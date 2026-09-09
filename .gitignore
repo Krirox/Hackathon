@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.sqlite
+*.db
+.upstream/
+.DS_Store
+.env
+var/
+data/artifacts/

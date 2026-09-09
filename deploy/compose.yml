@@ -1,0 +1,31 @@
+# Single-box dev topology (TODO §0.4): Buzz + Vital core + Postgres.
+# Production shape is VPS-1 Buzz · VPS-2 Vital core + Postgres · VPS-3 jcode
+# (sibling process over the harness API). This file is the dev approximation:
+# everything on one box, jcode reached at JCODE_API_SOCKET.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vital}
+      POSTGRES_USER: ${POSTGRES_USER:-vital}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see .env.example)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+  vital-core:
+    build: ..
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-vital}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vital}
+      JCODE_API_SOCKET: ${JCODE_API_SOCKET:-/run/jcode-api.sock}
+      TALK_SURFACE: ${TALK_SURFACE:-buzz}
+      TENANT_HMAC_SECRET: ${TENANT_HMAC_SECRET:?set TENANT_HMAC_SECRET (see .env.example)}
+    volumes:
+      - jcode-api:/run
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
+  jcode-api:

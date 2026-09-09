@@ -1,0 +1,3 @@
+# Vendored code is pinned upstream — never reformat it. Any upstream style
+# drift is resolved by re-vendoring, not by our formatter.
+src/vendor/
