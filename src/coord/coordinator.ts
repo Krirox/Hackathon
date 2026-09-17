@@ -4,6 +4,7 @@ import type { AsyncDb } from '../core/db.ts';
 import { dayOf as sqlDayOf, jsonNumber, jsonText } from '../core/db.ts';
 import type { RequestRow } from '../core/rows.ts';
 import {
+  LATE_COMPLETION_SETTLEMENT,
   MESSAGE_CLASSES,
   TERMINAL_REQUEST_STATES,
   type CoordinationRequest,
@@ -11,6 +12,14 @@ import {
   type MessageClass,
   type RequestState,
 } from '../core/types.ts';
+
+/**
+ * F03: the states from which paid work may execute. One set, every executor
+ * gates on it — `accept` moves a human-approved request to ACCEPTED so the
+ * claim path can pick it up; approval may not strand work in a state no
+ * executor reads. ADMITTED (scheduler-approved) is the pre-approval leg.
+ */
+export const EXECUTABLE_STATES: readonly RequestState[] = ['ADMITTED', 'ACCEPTED', 'IN_FLIGHT'];
 
 /**
  * Coordination layer.
@@ -193,6 +202,8 @@ function rowToRequest(r: RequestRow): CoordinationRequest {
     parentRequestId: r.parent_request == null ? null : String(r.parent_request),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
+    execOwner: r.exec_owner == null ? null : String(r.exec_owner),
+    execAttempt: Number(r.exec_attempt ?? 0),
   };
 }
 
@@ -245,6 +256,30 @@ export interface Coordinator {
   fail(tenant: string, id: string, reason: string): Promise<CoordinationRequest>;
   charge(tenant: string, id: string, cost: Partial<CoordinationRequest['spent']>): Promise<CoordinationRequest>;
   /**
+   * Exclusive execution ownership: atomically claim an ADMITTED request for
+   * a worker (compare-and-swap on state). Only the winner runs the paid
+   * work; losers get CLAIM_LOST and must not touch the harness.
+   */
+  claimExecution(
+    tenant: string,
+    id: string,
+    owner: string,
+    now: string,
+    leaseMs?: number,
+  ): Promise<CoordinationRequest>;
+  /**
+   * Release IN_FLIGHT claims whose lease expired back to ADMITTED so a dead
+   * worker's work becomes runnable again. Bounded per call, audited per row.
+   */
+  reclaimStale(tenant: string, nowMs: number, limit?: number): Promise<string[]>;
+  /**
+   * F03: move DEFERRED requests back to ADMITTED once their target scope
+   * has concurrency headroom. The missing readmission loop — submit parks
+   * work in DEFERRED at the cap, and without a sweep it never leaves.
+   * Re-checks the live cap per row; bounded per call.
+   */
+  readmitDeferred(tenant: string, limit?: number): Promise<string[]>;
+  /**
    * Continuous usage flow for long-lived executions (jcode turns, Lambda
    * workers): accumulate tokens/dollars WITHOUT consuming a round. charge()
    * counts coordination rounds, so per-event charging through it would
@@ -253,11 +288,18 @@ export interface Coordinator {
    * request mid-run. Callers must honor a TERMINATED_BUDGET return by
    * stopping work, the same as the in-memory ceiling trip.
    */
-  reportUsage(tenant: string, id: string, usage: { tokens?: number; dollars?: number }): Promise<CoordinationRequest>;
+  reportUsage(
+    tenant: string,
+    id: string,
+    usage: { tokens?: number; dollars?: number; humanMinutes?: number },
+  ): Promise<CoordinationRequest>;
   expireStale(tenant: string, now: string): Promise<string[]>;
   /** Refusal-rate health metric: 0% refusal across all agents means sycophancy. */
   refusalStats(tenant: string): Promise<{ total: number; refused: number; rate: number }>;
-  openEscalations(tenant: string, day: string): Promise<number>;
+  /** Cumulative human interruption events recorded in the immutable escalations log today. */
+  dailyEscalations(tenant: string, day: string): Promise<number>;
+  /** Concurrent open requests requiring human attention. */
+  openEscalations(tenant: string, day?: string): Promise<number>;
   /** Approval latency (TODO 2.3): submission → human decision, one audit row per decision. */
   recordApprovalLatency(
     tenant: string,
@@ -319,6 +361,94 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
   };
 
   const dayOf = (iso: string) => iso.slice(0, 10);
+
+  /**
+   * Atomic spent increment: ONE UPDATE computing new values from the row's
+   * own values, never read-modify-write. Concurrent charges/reportUsage each
+   * apply their delta under the row lock, so no increment is ever lost. Disk
+   * stays a high-water mark (max), rounds only move when asked. The native
+   * spent_tokens/spent_dollars mirrors move in the SAME statement — one
+   * writer, no drift window.
+   */
+  async function spentAddAtomic(
+    tenant: string,
+    id: string,
+    delta: { dollars: number; tokens: number; humanMinutes: number; rounds: number; diskBytes: number },
+    now: string,
+  ): Promise<number> {
+    const sql =
+      db.engine === 'postgres'
+        ? `UPDATE requests SET spent_json = jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(
+             COALESCE(spent_json::jsonb,'{}'::jsonb),
+             '{dollars}', to_jsonb(COALESCE(((spent_json::jsonb ->> 'dollars'))::float,0) + ?)),
+             '{tokens}', to_jsonb(COALESCE(((spent_json::jsonb ->> 'tokens'))::float,0) + ?)),
+             '{humanMinutes}', to_jsonb(COALESCE(((spent_json::jsonb ->> 'humanMinutes'))::float,0) + ?)),
+             '{rounds}', to_jsonb(COALESCE(((spent_json::jsonb ->> 'rounds'))::float,0) + ?)),
+             '{diskBytes}', to_jsonb(GREATEST(COALESCE(((spent_json::jsonb ->> 'diskBytes'))::float,0), ?)))::text,
+           spent_tokens = spent_tokens + ?, spent_dollars = spent_dollars + ?,
+           updated_at = ? WHERE id = ? AND tenant = ?`
+        : `UPDATE requests SET spent_json = json_set(COALESCE(spent_json,'{}'),
+             '$.dollars', COALESCE(json_extract(spent_json,'$.dollars'),0) + ?,
+             '$.tokens', COALESCE(json_extract(spent_json,'$.tokens'),0) + ?,
+             '$.humanMinutes', COALESCE(json_extract(spent_json,'$.humanMinutes'),0) + ?,
+             '$.rounds', COALESCE(json_extract(spent_json,'$.rounds'),0) + ?,
+             '$.diskBytes', max(COALESCE(json_extract(spent_json,'$.diskBytes'),0), ?)),
+           spent_tokens = spent_tokens + ?, spent_dollars = spent_dollars + ?,
+           updated_at = ? WHERE id = ? AND tenant = ?`;
+    const out = await db
+      .prepare(sql)
+      .run(
+        delta.dollars,
+        delta.tokens,
+        delta.humanMinutes,
+        delta.rounds,
+        delta.diskBytes,
+        delta.tokens,
+        delta.dollars,
+        now,
+        id,
+        tenant,
+      );
+    return out.changes;
+  }
+
+  /**
+   * Terminal settlement that never touches spent_json: the atomic increment
+   * already recorded the cost, so this only moves state, names the breach,
+   * and releases the budget reservation + execution claim.
+   */
+  async function settleTerminal(
+    tenant: string,
+    id: string,
+    to: RequestState,
+    refusalReason: string,
+    now: string,
+  ): Promise<CoordinationRequest> {
+    await db
+      .prepare(
+        `UPDATE requests SET state = ?, refusal_reason = ?, updated_at = ?,
+           reserved_json = '{"dollars":0,"tokens":0}', exec_owner = NULL, claimed_at = NULL
+           WHERE id = ? AND tenant = ?`,
+      )
+      .run(to, refusalReason, now, id, tenant);
+    const r = await load(tenant, id);
+    if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+    await audit(r.targetScope + ':agent', `REQUEST_${to}`, id, tenant, refusalReason);
+    return r;
+  }
+
+  async function maybeInflight(tenant: string, id: string, now: string): Promise<void> {
+    // Cheap CAS: only live pre-execution states move; a concurrent
+    // claim/charge that already moved it makes this a no-op instead of an
+    // overwrite. F03: ACCEPTED is included — charging an approved request
+    // must not undo the human's decision marker.
+    await db
+      .prepare(
+        `UPDATE requests SET state = 'IN_FLIGHT', updated_at = ?
+          WHERE id = ? AND tenant = ? AND state IN ('ADMITTED','ACCEPTED')`,
+      )
+      .run(now, id, tenant);
+  }
 
   async function submit(input: ProposalInput): Promise<AdmissionResult> {
     const p = proposalSchema.parse(input);
@@ -456,7 +586,14 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       }
 
       // ---- scheduler admission --------------------------------------------
+      // Serialized per tenant-day on a meta lock row: the counts below must
+      // observe every concurrent submit's reservation, or two admits racing
+      // past the same check print money. The UPDATE takes the row lock on
+      // Postgres; on sqlite the surrounding transaction is already exclusive.
       const today = dayOf(now);
+      const lockKey = `admitlock:${p.tenant}:${today}`;
+      await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(lockKey, '1');
+      await db.prepare('UPDATE meta SET value = value WHERE key = ?').run(lockKey);
       const inflight = (
         (await db
           .prepare(
@@ -466,13 +603,27 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
           .get(p.tenant, p.targetScope)) as { n: number }
       ).n;
 
-      const spentToday = (await db
+      // Live exposure is the outstanding reservation (the bid held at admit),
+      // terminal exposure is what was actually spent: summing both for live
+      // rows would double-count every admitted request against the ceiling.
+      // The terminal SUM reads the native mirrors, not JSON casts — this
+      // query runs per submit, so per-row function calls here are per-submit
+      // cost on the whole day's history.
+      const spentTerminal = (await db
         .prepare(
-          `SELECT COALESCE(SUM(${jsonNumber(db.engine, 'spent_json', 'dollars')}),0) AS d,
-                COALESCE(SUM(${jsonNumber(db.engine, 'spent_json', 'tokens')}),0) AS t
-           FROM requests WHERE tenant = ? AND ${sqlDayOf(db.engine, 'created_at')} = ?`,
+          `SELECT COALESCE(SUM(spent_dollars),0) AS d, COALESCE(SUM(spent_tokens),0) AS t
+             FROM requests WHERE tenant = ? AND ${sqlDayOf(db.engine, 'created_at')} = ?
+               AND state IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
         )
-        .get(p.tenant, today)) as { d: number; t: number };
+        .get(p.tenant, today, ...TERMINAL_REQUEST_STATES)) as { d: number; t: number };
+      const liveReserved = (await db
+        .prepare(
+          `SELECT COALESCE(SUM(${jsonNumber(db.engine, 'reserved_json', 'dollars')}),0) AS d,
+                 COALESCE(SUM(${jsonNumber(db.engine, 'reserved_json', 'tokens')}),0) AS t
+            FROM requests WHERE tenant = ? AND ${sqlDayOf(db.engine, 'created_at')} = ?
+              AND state NOT IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
+        )
+        .get(p.tenant, today, ...TERMINAL_REQUEST_STATES)) as { d: number; t: number };
 
       if (p.messageClass === 'QUERY' && bid.dollars > 1) {
         req.state = 'DENIED';
@@ -496,7 +647,10 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
           request: req,
         };
       }
-      if (spentToday.d + bid.dollars > limits.maxDailyDollars || spentToday.t + bid.tokens > limits.maxDailyTokens) {
+      if (
+        spentTerminal.d + liveReserved.d + bid.dollars > limits.maxDailyDollars ||
+        spentTerminal.t + liveReserved.t + bid.tokens > limits.maxDailyTokens
+      ) {
         req.state = 'DENIED';
         await persist(req);
         await audit(
@@ -504,14 +658,87 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
           'ADMIT_DENIED_BUDGET',
           req.id,
           p.tenant,
-          `day $${spentToday.d} + $${bid.dollars} > $${limits.maxDailyDollars}`,
+          `day $${spentTerminal.d + liveReserved.d} + $${bid.dollars} > $${limits.maxDailyDollars}`,
         );
         return { admitted: false, state: 'DENIED', reason: 'daily org budget exhausted', request: req };
       }
+      // Delegated parent bounds check (F20): child work must not exceed
+      // the parent's unspent budget across dollars, tokens, or attention.
+      if (p.parentRequestId) {
+        const parent = await load(p.tenant, p.parentRequestId);
+        if (parent) {
+          if (parent.state !== 'ADMITTED' && parent.state !== 'IN_FLIGHT') {
+            req.state = 'DENIED';
+            await persist(req);
+            await audit('scheduler', 'ADMIT_DENIED_PARENT', req.id, p.tenant, `parent ${parent.id} is ${parent.state}`);
+            return {
+              admitted: false,
+              state: 'DENIED',
+              reason: `parent ${parent.id} is ${parent.state} — child work denied`,
+              request: req,
+            };
+          }
+          const terminalChildSpend = (await db
+            .prepare(
+              `SELECT
+                 COALESCE(SUM(spent_dollars), 0) AS dollars,
+                 COALESCE(SUM(spent_tokens), 0) AS tokens,
+                 COALESCE(SUM(${jsonNumber(db.engine, 'spent_json', 'humanMinutes')}), 0) AS humanMinutes
+               FROM requests
+               WHERE tenant = ? AND parent_request = ?
+                 AND state IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
+            )
+            .get(parent.tenant, parent.id, ...TERMINAL_REQUEST_STATES)) as {
+            dollars: number;
+            tokens: number;
+            humanMinutes: number;
+          };
+
+          const liveChildBids = (await db
+            .prepare(
+              `SELECT
+                 COALESCE(SUM(CASE WHEN ${jsonNumber(db.engine, 'reserved_json', 'dollars')} > 0 THEN ${jsonNumber(db.engine, 'reserved_json', 'dollars')} ELSE ${jsonNumber(db.engine, 'bid_json', 'dollars')} END), 0) AS dollars,
+                 COALESCE(SUM(CASE WHEN ${jsonNumber(db.engine, 'reserved_json', 'tokens')} > 0 THEN ${jsonNumber(db.engine, 'reserved_json', 'tokens')} ELSE ${jsonNumber(db.engine, 'bid_json', 'tokens')} END), 0) AS tokens,
+                 COALESCE(SUM(${jsonNumber(db.engine, 'bid_json', 'humanMinutes')}), 0) AS humanMinutes
+               FROM requests
+               WHERE tenant = ? AND parent_request = ? AND id != ?
+                 AND state NOT IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
+            )
+            .get(parent.tenant, parent.id, req.id, ...TERMINAL_REQUEST_STATES)) as {
+            dollars: number;
+            tokens: number;
+            humanMinutes: number;
+          };
+
+          const remainingDollars =
+            parent.bid.dollars -
+            parent.spent.dollars -
+            (Number(terminalChildSpend.dollars) + Number(liveChildBids.dollars));
+
+          if (bid.dollars > remainingDollars) {
+            req.state = 'DENIED';
+            await persist(req);
+            await audit(
+              'scheduler',
+              'ADMIT_DENIED_PARENT_BUDGET',
+              req.id,
+              p.tenant,
+              `child bid $${bid.dollars} exceeds parent ${parent.id} remaining $${remainingDollars.toFixed(3)}`,
+            );
+            return {
+              admitted: false,
+              state: 'DENIED',
+              reason: `child bid exceeds parent ${parent.id} unspent budget`,
+              request: req,
+            };
+          }
+        }
+      }
+
       // The escalation cap BLOCKS: a request that needs human minutes is
-      // denied when today's attention budget is spent. Approval that arrives
+      // denied when today's cumulative attention budget is spent. Approval that arrives
       // after the cap is theater, not oversight.
-      if (bid.humanMinutes > 0 && (await openEscalations(p.tenant, today)) >= limits.maxHumanEscalationsPerDay) {
+      if (bid.humanMinutes > 0 && (await dailyEscalations(p.tenant, today)) >= limits.maxHumanEscalationsPerDay) {
         req.state = 'DENIED';
         await persist(req);
         await audit(
@@ -531,6 +758,13 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
 
       req.state = 'ADMITTED';
       await persist(req);
+      // Hold the bid as the request's reservation: later admits account it
+      // until a terminal state releases it. Same transaction as the counts
+      // above, so the hold is never visible without the check — and the
+      // reservation never exists without the row.
+      await db
+        .prepare('UPDATE requests SET reserved_json = ? WHERE id = ? AND tenant = ?')
+        .run(JSON.stringify({ dollars: bid.dollars, tokens: bid.tokens }), req.id, p.tenant);
       if (bid.humanMinutes > 0) {
         // Named-human audit trail: who was interrupted, for what, when.
         await db
@@ -553,13 +787,77 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return db.transaction(async () => {
       const r = await load(tenant, id);
       if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
-      if (TERMINAL_REQUEST_STATES.includes(r.state) && !['DECLINED', 'COMPLETED', 'FAILED'].includes(to)) {
-        throw new CoordinationError('TERMINAL', `request ${id} already ${r.state}`);
+      if (TERMINAL_REQUEST_STATES.includes(r.state)) {
+        // F03: terminal states are history, not a scratch pad. Three legal
+        // rewrites, exactly:
+        //   1. late COMPLETION over a refusal/expiry (the map): refusal
+        //      stands, row settles FAILED with the worker's objection
+        //      preserved behind `REFUSAL|`;
+        //   2. redelivery recovery FAILED→COMPLETED — but NOT when this
+        //      FAILED row is itself a preserved refusal (`REFUSAL|`): a
+        //      refusal is never resurrected;
+        //   3. same-state re-settlement: idempotent crash recovery, no
+        //      second history.
+        // Everything else refuses (TERMINAL).
+        const refusalPreserved = (r.refusalReason ?? '').startsWith('REFUSAL|');
+        const late = LATE_COMPLETION_SETTLEMENT.get(r.state);
+        if (to === 'COMPLETED' && r.state === 'FAILED') {
+          // Redelivery recovery: a genuinely failed run completed on retry.
+          // A preserved refusal is never resurrected.
+          if (refusalPreserved) {
+            throw new CoordinationError('TERMINAL', `request ${id} was refused — refusal is not recoverable`);
+          }
+          await db
+            .prepare('UPDATE requests SET state = ?, refusal_reason = ?, updated_at = ? WHERE id = ? AND tenant = ?')
+            .run('COMPLETED', r.refusalReason ?? null, new Date().toISOString(), id, tenant);
+          const recovered = (await load(tenant, id))!;
+          await audit(
+            'scheduler',
+            'REQUEST_FAILED_TO_COMPLETED',
+            id,
+            tenant,
+            'redelivery recovery: the retried work completed',
+          );
+          return recovered;
+        } else if (to === 'COMPLETED' && late) {
+          // Late completion over a refusal/expiry/budget-death: the settled
+          // outcome stands, the row settles FAILED with the worker's
+          // objection preserved behind `REFUSAL|`.
+          await db
+            .prepare('UPDATE requests SET state = ?, refusal_reason = ?, updated_at = ? WHERE id = ? AND tenant = ?')
+            .run(
+              late,
+              `REFUSAL|${fields.refusalReason ?? `worker completion contradicts settled ${r.state}`}`,
+              new Date().toISOString(),
+              id,
+              tenant,
+            );
+          const settled = (await load(tenant, id))!;
+          await audit('scheduler', `REQUEST_${r.state}_TO_${late}`, id, tenant, settled.refusalReason ?? undefined);
+          return settled;
+        }
+        if (to !== r.state) {
+          throw new CoordinationError('TERMINAL', `request ${id} already ${r.state}`);
+        }
+        // Same-state re-settlement: no-op recovery, return the settled row.
+        return (await load(tenant, id))!;
       }
       const next: CoordinationRequest = { ...r, ...fields, state: to, updatedAt: new Date().toISOString() };
       await persist(next);
+      if ((TERMINAL_REQUEST_STATES as readonly string[]).includes(to)) {
+        // Reconcile the hold: a finished request's bid must stop counting
+        // against the daily ceiling, and its execution claim must not pin
+        // the row IN_FLIGHT forever. persist() never touches these columns,
+        // so this is additive, same transaction.
+        await db
+          .prepare(
+            `UPDATE requests SET reserved_json = '{"dollars":0,"tokens":0}', exec_owner = NULL, claimed_at = NULL
+              WHERE id = ? AND tenant = ?`,
+          )
+          .run(id, tenant);
+      }
       await audit(next.targetScope + ':agent', `REQUEST_${to}`, id, tenant, next.refusalReason ?? undefined);
-      return next;
+      return (await load(tenant, id)) ?? next;
     });
   }
 
@@ -568,60 +866,141 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     id: string,
     cost: Partial<CoordinationRequest['spent']>,
   ): Promise<CoordinationRequest> {
-    const r = await load(tenant, id);
-    if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
-    const spent = {
-      dollars: r.spent.dollars + (cost.dollars ?? 0),
-      tokens: r.spent.tokens + (cost.tokens ?? 0),
-      humanMinutes: r.spent.humanMinutes + (cost.humanMinutes ?? 0),
-      rounds: r.spent.rounds + 1,
-      // Disk is a peak, not an accumulation: the caller reports the scope's
-      // current bytesOnDisk and we keep the high-water mark.
-      diskBytes: Math.max(r.spent.diskBytes, cost.diskBytes ?? 0),
-    };
+    const now = new Date().toISOString();
+    const changed = await spentAddAtomic(
+      tenant,
+      id,
+      {
+        dollars: cost.dollars ?? 0,
+        tokens: cost.tokens ?? 0,
+        humanMinutes: cost.humanMinutes ?? 0,
+        rounds: 1,
+        diskBytes: cost.diskBytes ?? 0,
+      },
+      now,
+    );
+    if (changed === 0) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+    const r = (await load(tenant, id))!;
+    const spent = r.spent;
     // Budget death: terminate loudly, log a partial result. Never continue silently.
     const breached: string[] = [];
     if (spent.dollars > r.bid.dollars) breached.push(`$${spent.dollars.toFixed(3)}/${r.bid.dollars}`);
     if (spent.tokens > r.bid.tokens) breached.push(`${spent.tokens}/${r.bid.tokens} tokens`);
     if (spent.rounds > r.bid.maxRounds) breached.push(`${spent.rounds}/${r.bid.maxRounds} rounds`);
+    if (r.bid.humanMinutes > 0 && spent.humanMinutes > r.bid.humanMinutes) {
+      breached.push(`${spent.humanMinutes}/${r.bid.humanMinutes} human minutes`);
+    }
     if (r.bid.maxDiskBytes > 0 && spent.diskBytes > r.bid.maxDiskBytes) {
       breached.push(
         `${(spent.diskBytes / 1024 / 1024).toFixed(1)}/${(r.bid.maxDiskBytes / 1024 / 1024).toFixed(0)} MiB disk`,
       );
     }
     if (breached.length) {
-      return transition(tenant, id, 'TERMINATED_BUDGET', {
-        spent,
-        refusalReason: `budget exhausted (${breached.join(', ')})`,
-      });
+      return settleTerminal(tenant, id, 'TERMINATED_BUDGET', `budget exhausted (${breached.join(', ')})`, now);
     }
-    return transition(tenant, id, r.state === 'ADMITTED' ? 'IN_FLIGHT' : r.state, { spent });
+    await maybeInflight(tenant, id, now);
+    return (await load(tenant, id))!;
   }
 
   async function reportUsage(
     tenant: string,
     id: string,
-    usage: { tokens?: number; dollars?: number },
+    usage: { tokens?: number; dollars?: number; humanMinutes?: number },
   ): Promise<CoordinationRequest> {
-    const r = await load(tenant, id);
-    if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
-    const spent = {
-      ...r.spent,
-      tokens: r.spent.tokens + (usage.tokens ?? 0),
-      dollars: r.spent.dollars + (usage.dollars ?? 0),
-    };
+    const now = new Date().toISOString();
+    const changed = await spentAddAtomic(
+      tenant,
+      id,
+      {
+        dollars: usage.dollars ?? 0,
+        tokens: usage.tokens ?? 0,
+        humanMinutes: usage.humanMinutes ?? 0,
+        rounds: 0,
+        diskBytes: 0,
+      },
+      now,
+    );
+    if (changed === 0) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+    const r = (await load(tenant, id))!;
+    const spent = r.spent;
     // Rounds deliberately untouched (see interface note): a token flow is
     // continuous activity, not coordination rounds.
     const breached: string[] = [];
     if (spent.dollars > r.bid.dollars) breached.push(`$${spent.dollars.toFixed(3)}/${r.bid.dollars}`);
     if (spent.tokens > r.bid.tokens) breached.push(`${spent.tokens}/${r.bid.tokens} tokens`);
+    if (r.bid.humanMinutes > 0 && spent.humanMinutes > r.bid.humanMinutes) {
+      breached.push(`${spent.humanMinutes}/${r.bid.humanMinutes} human minutes`);
+    }
     if (breached.length) {
-      return transition(tenant, id, 'TERMINATED_BUDGET', {
-        spent,
-        refusalReason: `budget exhausted mid-run (${breached.join(', ')})`,
+      return settleTerminal(tenant, id, 'TERMINATED_BUDGET', `budget exhausted mid-run (${breached.join(', ')})`, now);
+    }
+    await maybeInflight(tenant, id, now);
+    return (await load(tenant, id))!;
+  }
+
+  /**
+   * Exclusive execution claim (F02): a single UPDATE that moves ADMITTED to
+   * IN_FLIGHT only when the row is still ADMITTED. The winner records owner,
+   * attempt, and lease; every loser sees zero changed rows and gets
+   * CLAIM_LOST without ever touching the harness.
+   */
+  async function claimExecution(
+    tenant: string,
+    id: string,
+    owner: string,
+    now: string,
+    leaseMs = 60_000,
+  ): Promise<CoordinationRequest> {
+    // F03: the CAS covers the full executable set — a human-approved
+    // (ACCEPTED) request is claimable, not just scheduler-admitted work.
+    const out = await db
+      .prepare(
+        `UPDATE requests SET state = 'IN_FLIGHT', exec_owner = ?, exec_attempt = exec_attempt + 1,
+           claimed_at = ?, lease_ms = ?, updated_at = ?
+           WHERE id = ? AND tenant = ? AND state IN ('ADMITTED','ACCEPTED')`,
+      )
+      .run(owner, now, leaseMs, now, id, tenant);
+    if (out.changes === 0) {
+      const r = await load(tenant, id);
+      if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+      throw new CoordinationError('CLAIM_LOST', `request ${id} is ${r.state} — another worker holds the claim`, {
+        state: r.state,
       });
     }
-    return transition(tenant, id, r.state === 'ADMITTED' ? 'IN_FLIGHT' : r.state, { spent });
+    const claimed = (await load(tenant, id))!;
+    await audit(owner, 'EXECUTION_CLAIMED', id, tenant, `lease ${leaseMs}ms`);
+    return claimed;
+  }
+
+  /**
+   * Lease expiry (F02): IN_FLIGHT rows whose claimed_at + lease_ms passed are
+   * released back to ADMITTED. Selection happens in JS (portable date math),
+   * release is a CAS on (state, claimed_at) so a freshly re-claimed lease is
+   * never stolen. Bounded per call, one audit row per release.
+   */
+  async function reclaimStale(tenant: string, nowMs: number, limit = 100): Promise<string[]> {
+    const rows = (await db
+      .prepare(
+        `SELECT id, claimed_at, lease_ms FROM requests
+          WHERE tenant = ? AND state = 'IN_FLIGHT' AND claimed_at IS NOT NULL LIMIT ?`,
+      )
+      .all(tenant, limit)) as { id: string; claimed_at: string; lease_ms: number }[];
+    const released: string[] = [];
+    for (const row of rows) {
+      const at = Date.parse(String(row.claimed_at));
+      if (!Number.isFinite(at) || at + Number(row.lease_ms) > nowMs) continue;
+      const now = new Date(nowMs).toISOString();
+      const out = await db
+        .prepare(
+          `UPDATE requests SET state = 'ADMITTED', exec_owner = NULL, claimed_at = NULL, updated_at = ?
+            WHERE id = ? AND tenant = ? AND state = 'IN_FLIGHT' AND claimed_at = ?`,
+        )
+        .run(now, String(row.id), tenant, String(row.claimed_at));
+      if (out.changes === 0) continue;
+      await audit('scheduler', 'EXECUTION_RECLAIMED', String(row.id), tenant, 'lease expired — back to ADMITTED');
+      released.push(String(row.id));
+    }
+    return released;
   }
 
   async function decompose(
@@ -630,60 +1009,138 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     steps: DecomposeStep[],
     now?: string,
   ): Promise<AdmissionResult[]> {
-    const parent = await load(tenant, parentId);
-    if (!parent) throw new CoordinationError('NOT_FOUND', `request ${parentId}`);
-    if (parent.state !== 'ADMITTED' && parent.state !== 'IN_FLIGHT') {
-      throw new CoordinationError('BAD_PARENT', `request ${parentId} is ${parent.state} — only live work decomposes`);
-    }
-    if (steps.length === 0)
-      throw new CoordinationError('EMPTY_DECOMPOSE', 'decomposing into zero steps splits nothing');
-    const at = now ?? new Date().toISOString();
-    // Already-committed (non-terminal) children hold part of the budget.
-    const committed = (await db
-      .prepare(
-        `SELECT COALESCE(SUM(${jsonNumber(db.engine, 'bid_json', 'dollars')}),0) AS d FROM requests
-          WHERE tenant = ? AND parent_request = ? AND state NOT IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
-      )
-      .get(parent.tenant, parent.id, ...TERMINAL_REQUEST_STATES)) as { d: number };
-    const remaining = parent.bid.dollars - parent.spent.dollars - Number(committed.d);
-    const total = steps.reduce((s, st) => s + (st.bid?.dollars ?? 0), 0);
-    if (total > remaining) {
-      throw new CoordinationError(
-        'BUDGET_SPLIT',
-        `children bid $${total} against $${remaining.toFixed(3)} unspent on ${parentId} — decomposition never prints money`,
+    return db.transaction(async () => {
+      const parent = await load(tenant, parentId);
+      if (!parent) throw new CoordinationError('NOT_FOUND', `request ${parentId}`);
+      if (parent.state !== 'ADMITTED' && parent.state !== 'IN_FLIGHT') {
+        throw new CoordinationError('BAD_PARENT', `request ${parentId} is ${parent.state} — only live work decomposes`);
+      }
+      if (steps.length === 0)
+        throw new CoordinationError('EMPTY_DECOMPOSE', 'decomposing into zero steps splits nothing');
+      const at = now ?? new Date().toISOString();
+
+      // Account for full completed-child spend and nonterminal child reservations (F20)
+      const terminalChildSpend = (await db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(spent_dollars), 0) AS dollars,
+             COALESCE(SUM(spent_tokens), 0) AS tokens,
+             COALESCE(SUM(${jsonNumber(db.engine, 'spent_json', 'humanMinutes')}), 0) AS humanMinutes
+           FROM requests
+           WHERE tenant = ? AND parent_request = ?
+             AND state IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
+        )
+        .get(parent.tenant, parent.id, ...TERMINAL_REQUEST_STATES)) as {
+        dollars: number;
+        tokens: number;
+        humanMinutes: number;
+      };
+
+      const liveChildBids = (await db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN ${jsonNumber(db.engine, 'reserved_json', 'dollars')} > 0 THEN ${jsonNumber(db.engine, 'reserved_json', 'dollars')} ELSE ${jsonNumber(db.engine, 'bid_json', 'dollars')} END), 0) AS dollars,
+             COALESCE(SUM(CASE WHEN ${jsonNumber(db.engine, 'reserved_json', 'tokens')} > 0 THEN ${jsonNumber(db.engine, 'reserved_json', 'tokens')} ELSE ${jsonNumber(db.engine, 'bid_json', 'tokens')} END), 0) AS tokens,
+             COALESCE(SUM(${jsonNumber(db.engine, 'bid_json', 'humanMinutes')}), 0) AS humanMinutes
+           FROM requests
+           WHERE tenant = ? AND parent_request = ?
+             AND state NOT IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
+        )
+        .get(parent.tenant, parent.id, ...TERMINAL_REQUEST_STATES)) as {
+        dollars: number;
+        tokens: number;
+        humanMinutes: number;
+      };
+
+      const totalChildDollars = Number(terminalChildSpend.dollars) + Number(liveChildBids.dollars);
+      const totalChildTokens = Number(terminalChildSpend.tokens) + Number(liveChildBids.tokens);
+      const totalChildHumanMinutes = Number(terminalChildSpend.humanMinutes) + Number(liveChildBids.humanMinutes);
+
+      const remainingDollars = parent.bid.dollars - parent.spent.dollars - totalChildDollars;
+      const remainingTokens = parent.bid.tokens - parent.spent.tokens - totalChildTokens;
+      const remainingHumanMinutes = parent.bid.humanMinutes - parent.spent.humanMinutes - totalChildHumanMinutes;
+
+      // Omitted child bids are fully resolved against DEFAULT_BID and clamped (F20)
+      const stepDollars = steps.map((st) =>
+        st.bid?.dollars !== undefined
+          ? Math.min(st.bid.dollars, limits.maxBid?.dollars ?? st.bid.dollars)
+          : DEFAULT_BID.dollars,
       );
-    }
-    const out: AdmissionResult[] = [];
-    for (const st of steps) {
-      out.push(
-        await submit({
-          tenant,
-          messageClass: st.messageClass ?? 'REQUEST',
-          originScope: parent.originScope,
-          targetScope: st.targetScope ?? parent.targetScope,
-          goal: st.goal,
-          claimRefs: parent.chainClaimIds.length > 0 ? parent.chainClaimIds : parent.claimRefs,
-          deliverableSchema: st.deliverableSchema,
-          bid: st.bid,
-          onBehalfOf: parent.onBehalfOf,
-          parentRequestId: parent.id,
-          id: st.id,
-          now: at,
-        }),
-      );
-    }
-    return out;
+      const totalStepDollars = stepDollars.reduce((acc, d) => acc + d, 0);
+
+      if (totalStepDollars > remainingDollars) {
+        throw new CoordinationError(
+          'BUDGET_SPLIT',
+          `children bid $${totalStepDollars.toFixed(3)} against $${remainingDollars.toFixed(3)} unspent on ${parentId} — decomposition never prints money`,
+        );
+      }
+
+      const stepTokensExplicit = steps.some((st) => st.bid?.tokens !== undefined);
+      if (stepTokensExplicit) {
+        const stepTokens = steps.map((st) => st.bid?.tokens ?? DEFAULT_BID.tokens);
+        const totalStepTokens = stepTokens.reduce((acc, t) => acc + t, 0);
+        if (totalStepTokens > remainingTokens) {
+          throw new CoordinationError(
+            'BUDGET_SPLIT',
+            `children bid ${totalStepTokens} tokens against ${remainingTokens} unspent tokens on ${parentId} — decomposition never prints tokens`,
+          );
+        }
+      }
+
+      const stepHumanMinutesExplicit = steps.some((st) => (st.bid?.humanMinutes ?? 0) > 0);
+      if (stepHumanMinutesExplicit && parent.bid.humanMinutes > 0) {
+        const stepHumanMinutes = steps.map((st) => st.bid?.humanMinutes ?? 0);
+        const totalStepHumanMinutes = stepHumanMinutes.reduce((acc, h) => acc + h, 0);
+        if (totalStepHumanMinutes > remainingHumanMinutes) {
+          throw new CoordinationError(
+            'BUDGET_SPLIT',
+            `children bid ${totalStepHumanMinutes} human minutes against ${remainingHumanMinutes} unspent human minutes on ${parentId} — attention budget exhausted`,
+          );
+        }
+      }
+
+      const out: AdmissionResult[] = [];
+      for (const st of steps) {
+        out.push(
+          await submit({
+            tenant,
+            messageClass: st.messageClass ?? 'REQUEST',
+            originScope: parent.originScope,
+            targetScope: st.targetScope ?? parent.targetScope,
+            goal: st.goal,
+            claimRefs: parent.chainClaimIds.length > 0 ? parent.chainClaimIds : parent.claimRefs,
+            deliverableSchema: st.deliverableSchema,
+            bid: st.bid,
+            onBehalfOf: parent.onBehalfOf,
+            parentRequestId: parent.id,
+            id: st.id,
+            now: at,
+          }),
+        );
+      }
+      return out;
+    });
   }
 
-  async function openEscalations(tenant: string, day: string): Promise<number> {
+  async function dailyEscalations(tenant: string, day: string): Promise<number> {
+    return (
+      (await db.prepare('SELECT COUNT(*) AS n FROM escalations WHERE tenant = ? AND day = ?').get(tenant, day)) as {
+        n: number;
+      }
+    ).n;
+  }
+
+  async function openEscalations(tenant: string, day?: string): Promise<number> {
+    const dayClause = day ? `AND ${sqlDayOf(db.engine, 'updated_at')} = ?` : '';
+    const params = day ? [tenant, day] : [tenant];
     return (
       (await db
         .prepare(
           `SELECT COUNT(*) AS n FROM requests
-           WHERE tenant = ? AND ${sqlDayOf(db.engine, 'updated_at')} = ? AND ${jsonNumber(db.engine, 'bid_json', 'humanMinutes')} > 0
+           WHERE tenant = ? ${dayClause} AND ${jsonNumber(db.engine, 'bid_json', 'humanMinutes')} > 0
              AND state IN ('ADMITTED','IN_FLIGHT','DEFERRED')`,
         )
-        .get(tenant, day)) as { n: number }
+        .get(...params)) as { n: number }
     ).n;
   }
 
@@ -790,15 +1247,69 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return { total, refused, rate: total === 0 ? 0 : refused / total };
   }
 
-  async function expireStale(tenant: string, now: string): Promise<string[]> {
+  /**
+   * F03: readmit DEFERRED work. Submit parks a request in DEFERRED when its
+   * target scope is at the concurrency cap; without this sweep deferred work
+   * waits forever — the audit's "deferred work can remain indefinitely
+   * queued". Re-admission re-checks the live cap (a deferred request must
+   * not leapfrog freshly admitted work) and uses the same CAS shape as
+   * reclaimStale: DEFERRED→ADMITTED only while the row is still DEFERRED.
+   * Not atomic across concurrent sweeps, but the CAS loser simply re-checks
+   * on the next sweep; no work is lost or duplicated. Bounded like
+   * expireStale so a huge backlog terminates.
+   */
+  async function readmitDeferred(tenant: string, limit = 100): Promise<string[]> {
     const rows = (await db
-      .prepare(
-        `SELECT id FROM requests WHERE tenant = ? AND state IN ('ADMITTED','IN_FLIGHT','DEFERRED')
-         AND ${jsonText(db.engine, 'bid_json', 'deadline')} <= ?`,
-      )
-      .all(tenant, now)) as { id: string }[];
-    for (const r of rows) await transition(tenant, String(r.id), 'EXPIRED', { refusalReason: 'deadline passed' });
-    return rows.map((r) => String(r.id));
+      .prepare("SELECT id, target_scope FROM requests WHERE tenant = ? AND state = 'DEFERRED' LIMIT ?")
+      .all(tenant, limit)) as { id: string; target_scope: string }[];
+    const readmitted: string[] = [];
+    for (const row of rows) {
+      const inflight = (
+        (await db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM requests WHERE tenant = ? AND target_scope = ? AND state IN ('ADMITTED','IN_FLIGHT')",
+          )
+          .get(tenant, String(row.target_scope))) as { n: number }
+      ).n;
+      if (inflight >= limits.maxConcurrentPerScope) continue;
+      const out = await db
+        .prepare(
+          "UPDATE requests SET state = 'ADMITTED', updated_at = ? WHERE id = ? AND tenant = ? AND state = 'DEFERRED'",
+        )
+        .run(new Date().toISOString(), String(row.id), tenant);
+      if (out.changes === 0) continue;
+      await audit(
+        'scheduler',
+        'REQUEST_READMITTED',
+        String(row.id),
+        tenant,
+        'deferred work re-checked against the live cap',
+      );
+      readmitted.push(String(row.id));
+    }
+    return readmitted;
+  }
+
+  async function expireStale(tenant: string, now: string): Promise<string[]> {
+    // Chunked: the candidate set is unbounded (a tenant that never sweeps),
+    // and each expiry is its own transition + audit row. Cap rounds so a
+    // pathological backlog terminates instead of sweeping forever.
+    const BATCH = 500;
+    const MAX_ROUNDS = 1000;
+    const expired: string[] = [];
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const rows = (await db
+        .prepare(
+          `SELECT id FROM requests WHERE tenant = ? AND state IN ('ADMITTED','IN_FLIGHT','DEFERRED')
+           AND ${jsonText(db.engine, 'bid_json', 'deadline')} <= ? LIMIT ${BATCH}`,
+        )
+        .all(tenant, now)) as { id: string }[];
+      if (rows.length === 0) break;
+      for (const r of rows) await transition(tenant, String(r.id), 'EXPIRED', { refusalReason: 'deadline passed' });
+      expired.push(...rows.map((r) => String(r.id)));
+      if (rows.length < BATCH) break;
+    }
+    return expired;
   }
 
   return {
@@ -845,9 +1356,13 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     },
     charge,
     reportUsage,
+    claimExecution,
+    reclaimStale,
+    readmitDeferred,
     decompose,
     expireStale,
     refusalStats,
+    dailyEscalations,
     openEscalations,
     recordApprovalLatency,
     approvalLatencyStats,

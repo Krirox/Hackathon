@@ -33,6 +33,58 @@ export interface Rates {
   dollarPerHumanMinute: number;
 }
 
+/**
+ * Versioned rates (audit cost finding): the dashboard used to price every
+ * decision at fixed code constants, which silently reprices history whenever
+ * the constants move. Rates now live in meta per tenant with an audit trail;
+ * readers resolve what is stored, writers bump explicitly.
+ */
+export const DEFAULT_RATES: Rates = { dollarPerToken: 0.001, dollarPerHumanMinute: 1 };
+
+export async function getRates(db: AsyncDb, tenant: string): Promise<Rates> {
+  const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(`rates:${tenant}`)) as
+    { value: string } | undefined;
+  if (!r) return { ...DEFAULT_RATES };
+  try {
+    const v = JSON.parse(String(r.value)) as Partial<Rates>;
+    const dollarPerToken = Number(v.dollarPerToken);
+    const dollarPerHumanMinute = Number(v.dollarPerHumanMinute);
+    if (
+      !Number.isFinite(dollarPerToken) ||
+      dollarPerToken < 0 ||
+      !Number.isFinite(dollarPerHumanMinute) ||
+      dollarPerHumanMinute < 0
+    ) {
+      throw new AttributionError('BAD_RATES', 'stored rates are not usable — refusing to price on garbage');
+    }
+    return { dollarPerToken, dollarPerHumanMinute };
+  } catch (e) {
+    if (e instanceof AttributionError) throw e;
+    throw new AttributionError('BAD_RATES', 'stored rates are not parseable');
+  }
+}
+
+export async function setRates(db: AsyncDb, tenant: string, rates: Rates, by: string, now?: string): Promise<Rates> {
+  if (!by) throw new AttributionError('NO_OWNER', 'a rate change without a named human is theater');
+  if (
+    !Number.isFinite(rates.dollarPerToken) ||
+    rates.dollarPerToken < 0 ||
+    !Number.isFinite(rates.dollarPerHumanMinute) ||
+    rates.dollarPerHumanMinute < 0
+  ) {
+    throw new AttributionError('BAD_RATES', 'rates must be finite and non-negative');
+  }
+  const at = now ?? new Date().toISOString();
+  const next = { dollarPerToken: rates.dollarPerToken, dollarPerHumanMinute: rates.dollarPerHumanMinute };
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(`rates:${tenant}`, JSON.stringify(next));
+  await db
+    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+    .run(tenant, by, 'RATES_SET', `rates:${tenant}`, JSON.stringify(next), at);
+  return next;
+}
+
 export interface DecisionCost {
   decisionId: string;
   tokens: number;
@@ -53,54 +105,121 @@ export async function costOfDecision(
   decisionId: string,
   rates: Rates,
 ): Promise<DecisionCost> {
-  const dec = await ledger.getDecision(tenant, decisionId);
-  if (!dec) throw new AttributionError('MISSING_DECISION', `unknown decision ${decisionId}`);
-  let tokens = 0;
-  let humanMinutes = 0;
-  let requestDollars = 0;
-  if (dec.requestId) {
-    const req = await coord.get(tenant, dec.requestId);
-    if (req) {
-      humanMinutes += req.spent.humanMinutes;
-      requestDollars += req.spent.dollars;
-    }
-    const traces = (await db
-      .prepare('SELECT cost_json FROM traces WHERE tenant = ? AND request_id = ?')
-      .all(tenant, dec.requestId)) as { cost_json: string }[];
-    for (const t of traces) {
+  const all = await costsOfDecisions(db, coord, ledger, tenant, [decisionId], rates);
+  const one = all.get(decisionId);
+  if (!one) throw new AttributionError('MISSING_DECISION', `unknown decision ${decisionId}`);
+  return one;
+}
+
+/**
+ * Bulk cost roll-up: 3 bounded queries for N decisions instead of ~4N
+ * sequential round trips (getDecision + request + traces + outcomes each).
+ * The console cost curve is the driver — per-decision costing over a
+ * lifetime of decisions is what made every dashboard GET history-sized.
+ */
+export async function costsOfDecisions(
+  db: AsyncDb,
+  coord: Coordinator,
+  ledger: Ledger,
+  tenant: string,
+  decisionIds: string[],
+  rates: Rates,
+): Promise<Map<string, DecisionCost>> {
+  const out = new Map<string, DecisionCost>();
+  const ids = [...new Set(decisionIds)];
+  if (ids.length === 0) return out;
+  const inList = ids.map(() => '?').join(',');
+  const decs = (await db
+    .prepare(`SELECT id, request_id FROM decisions WHERE tenant = ? AND id IN (${inList})`)
+    .all(tenant, ...ids)) as { id: string; request_id: string | null }[];
+  const byId = new Map(decs.map((d) => [String(d.id), d.request_id === null ? null : String(d.request_id)]));
+  const reqIds = [...new Set([...byId.values()].filter((r): r is string => r !== null))];
+  const spentByReq = new Map<string, { humanMinutes: number; dollars: number }>();
+  if (reqIds.length > 0) {
+    const reqList = reqIds.map(() => '?').join(',');
+    const rows = (await db
+      .prepare(`SELECT id, spent_json FROM requests WHERE tenant = ? AND id IN (${reqList})`)
+      .all(tenant, ...reqIds)) as { id: string; spent_json: string }[];
+    for (const r of rows) {
       try {
-        tokens += Number((JSON.parse(String(t.cost_json)) as { tokens?: number }).tokens ?? 0);
+        const s = JSON.parse(String(r.spent_json)) as { humanMinutes?: number; dollars?: number };
+        spentByReq.set(String(r.id), { humanMinutes: Number(s.humanMinutes ?? 0), dollars: Number(s.dollars ?? 0) });
       } catch {
-        /* a malformed cost blob contributes nothing — it does not poison the roll-up */
+        spentByReq.set(String(r.id), { humanMinutes: 0, dollars: 0 });
       }
     }
   }
-  const outcomes = (await db
-    .prepare('SELECT metric, predicted, actual, holdout_ref FROM outcomes WHERE tenant = ? AND decision_id = ?')
-    .all(tenant, decisionId)) as {
+  const tokensByReq = new Map<string, number>();
+  if (reqIds.length > 0) {
+    const reqList = reqIds.map(() => '?').join(',');
+    const rows = (await db
+      .prepare(`SELECT request_id, cost_json FROM traces WHERE tenant = ? AND request_id IN (${reqList})`)
+      .all(tenant, ...reqIds)) as { request_id: string; cost_json: string }[];
+    for (const t of rows) {
+      try {
+        const n = Number((JSON.parse(String(t.cost_json)) as { tokens?: number }).tokens ?? 0);
+        tokensByReq.set(String(t.request_id), (tokensByReq.get(String(t.request_id)) ?? 0) + n);
+      } catch {
+        /* malformed cost blobs contribute nothing — same rule as the single path */
+      }
+    }
+  }
+  const outcomesByDec = new Map<string, DecisionCost['outcomes']>();
+  const decList = ids.map(() => '?').join(',');
+  const orows = (await db
+    .prepare(
+      `SELECT decision_id, metric, predicted, actual, holdout_ref FROM outcomes WHERE tenant = ? AND decision_id IN (${decList})`,
+    )
+    .all(tenant, ...ids)) as {
+    decision_id: string;
     metric: string;
     predicted: number | null;
     actual: number;
     holdout_ref: string | null;
   }[];
-  const rows = outcomes.map((o) => ({
-    metric: String(o.metric),
-    predicted: o.predicted === null ? null : Number(o.predicted),
-    actual: Number(o.actual),
-    holdoutRef: o.holdout_ref === null ? null : String(o.holdout_ref),
-  }));
-  const good = rows.filter((o) => (o.predicted === null ? o.actual !== 0 : o.actual >= o.predicted)).length;
-  const dollars = requestDollars + tokens * rates.dollarPerToken + humanMinutes * rates.dollarPerHumanMinute;
-  return {
-    decisionId,
-    tokens,
-    humanMinutes,
-    requestDollars,
-    dollars,
-    outcomes: rows,
-    goodDecisions: good,
-    costPerGoodDecision: good === 0 ? null : dollars / good,
-  };
+  for (const o of orows) {
+    const list = outcomesByDec.get(String(o.decision_id)) ?? [];
+    list.push({
+      metric: String(o.metric),
+      predicted: o.predicted === null ? null : Number(o.predicted),
+      actual: Number(o.actual),
+      holdoutRef: o.holdout_ref === null ? null : String(o.holdout_ref),
+    });
+    outcomesByDec.set(String(o.decision_id), list);
+  }
+  void coord;
+  void ledger;
+  for (const id of ids) {
+    if (!byId.has(id)) continue;
+    const reqId = byId.get(id);
+    const spent = reqId ? (spentByReq.get(reqId) ?? { humanMinutes: 0, dollars: 0 }) : { humanMinutes: 0, dollars: 0 };
+    const tokens = reqId ? (tokensByReq.get(reqId) ?? 0) : 0;
+    const outcomes = outcomesByDec.get(id) ?? [];
+    // F21: Evaluate metric direction — lower is better for cost/latency/churn/error/defect.
+    const isPassingOutcome = (o: DecisionCost['outcomes'][number]): boolean => {
+      const lowerIsBetter = /latency|error|churn|cost|time|defect|delay/i.test(o.metric);
+      if (o.predicted === null) return o.actual > 0 && !lowerIsBetter;
+      return lowerIsBetter ? o.actual <= o.predicted : o.actual >= o.predicted;
+    };
+    const passingCount = outcomes.filter(isPassingOutcome).length;
+    // One decision-level outcome policy:
+    // When multiple outcomes exist for a decision, all evaluated outcomes must pass
+    // for the decision as a whole to be considered a "good decision".
+    const isGoodDecision = outcomes.length > 0 && passingCount === outcomes.length;
+    const good = isGoodDecision ? 1 : 0;
+    const dollars = spent.dollars + tokens * rates.dollarPerToken + spent.humanMinutes * rates.dollarPerHumanMinute;
+    out.set(id, {
+      decisionId: id,
+      tokens,
+      humanMinutes: spent.humanMinutes,
+      requestDollars: spent.dollars,
+      dollars,
+      outcomes,
+      goodDecisions: good,
+      costPerGoodDecision: good === 0 ? null : dollars,
+    });
+  }
+  return out;
 }
 
 /** Deterministic holdout assignment: same key, same lane, every time. */
@@ -112,11 +231,17 @@ export function assignHoldout(key: string, holdoutRatio = 0.1): 'holdout' | 'tre
   return v < holdoutRatio ? 'holdout' : 'treated';
 }
 
+export interface PreregisteredMetric {
+  name: string;
+  threshold: number;
+  direction?: 'higher' | 'lower';
+}
+
 export interface Preregistration {
   id: string;
   tenant: string;
   decisionId: string | null;
-  metrics: { name: string; threshold: number }[];
+  metrics: PreregisteredMetric[];
   agreedBy: string;
   agreedAt: string;
 }
@@ -125,7 +250,7 @@ export interface Preregistration {
 export async function preregister(
   db: AsyncDb,
   tenant: string,
-  input: { decisionId?: string; metrics: { name: string; threshold: number }[]; agreedBy: string; now?: string },
+  input: { decisionId?: string; metrics: PreregisteredMetric[]; agreedBy: string; now?: string },
 ): Promise<Preregistration> {
   const at = input.now ?? new Date().toISOString();
   if (input.metrics.length === 0)
