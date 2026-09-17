@@ -30,6 +30,7 @@ import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verify
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
 import { renderReview } from './review.ts';
+import { claimDetail, requestDetail } from './detail.ts';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
 
@@ -499,7 +500,7 @@ export function startConsoleServer(
     const build = (async () => {
       try {
         const t0 = Date.now();
-        const html = renderHtml(await buildReport(db, ledger, coord, comp, t, at));
+        const html = renderHtml(await buildReport(db, ledger, coord, comp, t, at), true);
         metrics.reportBuilds += 1;
         metrics.reportBuildMs += Date.now() - t0;
         return html;
@@ -769,12 +770,39 @@ export function startConsoleServer(
           res.end(JSON.stringify({ ok: true, engine: db.engine, at }));
           return;
         }
+        const detail = path.match(/^\/console\/(claims|requests)\/([^/]+)$/);
+        if (method === 'GET' && detail) {
+          const auth = await sessionOf();
+          if (!auth) return redirect(res, '/login');
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          let id: string;
+          try { id = decodeURIComponent(detail[2]!); }
+          catch { return json(res, 400, { ok: false, error: 'malformed detail id' }); }
+          const pageIndex = Number(url.searchParams.get('page') ?? '0');
+          if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
+            return json(res, 400, { ok: false, error: 'page must be a nonnegative integer' });
+          const fallbackMode = operatorSecret ? 'secret' : 'session';
+          const detailOpts = { tenant, actor: by(auth.user), csrf: auth.session.csrfToken,
+            canApprove: atLeast(auth.user.role, approverMin), requiredRole: approverMin,
+            operatorMode: keyAuth ? 'signature' as const : fallbackMode as 'secret' | 'session', home };
+          const html = detail[1] === 'claims'
+            ? await claimDetail(db, ledger, id, pageIndex, detailOpts)
+            : await requestDetail(coord, ledger, id, pageIndex, detailOpts);
+          if (!html) return json(res, 404, { ok: false, error: 'evidence not found' });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(html);
+          return;
+        }
         if (method === 'GET' && path === home) {
           if (!provisioned) return redirect(res, '/signup');
           const auth = await sessionOf();
           if (!auth) return redirect(res, '/login');
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          const reviewPage = Number(url.searchParams.get('reviewPage') ?? '0');
+          if (!Number.isSafeInteger(reviewPage) || reviewPage < 0)
+            return json(res, 400, { ok: false, error: 'reviewPage must be a nonnegative integer' });
           const report = await reportHtml(tenant, at);
           const fallbackMode = operatorSecret ? 'secret' : 'session';
           const review = await renderReview(coord, ledger, {
@@ -784,6 +812,8 @@ export function startConsoleServer(
             canApprove: atLeast(auth.user.role, approverMin),
             requiredRole: approverMin,
             operatorMode: keyAuth ? 'signature' : fallbackMode,
+            page: reviewPage,
+            home,
           });
           const html = report.replace('<h1>Reality health</h1>', `${review}<h1>Reality health</h1>`);
           // The CSRF token rides in the page so same-origin form posts and
@@ -1038,7 +1068,7 @@ export function startConsoleServer(
             return;
           }
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const statement = call.fields.statement ?? '';
+          const statement = (call.fields.statement ?? '').trim();
           if (!statement) {
             json(res, 400, {
               ok: false,
@@ -1062,9 +1092,13 @@ export function startConsoleServer(
               json(res, 404, { ok: false, error: `unknown claim ${id}` });
               return;
             }
+            if (['SUPERSEDED', 'RETIRED'].includes(old.status))
+              return json(res, 409, { ok: false, error: 'This claim is historical. Refresh and correct its current replacement.' });
             const rawVal = call.json && 'value' in call.json ? call.json.value : call.fields.value;
             let patch: { value?: number | null; unit?: string | null; confidence?: number } | undefined;
             if (rawVal !== undefined) {
+              if (rawVal !== null && typeof rawVal !== 'string' && typeof rawVal !== 'number')
+                return json(res, 400, { ok: false, error: 'value must be a finite number or null' });
               const numVal = rawVal === '' || rawVal === null ? null : Number(rawVal);
               if (numVal !== null && !Number.isFinite(numVal)) {
                 json(res, 400, { ok: false, error: 'value must be a finite number or null' });
@@ -1072,9 +1106,15 @@ export function startConsoleServer(
               }
               const rawUnit = call.json && 'unit' in call.json ? call.json.unit : call.fields.unit;
               const rawConf = call.json && 'confidence' in call.json ? call.json.confidence : call.fields.confidence;
+              let unitPatch: string | null | undefined;
+              if (rawUnit === null) {
+                unitPatch = null;
+              } else if (rawUnit !== undefined) {
+                unitPatch = String(rawUnit);
+              }
               patch = {
                 value: numVal,
-                unit: rawUnit !== undefined ? String(rawUnit) : undefined,
+                unit: unitPatch,
                 confidence: rawConf !== undefined ? Number(rawConf) : undefined,
               };
             }

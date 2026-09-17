@@ -166,7 +166,7 @@ function gapLine(gaps: string[]): string {
   return `<div style="font-size:11px;color:${HYPO}">? ${esc(gaps[0]!)}${extra}</div>`;
 }
 
-export function renderHtml(r: ConsoleReport): string {
+export function renderHtml(r: ConsoleReport, live = false): string {
   const h = r.health;
   // Defensive second bound: the report is already windowed, but the
   // renderer never trusts its input to be bounded — a caller handing a
@@ -200,8 +200,8 @@ export function renderHtml(r: ConsoleReport): string {
             (
               q,
             ) => `<div style="border-left:3px solid ${q.state === 'COMPLETED' ? FACT : HAIRLINE};padding:6px 10px;margin:6px 0;">
-            <div style="font-size:12px;">${esc(q.goal)} <span style="color:${MUTED};font-size:11px">${esc(q.state)} · ${esc(q.originScope)}→${esc(q.targetScope)}</span></div>
-            ${q.evidence.map((e) => `<div style="font-size:11px;margin-top:4px;">${evidenceChip(e)} ${esc(e.statement.slice(0, 120))} <span style="color:${MUTED}">${esc(e.tier)} · ${esc(e.status)}</span></div>`).join('')}
+            <div style="font-size:12px;">${live ? `<a href="/console/requests/${esc(encodeURIComponent(q.id))}">${esc(q.goal)}</a>` : esc(q.goal)} <span style="color:${MUTED};font-size:11px">${esc(q.state)} · ${esc(q.originScope)}→${esc(q.targetScope)}</span></div>
+            ${q.evidence.map((e) => `<div style="font-size:11px;margin-top:4px;">${live ? `<a href="/console/claims/${esc(encodeURIComponent(e.id))}">${evidenceChip(e)}</a>` : evidenceChip(e)} ${esc(e.statement.slice(0, 120))} <span style="color:${MUTED}">${esc(e.tier)} · ${esc(e.status)}</span></div>`).join('')}
           </div>`,
           )
           .join('')}</div>`,
