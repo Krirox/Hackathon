@@ -26,6 +26,7 @@ import {
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
+import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verifyApproval } from '../gov/operator.ts';
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
@@ -78,6 +79,20 @@ export interface ConsoleServerOptions {
    * autonomy, not which human may approve.
    */
   approverRole?: 'member' | 'admin' | 'owner';
+  /**
+   * Additional mutation gate via `x-vital-operator`, never a replacement
+   * for session, tenant, role or CSRF checks. Ignored when operatorKeys is
+   * nonempty; key mode must not downgrade to a shared secret.
+   */
+  operatorSecret?: string;
+  /**
+   * Nonempty keys require additional ed25519 proof via x-vital-signature.
+   * Sign the canonical envelope using the SESSION identity `userId (email)`,
+   * not the body's by field. Live registry keys join the configured keys;
+   * revocation wins and registry corruption denies. Responses add keyId and
+   * an optional registry keyName (a label, not the authenticated identity).
+   */
+  operatorKeys?: string[];
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -260,6 +275,7 @@ function cookieValue(req: IncomingMessage, name: string): string | undefined {
 interface Call {
   csrf: string | null;
   fields: Record<string, string>;
+  json?: Record<string, unknown>;
 }
 
 async function parseCall(req: IncomingMessage): Promise<Call> {
@@ -276,7 +292,7 @@ async function parseCall(req: IncomingMessage): Promise<Call> {
     const body = parseJson(raw);
     const flat: Record<string, string> = {};
     for (const [k, v] of Object.entries(body)) if (typeof v === 'string') flat[k] = v;
-    return { csrf: (req.headers['x-vital-csrf'] as string | undefined) ?? null, fields: flat };
+    return { csrf: (req.headers['x-vital-csrf'] as string | undefined) ?? null, fields: flat, json: body };
   }
   const fields = new URLSearchParams(raw);
   return { csrf: fields.get('csrf'), fields: Object.fromEntries(fields) };
@@ -442,6 +458,57 @@ export function startConsoleServer(
   // lives under `/console` (login/signup/change-password keep their paths —
   // they are console routes regardless).
   const home = siteDir ? '/console' : '/';
+  const operatorSecret = opts.operatorSecret ?? null;
+  const operatorKeys = opts.operatorKeys ?? [];
+  for (const pem of operatorKeys) operatorKeyId(pem);
+  const keyAuth = operatorKeys.length > 0;
+  const authorized = (req: IncomingMessage): boolean => {
+    if (!operatorSecret) return true;
+    const got = req.headers['x-vital-operator'];
+    if (typeof got !== 'string') return false;
+    const a = Buffer.from(got);
+    const b = Buffer.from(operatorSecret);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  const verifyingKey = async (
+    req: IncomingMessage,
+    id: string,
+    action: string,
+    who: string,
+  ): Promise<{ keyId: string; keyName?: string } | null> => {
+    const sig = req.headers['x-vital-signature'];
+    if (typeof sig !== 'string' || !sig) return null;
+    try {
+      const msg = approvalMessage(tenant, id, action, who);
+      for (const key of effectiveKeys(operatorKeys, await listOperatorKeys(db, tenant))) {
+        if (verifyApproval(key.publicKeyPem, msg, sig))
+          return { keyId: key.keyId, ...(key.name === null ? {} : { keyName: key.name }) };
+      }
+    } catch {
+      // Malformed input or registry corruption must never permit a mutation.
+    }
+    return null;
+  };
+  const metrics = { requests: 0, errors: 0, reportBuilds: 0, reportBuildMs: 0, startedAt: Date.now() };
+  // Share the base report only; inject each session's identity and CSRF afterwards.
+  const inflight = new Map<string, Promise<string>>();
+  const reportHtml = (t: string, at: string): Promise<string> => {
+    const running = inflight.get(t);
+    if (running) return running;
+    const build = (async () => {
+      try {
+        const t0 = Date.now();
+        const html = renderHtml(await buildReport(db, ledger, coord, comp, t, at));
+        metrics.reportBuilds += 1;
+        metrics.reportBuildMs += Date.now() - t0;
+        return html;
+      } finally {
+        inflight.delete(t);
+      }
+    })();
+    inflight.set(t, build);
+    return build;
+  };
 
   // Per-instance rate-limit buckets (see the rate-limit note above): a server
   // owns its own counters, so cohabiting instances never share one.
@@ -477,10 +544,47 @@ export function startConsoleServer(
     let provisioned = await ensureBootstrapOwner(db, tenant, now());
 
     const server: Server = createServer((req, res) => {
+      const started = Date.now();
+      let logPath = 'unmatched';
+      res.on('finish', () => {
+        metrics.requests += 1;
+        console.log(
+          JSON.stringify({
+            at: new Date(started).toISOString(),
+            method: req.method,
+            path: logPath,
+            status: res.statusCode,
+            ms: Date.now() - started,
+          }),
+        );
+      });
       void (async () => {
         const url = new URL(req.url ?? '/', 'http://console');
         const path = url.pathname;
         const method = req.method ?? 'GET';
+        // Route templates avoid logging tenant data, identifiers, or query strings.
+        if (/^\/api\/requests\/[^/]+\/(approve|decline)$/.test(path))
+          logPath = `/api/requests/:id/${path.endsWith('/approve') ? 'approve' : 'decline'}`;
+        else if (/^\/api\/claims\/[^/]+\/correct$/.test(path)) logPath = '/api/claims/:id/correct';
+        else if (
+          [
+            home,
+            '/login',
+            '/signup',
+            '/logout',
+            '/change-password',
+            '/team',
+            '/team/invite',
+            '/team/disable',
+            '/healthz',
+            '/api/health',
+            '/api/metrics',
+            '/api/approval-latency',
+            '/api/cost-per-signal',
+          ].includes(path)
+        )
+          logPath = path;
+        if (method === 'GET' && path === '/healthz') return json(res, 200, { ok: true, vital: '0.0.1' });
         const ip = req.socket.remoteAddress ?? undefined;
         const at = now();
 
@@ -669,7 +773,8 @@ export function startConsoleServer(
           const auth = await sessionOf();
           if (!auth) return redirect(res, '/login');
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const html = renderHtml(await buildReport(db, ledger, coord, comp, tenant, at));
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          const html = await reportHtml(tenant, at);
           // The CSRF token rides in the page so same-origin form posts and
           // same-origin fetches can both present it.
           const withCsrf = html.replace(
@@ -812,6 +917,8 @@ export function startConsoleServer(
               ok: false,
               error: `approving requires ${approverMin} (you are ${auth.user.role})`,
             });
+          if (!keyAuth && !authorized(req))
+            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
           let call: Call;
           try {
             call = await parseCall(req);
@@ -831,6 +938,10 @@ export function startConsoleServer(
             json(res, 400, { ok: false, error: 'malformed request id' });
             return;
           }
+          const who = by(auth.user);
+          const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
+          const identity = keyAuth ? await verifyingKey(req, id, action, who) : {};
+          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
           const current = await coord.get(tenant, id);
           if (!current) {
             json(res, 404, { ok: false, error: `unknown request ${id}` });
@@ -838,9 +949,7 @@ export function startConsoleServer(
           }
           // The approver is the authenticated identity — the body cannot
           // name a human, so "approval theater" needs a compromised session.
-          const who = by(auth.user);
           try {
-            const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
             const next =
               action === 'approve'
                 ? await coord.accept(tenant, id)
@@ -861,7 +970,7 @@ export function startConsoleServer(
             } catch {
               latencySeconds = null;
             }
-            json(res, 200, { ok: action === 'approve', id, state: next.state, by: who, latencySeconds });
+            json(res, 200, { ok: action === 'approve', id, state: next.state, by: who, latencySeconds, ...identity });
           } catch (e) {
             json(res, 409, { ok: false, error: (e as Error).message });
           }
@@ -876,6 +985,14 @@ export function startConsoleServer(
           if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           json(res, 200, await coord.approvalLatencyStats(tenant));
+          return;
+        }
+
+        if (method === 'GET' && path === '/api/metrics') {
+          const auth = await sessionOf();
+          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          json(res, 200, { ...metrics, uptimeMs: Date.now() - metrics.startedAt });
           return;
         }
 
@@ -900,6 +1017,8 @@ export function startConsoleServer(
           const auth = await sessionOf();
           if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (!keyAuth && !authorized(req))
+            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
           let call: Call;
           try {
             call = await parseCall(req);
@@ -923,14 +1042,32 @@ export function startConsoleServer(
             json(res, 400, { ok: false, error: 'malformed claim id' });
             return;
           }
+          const who = by(auth.user);
+          const identity = keyAuth ? await verifyingKey(req, id, 'correct', who) : {};
+          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
           try {
             const old = await ledger.get(tenant, id);
             if (!old) {
               json(res, 404, { ok: false, error: `unknown claim ${id}` });
               return;
             }
-            const who = by(auth.user);
-            const neu = await ledger.correctClaim(tenant, id, statement, who, at);
+            const rawVal = call.json && 'value' in call.json ? call.json.value : call.fields.value;
+            let patch: { value?: number | null; unit?: string | null; confidence?: number } | undefined;
+            if (rawVal !== undefined) {
+              const numVal = rawVal === '' || rawVal === null ? null : Number(rawVal);
+              if (numVal !== null && !Number.isFinite(numVal)) {
+                json(res, 400, { ok: false, error: 'value must be a finite number or null' });
+                return;
+              }
+              const rawUnit = call.json && 'unit' in call.json ? call.json.unit : call.fields.unit;
+              const rawConf = call.json && 'confidence' in call.json ? call.json.confidence : call.fields.confidence;
+              patch = {
+                value: numVal,
+                unit: rawUnit !== undefined ? String(rawUnit) : undefined,
+                confidence: rawConf !== undefined ? Number(rawConf) : undefined,
+              };
+            }
+            const neu = await ledger.correctClaim(tenant, id, statement, who, at, patch);
             await auditConsole(db, tenant, who, 'console.correct', `claim:${id}`, at, `superseded_by=${neu.id}`);
             // Feed the eval spine. The CLAIM_CORRECTED audit row (target
             // `oldId->newId`) is the spine's intake; a spine failure must not
@@ -962,6 +1099,7 @@ export function startConsoleServer(
               supersededBy: neu.id,
               diff: { before: old.statement, after: neu.statement },
               evalCaseId,
+              ...(keyAuth ? { by: who, ...identity } : {}),
             });
           } catch (e) {
             json(res, 409, { ok: false, error: (e as Error).message });
@@ -983,8 +1121,9 @@ export function startConsoleServer(
 
         json(res, 404, { ok: false, error: 'not found' });
       })().catch(() => {
+        metrics.errors += 1;
         if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
-        else res.end();
+        else res.destroy();
       });
     });
 

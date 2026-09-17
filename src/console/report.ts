@@ -3,8 +3,38 @@ import type { Ledger } from '../ledger/ledger.ts';
 import type { ApprovalLatencyStats, Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler, SkillState } from '../compiler/compiler.ts';
 import { CognitiveRouter } from '../router/router.ts';
-import { describeCard } from '../compiler/registry.ts';
-import { costOfDecision } from '../attrib/attribution.ts';
+import { describeCardReadOnly } from '../compiler/registry.ts';
+import { costsOfDecisions, getRates } from '../attrib/attribution.ts';
+
+/**
+ * Output budgets: the dashboard is a bounded window, never history-sized.
+ * COST_CURVE_BUDGET caps chart points (downsampled, endpoints preserved);
+ * MAX_ROOMS caps room sections and ROOM_REQUESTS caps requests per room —
+ * both sliced BEFORE evidence hydration so a large tenant never pays for
+ * rows it will not display. MAX_NEEDS_HUMAN and MAX_CARDS_PER_STATE bound
+ * the queue and compiler columns the same way.
+ */
+export const COST_CURVE_BUDGET = 120;
+export const MAX_ROOMS = 50;
+export const ROOM_REQUESTS = 20;
+export const MAX_NEEDS_HUMAN = 100;
+export const MAX_CARDS_PER_STATE = 100;
+
+/**
+ * Even-stride downsampling to a fixed point budget. Indices spread evenly
+ * across the input with the first and last points always kept, so spikes
+ * at the edges survive instead of being sliced off by a head/tail cut.
+ */
+export function downsampleIndices(n: number, budget: number): number[] {
+  if (n <= budget || budget <= 0) return Array.from({ length: n }, (_, i) => i);
+  if (budget === 1) return [n - 1];
+  const out = new Set<number>();
+  const step = (n - 1) / (budget - 1);
+  for (let i = 0; i < budget; i++) out.add(Math.round(i * step));
+  out.add(0);
+  out.add(n - 1);
+  return [...out].sort((a, b) => a - b);
+}
 
 /**
  * Vital Console, read model (the Ledger is our only bespoke surface).
@@ -33,9 +63,6 @@ export interface CostPoint {
   label: string;
   costPerGoodDecision: number | null;
 }
-
-/** Re-exported shape of `router.costPerSignal`, so renderers need no router import. */
-export type CostPerSignal = Awaited<ReturnType<CognitiveRouter['costPerSignal']>>;
 
 export interface TierBucket {
   label: string;
@@ -96,7 +123,7 @@ export interface ConsoleReport {
   /** Approval latency (TODO 2.3): submission → human decision, from APPROVAL_LATENCY audit rows. */
   approvalLatency: ApprovalLatencyStats;
   /** Cost-per-signal (TODO 4.1): the expensive tier's share of routed arrivals vs the <1% gate. */
-  costPerSignal: CostPerSignal;
+  costPerSignal: Awaited<ReturnType<CognitiveRouter['costPerSignal']>>;
 }
 
 const TERMINAL = ['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'];
@@ -120,7 +147,16 @@ export async function buildReport(
     .all(tenant)) as { target: string; at: string }[];
   const openKeys = new Set(pairs.flatMap((p) => [`${p.a.id}<>${p.b.id}`, `${p.b.id}<>${p.a.id}`]));
   const openAts = audits.filter((a) => openKeys.has(String(a.target))).map((a) => Date.parse(String(a.at)));
-  const oldestOpenHours = openAts.length === 0 ? null : (Date.parse(now) - Math.min(...openAts)) / 3_600_000;
+  // Iterative minimum: the audit trail is history-sized and must never be
+  // spread into an argument list (call-stack overflow past ~100k rows).
+  let oldestOpenHours: number | null = null;
+  if (openAts.length > 0) {
+    let earliest = openAts[0]!;
+    for (let i = 1; i < openAts.length; i++) {
+      if (openAts[i]! < earliest) earliest = openAts[i]!;
+    }
+    oldestOpenHours = (Date.parse(now) - earliest) / 3_600_000;
+  }
 
   const requests = await coord.list(tenant);
   const today = now.slice(0, 10);
@@ -128,10 +164,6 @@ export async function buildReport(
   const humanSpent = todays.reduce((s, r) => s + r.spent.humanMinutes, 0);
   const dollarsToday = todays.reduce((s, r) => s + r.spent.dollars, 0);
   const openHuman = requests.filter((r) => !TERMINAL.includes(r.state) && r.bid.humanMinutes > 0);
-  // Cost-per-signal (TODO 4.1): the router is a passive read-model over
-  // routing_decisions — no timers, no writes — so building a throwaway one
-  // here is the cheapest way to surface the spend-side gate.
-  const costPerSignal = await new CognitiveRouter(db).costPerSignal(tenant);
 
   // Cost curve: one point per decision with a measured outcome, in time order.
   const decisions = (await db
@@ -141,19 +173,30 @@ export async function buildReport(
     signed_at: string;
   }[];
   const costCurve: CostPoint[] = [];
-  for (const [i, d] of decisions.entries()) {
-    let cost: number | null;
-    try {
-      cost = (
-        await costOfDecision(db, coord, ledger, tenant, String(d.id), {
-          dollarPerToken: 0.001,
-          dollarPerHumanMinute: 1,
-        })
-      ).costPerGoodDecision;
-    } catch {
-      cost = null;
-    }
-    costCurve.push({ at: String(d.signed_at), label: `D${i + 1}`, costPerGoodDecision: cost });
+  // Downsample BEFORE costing: only the visible window pays for bulk
+  // roll-ups, so a 500-decision tenant costs ~120 decisions, not history.
+  const visibleIdx = downsampleIndices(decisions.length, COST_CURVE_BUDGET);
+  const visibleDecisions = visibleIdx.map((i) => decisions[i]!);
+  // One bulk roll-up for all decisions: per-decision costing here used to be
+  // ~4 sequential queries each, making every dashboard GET history-sized.
+  // Rates resolve per tenant (versioned in meta) — never code constants that
+  // silently reprice history when they move.
+  const rates = await getRates(db, tenant);
+  const bulk = await costsOfDecisions(
+    db,
+    coord,
+    ledger,
+    tenant,
+    visibleDecisions.map((d) => String(d.id)),
+    rates,
+  );
+  for (const [vi, d] of visibleDecisions.entries()) {
+    const origI = visibleIdx[vi]!;
+    costCurve.push({
+      at: String(d.signed_at),
+      label: `D${origI + 1}`,
+      costPerGoodDecision: bulk.get(String(d.id))?.costPerGoodDecision ?? null,
+    });
   }
 
   // Tier mix: traces bucketed into 7-day windows from the earliest trace.
@@ -184,7 +227,7 @@ export async function buildReport(
     });
   }
 
-  const needsHuman: HumanItem[] = openHuman.map((r) => ({
+  const needsHuman: HumanItem[] = openHuman.slice(0, MAX_NEEDS_HUMAN).map((r) => ({
     requestId: r.id,
     goal: r.goal,
     scope: r.targetScope,
@@ -198,8 +241,10 @@ export async function buildReport(
   const compiler: CompilerColumn[] = [];
   for (const state of states) {
     const cards: CompilerColumn['cards'] = [];
-    for (const c of await comp.list(tenant, { state })) {
-      const desc = await describeCard(comp, tenant, c.id);
+    // Presentation read: drift signals are shown, never acted on — a
+    // dashboard GET must not demote cards or append audit rows.
+    for (const c of (await comp.list(tenant, { state })).slice(0, MAX_CARDS_PER_STATE)) {
+      const desc = await describeCardReadOnly(db, comp, tenant, c.id);
       cards.push({
         id: c.id,
         intent: c.intent,
@@ -216,7 +261,9 @@ export async function buildReport(
 
   const scopes = [...new Set(requests.flatMap((r) => [r.originScope, r.targetScope]))];
   const rooms: RoomView[] = [];
-  for (const scope of scopes) {
+  // Slice the room list BEFORE hydrating evidence: only the visible window
+  // pays for ledger.get calls, so room count never drives evidence I/O.
+  for (const scope of scopes.slice(0, MAX_ROOMS)) {
     const mine = requests.filter((r) => r.originScope === scope || r.targetScope === scope);
     const open = mine.filter((r) => !TERMINAL.includes(r.state)).length;
     const failed = mine.filter((r) => r.state === 'FAILED' || r.state === 'TERMINATED_BUDGET').length;
@@ -224,7 +271,7 @@ export async function buildReport(
     if (open === 0 && mine.length > 0) health = 'idle';
     else if (failed > 0 || open > 3) health = 'degraded';
     const roomRequests: RoomView['requests'] = [];
-    for (const r of mine.slice(-20)) {
+    for (const r of mine.slice(-ROOM_REQUESTS)) {
       const evidence: RoomView['requests'][number]['evidence'] = [];
       for (const id of r.claimRefs) {
         const c = await ledger.get(tenant, id);
@@ -274,6 +321,9 @@ export async function buildReport(
     compiler,
     rooms,
     approvalLatency: await coord.approvalLatencyStats(tenant),
-    costPerSignal,
+    // Cost-per-signal (TODO 4.1): the router is a passive read-model over
+    // routing_decisions — no timers, no writes — so building a throwaway one
+    // here is free and keeps every caller's report shape identical.
+    costPerSignal: await new CognitiveRouter(db).costPerSignal(tenant),
   };
 }

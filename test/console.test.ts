@@ -1,14 +1,167 @@
 import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base } from './helpers.ts';
 import { request as httpRequest } from 'node:http';
-import { buildReport } from '../src/console/report.ts';
+import { buildReport, COST_CURVE_BUDGET, MAX_ROOMS, ROOM_REQUESTS } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import { listCases } from '../src/evals/runner.ts';
 import { rIn } from './helpers.ts';
-import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
+import { installAuthSchema, signupTenant, listUsers } from '../src/core/auth.ts';
+import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
+import { seedTrace, cardInput } from './helpers.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
+
+T('merged console keeps operator secret checks in addition to session authentication', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await coord.submit(base({ id: 'merged-secret', goal: 'review with both credentials' }));
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+    operatorSecret: 'opaque',
+  });
+  try {
+    const url = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const endpoint = `${url}/api/requests/merged-secret/approve`;
+    eq((await fetch(endpoint, { method: 'POST', headers: session.headers, body: '{}' })).status, 401);
+    eq(
+      (
+        await fetch(endpoint, {
+          method: 'POST',
+          headers: { ...session.headers, 'content-type': 'application/json', 'x-vital-operator': 'opaque' },
+          body: '{}',
+        })
+      ).status,
+      200,
+    );
+    eq((await fetch(`${url}/api/metrics`)).status, 401);
+    const metrics = (await (await fetch(`${url}/api/metrics`, { headers: session.headers })).json()) as {
+      requests: number;
+      reportBuilds: number;
+    };
+    eq(metrics.requests > 0, true);
+    eq(metrics.reportBuilds > 0, true);
+    eq((await fetch(`${url}/healthz`)).status, 200);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('merged signed approval retains the authenticated session identity', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const key = generateOperatorKey();
+  const owner = (await listUsers(db, TEN)).find((u) => u.email === OWNER.email)!;
+  const who = `${owner.id} (${owner.email})`;
+  await coord.submit(base({ id: 'merged-signed', goal: 'review with signed session identity' }));
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+    operatorKeys: [key.publicKeyPem],
+  });
+  try {
+    const session = await ownerSession(server.port);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/merged-signed/approve`, {
+      method: 'POST',
+      headers: {
+        ...session.headers,
+        'content-type': 'application/json',
+        'x-vital-signature': signApproval(key.privateKeyPem, approvalMessage(TEN, 'merged-signed', 'approve', who)),
+      },
+      body: JSON.stringify({ by: 'ignored body identity' }),
+    });
+    eq(response.status, 200);
+    const result = (await response.json()) as { by: string; keyId: string };
+    eq(result.by, who);
+    eq(result.keyId, operatorKeyId(key.publicKeyPem));
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('merged report preserves local bounded chart and room windows', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  try {
+    for (let i = 0; i < 500; i++) {
+      await db
+        .prepare(
+          'INSERT INTO decisions (id,tenant,goal,action,action_class,context_bundle,decided_by,approved_by,scope,autonomy,request_id,signed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          `window_${i}`,
+          TEN,
+          'g',
+          'a',
+          'READ',
+          '{}',
+          'h',
+          null,
+          'x',
+          'autonomous',
+          null,
+          new Date(Date.parse(NOW) + i * 1000).toISOString(),
+        );
+    }
+    for (let i = 0; i < 60; i++) {
+      await coord.submit(base({ id: `window_req_${i}`, originScope: `scope-${i}`, goal: `work ${i}` }));
+    }
+    const report = await buildReport(db, ledger, coord, comp, TEN, NOW);
+    eq(report.costCurve.length <= COST_CURVE_BUDGET, true);
+    eq(report.costCurve[0]!.label, 'D1');
+    eq(report.costCurve[report.costCurve.length - 1]!.label, 'D500');
+    eq(report.rooms.length <= MAX_ROOMS, true);
+    eq(
+      report.rooms.every((room) => room.requests.length <= ROOM_REQUESTS),
+      true,
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+T('merged report never demotes a drifting card or writes audit rows', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  try {
+    await seedTrace(comp, db, 'merged_trace', 'SUCCESS', 0.95);
+    const card = await comp.compile(cardInput(['merged_trace']));
+    await db.prepare("UPDATE skill_cards SET state='PROMOTED' WHERE id = ?").run(card.id);
+    for (let i = 0; i < 20; i++) {
+      await db
+        .prepare(
+          'INSERT INTO traces (id,tenant,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          `merged_bad_${i}`,
+          TEN,
+          'marketing',
+          'x',
+          'draft-launch-copy',
+          '[]',
+          'WORKFLOW',
+          'FAILURE',
+          '{}',
+          card.id,
+          0.9,
+          NOW,
+        );
+    }
+    const before = await db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ?').get(TEN);
+    const report = await buildReport(db, ledger, coord, comp, TEN, NOW);
+    eq((await comp.get(TEN, card.id))!.state, 'PROMOTED');
+    eq(await db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ?').get(TEN), before);
+    eq(
+      report.compiler
+        .find((c) => c.state === 'PROMOTED')!
+        .cards.find((c) => c.id === card.id)!
+        .trustGaps.includes('drifting: live success below validated baseline'),
+      true,
+    );
+  } finally {
+    await db.close();
+  }
+});
 
 const OWNER = { email: 'owner@acme.test', password: 'the-console-password' };
 
@@ -278,6 +431,20 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
     eq(neu?.statement, 'the launch plan is $149/mo');
     const superseded = await ledger.get(TEN, claim.id);
     eq(superseded?.status, 'SUPERSEDED');
+
+    // Typed correction via HTTP API updates statement and structured value together.
+    const typedRes = (await (
+      await fetch(`${base_}/api/claims/${r.supersededBy}/correct`, {
+        method: 'POST',
+        headers: { ...authed.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ statement: 'the launch plan is $179/mo', value: 179, unit: 'USD/mo' }),
+      })
+    ).json()) as { ok: boolean; supersededBy: string };
+    eq(typedRes.ok, true);
+    const typedClaim = await ledger.get(TEN, typedRes.supersededBy);
+    eq(typedClaim?.statement, 'the launch plan is $179/mo');
+    eq(typedClaim?.value, 179);
+    eq(typedClaim?.unit, 'USD/mo');
 
     // The spine case is real, in the overrides suite, and expects the correction.
     const cases = await listCases(db, TEN, 'overrides');

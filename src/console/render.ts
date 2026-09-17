@@ -1,4 +1,5 @@
 import type { ConsoleReport, CostPoint, TierBucket } from './report.ts';
+import { COST_CURVE_BUDGET, MAX_CARDS_PER_STATE, MAX_NEEDS_HUMAN, MAX_ROOMS, ROOM_REQUESTS } from './report.ts';
 
 /**
  * Static renderer for the console read model: one self-contained HTML file,
@@ -44,8 +45,14 @@ const KIND_STYLE: Record<string, { color: string; glyph: string }> = {
 
 /** Line chart with a dashed target line. Points with null values are gaps, not zeros. */
 export function lineChart(points: CostPoint[], target: number, w = 560, h = 220): string {
-  const vals = points.map((p) => p.costPerGoodDecision).filter((v): v is number => v !== null);
-  const max = Math.max(target * 1.3, ...vals, 1);
+  // Iterative maximum: one point per decision means history-sized spreads
+  // would overflow the call stack — walk the values instead.
+  let max = target * 1.3;
+  if (max < 1) max = 1;
+  for (const p of points) {
+    const v = p.costPerGoodDecision;
+    if (v !== null && v > max) max = v;
+  }
   const pad = 34;
   const x = (i: number) => (points.length === 1 ? pad : pad + (i * (w - pad - 8)) / (points.length - 1));
   const y = (v: number) => h - 24 - (v / max) * (h - 48);
@@ -161,10 +168,17 @@ function gapLine(gaps: string[]): string {
 
 export function renderHtml(r: ConsoleReport): string {
   const h = r.health;
+  // Defensive second bound: the report is already windowed, but the
+  // renderer never trusts its input to be bounded — a caller handing a
+  // hand-built report must still get a bounded page.
+  const curve = r.costCurve.slice(-COST_CURVE_BUDGET);
+  const needsHuman = r.needsHuman.slice(0, MAX_NEEDS_HUMAN);
+  const roomsCapped = r.rooms.slice(0, MAX_ROOMS);
   const cards = (state: string): string => {
     const col = r.compiler.find((c) => c.state === state);
     if (!col || col.cards.length === 0) return '<p style="color:' + MUTED + ';font-size:12px">—</p>';
     return col.cards
+      .slice(0, MAX_CARDS_PER_STATE)
       .map(
         (c) => `<div style="border:1px solid ${HAIRLINE};border-radius:8px;padding:10px;margin-bottom:8px;">
           <div style="font-weight:700">${esc(c.intent)} <span style="font-weight:400;color:${MUTED};font-size:11px">v${c.version} · ${esc(c.trustTier)}</span></div>
@@ -175,12 +189,13 @@ export function renderHtml(r: ConsoleReport): string {
       )
       .join('');
   };
-  const rooms = r.rooms
+  const rooms = roomsCapped
     .map(
       (
         room,
       ) => `<div style="margin-bottom:14px;"><div style="font-weight:700">${esc(room.scope)} ${healthDot(room.health)}</div>
         ${room.requests
+          .slice(-ROOM_REQUESTS)
           .map(
             (
               q,
@@ -203,14 +218,14 @@ export function renderHtml(r: ConsoleReport): string {
 <div class="card"><div class="sub">provenance complete</div><div class="big">${(h.provenanceComplete * 100).toFixed(0)}%</div><div class="sub">FACT only</div></div>
 <div class="card"><div class="sub">orphan claims</div><div class="big">${h.orphanClaims}</div><div class="sub">target 0</div></div>
 <div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? '—' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}${r.approvalLatency.byHuman.length === 0 ? '' : ` · slowest: ${esc(r.approvalLatency.byHuman[0]!.human)} ${fmtDuration(r.approvalLatency.byHuman[0]!.medianSeconds)}`}</div></div>
-<div class="card"><div class="sub">cost per signal</div><div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div></div>
+<div class="card"><div class="sub">cost per signal</div>${r.costPerSignal === null ? '<div class="big">—</div><div class="sub">no router configured</div>' : `<div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div>`}</div>
 </div>
-<h2>Intelligence cost per good decision</h2>
-<div class="card">${lineChart(r.costCurve, r.costTarget)}</div>
+ <h2>Intelligence cost per good decision</h2>
+ <div class="card">${lineChart(curve, r.costTarget)}</div>
 <h2>Tier mix</h2>
 <div class="card">${tierStack(r.tierMix)}</div>
-<h2>Needs a human (${r.needsHuman.length} open · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${r.digestCount} notices → digest)</h2>
-<div class="grid">${r.needsHuman.map((n) => `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${esc(n.goal)}</div><div class="sub">${esc(n.state)}</div></div>`).join('') || '<p class="sub">queue clear</p>'}</div>
+<h2>Needs a human (${needsHuman.length} open · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${r.digestCount} notices → digest)</h2>
+<div class="grid">${needsHuman.map((n) => `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${esc(n.goal)}</div><div class="sub">${esc(n.state)}</div></div>`).join('') || '<p class="sub">queue clear</p>'}</div>
 <h2>Compiler — why not trusted yet</h2>
 <div class="cols">${['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'].map((s) => `<div><div class="sub">${s}</div>${cards(s)}</div>`).join('')}</div>
 <h2>Rooms</h2>
