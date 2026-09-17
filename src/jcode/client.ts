@@ -25,6 +25,14 @@ export interface JcodeClientOptions {
    * 2026-09-09.
    */
   helloTimeoutMs?: number;
+  /**
+   * Bound on request() legs that expect a correlated reply (hello, create,
+   * attach, cancel, permission_response). 0 (default) = unbounded, matching
+   * historical behavior; set it wherever a missing reply must fail instead
+   * of hanging. send() never waits for a reply (see below), so it is
+   * unaffected by this setting.
+   */
+  requestTimeoutMs?: number;
 }
 
 export class JcodeError extends Error {
@@ -138,16 +146,33 @@ export class JcodeClient extends EventEmitter {
     }
   }
 
-  request(req: string, fields: Record<string, unknown> = {}): Promise<ServerFrame> {
+  request(req: string, fields: Record<string, unknown> = {}, opts: { timeoutMs?: number } = {}): Promise<ServerFrame> {
     if (!this.sock) return Promise.reject(new JcodeError('NOT_CONNECTED', 'connect() first'));
     const id = this.nextId++;
     const frame: ClientFrame = { v: API_VERSION_MAJOR, id, req, ...fields };
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const settle = (fn: () => void): void => {
+        if (timer) clearTimeout(timer);
+        fn();
+      };
+      this.pending.set(id, {
+        resolve: (f) => settle(() => resolve(f)),
+        reject: (e) => settle(() => reject(e)),
+      });
+      const budget = opts.timeoutMs ?? this.opts.requestTimeoutMs ?? 0;
+      if (budget > 0) {
+        timer = setTimeout(() => {
+          if (this.pending.delete(id)) {
+            reject(new JcodeError('REQUEST_TIMEOUT', `${req} got no reply within ${budget}ms`));
+          }
+        }, budget);
+        timer.unref?.();
+      }
       this.sock!.write(JSON.stringify(frame) + '\n', (err) => {
         if (err) {
           this.pending.delete(id);
-          reject(new JcodeError('WRITE', err.message));
+          settle(() => reject(new JcodeError('WRITE', err.message)));
         }
       });
     });
@@ -182,12 +207,33 @@ export class JcodeClient extends EventEmitter {
     }
   }
 
+  /**
+   * Fire-and-forget send. The bridge answers send_message with NO correlated
+   * reply — the daemon ack arrives as a bare MessageAccepted event and done
+   * as TurnDone — so awaiting reply_to here hangs forever against the real
+   * bridge (FakeHarness's correlated message_accepted masked this). This
+   * resolves once the frame is flushed to the socket; turn progress and
+   * failures surface as session-filtered events (turn_done, bare error),
+   * which is the runner's job to observe. Per-call errors cannot be
+   * reported here by construction.
+   */
   async send(sessionId: string, content: string, opts: { noReply?: boolean } = {}): Promise<void> {
-    await this.requestOk('send_message', {
+    if (!this.sock) throw new JcodeError('NOT_CONNECTED', 'connect() first');
+    const id = this.nextId++;
+    const frame: ClientFrame = {
+      v: API_VERSION_MAJOR,
+      id,
+      req: 'send_message',
       session_id: sessionId,
       content,
       images: [],
       no_reply: opts.noReply ?? false,
+    };
+    await new Promise<void>((resolve, reject) => {
+      this.sock!.write(JSON.stringify(frame) + '\n', (err) => {
+        if (err) reject(new JcodeError('WRITE', err.message));
+        else resolve();
+      });
     });
   }
 
@@ -209,6 +255,14 @@ export class JcodeClient extends EventEmitter {
   }
 
   close(): void {
+    // A destroyed socket never answers: settle every inflight request so a
+    // harness disconnect surfaces as a rejection, never a silent hang.
+    // (runner.ts relies on this — waitForTurn must see disconnects.)
+    if (this.pending.size > 0) {
+      const pendings = [...this.pending.values()];
+      this.pending.clear();
+      for (const w of pendings) w.reject(new JcodeError('CLOSED', 'connection closed with request inflight'));
+    }
     this.sock?.destroy();
     this.sock = null;
   }

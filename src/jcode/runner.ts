@@ -33,6 +33,9 @@ export interface CodingTask {
   /** Ceiling; enforced against jcode's own token_usage events. */
   maxDollars: number;
   maxTokens: number;
+  /** Bound on one agent turn. Real coding turns take minutes; the 60s
+   *  default only fits the scripted harness — raise for live siblings. */
+  turnTimeoutMs?: number;
 }
 
 export type PermissionPolicy = (ctx: { toolName: string; description: string; task: CodingTask }) => {
@@ -51,6 +54,24 @@ export interface RunResult {
   usage: { input: number; output: number };
   claimIds: string[];
   refusalReason?: string;
+}
+
+/**
+ * Live progress from a running turn — the feed a Buzz thread (or any other
+ * watcher) renders while the work happens, instead of waiting for turn_done.
+ * Emitted on every tool completion and every token batch; subscribers decide
+ * their own sampling (post every Nth step, throttle by time, etc.).
+ */
+export interface ProgressUpdate {
+  requestId: string;
+  sessionId: string;
+  /** Monotonic step within this run: tool completions and token batches. */
+  step: number;
+  /** Tool that just completed, when this update is a tool step. */
+  toolName?: string;
+  /** Cumulative tokens this run has consumed so far. */
+  tokens: number;
+  usage: { input: number; output: number };
 }
 
 /** Default policy: read-only tools run, writes need approval, unknowns deny. */
@@ -117,6 +138,26 @@ export class JcodeRunner extends EventEmitter {
     const usage = { input: 0, output: 0 };
     const claimIds: string[] = [];
     let budgetBroken = false;
+    // Progress sink (live watch): every tool completion and token batch flows
+    // spend into the coordinator mid-run (reportUsage touches tokens/dollars
+    // only — never rounds, so unlike charge() it cannot self-terminate the
+    // run) and emits a ProgressUpdate for watchers (Buzz thread publisher).
+    // A reporting failure halts further reporting but never the run itself:
+    // progress is observability, not control.
+    let sessionId = '';
+    let step = 0;
+    let reportHalted = false;
+    const progress = (toolName?: string): void => {
+      step += 1;
+      this.emit('progress', {
+        requestId,
+        sessionId,
+        step,
+        toolName,
+        tokens: usage.input + usage.output,
+        usage: { ...usage },
+      } satisfies ProgressUpdate);
+    };
     // Permission round-trips are answered asynchronously. The run must not
     // finish (and destroy the socket) while one is still in flight, or the
     // response write is dropped and the harness never sees our decision.
@@ -176,18 +217,41 @@ export class JcodeRunner extends EventEmitter {
       // Tool calls are activity, not rounds: a round is one agent turn.
       // Charging a round here would make any run of >maxRounds tool calls
       // self-terminate, which is exactly the bug this line used to be.
+      const name = String(f.name ?? '');
       toolCalls.push({
-        name: String(f.name ?? ''),
+        name,
         callId: String(f.call_id ?? ''),
         error: (f.error as string) ?? null,
       });
+      progress(name);
     };
     const onUsage = (f: ServerFrame) => {
+      const delta = Number(f.input ?? 0) + Number(f.output ?? 0);
       usage.input += Number(f.input ?? 0);
       usage.output += Number(f.output ?? 0);
       const tokens = usage.input + usage.output;
       if (tokens > task.maxTokens) budgetBroken = true;
       this.emit('usage', tokens);
+      // Persist the flow mid-run so a crash loses minutes, not the whole
+      // turn — and so a coordinator-side breach stops the run even if the
+      // in-memory ceiling hasn't tripped yet.
+      if (!reportHalted && delta > 0) {
+        void track(
+          this.coord
+            .reportUsage(tenant, requestId, { tokens: delta })
+            .then((r) => {
+              if (r.state === 'TERMINATED_BUDGET') budgetBroken = true;
+              progress();
+            })
+            .catch((e) => {
+              reportHalted = true;
+              // Custom event name: safe without listeners (only 'error' throws).
+              this.emit('progressError', { requestId, error: (e as Error).message });
+            }),
+        );
+      } else {
+        progress();
+      }
     };
 
     client.on('frame:permission_request', (f) => {
@@ -199,15 +263,33 @@ export class JcodeRunner extends EventEmitter {
 
     let status: RunResult['status'] = 'COMPLETED';
     let refusalReason: string | undefined;
+    // Bare `error` events (no reply_to) are the real bridge's failure
+    // channel: legacy errors for a normal message arrive as events, never as
+    // correlated replies. Correlated errors already reject their own request
+    // (client.onData), so only unattributed ones fail the turn here.
+    let turnError: string | null = null;
+    const onRunError = (f: ServerFrame): void => {
+      if (typeof f.reply_to === 'number') return;
+      if (turnError === null) turnError = String(f.message ?? f.code ?? 'harness error');
+    };
 
     try {
       await client.connect();
-      const sessionId = await client.createSession(task.workingDir);
+      sessionId = await client.createSession(task.workingDir);
       await client.attach(sessionId);
       await this.coord.accept(tenant, requestId);
 
+      client.on('frame:error', onRunError);
       await client.send(sessionId, task.command);
-      const turn = await this.waitForTurn(client, sessionId, task.maxDollars, () => budgetBroken);
+      const turn = await this.waitForTurn(
+        client,
+        sessionId,
+        task.maxDollars,
+        () => budgetBroken,
+        () => turnError,
+        task.turnTimeoutMs ?? 60_000,
+      );
+      client.removeListener('frame:error', onRunError);
       // Drain outstanding permission round-trips (bounded) before writing
       // back: a turn_done that arrives in the same chunk as a
       // permission_request must not close the socket under the response.
@@ -220,6 +302,9 @@ export class JcodeRunner extends EventEmitter {
       } else if (turn === 'timeout') {
         status = 'FAILED';
         refusalReason = 'harness turn did not complete';
+      } else if (turn === 'error') {
+        status = 'FAILED';
+        refusalReason = turnError ?? 'harness reported an error';
       }
 
       // Deliverable + provenance claim, then close the request.
@@ -247,13 +332,26 @@ export class JcodeRunner extends EventEmitter {
       claimIds.push(out.id);
 
       if (status === 'COMPLETED') {
+        // complete() records claims, not cost: every token already flowed
+        // through reportUsage mid-run, so re-adding usage here would
+        // double-count. spent.tokens on the request IS the run's total.
         await this.coord.complete(tenant, requestId, {
           claims: claimIds,
           cost: { tokens: usage.input + usage.output },
         });
         await this.recordTrace(tenant, req, sessionId, summary, usage);
       } else {
-        await this.coord.fail(tenant, requestId, refusalReason ?? 'unknown failure');
+        // The request may already be TERMINATED_BUDGET — reportUsage can kill
+        // it mid-run before the in-memory ceiling trips. Failing it again
+        // would overwrite TERMINATED_BUDGET with FAILED (terminal→FAILED is
+        // legal), so read first and only fail a non-terminal request.
+        const current = await this.coord.get(tenant, requestId);
+        if (current?.state === 'TERMINATED_BUDGET') {
+          status = 'TERMINATED_BUDGET';
+          refusalReason = current.refusalReason ?? refusalReason;
+        } else {
+          await this.coord.fail(tenant, requestId, refusalReason ?? 'unknown failure');
+        }
       }
       return {
         requestId,
@@ -276,7 +374,7 @@ export class JcodeRunner extends EventEmitter {
       }
       return {
         requestId,
-        sessionId: '',
+        sessionId,
         status,
         transcript: transcript.join(''),
         toolCalls,
@@ -295,13 +393,22 @@ export class JcodeRunner extends EventEmitter {
     sessionId: string,
     _maxDollars: number,
     budgetHit: () => boolean,
-  ): Promise<'done' | 'budget' | 'timeout'> {
+    errorHit: () => string | null,
+    timeoutMs: number,
+  ): Promise<'done' | 'budget' | 'timeout' | 'error'> {
     return new Promise((resolve) => {
+      const finish = (v: 'done' | 'budget' | 'timeout' | 'error'): void => {
+        clearInterval(poll);
+        clearTimeout(limit);
+        client.removeListener('frame:turn_done', done);
+        resolve(v);
+      };
       // Await the cancel round-trip so the harness actually observes it
       // before the run closes the socket under the write. If the harness is
       // gone, the budget breach stands regardless — resolve anyway.
       const finishBudget = () => {
         clearInterval(poll);
+        clearTimeout(limit);
         client.removeListener('frame:turn_done', done);
         let settled = false;
         const fin = (): void => {
@@ -315,6 +422,7 @@ export class JcodeRunner extends EventEmitter {
       };
       const poll = setInterval(() => {
         if (budgetHit()) finishBudget();
+        else if (errorHit() !== null) finish('error');
       }, 50);
       function done(f: ServerFrame) {
         if (String(f.session_id ?? '') !== sessionId) return;
@@ -325,16 +433,17 @@ export class JcodeRunner extends EventEmitter {
           finishBudget();
           return;
         }
-        clearInterval(poll);
-        client.removeListener('frame:turn_done', done);
-        resolve('done');
+        if (errorHit() !== null) {
+          finish('error');
+          return;
+        }
+        finish('done');
       }
       client.on('frame:turn_done', done);
-      setTimeout(() => {
-        clearInterval(poll);
-        client.removeListener('frame:turn_done', done);
-        resolve('timeout');
-      }, 60_000).unref?.();
+      const limit = setTimeout(() => {
+        finish('timeout');
+      }, timeoutMs);
+      limit.unref?.();
     });
   }
 
