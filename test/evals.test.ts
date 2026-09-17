@@ -1,5 +1,6 @@
 import { T, eq, TEN, NOW, fresh, sor, rejects } from './helpers.ts';
 import { addCase, getRun, listCases, proposeEvalFromCorrection, runSuite } from '../src/evals/runner.ts';
+import { startConsoleServer } from '../src/console/serve.ts';
 import { advanceStage, currentStage, rollbackStage } from '../src/evals/promotion.ts';
 import { INJECTION_CORPUS, runInjectionSuite, runInjectionSuiteAsync } from '../src/evals/injection.ts';
 import { denylistBackend } from '../src/substrate/screen.ts';
@@ -151,6 +152,79 @@ T('a human correction becomes a regression eval that stays green', async () => {
   });
   eq(run.failed, 0);
   void neu;
+});
+
+T('a captured override catches the stale reader it exists for (red→green)', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  const claim = await ledger.append({
+    tenant: TEN,
+    subject: 'pricing',
+    kind: 'FACT',
+    statement: 'the launch plan is $99/mo',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:priya',
+    scope: 'marketing',
+    authorType: 'human',
+    provenance: { ...sor() },
+  });
+
+  // A downstream consumer caches the ledger's answer before the correction.
+  const staleView = new Map<string, string>([[claim.id, (await ledger.get(TEN, claim.id))!.statement]]);
+
+  // The human overrides the wrong price through the console surface —
+  // the same path override capture is built on.
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  let correction!: { ok: boolean; supersedes: string; supersededBy: string; evalCaseId: string | null };
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/claims/${claim.id}/correct`, {
+      method: 'POST',
+      body: JSON.stringify({ by: 'human:priya', statement: 'the launch plan is $149/mo' }),
+    });
+    correction = (await res.json()) as {
+      supersedes: string;
+      supersededBy: string;
+      evalCaseId: string | null;
+      ok: boolean;
+    };
+    eq(correction.ok, true);
+  } finally {
+    await server.close();
+  }
+  eq(correction.evalCaseId !== null, true, 'the correction produced a regression case:');
+
+  // The capability target: a reader is correct iff it serves the corrected
+  // statement and the old claim stays superseded — exactly what the case expects.
+  const readerTarget = async ({ expect }: any) => {
+    const served = staleView.get(expect.supersedes);
+    const old = await ledger.get(TEN, expect.supersedes);
+    const neu = await ledger.get(TEN, expect.supersededBy);
+    return {
+      pass: served === expect.statement && old?.status === 'SUPERSEDED' && neu?.statement === expect.statement,
+      detail: { served, expected: expect.statement },
+    };
+  };
+
+  // RED: the stale cache still asserts $99 — the captured override catches it.
+  const red = await runSuite(db, TEN, 'overrides', 'stale-cache-reader', readerTarget);
+  eq(red.failed, 1, 'the stale reader fails the captured override:');
+  eq(red.results[0]!.pass, false);
+  eq(
+    (red.results[0]!.detail as { served?: string }).served,
+    'the launch plan is $99/mo',
+    'the failure names the stale value:',
+  );
+  const redRow = (await db.prepare('SELECT passed, failed FROM eval_runs WHERE id = ?').get(red.id)) as {
+    passed: number;
+    failed: number;
+  };
+  eq(redRow.failed, 1, 'the red run is recorded in the spine:');
+
+  // GREEN: the reader re-serves from the ledger and now satisfies the case.
+  staleView.set(correction.supersedes, 'the launch plan is $149/mo');
+  const green = await runSuite(db, TEN, 'overrides', 'live-ledger-reader', readerTarget);
+  eq(green.failed, 0, 'the corrected reader passes the same case:');
 });
 
 T('correction pipeline rejects non-correction audit rows', async () => {
