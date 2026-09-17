@@ -34,7 +34,7 @@ Requires Node 22.
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit, must be 0 errors
-npm test            # tsx test/run.ts — <!-- vital:testcount -->190 tests, real sockets, real sqlite<!-- /vital:testcount -->
+npm test            # tsx test/run.ts — <!-- vital:testcount -->191 tests, real sockets, real sqlite<!-- /vital:testcount -->
 ```
 
 No Postgres, no Buzz, no jcode needed for the suite: tests run against
@@ -60,7 +60,7 @@ docs/adr/     architecture decisions (0001–0005)
 
 ## Current state (2026-09-11)
 
-Typecheck clean, suite <!-- vital:testcount -->190/190 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->191/191 green<!-- /vital:testcount -->.
 Built (per `TODO.md` "V2 status"): ledger+decisions+replay+export · coord+
 decompose+escalation gate · router+registry+calibration · compiler+mining+
 registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/

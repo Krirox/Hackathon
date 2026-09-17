@@ -7,3 +7,4 @@ dist/
 .env
 var/
 data/artifacts/
+.terraform/

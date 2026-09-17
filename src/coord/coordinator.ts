@@ -27,6 +27,18 @@ import {
  *   right to refuse · budget death · no self-delegation.
  */
 
+/** Latency distribution over recorded human approval decisions (TODO 2.3). */
+export interface ApprovalLatencyStats {
+  n: number;
+  medianSeconds: number | null;
+  p90Seconds: number | null;
+  maxSeconds: number | null;
+  /** Which humans are the slow step: sorted slowest-first, median per human. */
+  byHuman: { human: string; n: number; medianSeconds: number }[];
+  /** Where the slow work queues up: the request's target scope. */
+  byScope: { scope: string; n: number; medianSeconds: number }[];
+}
+
 export class CoordinationError extends Error {
   constructor(
     readonly code: string,
@@ -245,12 +257,7 @@ export interface Coordinator {
     decidedAt: string,
   ): Promise<{ seconds: number }>;
   /** Latency distribution over recorded approvals — the curation-cost kill-metric's clock. */
-  approvalLatencyStats(tenant: string): Promise<{
-    n: number;
-    medianSeconds: number | null;
-    p90Seconds: number | null;
-    maxSeconds: number | null;
-  }>;
+  approvalLatencyStats(tenant: string): Promise<ApprovalLatencyStats>;
 }
 
 export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT_LIMITS): Coordinator {
@@ -664,25 +671,67 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return { seconds };
   }
 
-  async function approvalLatencyStats(tenant: string) {
+  async function approvalLatencyStats(tenant: string): Promise<ApprovalLatencyStats> {
+    // detail carries {action, seconds, human}; joining requests gives the
+    // target scope — who is the slow step, and where the work queues up.
     const rows = (
       (await db
-        .prepare("SELECT detail FROM audit_log WHERE tenant = ? AND action = 'APPROVAL_LATENCY' ORDER BY at")
-        .all(tenant)) as { detail: string | null }[]
+        .prepare(
+          `SELECT a.target AS request_id, a.detail, r.target_scope
+           FROM audit_log a
+           LEFT JOIN requests r ON r.tenant = a.tenant AND r.id = a.target
+           WHERE a.tenant = ? AND a.action = 'APPROVAL_LATENCY'
+           ORDER BY a.at`,
+        )
+        .all(tenant)) as { request_id: string; detail: string | null; target_scope: string | null }[]
     ).map((r) => {
       try {
-        return JSON.parse(String(r.detail ?? '{}')) as { seconds?: number };
+        const d = JSON.parse(String(r.detail ?? '{}')) as { seconds?: number; human?: string };
+        return { seconds: d.seconds, human: d.human, scope: r.target_scope };
       } catch {
-        return {};
+        return { seconds: undefined, human: undefined, scope: r.target_scope };
       }
     });
-    const xs = rows
-      .map((d) => d.seconds)
-      .filter((s): s is number => typeof s === 'number' && Number.isFinite(s))
-      .sort((a, b) => a - b);
-    const pick = (q: number): number | null =>
-      xs.length === 0 ? null : Math.min(xs[Math.min(xs.length - 1, Math.floor(q * xs.length))]!, xs[xs.length - 1]!);
-    return { n: xs.length, medianSeconds: pick(0.5), p90Seconds: pick(0.9), maxSeconds: xs[xs.length - 1] ?? null };
+    const median = (xs: number[]): number | null => {
+      if (xs.length === 0) return null;
+      const s = [...xs].sort((a, b) => a - b);
+      const mid = Math.floor(s.length / 2);
+      return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+    };
+    const seconds = rows.map((r) => r.seconds).filter((s): s is number => typeof s === 'number' && Number.isFinite(s));
+    const overall = median(seconds);
+    const groupBy = (keyOf: (r: { seconds?: number; human?: string; scope: string | null }) => string | undefined) => {
+      const m = new Map<string, number[]>();
+      for (const r of rows) {
+        const k = keyOf(r);
+        if (typeof k !== 'string' || k === '' || typeof r.seconds !== 'number') continue;
+        const list = m.get(k) ?? [];
+        list.push(r.seconds);
+        m.set(k, list);
+      }
+      return [...m.entries()]
+        .map(([k, xs]) => ({ key: k, n: xs.length, medianSeconds: median(xs)! }))
+        .sort((a, b) => b.medianSeconds - a.medianSeconds);
+    };
+    const p90 =
+      seconds.length === 0
+        ? null
+        : Math.min(
+            seconds[Math.min(seconds.length - 1, Math.floor(0.9 * seconds.length))]!,
+            seconds[seconds.length - 1]!,
+          );
+    return {
+      n: seconds.length,
+      medianSeconds: overall,
+      p90Seconds: p90,
+      maxSeconds: seconds.length === 0 ? null : Math.max(...seconds),
+      byHuman: groupBy((r) => r.human).map(({ key, n, medianSeconds }) => ({ human: key, n, medianSeconds })),
+      byScope: groupBy((r) => r.scope ?? undefined).map(({ key, n, medianSeconds }) => ({
+        scope: key,
+        n,
+        medianSeconds,
+      })),
+    };
   }
 
   async function refusalStats(tenant: string) {

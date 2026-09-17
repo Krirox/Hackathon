@@ -202,7 +202,7 @@ export function renderHtml(r: ConsoleReport): string {
 <div class="card"><div class="sub">contradictions open</div><div class="big">${h.contradictions.open}</div><div class="sub">MTTR ${h.contradictions.mttrHours === null ? 'unmeasured — resolution timestamps pending' : h.contradictions.mttrHours.toFixed(0) + 'h'} · SLA ${h.contradictions.slaHours}h</div></div>
 <div class="card"><div class="sub">provenance complete</div><div class="big">${(h.provenanceComplete * 100).toFixed(0)}%</div><div class="sub">FACT only</div></div>
 <div class="card"><div class="sub">orphan claims</div><div class="big">${h.orphanClaims}</div><div class="sub">target 0</div></div>
-<div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? '—' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}</div></div>
+<div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? '—' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}${r.approvalLatency.byHuman.length === 0 ? '' : ` · slowest: ${esc(r.approvalLatency.byHuman[0]!.human)} ${fmtDuration(r.approvalLatency.byHuman[0]!.medianSeconds)}`}</div></div>
 </div>
 <h2>Intelligence cost per good decision</h2>
 <div class="card">${lineChart(r.costCurve, r.costTarget)}</div>

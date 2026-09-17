@@ -36,6 +36,30 @@ T('idempotency: re-emitted identical NOTICE replays the finished thread', async 
   eq(c?.state, 'COMPLETED', 'and the original thread is untouched');
 });
 
+T('approval latency breaks down per human and per target scope', async () => {
+  const { coord } = await fresh();
+  await coord.submit(base({ id: 'b1', goal: 'slow scope work', now: NOW }));
+  await coord.submit(base({ id: 'b2', goal: 'quick scope work', targetScope: 'design', now: NOW }));
+  await coord.submit(base({ id: 'b3', goal: 'declined work', now: NOW }));
+  // NOW is 2026-09-09T12:00Z: b1 approved +6h, b2 +1s, b3 declined +12h.
+  await coord.recordApprovalLatency(TEN, 'b1', 'approve', 'human:slow', '2026-09-09T18:00:00.000Z');
+  await coord.recordApprovalLatency(TEN, 'b2', 'approve', 'human:quick', '2026-09-09T12:00:01.000Z');
+  await coord.recordApprovalLatency(TEN, 'b3', 'decline', 'human:slow', '2026-09-10T00:00:00.000Z');
+
+  const s = await coord.approvalLatencyStats(TEN);
+  eq(s.n, 3, 'declines count as decisions too:');
+  eq(s.maxSeconds, 43200);
+  eq(s.byHuman[0]!.human, 'human:slow', 'slowest human first:');
+  eq(s.byHuman[0]!.n, 2);
+  eq(s.byHuman[0]!.medianSeconds, 32400, 'median of 6h and 12h:');
+  eq(s.byHuman[1]!.human, 'human:quick');
+  eq(s.byHuman[1]!.medianSeconds, 1);
+  eq(s.byScope[0]!.scope, 'engineering', 'the scope holding the slow work first:');
+  eq(s.byScope[0]!.n, 2);
+  eq(s.byScope[1]!.scope, 'design');
+  eq(s.byScope[1]!.medianSeconds, 1);
+});
+
 T('NOTICE never interrupts a human — completes straight to digest', async () => {
   const { coord } = await fresh();
   const r = await coord.submit(
