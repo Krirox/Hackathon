@@ -37,6 +37,16 @@ output "executor_function" {
   value = aws_lambda_function.executor.function_name
 }
 
+output "jcode_service" {
+  description = "Staged jcode split: count 0 in socket mode, jcode_desired_count once jcode_target = tcp"
+  value       = aws_ecs_service.jcode.name
+}
+
+output "jcode_discovery" {
+  description = "Private DNS name the TCP-stage core would dial (staged; JcodeClient has no host:port yet)"
+  value       = "${aws_service_discovery_service.jcode.name}.${aws_service_discovery_private_dns_namespace.vital.name}"
+}
+
 output "ops_topic" {
   value = aws_sns_topic.ops.arn
 }

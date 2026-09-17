@@ -8,8 +8,16 @@ executor_image = ""
 jcode_image    = "ghcr.io/1jehuang/jcode:v0.84.0"
 
 desired_count     = 2
+core_min_capacity = 2
+core_max_capacity = 6
+core_requests_per_target = 1000
+# Staged jcode split: keep socket until the client learns TCP (see main.tf).
+jcode_target        = "socket"
+jcode_desired_count = 1
+nat_per_az          = false
 db_instance_class = "db.t4g.micro"
 db_multi_az       = true
+db_max_allocated_storage = 100
 
 # All secrets via TF_VAR_* env in CI (see .github/workflows/deploy-aws.yml).
 tenant_hmac_secret = "CHANGEME"
@@ -18,6 +26,14 @@ webhook_secret     = "CHANGEME"
 serper_api_key     = "CHANGEME"
 gemini_api_key     = "CHANGEME"
 novita_api_key     = "CHANGEME"
+# Console mutation gate (empty = ungated dev only). Pilot: set via TF_VAR_operator_secret.
+# operator_secret = "CHANGEME"
+# ALB HTTPS (empty = HTTP-forward dev only). Pilot: ACM cert ARN.
+# acm_certificate_arn = ""
+
+# Remote state (see commented backend block in main.tf): create the bucket +
+# lock table once, then uncomment there and init with -backend-config flags
+# (bucket, key, region, dynamodb_table). Until then, one machine, local state.
 
 allowed_egress_hosts         = "api.novita.ai,generativelanguage.googleapis.com,api.serper.dev"
 lambda_memory_mb             = 2048

@@ -17,5 +17,5 @@ COPY --from=build /app/dist ./dist
 ENV HOST=0.0.0.0 PORT=3100 VITAL_TENANT=acme
 EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||'3100')+'/api/approval-latency').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||'3100')+'/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 CMD ["node", "dist/cli.js", "serve"]

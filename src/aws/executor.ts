@@ -12,6 +12,7 @@ import {
   type ChatMessage,
 } from '../substrate/models.ts';
 import { decideEgress } from '../substrate/egress.ts';
+import { getRates } from '../attrib/attribution.ts';
 
 /**
  * AWS Lambda container handler for fast coding-agent work (TODO AWS deploy).
@@ -39,6 +40,14 @@ export interface ExecutorJob {
   claimRefs?: string[];
   onBehalfOf?: string;
   lane?: 'dev' | 'production';
+  /**
+   * Idempotency key the producer attached at enqueue time. A redelivered SQS
+   * message for an already-COMPLETED request is acked (duplicate success)
+   * ONLY when this matches the stored request's key — a redelivery that
+   * names a completed id but carries a different key is a different job
+   * wearing a familiar id, and must fail loudly instead of acking.
+   */
+  idempotencyKey?: string;
 }
 
 interface SqsRecord {
@@ -102,6 +111,7 @@ function parseJob(body: string): ExecutorJob {
     claimRefs: Array.isArray(j['claimRefs']) ? (j['claimRefs'] as string[]) : [],
     onBehalfOf: typeof j['onBehalfOf'] === 'string' ? (j['onBehalfOf'] as string) : 'lambda-executor',
     lane: (lane as 'dev' | 'production' | undefined) ?? 'production',
+    idempotencyKey: typeof j['idempotencyKey'] === 'string' ? (j['idempotencyKey'] as string) : undefined,
   };
 }
 
@@ -123,10 +133,17 @@ function checkModelEgress(baseUrl: string, env: NodeJS.ProcessEnv): void {
   if (verdict.verdict !== 'allow') throw new Error(`[executor:EGRESS] ${verdict.reason}`);
 }
 
-async function runJob(
+/** Exported for tests: the per-record path without the SQS/DB-open envelope. */
+export async function runJob(
   db: AsyncDb,
   job: ExecutorJob,
   env: NodeJS.ProcessEnv,
+  chat: (
+    profile: Parameters<typeof completeChat>[0],
+    apiKey: string,
+    messages: ChatMessage[],
+  ) => Promise<{ text: string; usage: { input: number; output: number } }> = (profile, apiKey, messages) =>
+    completeChat(profile, apiKey, messages, nodeFetch),
 ): Promise<Omit<JobResult, 'messageId' | 'requestId'>> {
   const ledger = createLedger(db);
   const coord = createCoordinator(db);
@@ -134,8 +151,44 @@ async function runJob(
 
   const req = await coord.get(job.tenant, job.requestId);
   if (!req) throw new Error(`[executor] unknown request ${job.requestId}`);
-  if (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT') {
+  if (req.state === 'COMPLETED') {
+    // Redelivered success (SQS at-least-once): ack the duplicate instead of
+    // failing it to the DLQ — no new model call, no new claims. The
+    // idempotency-key check is the whole safety: without it, any redelivery
+    // naming a finished id would read as success.
+    if (job.idempotencyKey !== undefined && job.idempotencyKey !== req.idempotencyKey) {
+      throw new Error(
+        `[executor] request ${job.requestId} already COMPLETED under a different idempotency key — refusing to ack`,
+      );
+    }
+    return { status: 'COMPLETED', claimIds: [...req.chainClaimIds], usage: { input: 0, output: 0 } };
+  }
+  // FAILED is retryable, not terminal-for-the-worker: a redelivered job for
+  // a failed request re-runs the model and completes (FAILED→COMPLETED is a
+  // legal coordinator transition). Anything else non-live still throws.
+  if (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT' && req.state !== 'ACCEPTED' && req.state !== 'FAILED') {
     throw new Error(`[executor] request ${job.requestId} is ${req.state}, not admitted`);
+  }
+
+  // F05: exclusive leased ownership BEFORE any spend. The atomic
+  // ADMITTED/ACCEPTED→IN_FLIGHT CAS means two concurrent deliveries of the
+  // same job cannot both run paid work; the loser gets CLAIM_LOST and the
+  // SQS redelivery discipline handles it. FAILED rows (retry path) are
+  // already IN_FLIGHT-cas-ineligible, so the retry claims by re-failing the
+  // row first: the coordinator's FAILED→COMPLETED recovery below settles it.
+  if (req.state === 'ADMITTED' || req.state === 'ACCEPTED') {
+    try {
+      await coord.claimExecution(
+        job.tenant,
+        job.requestId,
+        job.onBehalfOf ?? 'lambda-executor',
+        new Date().toISOString(),
+      );
+    } catch {
+      throw new Error(
+        `[executor:CLAIM_LOST] request ${job.requestId} is being executed by another worker — refusing to double-spend`,
+      );
+    }
   }
 
   const profile = job.lane === 'dev' ? devProfile(env) : prodProfile(env);
@@ -143,7 +196,15 @@ async function runJob(
   checkModelEgress(profile.baseUrl, env);
   const apiKey = readApiKey(env, profile);
 
-  if (req.state === 'ADMITTED') await coord.accept(job.tenant, job.requestId);
+  // F05: even on the IN_FLIGHT retry path, another worker may hold the
+  // claim. If the row is claimed by someone else, refuse before any spend.
+  const current = await coord.get(job.tenant, job.requestId);
+  const holder = current?.execOwner ?? null;
+  if (holder && holder !== (job.onBehalfOf ?? 'lambda-executor')) {
+    throw new Error(
+      `[executor:CLAIM_LOST] request ${job.requestId} is claimed by ${holder} — refusing to double-spend`,
+    );
+  }
 
   const grounded = [...(job.claimRefs ?? []), ...(req.claimRefs ?? [])];
   const context = grounded.length > 0 ? await ledger.contextFor(job.tenant, grounded, new Date().toISOString()) : [];
@@ -159,14 +220,45 @@ async function runJob(
     },
     { role: 'user', text: `Grounded context:\n${contextText}\n\nTask:\n${job.prompt}` },
   ];
-  const out = await completeChat(profile, apiKey, messages, nodeFetch);
+  const out = await chat(profile, apiKey, messages);
+
+  // F05: the FULL deliverable is persisted as an artifact row (bounded at
+  // 1 MiB — Lambda deliverables are short-horizon outputs, and the bound
+  // makes the storage guarantee honest); the claim's value carries only a
+  // preview plus the artifact reference. The old code truncated at 8,000
+  // chars with no recovery path — the produced artifact was unreachable.
+  const artifactId = `art_${crypto.randomUUID()}`;
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS executor_artifacts (
+         id TEXT PRIMARY KEY, tenant TEXT NOT NULL, request_id TEXT NOT NULL,
+         claim_id TEXT, model TEXT, body TEXT NOT NULL, created_at TEXT NOT NULL)`,
+    )
+    .run();
+  if (out.text.length > 1_000_000) {
+    throw new Error(
+      '[executor:ARTIFACT_TOO_LARGE] deliverable exceeds the 1MiB artifact bound — refusing to store a silent truncation',
+    );
+  }
+  await db
+    .prepare(
+      `INSERT INTO executor_artifacts (id, tenant, request_id, claim_id, model, body, created_at) VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(artifactId, job.tenant, job.requestId, null, profile.model, out.text, new Date().toISOString());
 
   const claim = await ledger.append({
     tenant: job.tenant,
     subject: `lambda:${req.targetScope}`,
     kind: 'OBSERVATION',
     statement: `executor run: ${(out.text.length / 1000).toFixed(1)}k chars, ${out.usage.input + out.usage.output} tokens`,
-    value: { text: out.text.slice(0, 8000), usage: out.usage, model: profile.model, lane: job.lane },
+    value: {
+      textPreview: out.text.slice(0, 2000),
+      fullTextRef: artifactId,
+      truncated: false,
+      usage: out.usage,
+      model: profile.model,
+      lane: job.lane,
+    },
     confidence: 0.7,
     owner: job.onBehalfOf ?? 'lambda-executor',
     scope: req.targetScope,
@@ -182,10 +274,30 @@ async function runJob(
     },
   });
   claimIds.push(claim.id);
+  await db.prepare('UPDATE executor_artifacts SET claim_id = ? WHERE id = ?').run(claim.id, artifactId);
 
+  // F05: authoritative cost accounting. Usage flows through reportUsage —
+  // the coordinator's atomic spend increment, which enforces the request's
+  // own ceilings and can TERMINATE_BUDGET mid-flight — so the spent mirrors
+  // and daily roll-ups see exactly what this job consumed. complete() then
+  // records the result; it no longer carries (ignored) cost. Dollar costing
+  // uses the tenant's versioned rates (meta), unknown rates degrade to the
+  // token count, never to a fabricated zero.
+  const rates = await getRates(db, job.tenant);
+  const charged = await coord.reportUsage(job.tenant, job.requestId, {
+    tokens: out.usage.input + out.usage.output,
+    dollars: (out.usage.input + out.usage.output) * rates.dollarPerToken,
+  });
+  if (charged.state === 'TERMINATED_BUDGET') {
+    // The usage itself breached the bid: reportUsage already settled the
+    // request. Do NOT complete — surface the failure so the operator sees
+    // why the deliverable never formally landed. The artifact and the
+    // observation claim survive on the ledger for inspection.
+    return { status: 'FAILED', claimIds, usage: out.usage, error: 'budget exhausted mid-run (reportUsage ceiling)' };
+  }
   await coord.complete(job.tenant, job.requestId, {
     claims: claimIds,
-    cost: { tokens: out.usage.input + out.usage.output },
+    cost: {},
   });
   return { status: 'COMPLETED', claimIds, usage: out.usage };
 }
@@ -196,8 +308,16 @@ export async function handler(
 ): Promise<{ results: JobResult[] }> {
   const opened = openFromEnv(env);
   const db: AsyncDb = opened.db;
-  if (opened.kind === 'postgres') await migratePostgres(db);
-  else await migrate(db);
+  // Migrations are deployment work, not per-invocation work: every Lambda
+  // boot running DDL adds latency and contention, and the try/catch
+  // additive runner can stamp success over a real failure. The ECS core
+  // service migrates at boot; the executor skips when told to.
+  // VITAL_MIGRATE_ON_BOOT=0 requires the core to have booted (and migrated)
+  // at least once first — deploy ordering, enforced by documentation, not code.
+  if (env['VITAL_MIGRATE_ON_BOOT'] !== '0') {
+    if (opened.kind === 'postgres') await migratePostgres(db);
+    else await migrate(db);
+  }
 
   const results: JobResult[] = [];
   try {
@@ -214,7 +334,13 @@ export async function handler(
           if (job) {
             const coord = createCoordinator(db);
             const current = await coord.get(job.tenant, job.requestId);
-            if (current && (current.state === 'ADMITTED' || current.state === 'IN_FLIGHT')) {
+            // F03: ACCEPTED joins the failure path too — an approved request
+            // that errors must settle, not strand (fail() itself rejects on
+            // settled rows, so the wider live set is safe to probe).
+            if (
+              current &&
+              (current.state === 'ADMITTED' || current.state === 'ACCEPTED' || current.state === 'IN_FLIGHT')
+            ) {
               await coord.fail(job.tenant, job.requestId, message.slice(0, 500));
             }
           }

@@ -36,9 +36,61 @@ variable "jcode_image" {
 }
 
 variable "desired_count" {
-  description = "vital-core Fargate tasks behind the ALB"
+  description = "vital-core Fargate tasks behind the ALB (initial count; the target-tracking scaler owns it at runtime within core_min/max_capacity)"
   type        = number
   default     = 2
+}
+
+variable "core_min_capacity" {
+  description = "Autoscaling floor for vital-core tasks"
+  type        = number
+  default     = 2
+}
+
+variable "core_max_capacity" {
+  description = "Autoscaling ceiling for vital-core tasks"
+  type        = number
+  default     = 6
+}
+
+variable "core_requests_per_target" {
+  description = "Target ALB requests-per-target for core autoscaling (scale out above it, in below it)"
+  type        = number
+  default     = 1000
+}
+
+variable "jcode_target" {
+  description = "STAGED split switch: socket = live sidecar in the core task; tcp = run the standalone jcode service (needs the TCP client step first, see main.tf)"
+  type        = string
+  default     = "socket"
+  validation {
+    condition     = contains(["socket", "tcp"], var.jcode_target)
+    error_message = "jcode_target must be socket or tcp."
+  }
+}
+
+variable "jcode_desired_count" {
+  description = "Standalone jcode service tasks once jcode_target = tcp (0 until then)"
+  type        = number
+  default     = 1
+}
+
+variable "jcode_cpu" {
+  description = "Fargate CPU units for the standalone jcode task"
+  type        = string
+  default     = "512"
+}
+
+variable "jcode_memory" {
+  description = "Fargate memory (MB) for the standalone jcode task"
+  type        = string
+  default     = "1024"
+}
+
+variable "nat_per_az" {
+  description = "true = one NAT gateway per AZ (pilot+ posture, ~one NAT charge each, no cross-AZ egress dependency); false = single NAT in the first AZ (cheaper, dev default)"
+  type        = bool
+  default     = false
 }
 
 variable "core_cpu" {
@@ -73,6 +125,12 @@ variable "db_multi_az" {
   description = "Multi-AZ for pilot/prod Ledger (keep true past the first pilot)"
   type        = bool
   default     = true
+}
+
+variable "db_max_allocated_storage" {
+  description = "RDS storage-autoscaling ceiling in GiB (must exceed the 20 GiB floor; autoscaling grows toward it as free space fills)"
+  type        = number
+  default     = 100
 }
 
 variable "tenant_hmac_secret" {
@@ -130,6 +188,19 @@ variable "lambda_reserved_concurrency" {
   description = "Cap on parallel executor microVMs — the budget-death backstop at the infra layer (0 = unreserved)"
   type        = number
   default     = 20
+}
+
+variable "acm_certificate_arn" {
+  description = "ACM cert for ALB HTTPS. Empty = HTTP-forward (dev only): approvals travel in plaintext and must never carry production authority. Set for any pilot."
+  type        = string
+  default     = ""
+}
+
+variable "operator_secret" {
+  description = "Shared secret gating console mutations via x-vital-operator (VITAL_OPERATOR_SECRET). Empty = ungated (loopback dev only). Set for any deployment behind the ALB."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "tags" {

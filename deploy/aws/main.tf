@@ -29,6 +29,20 @@ terraform {
       version = "~> 3.0"
     }
   }
+  # Remote state (F22): local state is a single-operator toy. Before the
+  # first shared apply, create the bucket + lock table ONCE (versioned,
+  # encrypted), then uncomment and migrate:
+  #
+  #   backend "s3" {
+  #     bucket         = "vital-tfstate-<account-id>"
+  #     key            = "vital/terraform.tfstate"
+  #     region         = "eu-central-1"
+  #     encrypt        = true
+  #     dynamodb_table = "vital-tfstate-locks"
+  #   }
+  #
+  # Until then every apply is `-input=false` from one machine, and the
+  # state file itself is secret material (it carries DB passwords + URLs).
 }
 
 provider "aws" {
@@ -77,15 +91,21 @@ resource "aws_subnet" "private" {
   tags              = { Name = "${local.name}-private-${count.index}" }
 }
 
+# Single NAT by default (var.nat_per_az = false): cheapest, but every AZ's
+# private egress funnels through the first public subnet — a cross-AZ
+# dependency and a bandwidth choke. Per-AZ NAT (true) gives each AZ its own
+# gateway + route table at ~one NAT hourly charge each: pay it for pilot+.
 resource "aws_eip" "nat" {
+  count  = var.nat_per_az ? var.az_count : 1
   domain = "vpc"
-  tags   = { Name = "${local.name}-nat" }
+  tags   = { Name = "${local.name}-nat-${count.index}" }
 }
 
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-  tags          = { Name = "${local.name}-nat" }
+  count         = var.nat_per_az ? var.az_count : 1
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+  tags          = { Name = "${local.name}-nat-${count.index}" }
 }
 
 resource "aws_route_table" "public" {
@@ -104,18 +124,19 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_route_table" "private" {
+  count  = var.nat_per_az ? var.az_count : 1
   vpc_id = aws_vpc.main.id
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
+    nat_gateway_id = aws_nat_gateway.main[count.index].id
   }
-  tags = { Name = "${local.name}-private" }
+  tags = { Name = "${local.name}-private-${count.index}" }
 }
 
 resource "aws_route_table_association" "private" {
   count          = var.az_count
   subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
+  route_table_id = aws_route_table.private[var.nat_per_az ? count.index : 0].id
 }
 
 resource "aws_security_group" "alb" {
@@ -208,6 +229,12 @@ resource "aws_ecr_lifecycle_policy" "core" {
   policy     = jsonencode({ rules = [{ rulePriority = 1, description = "keep last 20", selection = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 20 }, action = { type = "expire" } }] })
 }
 
+# The executor repo had no pruning: untagged Lambda builds accumulate forever.
+resource "aws_ecr_lifecycle_policy" "executor" {
+  repository = aws_ecr_repository.executor.name
+  policy     = jsonencode({ rules = [{ rulePriority = 1, description = "keep last 20", selection = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 20 }, action = { type = "expire" } }] })
+}
+
 # ------------------------------------------------------------------ secrets ---
 resource "aws_secretsmanager_secret" "tenant_hmac" { name = "${local.name}/tenant-hmac-secret" }
 resource "aws_secretsmanager_secret_version" "tenant_hmac" {
@@ -239,6 +266,17 @@ resource "aws_secretsmanager_secret_version" "novita" {
   secret_id     = aws_secretsmanager_secret.novita.id
   secret_string = var.novita_api_key
 }
+# Operator secret is optional (empty var = no secret, mutations ungated):
+# count-gated so dev applies create nothing to rotate or leak.
+resource "aws_secretsmanager_secret" "operator" {
+  count = var.operator_secret == "" ? 0 : 1
+  name  = "${local.name}/operator-secret"
+}
+resource "aws_secretsmanager_secret_version" "operator" {
+  count         = var.operator_secret == "" ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.operator[0].id
+  secret_string = var.operator_secret
+}
 
 resource "random_password" "db" {
   length  = 32
@@ -252,13 +290,17 @@ resource "aws_db_subnet_group" "main" {
 }
 
 resource "aws_db_instance" "ledger" {
-  identifier              = "${local.name}-ledger"
-  engine                  = "postgres"
-  engine_version          = "16"
-  instance_class          = var.db_instance_class
-  allocated_storage       = 20
-  storage_type            = "gp3"
-  storage_encrypted       = true
+  identifier        = "${local.name}-ledger"
+  engine            = "postgres"
+  engine_version    = "16"
+  instance_class    = var.db_instance_class
+  allocated_storage = 20
+  storage_type      = "gp3"
+  storage_encrypted = true
+  # Storage autoscaling ceiling (GiB): RDS grows in ~5 GiB steps as the floor
+  # fills, so the Ledger never wedges on a full disk at 3am. Must exceed
+  # allocated_storage; the free-space alarm below is the human backstop.
+  max_allocated_storage   = var.db_max_allocated_storage
   db_name                 = var.db_name
   username                = var.db_username
   password                = random_password.db.result
@@ -331,14 +373,44 @@ resource "aws_s3_bucket_public_access_block" "audit" {
   restrict_public_buckets = true
 }
 
+# Versioned buckets grow without bound: expire noncurrent versions and never
+# leave failed multipart uploads behind (each buffers parts you pay for).
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+  rule {
+    id     = "prune-noncurrent"
+    status = "Enabled"
+    filter {}
+    noncurrent_version_expiration { noncurrent_days = 90 }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  # Past the 365d COMPLIANCE retention above: lifecycle must never reap a
+  # version the Object Lock still protects, so the floor here is 400 days.
+  rule {
+    id     = "prune-noncurrent"
+    status = "Enabled"
+    filter {}
+    noncurrent_version_expiration { noncurrent_days = 400 }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+  }
+}
+
 # --------------------------------------------------------------------- queue ---
 resource "aws_sqs_queue" "executor_dlq" {
   name = "${local.name}-executor-dlq"
 }
 
 resource "aws_sqs_queue" "requests" {
-  name                       = "${local.name}-requests"
-  visibility_timeout_seconds = 900
+  name = "${local.name}-requests"
+  # Headroom over the 900s Lambda timeout (AWS guidance: ≥6x function
+  # timeout): a job finishing near the deadline must not become visible
+  # while still processing (duplicate execution) nor die without DLQ
+  # routing. 5400s = 6 × 900s.
+  visibility_timeout_seconds = 5400
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.executor_dlq.arn
     maxReceiveCount     = 3
@@ -403,11 +475,11 @@ resource "aws_iam_policy" "ecs_task" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [
+      { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([
         aws_secretsmanager_secret.tenant_hmac.arn, aws_secretsmanager_secret.core_secret.arn,
         aws_secretsmanager_secret.webhook.arn, aws_secretsmanager_secret.serper.arn,
         aws_secretsmanager_secret.gemini.arn, aws_secretsmanager_secret.novita.arn
-      ] },
+      ], aws_secretsmanager_secret.operator[*].arn) },
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = [
         "${aws_s3_bucket.artifacts.arn}/*", "${aws_s3_bucket.audit.arn}/*"
       ] },
@@ -492,7 +564,9 @@ resource "aws_lb_target_group" "core" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
   health_check {
-    path                = "/api/approval-latency"
+    # Constant-cost liveness: never point a probe at analytics
+    # (/api/approval-latency scans audit history per probe per target).
+    path                = "/healthz"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     interval            = 30
@@ -504,6 +578,36 @@ resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
+  # With a certificate (var.acm_certificate_arn) port 80 redirects to HTTPS;
+  # without one it forwards (dev only — approvals in plaintext is not a
+  # production posture, see variables.tf).
+  dynamic "default_action" {
+    for_each = var.acm_certificate_arn == "" ? [1] : []
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.core.arn
+    }
+  }
+  dynamic "default_action" {
+    for_each = var.acm_certificate_arn == "" ? [] : [1]
+    content {
+      type = "redirect"
+      redirect {
+        port        = "443"
+        protocol    = "HTTPS"
+        status_code = "HTTP_301"
+      }
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  count             = var.acm_certificate_arn == "" ? 0 : 1
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.acm_certificate_arn
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.core.arn
@@ -546,15 +650,20 @@ resource "aws_ecs_task_definition" "core" {
         { name = "ARTIFACT_DIR", value = "/var/vital/sandboxes/artifacts" },
         { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
       ]
-      secrets = [
-        { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.db_url.arn}" },
-        { name = "TENANT_HMAC_SECRET", valueFrom = aws_secretsmanager_secret.tenant_hmac.arn },
-        { name = "VITAL_CORE_SECRET", valueFrom = aws_secretsmanager_secret.core_secret.arn },
-        { name = "WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.webhook.arn },
-        { name = "SERPER_API_KEY", valueFrom = aws_secretsmanager_secret.serper.arn },
-        { name = "GEMINI_API_KEY", valueFrom = aws_secretsmanager_secret.gemini.arn },
-        { name = "NOVITA_API_KEY", valueFrom = aws_secretsmanager_secret.novita.arn }
-      ]
+      secrets = concat(
+        [
+          { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.db_url.arn}" },
+          { name = "TENANT_HMAC_SECRET", valueFrom = aws_secretsmanager_secret.tenant_hmac.arn },
+          { name = "VITAL_CORE_SECRET", valueFrom = aws_secretsmanager_secret.core_secret.arn },
+          { name = "WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.webhook.arn },
+          { name = "SERPER_API_KEY", valueFrom = aws_secretsmanager_secret.serper.arn },
+          { name = "GEMINI_API_KEY", valueFrom = aws_secretsmanager_secret.gemini.arn },
+          { name = "NOVITA_API_KEY", valueFrom = aws_secretsmanager_secret.novita.arn }
+        ],
+        var.operator_secret == "" ? [] : [
+          { name = "VITAL_OPERATOR_SECRET", valueFrom = aws_secretsmanager_secret.operator[0].arn }
+        ]
+      )
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -604,7 +713,117 @@ resource "aws_ecs_service" "core" {
     container_name   = "vital-core"
     container_port   = 3100
   }
+  # The target-tracking scaler below owns the replica count at runtime;
+  # without this every apply would snap it back to var.desired_count.
+  lifecycle { ignore_changes = [desired_count] }
   depends_on = [aws_lb_listener.http]
+}
+
+# Core API replicas scale on ALB load, independent of workers: request-heavy
+# days add Fargate tasks, the Lambda plane absorbs job spikes separately.
+resource "aws_appautoscaling_target" "core" {
+  max_capacity       = var.core_max_capacity
+  min_capacity       = var.core_min_capacity
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.core.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "core_requests" {
+  name               = "${local.name}-core-requests"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.core.resource_id
+  scalable_dimension = aws_appautoscaling_target.core.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.core.service_namespace
+  target_tracking_scaling_policy_configuration {
+    target_value = var.core_requests_per_target
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${aws_lb.main.arn_suffix}/${aws_lb_target_group.core.arn_suffix}"
+    }
+    scale_in_cooldown  = 120
+    scale_out_cooldown = 60
+  }
+}
+
+# ------------------------------------------------------- jcode service -----
+# STAGED, not live (default jcode_target = "socket"): the jcode sidecar in
+# the core task above still shares the jcode-sock volume today, because
+# JcodeClient (src/jcode/client.ts) only speaks socketPath — node:net
+# connect({ path }) — with no host:port option. A real split breaks the
+# shared volume (ECS volumes do not cross tasks), so it needs a TCP step
+# first: harness listens on TCP, client learns host:port. That code change is
+# NOT this stack's to make, so this task definition + service + discovery
+# namespace are the ready-to-run half: set jcode_target = "tcp" and the
+# service scales to jcode_desired_count; teach the client TCP; then drop the
+# sidecar container from the core task definition.
+resource "aws_service_discovery_private_dns_namespace" "vital" {
+  name = "${local.name}.local"
+  vpc  = aws_vpc.main.id
+}
+
+resource "aws_service_discovery_service" "jcode" {
+  name = "jcode"
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.vital.id
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+}
+
+resource "aws_ecs_task_definition" "jcode" {
+  family                   = "${local.name}-jcode"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.jcode_cpu
+  memory                   = var.jcode_memory
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+  container_definitions = jsonencode([
+    {
+      name      = "jcode"
+      image     = var.jcode_image
+      essential = true
+      # Placeholder for the staged TCP listener: the harness does NOT listen
+      # on TCP today (see note above). Until it does, nothing dials this.
+      portMappings = [{ containerPort = 50051, protocol = "tcp" }]
+      environment = [
+        { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" },
+        # TODO(tcp-split): point the harness at 0.0.0.0:50051 here and teach
+        # JcodeClient a host:port dial, then flip jcode_target and remove the
+        # sidecar from the core task.
+        { name = "JCODE_API_TCP_PORT", value = "50051" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.core.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "jcode-split"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "jcode" {
+  name            = "${local.name}-jcode"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.jcode.arn
+  # 0 in socket mode (the sidecar does the work); jcode_desired_count once
+  # jcode_target flips to "tcp" and the client can dial the discovery name.
+  desired_count = var.jcode_target == "tcp" ? var.jcode_desired_count : 0
+  launch_type   = "FARGATE"
+  network_configuration {
+    subnets          = aws_subnet.private[*].id
+    security_groups  = [aws_security_group.ecs.id]
+    assign_public_ip = false
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.jcode.arn
+  }
 }
 
 # ------------------------------------------------------- lambda executors ----
@@ -617,7 +836,12 @@ resource "aws_lambda_function" "executor" {
   image_uri     = var.executor_image
   timeout       = 900
   memory_size   = var.lambda_memory_mb
-  ephemeral_storage { size = 10240 }
+  # Memory stays at 2048: Lambda CPU scales with memory and this is
+  # model-I/O + DB work, so cutting it cuts throughput — measure first.
+  # Ephemeral storage drops to the 512MB minimum instead: the handler
+  # (src/aws/executor.ts) uses no /tmp scratch — DB rows + HTTPS model calls
+  # only — so 10GB was paying for empty disk.
+  ephemeral_storage { size = 512 }
   reserved_concurrent_executions = var.lambda_reserved_concurrency > 0 ? var.lambda_reserved_concurrency : null
   vpc_config {
     subnet_ids         = aws_subnet.private[*].id
@@ -625,11 +849,12 @@ resource "aws_lambda_function" "executor" {
   }
   environment {
     variables = {
-      VITAL_TENANT         = "acme"
-      ALLOWED_EGRESS_HOSTS = var.allowed_egress_hosts
-      APPROVED_PROD_MODELS = "deepseek/deepseek-v4"
-      APPROVED_DEV_MODELS  = "gemini-3.8-flash"
-      ARTIFACT_BUCKET      = aws_s3_bucket.artifacts.bucket
+      VITAL_TENANT          = "acme"
+      VITAL_MIGRATE_ON_BOOT = "0"
+      ALLOWED_EGRESS_HOSTS  = var.allowed_egress_hosts
+      APPROVED_PROD_MODELS  = "deepseek/deepseek-v4"
+      APPROVED_DEV_MODELS   = "gemini-3.8-flash"
+      ARTIFACT_BUCKET       = aws_s3_bucket.artifacts.bucket
       # Without these the handler falls back to sqlite :memory: and keyless
       # model calls — every job fails at coord.get. Values ride TF state
       # (sensitive); rotation = new secret version + re-apply.
@@ -689,5 +914,20 @@ resource "aws_cloudwatch_metric_alarm" "queue_age" {
   threshold           = 1800
   comparison_operator = "GreaterThanThreshold"
   dimensions          = { QueueName = aws_sqs_queue.requests.name }
+  alarm_actions       = [aws_sns_topic.ops.arn]
+}
+
+# Human backstop under storage autoscaling: fires while RDS still has ~2 GiB
+# free, well before the ceiling in var.db_max_allocated_storage is hit.
+resource "aws_cloudwatch_metric_alarm" "rds_free_storage" {
+  alarm_name          = "${local.name}-rds-free-storage"
+  namespace           = "AWS/RDS"
+  metric_name         = "FreeStorageSpace"
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 2147483648
+  comparison_operator = "LessThanThreshold"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.ledger.identifier }
   alarm_actions       = [aws_sns_topic.ops.arn]
 }
