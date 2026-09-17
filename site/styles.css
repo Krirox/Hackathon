@@ -68,6 +68,8 @@ a {
   height: 100vh;
   z-index: -2;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.4s ease;
 }
 
 .bg-vignette {
@@ -355,27 +357,78 @@ a {
 }
 
 /* ==========================================================================
-   Hero Section & 3D Stage
+   FIRST TWO SCROLL EXPERIENCES: UNIFIED STORYTELLING SEQUENCE
    ========================================================================== */
 
-.hero-section {
-  min-height: 100vh;
+.story-experience-track {
+  position: relative;
+  width: 100%;
+  height: 250vh; /* Smooth, expansive scroll distance for the 2-step journey */
+}
+
+.story-sticky-viewport {
+  position: sticky;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 3D Gyroscopic Rings Stage (Lives continuously across Hero and Story Section) */
+.stage-3d-wrapper {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2; /* Layering: Background -> Particles -> 3D Object -> Text/UI */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#canvas-3d-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+#canvas-3d-container:active {
+  cursor: grabbing;
+}
+
+#canvas-3d-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+/* 1. Hero Overlay (Scroll 0) */
+.hero-overlay {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
   padding-top: 130px;
-  padding-bottom: 60px;
+  padding-bottom: 40px;
   text-align: center;
-  position: relative;
-  overflow: hidden;
+  z-index: 5;
+  pointer-events: auto;
+  will-change: opacity, transform;
 }
 
 .hero-content {
   max-width: 880px;
   margin: 0 auto;
   padding: 0 24px;
-  z-index: 2;
   position: relative;
 }
 
@@ -438,49 +491,86 @@ a {
   font-weight: 300;
 }
 
-/* 3D Gyroscopic Stage Container */
-.stage-3d-wrapper {
-  position: relative;
-  width: min(96vw, 1100px);
-  height: clamp(460px, 58vh, 640px);
-  margin: -10px auto 10px;
+/* 2. Second Story Section Overlay */
+.story-overlay {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 2;
+  padding: 100px 48px 60px;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0;
+  will-change: opacity, transform;
 }
 
-#canvas-3d-container {
+.story-overlay-inner {
+  max-width: var(--max-w);
   width: 100%;
-  height: 100%;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 48px;
+  align-items: center;
+}
+
+.story-text-col {
+  max-width: 580px;
+  text-align: left;
+  pointer-events: auto;
+}
+
+.story-heading {
+  font-size: clamp(34px, 4.2vw, 64px);
+  font-weight: 300;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  color: var(--text-pure);
+  margin-bottom: 20px;
+}
+
+.story-heading .dot {
+  color: var(--accent-lime);
+}
+
+.story-lede {
+  font-size: clamp(15px, 1.4vw, 18px);
+  line-height: 1.65;
+  color: var(--text-muted);
+  margin-bottom: 28px;
+}
+
+.story-lede em {
+  color: var(--text-main);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.story-stage-anchor {
   position: relative;
-  cursor: grab;
+  height: 100%;
+  min-height: 480px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  pointer-events: none;
 }
 
-#canvas-3d-container:active {
-  cursor: grabbing;
-}
-
-#canvas-3d-container canvas {
-  width: 100% !important;
-  height: 100% !important;
-  display: block;
-}
-
-/* Floating Layer Tooltip (Matching Image 3) */
+/* Floating Layer Card attached to 3D Stage */
 .floating-layer-card {
+  pointer-events: auto;
   position: absolute;
-  right: 5%;
+  right: 0%;
   bottom: 12%;
   background: rgba(18, 20, 26, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   padding: 16px 20px;
   backdrop-filter: blur(16px);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
   text-align: left;
-  max-width: 260px;
-  pointer-events: auto;
+  max-width: 270px;
   cursor: pointer;
   transition: transform 0.4s var(--ease), border-color 0.4s, opacity 0.4s;
   animation: floatCard 4s ease-in-out infinite alternate;
@@ -526,7 +616,8 @@ a {
 
 /* Scroll Hint & Chevron */
 .scroll-wrap {
-  margin-top: 10px;
+  margin-top: auto;
+  margin-bottom: 18px;
   z-index: 2;
 }
 
@@ -561,7 +652,7 @@ a {
 .hero-meta {
   display: flex;
   gap: 16px;
-  margin-top: 36px;
+  margin-bottom: 12px;
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.22em;
@@ -574,6 +665,36 @@ a {
 .meta-dot {
   color: var(--accent-lime);
   opacity: 0.6;
+}
+
+/* Section 3 Platform Highlights styling */
+.platform-highlights {
+  padding-top: 40px;
+  padding-bottom: 100px;
+}
+
+@media (max-width: 900px) {
+  .story-experience-track {
+    height: 280vh;
+  }
+  .story-overlay {
+    padding: 80px 24px 30px;
+    align-items: flex-start;
+    overflow-y: auto;
+  }
+  .story-overlay-inner {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .story-stage-anchor {
+    min-height: auto;
+    justify-content: flex-start;
+  }
+  .floating-layer-card {
+    position: static;
+    max-width: 100%;
+    margin-top: 10px;
+  }
 }
 
 /* ==========================================================================
