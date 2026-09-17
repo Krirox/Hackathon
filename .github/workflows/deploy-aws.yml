@@ -1,0 +1,61 @@
+# AWS deploy: build vital-core + executor images, push to ECR, terraform apply.
+# Manual dispatch only — infra changes are never a side effect of a test push.
+# Required repo secrets: AWS_ROLE_TO_ASSUME (OIDC), plus TF_VAR_* for every
+# sensitive var in deploy/aws/variables.tf (see terraform.tfvars.example).
+name: deploy-aws
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag (default: short SHA)'
+        required: false
+        default: ''
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Build and push vital-core
+        run: |
+          CORE_REPO=$(aws ecr describe-repositories --repository-names vital-core --query 'repositories[0].repositoryUri' --output text)
+          docker build -f deploy/aws/Dockerfile.vital-core -t "$CORE_REPO:${{ steps.tag.outputs.tag }}" .
+          docker push "$CORE_REPO:${{ steps.tag.outputs.tag }}"
+          echo "CORE_IMAGE=$CORE_REPO:${{ steps.tag.outputs.tag }}" >> "$GITHUB_ENV"
+      - name: Build and push executor
+        run: |
+          EXEC_REPO=$(aws ecr describe-repositories --repository-names vital-executor --query 'repositories[0].repositoryUri' --output text)
+          docker build -f deploy/aws/Dockerfile.executor -t "$EXEC_REPO:${{ steps.tag.outputs.tag }}" .
+          docker push "$EXEC_REPO:${{ steps.tag.outputs.tag }}"
+          echo "EXECUTOR_IMAGE=$EXEC_REPO:${{ steps.tag.outputs.tag }}" >> "$GITHUB_ENV"
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply
+        working-directory: deploy/aws
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve \
+            -var "region=$AWS_REGION" \
+            -var "core_image=$CORE_IMAGE" \
+            -var "executor_image=$EXECUTOR_IMAGE"
+      - name: Smoke check
+        run: |
+          ALB=$(terraform -chdir=deploy/aws output -raw alb_dns)
+          curl -fsS "http://$ALB/api/approval-latency" | head -c 500
