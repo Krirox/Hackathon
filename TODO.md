@@ -8,34 +8,21 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 typecheck  0 errors (re-verified 2026-09-17)
 tests      <!-- vital:testcount -->250/250 GREEN<!-- /vital:testcount --> (2026-09-17, incl. 34 auth/console + 7 erasure tests:
            signup-claim flow, login+pre-session CSRF, lockout, rate limit, tenant isolation,
-<<<<<<< HEAD
-           provision/unprovisioned boot, HTTP invite/disable + role gate, opt-in site serving)
-commits    14 on 2026-09-17 (6aa49a3..8623ab9): PG-lane concurrency fix · typed rows · approval-latency + override capture (red→green) · cost-per-signal · security hardening (body caps, URIError DoS, fail-closed screen) · AWS deploy path · Buzz live-watch
-built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate+reportUsage · router+registry+calibration+costPerSignal
-           compiler+mining+registry+trustTier+drift-autoDemote · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
-           evals (suites/promotion/injection/poisoning-vs-gate/heldout + overrides-from-console) · attrib · ingest (file/github/serper)
-           sense · wedge · talk (HMAC surface + buzz live-watch publisher) · substrate (scheduler/sandbox/egress/screen/identity/2 adapters)
-           console (session-authenticated: signup-claim/login/CSRF/lockout/roles/health + report/approve/decline/correct/latency/digest) ·
-           aws-deploy path (terraform: ALB/ECS/Lambda executor/RDS+PITR/SecretsManager, dispatch-only workflow) ·
-           V2.1.1 identity layer (web signup-claim, /team invite+disable, per-tenant GDPR erasure via `vital erase`)
-not built  an APPLIED deployment (path exists, nobody has run apply) · live jcode/Buzz traffic · the auth remainders in V2.1.1
-           (service tokens for headless callers, owner-field resolution) · pilot + GTM (V2 backlog below — the only list that matters now)
-=======
            provision/unprovisioned boot, HTTP invite/disable + role gate, opt-in site serving;
            full Db→AsyncDb port; suite runs SERIALLY — T() chained,
            which the timing-sensitive socket tests always needed)
-commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
-built      ledger+decisions+replay+export · coord+decompose+escalation gate · router+registry+calibration
-           compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
-           evals (suites/promotion/injection/poisoning-vs-gate/heldout) · attrib · ingest (file/github/serper)
+commits    14 on 2026-09-17 (6aa49a3..8623ab9): PG-lane concurrency fix · typed rows · approval-latency + override capture (red→green) · cost-per-signal · security hardening (body caps, URIError DoS, fail-closed screen) · AWS deploy path · Buzz live-watch
+built      ledger+decisions+replay+export+subjects · coord+decompose+escalation gate+reportUsage · router+registry+calibration+costPerSignal
+           compiler+mining+registry+trustTier+drift-autoDemote · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
+           evals (suites/promotion/injection/poisoning-vs-gate/heldout + overrides-from-console) · attrib · ingest (file/github/serper)
            sense (contracts/materiality/integrity/poisoning) · wedge (ship/churn/feature/deepresearch)
-           talk · substrate (scheduler/sandbox/egress/screen/identity/2 adapters) · capabilities · vendor/qm ×7
-           + V2.1 items already done below: live-Postgres path (AsyncDb) · approval console (now
-           session-authenticated with web signup-claim: login/CSRF/lockout/roles/health — V2.1.1)
-           · egress proxy · static site wired to the console (Sign in / Get started / live pill)
-not built  live Buzz/jcode/production traffic · GTM · and the auth remainders itemized in V2.1.1:
-           service tokens for headless callers, owner-field resolution
->>>>>>> 94ea89d (Add per-tenant GDPR data erasure: export-first, introspection-complete, audited)
+           talk (HMAC surface + buzz live-watch publisher) · substrate (scheduler/sandbox/egress/screen/identity/2 adapters) · capabilities · vendor/qm ×7
+           console (session-authenticated: signup-claim/login/CSRF/lockout/roles/health + report/approve/decline/correct/latency/digest) ·
+           egress proxy · static site wired to the console (Sign in / Get started / live pill) ·
+           aws-deploy path (terraform: ALB/ECS/Lambda executor/RDS+PITR/SecretsManager, dispatch-only workflow) · live-Postgres path (AsyncDb) ·
+           V2.1.1 identity layer (web signup-claim, /team invite+disable, per-tenant GDPR erasure via `vital erase`)
+not built  an APPLIED deployment (path exists, nobody has run apply) · live jcode/Buzz traffic · the auth remainders in V2.1.1
+           (service tokens for headless callers, owner-field resolution) · pilot + GTM (V2 backlog below — the only list that matters now)
 ```
 
 Phases 0–6 below are substantially complete as tested code; remaining items
