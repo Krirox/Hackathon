@@ -6,6 +6,7 @@ import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
+import { proposeEvalFromCorrection } from '../evals/runner.ts';
 
 /**
  * Console serve mode (TODO V2.1 approval surface, local edition): the
@@ -42,7 +43,7 @@ export function startConsoleServer(
   ledger: Ledger,
   coord: Coordinator,
   comp: OrganizationalCompiler,
-  opts: { port?: number; tenant?: string; now?: () => string } = {},
+  opts: { port?: number; host?: string; tenant?: string; now?: () => string } = {},
 ): Promise<ConsoleServer> {
   const tenant = opts.tenant ?? 'acme';
   const now = opts.now ?? (() => new Date().toISOString());
@@ -100,6 +101,70 @@ export function startConsoleServer(
         }
         return;
       }
+      // Override capture (TODO 2.3): a human edits a claim → correctClaim
+      // supersedes the old row and audits the diff; then the eval spine
+      // converts the audit row into a regression case, so every override
+      // teaches the machine exactly what it got wrong.
+      const fix = url.pathname.match(/^\/api\/claims\/([^/]+)\/correct$/);
+      if (req.method === 'POST' && fix) {
+        let body: { by?: string; statement?: string };
+        try {
+          body = JSON.parse((await readBody(req)) || '{}') as { by?: string; statement?: string };
+        } catch {
+          json(res, 400, { ok: false, error: 'malformed JSON body' });
+          return;
+        }
+        if (!body.by || !body.statement) {
+          json(res, 400, {
+            ok: false,
+            error: 'a correction needs a named human and the corrected statement — pass { by, statement }',
+          });
+          return;
+        }
+        const id = decodeURIComponent(fix[1]!);
+        try {
+          const old = await ledger.get(tenant, id);
+          if (!old) {
+            json(res, 404, { ok: false, error: `unknown claim ${id}` });
+            return;
+          }
+          const neu = await ledger.correctClaim(tenant, id, body.statement, body.by, now());
+          // Feed the eval spine. The CLAIM_CORRECTED audit row (target
+          // `oldId->newId`) is the spine's intake; a spine failure must not
+          // un-correct the claim, so this degrades to evalCaseId: null.
+          let evalCaseId: string | null = null;
+          try {
+            const seqRow = (await db
+              .prepare(
+                "SELECT seq FROM audit_log WHERE tenant = ? AND action = 'CLAIM_CORRECTED' AND target = ? ORDER BY seq DESC LIMIT 1",
+              )
+              .get(tenant, `${old.id}->${neu.id}`)) as { seq: number } | undefined;
+            if (seqRow) {
+              const kase = await proposeEvalFromCorrection(
+                db,
+                (cid) =>
+                  ledger.get(tenant, cid).then((c) => (c ? { subject: c.subject, statement: c.statement } : null)),
+                tenant,
+                Number(seqRow.seq),
+                'overrides',
+              );
+              evalCaseId = kase.id;
+            }
+          } catch {
+            evalCaseId = null;
+          }
+          json(res, 200, {
+            ok: true,
+            supersedes: old.id,
+            supersededBy: neu.id,
+            diff: { before: old.statement, after: neu.statement },
+            evalCaseId,
+          });
+        } catch (e) {
+          json(res, 409, { ok: false, error: (e as Error).message });
+        }
+        return;
+      }
       json(res, 404, { ok: false, error: 'not found' });
     })();
   });
@@ -111,7 +176,7 @@ export function startConsoleServer(
       sock.on('close', () => open.delete(sock));
     });
     server.once('error', reject);
-    server.listen(opts.port ?? 0, '127.0.0.1', () => {
+    server.listen(opts.port ?? 0, opts.host ?? '127.0.0.1', () => {
       const addr = server.address();
       if (!addr || typeof addr === 'string') return reject(new Error('[console:UNBOUND] server did not bind'));
       resolve({

@@ -3,6 +3,7 @@ import { buildReport } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
+import { listCases } from '../src/evals/runner.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
@@ -177,6 +178,79 @@ T('digest composition: NOTICEs land here, grouped, never in the Feed', async () 
 
   // Not-a-date guard: a NOTICE beyond the query instant is invisible.
   eq((await composeDigest(db, TEN, '2026-01-01T00:00:00.000Z')).length, 0);
+});
+
+T('override capture: correcting a claim stores the diff and feeds the eval spine', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const claim = await ledger.append({
+      tenant: TEN,
+      subject: 'pricing',
+      kind: 'FACT',
+      statement: 'the launch plan is $99/mo',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'human:priya',
+      scope: 'marketing',
+      authorType: 'human',
+      provenance: { ...sor() },
+    });
+
+    const r = (await (
+      await fetch(`${base_}/api/claims/${claim.id}/correct`, {
+        method: 'POST',
+        body: JSON.stringify({ by: 'human:priya', statement: 'the launch plan is $149/mo' }),
+      })
+    ).json()) as {
+      ok: boolean;
+      supersedes: string;
+      supersededBy: string;
+      diff: { before: string; after: string };
+      evalCaseId: string | null;
+    };
+    eq(r.ok, true, 'the correction lands:');
+    eq(r.supersedes, claim.id);
+    eq(r.diff.before, 'the launch plan is $99/mo', 'the diff captures what was wrong:');
+    eq(r.diff.after, 'the launch plan is $149/mo');
+    eq(r.evalCaseId !== null, true, 'the spine got a regression case:');
+
+    // The new claim exists, supersedes the old, and the old is gone from bySubject.
+    const neu = await ledger.get(TEN, r.supersededBy);
+    eq(neu?.statement, 'the launch plan is $149/mo');
+    const superseded = await ledger.get(TEN, claim.id);
+    eq(superseded?.status, 'SUPERSEDED');
+
+    // The spine case is real, in the overrides suite, and expects the correction.
+    const cases = await listCases(db, TEN, 'overrides');
+    eq(
+      cases.some((c) => c.id === r.evalCaseId),
+      true,
+      'the case is listed in the overrides suite:',
+    );
+    const kase = cases.find((c) => c.id === r.evalCaseId)!;
+    eq(kase.kind, 'correction-regression');
+    eq((kase.expect as { statement: string }).statement, 'the launch plan is $149/mo');
+
+    // Validation and unknown-claim refusals keep the surface honest.
+    const noBy = (await (
+      await fetch(`${base_}/api/claims/${claim.id}/correct`, { method: 'POST', body: '{}' })
+    ).json()) as {
+      ok: boolean;
+    };
+    eq(noBy.ok, false, 'anonymous corrections refused:');
+    const missing = (await (
+      await fetch(`${base_}/api/claims/clm_nope/correct`, {
+        method: 'POST',
+        body: JSON.stringify({ by: 'h', statement: 'x' }),
+      })
+    ).json()) as { ok: boolean };
+    eq(missing.ok, false);
+  } finally {
+    await server.close();
+  }
 });
 
 T('approval latency is instrumented: recorded per decision, aggregated, served', async () => {
