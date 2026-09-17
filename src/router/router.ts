@@ -506,6 +506,39 @@ export class CognitiveRouter {
       .run(tenant, taskType, tier, model, correct ? 1 : 0, 1, at, correct ? 1 : 0);
   }
 
+  /**
+   * Cost-per-signal (TODO §4.1): of all routed arrivals, what share does the
+   * expensive tier see? The gate is <1% — an unsorted inbox means every task
+   * pays model prices. `propose`-side (what the router wanted) is the signal
+   * quality; `executed`-side is what the org actually spent on.
+   */
+  async costPerSignal(tenant: string): Promise<{
+    arrivals: number;
+    modelShare: number;
+    humanShare: number;
+    byTier: Record<string, number>;
+    gate: number;
+    withinGate: boolean;
+  }> {
+    const rows = (await this.db
+      .prepare('SELECT proposed, executed FROM routing_decisions WHERE tenant = ?')
+      .all(tenant)) as { proposed: string; executed: string }[];
+    const share = (col: 'proposed' | 'executed'): Record<string, number> => {
+      const by: Record<string, number> = {};
+      for (const r of rows) {
+        const k = String(r[col]);
+        by[k] = (by[k] ?? 0) + 1;
+      }
+      return by;
+    };
+    const byTier = share('executed');
+    const arrivals = rows.length;
+    const modelShare = arrivals === 0 ? 0 : (byTier['MODEL'] ?? 0) / arrivals;
+    const humanShare = arrivals === 0 ? 0 : (byTier['HUMAN'] ?? 0) / arrivals;
+    const gate = 0.01;
+    return { arrivals, modelShare, humanShare, byTier, gate, withinGate: modelShare < gate };
+  }
+
   async calibration(
     tenant: string,
     taskType: string,
