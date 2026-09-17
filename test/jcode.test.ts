@@ -649,10 +649,7 @@ T('renewExecutionLease enforces CAS and renews lease interval', async () => {
   eq(renewed.state, 'IN_FLIGHT');
 
   // Attempting renewal from non-owner fails with LEASE_EXPIRED
-  await rejects(
-    async () => await coord.renewExecutionLease(TEN, request.id, 'worker:imposter', NOW),
-    'LEASE_EXPIRED',
-  );
+  await rejects(async () => await coord.renewExecutionLease(TEN, request.id, 'worker:imposter', NOW), 'LEASE_EXPIRED');
 });
 
 T('timeout in waitForTurn sends cancel frame before failing', async () => {
@@ -707,7 +704,9 @@ T('cited claims in task.claimRefs are resolved and prepended to harness command'
     // Promote claim to VERIFIED so contextFor includes it
     await db.prepare("UPDATE claims SET status = 'VERIFIED' WHERE id = ?").run(clm.id);
 
-    const { request } = await coord.submit(base({ id: 'jground', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+    const { request } = await coord.submit(
+      base({ id: 'jground', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+    );
     const r = new JcodeRunner(db, ledger, coord);
     await r.run(
       TEN,
@@ -742,12 +741,14 @@ T('dollar budget ceiling terminates run with TERMINATED_BUDGET', async () => {
     });
     // 1500 tokens * 0.001 dollarPerToken = $1.50.
     // Setting maxDollars to 0.50 triggers a dollar budget breach.
-    const { request } = await coord.submit(base({ id: 'jbudget', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+    const { request } = await coord.submit(
+      base({ id: 'jbudget', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+    );
     const r = new JcodeRunner(db, ledger, coord);
     const out = await r.run(
       TEN,
       request.id,
-      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 0.50, maxTokens: 10_000 },
+      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 0.5, maxTokens: 10_000 },
       { socketPath: h.path },
     );
     eq(out.status, 'TERMINATED_BUDGET');
@@ -774,7 +775,9 @@ T('deliverable transcript is stored in artifact store and linked to observation 
     const storeDir = `data/artifacts/test-${Date.now()}`;
     const store = new FilesystemArtifactStore(storeDir);
     try {
-      const { request } = await coord.submit(base({ id: 'jart', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+      const { request } = await coord.submit(
+        base({ id: 'jart', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+      );
       const r = new JcodeRunner(db, ledger, coord, undefined, store);
       const out = await r.run(
         TEN,
@@ -783,7 +786,9 @@ T('deliverable transcript is stored in artifact store and linked to observation 
         { socketPath: h.path },
       );
       eq(out.status, 'COMPLETED');
-      const obsClaim = (await ledger.bySubject(TEN, 'jcode:engineering')).find((c) => c.statement.includes('harness run'))!;
+      const obsClaim = (await ledger.bySubject(TEN, 'jcode:engineering')).find((c) =>
+        c.statement.includes('harness run'),
+      )!;
       eq(!!obsClaim, true, 'observation claim recorded:');
       const val = obsClaim.value as { fullTextRef?: string };
       eq(typeof val.fullTextRef, 'string', 'fullTextRef present in value:');
@@ -803,4 +808,3 @@ T('deliverable transcript is stored in artifact store and linked to observation 
     }
   });
 });
-

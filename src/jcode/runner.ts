@@ -316,13 +316,11 @@ export class JcodeRunner extends EventEmitter {
     // Execution lease heartbeat: actively renew our claim so long-running turns
     // don't get reclaimed as stale.
     const leaseHeartbeat = setInterval(() => {
-      void this.coord
-        .renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString())
-        .catch((e) => {
-          if (turnError === null) {
-            turnError = `execution lease lost: ${(e as Error).message}`;
-          }
-        });
+      void this.coord.renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString()).catch((e) => {
+        if (turnError === null) {
+          turnError = `execution lease lost: ${(e as Error).message}`;
+        }
+      });
     }, 25_000);
     leaseHeartbeat.unref?.();
 

@@ -59,6 +59,17 @@ No Postgres, no Buzz, no jcode needed for the suite: tests run against
 `node:sqlite` (`:memory:` + temp files) and a scripted harness over real
 sockets (`test/fake-harness.ts`).
 
+Browser review regression (separate from `npm test`):
+
+```sh
+npx playwright install chromium
+npm run test:browser
+```
+
+This runs a local in-memory console through login, paginated evidence review,
+claim correction/history, approval, decline, and queue refresh. No external
+services or customer data are used; browser installation requires a download.
+
 ## Layout
 
 ```

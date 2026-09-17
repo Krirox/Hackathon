@@ -777,18 +777,28 @@ export function startConsoleServer(
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           let id: string;
-          try { id = decodeURIComponent(detail[2]!); }
-          catch { return json(res, 400, { ok: false, error: 'malformed detail id' }); }
+          try {
+            id = decodeURIComponent(detail[2]!);
+          } catch {
+            return json(res, 400, { ok: false, error: 'malformed detail id' });
+          }
           const pageIndex = Number(url.searchParams.get('page') ?? '0');
           if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
             return json(res, 400, { ok: false, error: 'page must be a nonnegative integer' });
           const fallbackMode = operatorSecret ? 'secret' : 'session';
-          const detailOpts = { tenant, actor: by(auth.user), csrf: auth.session.csrfToken,
-            canApprove: atLeast(auth.user.role, approverMin), requiredRole: approverMin,
-            operatorMode: keyAuth ? 'signature' as const : fallbackMode as 'secret' | 'session', home };
-          const html = detail[1] === 'claims'
-            ? await claimDetail(db, ledger, id, pageIndex, detailOpts)
-            : await requestDetail(coord, ledger, id, pageIndex, detailOpts);
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: atLeast(auth.user.role, approverMin),
+            requiredRole: approverMin,
+            operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
+            home,
+          };
+          const html =
+            detail[1] === 'claims'
+              ? await claimDetail(db, ledger, id, pageIndex, detailOpts)
+              : await requestDetail(coord, ledger, id, pageIndex, detailOpts);
           if (!html) return json(res, 404, { ok: false, error: 'evidence not found' });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(html);
@@ -1093,7 +1103,10 @@ export function startConsoleServer(
               return;
             }
             if (['SUPERSEDED', 'RETIRED'].includes(old.status))
-              return json(res, 409, { ok: false, error: 'This claim is historical. Refresh and correct its current replacement.' });
+              return json(res, 409, {
+                ok: false,
+                error: 'This claim is historical. Refresh and correct its current replacement.',
+              });
             const rawVal = call.json && 'value' in call.json ? call.json.value : call.fields.value;
             let patch: { value?: number | null; unit?: string | null; confidence?: number } | undefined;
             if (rawVal !== undefined) {

@@ -44,7 +44,6 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
     const forms = opts.canApprove
       ? ['approve', 'decline']
           .map((action) => {
-
             return `<form data-review-action="${action}" action="/api/requests/${esc(encodeURIComponent(r.id))}/${action}" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 ${action === 'decline' ? '<label>Decline reason <textarea name="reason" required maxlength="2000"></textarea></label>' : ''}
@@ -91,7 +90,12 @@ export const REVIEW_SCRIPT = `
     const headers = { 'content-type': 'application/json', 'x-vital-csrf': fields.get('csrf') };
     if (fields.has('operatorSecret')) headers['x-vital-operator'] = fields.get('operatorSecret');
     if (fields.has('operatorSignature')) headers['x-vital-signature'] = fields.get('operatorSignature');
-    const controls = card.querySelectorAll('input, textarea, button');
+    if (action === 'correct' && fields.get('valueMode') === 'number' &&
+            (!String(fields.get('value') ?? '').trim() || !Number.isFinite(Number(fields.get('value'))))) {
+          status.textContent = 'Enter a finite numeric value, or choose Clear value and unit.';
+          return;
+        }
+        const controls = card.querySelectorAll('input, textarea, select, button');
     card.dataset.busy = 'true'; card.setAttribute('aria-busy', 'true');
     controls.forEach(control => { control.disabled = true; });
     status.textContent = 'Submitting ' + action + '…';

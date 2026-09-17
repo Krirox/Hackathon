@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --import tsx --test --test-force-exit test/run.ts",
+    "test:browser": "node --import tsx --test test/review.browser.ts",
     "test:postgres": "node --import tsx --test --test-force-exit test/run-postgres.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",

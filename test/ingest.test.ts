@@ -603,9 +603,9 @@ T('F09: ingestInboxBatch claims, persists claims and settles inbox rows to DONE'
 
   // Check inbox rows status
   const statuses = (
-    (await db
-      .prepare('SELECT status FROM ingest_inbox WHERE tenant = ? AND collector = ?')
-      .all(TEN, c.name)) as { status: string }[]
+    (await db.prepare('SELECT status FROM ingest_inbox WHERE tenant = ? AND collector = ?').all(TEN, c.name)) as {
+      status: string;
+    }[]
   ).map((r) => r.status);
   eq(statuses, ['DONE', 'DONE']);
 
@@ -620,4 +620,3 @@ T('F09: ingestInboxBatch claims, persists claims and settles inbox rows to DONE'
   eq(second.receipts.length, 0);
   eq(second.claimIds.length, 0);
 });
-
