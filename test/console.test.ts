@@ -5,6 +5,7 @@ import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import { listCases } from '../src/evals/runner.ts';
+import { rIn } from './helpers.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
@@ -374,6 +375,33 @@ T('malformed ids and body bombs fail loud, never hang or crash the server', asyn
       })
     ).json()) as { ok: boolean };
     eq(ok.ok, true, 'server survives both:');
+  } finally {
+    await server.close();
+  }
+});
+
+T('cost-per-signal is surfaced: report card, /api/cost-per-signal, cli status field', async () => {
+  const { db, ledger, coord, comp, router } = await fresh();
+  // One arrival through the real routing path so routing_decisions has a row.
+  await router.route(rIn({ taskType: 'release.detect', importance: 0.1 }));
+  const cps = await router.costPerSignal(TEN);
+  eq(cps.arrivals, 1);
+  eq(cps.modelShare, 0, 'reflex handled it — the gate passes:');
+
+  const report = await buildReport(db, ledger, coord, comp, TEN, NOW);
+  eq(report.costPerSignal.arrivals, 1, 'report carries the same read:');
+  eq(report.costPerSignal.withinGate, true);
+  const html = renderHtml(report);
+  eq(html.includes('cost per signal'), true, 'health-grid card renders:');
+  eq(html.includes('OVER GATE'), false, 'gate passing reads as passing:');
+
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/cost-per-signal`);
+    eq(res.status, 200);
+    const body = (await res.json()) as { arrivals: number; modelShare: number; withinGate: boolean };
+    eq(body.arrivals, 1);
+    eq(body.withinGate, true);
   } finally {
     await server.close();
   }
