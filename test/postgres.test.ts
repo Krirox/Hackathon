@@ -71,10 +71,13 @@ pgT('concurrent ledger appends mint distinct, monotonic seqs (postgres)', async 
   try {
     await migrate(db);
     const ledger = createLedger(db);
+    // Own tenant: ledger_seq persists per tenant, and the nextSeq test above
+    // already ran 25 increments on the shared one — min would be 26, not 1.
+    const t = `${tenant}-appends`;
     const claims = await Promise.all(
       Array.from({ length: 20 }, (_, i) =>
         ledger.append({
-          tenant,
+          tenant: t,
           subject: 'release',
           kind: 'OBSERVATION',
           statement: `w${i}`,
@@ -92,7 +95,7 @@ pgT('concurrent ledger appends mint distinct, monotonic seqs (postgres)', async 
     const seqs = claims.map((c) => c.seq);
     eq(new Set(seqs).size, 20, 'no duplicate seqs across concurrent appends:');
     eq(Math.min(...seqs), 1);
-    const stats = await ledger.stats(tenant, NOW);
+    const stats = await ledger.stats(t, NOW);
     eq(stats.total, 20);
   } finally {
     await db.close();
@@ -119,7 +122,9 @@ pgT('coordinator dialect helpers execute against real postgres', async () => {
       goal: 'pg lane',
       claimRefs: ['clm_x'],
       deliverableSchema: 'x.v1',
-      bid: { dollars: 2, humanMinutes: 1 },
+      // deadline must be explicit: the default is now+24h, and expireStale(NOW)
+      // correctly returns [] for it — the CI lane failed on exactly this before.
+      bid: { dollars: 2, humanMinutes: 1, deadline: NOW },
       onBehalfOf: 'human:priya',
       now: NOW,
     });

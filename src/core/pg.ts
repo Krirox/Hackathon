@@ -1,4 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { migrate, type AsyncDb, type AsyncStatement, type Row } from './db.ts';
 import { openDb } from './db.ts';
 
@@ -50,7 +51,16 @@ const cleanParam = (v: unknown): unknown => {
 
 export function openPostgres(url: string): AsyncDb {
   const pool = new Pool({ connectionString: url });
-  let holder: { client: PoolClient; depth: number } | null = null;
+
+  // Transaction context rides the async chain, never shared mutable state:
+  // concurrent transactions each hold their own pool client (READ COMMITTED
+  // + the atomic nextSeq upsert carry the correctness), while nested calls
+  // on the same chain become savepoints on their parent's client. A closure
+  // `holder` cannot express this — concurrent transactions would interleave
+  // statements on one client and COMMIT would release it mid-flight
+  // (`savepoint "vital_sp1" does not exist`, caught by the PG CI lane).
+  const tx = new AsyncLocalStorage<{ client: PoolClient }>();
+  let spCounter = 0; // synchronous increment: unique savepoint names even for concurrent nested calls
 
   const prep = (exec: (sql: string, params: unknown[]) => Promise<{ rows: Row[]; rowCount: number | null }>) => {
     const run = (sql: string, params: unknown[]) => exec(toPostgresPlaceholders(sql), params.map(cleanParam));
@@ -66,38 +76,43 @@ export function openPostgres(url: string): AsyncDb {
 
   return {
     engine: 'postgres',
-    prepare: (sql) => (holder ? scoped(holder.client)(sql) : direct(sql)),
+    prepare: (sql) => {
+      const ctx = tx.getStore();
+      return ctx ? scoped(ctx.client)(sql) : direct(sql);
+    },
     exec: async (sql: string) => {
-      if (holder) await holder.client.query(sql);
+      const ctx = tx.getStore();
+      if (ctx) await ctx.client.query(sql);
       else await pool.query(sql);
     },
     transaction: async <T>(fn: () => Promise<T> | T): Promise<T> => {
-      if (holder) {
-        const depth = holder.depth++;
-        await holder.client.query(`SAVEPOINT vital_sp${depth}`);
+      const parent = tx.getStore();
+      if (parent) {
+        const name = `vital_sp${spCounter++}`;
+        await parent.client.query(`SAVEPOINT ${name}`);
         try {
           const out = await fn();
-          await holder.client.query(`RELEASE SAVEPOINT vital_sp${depth}`);
-          holder.depth--;
+          await parent.client.query(`RELEASE SAVEPOINT ${name}`);
           return out;
         } catch (err) {
-          await holder.client.query(`ROLLBACK TO SAVEPOINT vital_sp${depth}`);
-          holder.depth--;
+          await parent.client.query(`ROLLBACK TO SAVEPOINT ${name}`);
           throw err;
         }
       }
       const client = await pool.connect();
-      holder = { client, depth: 1 };
-      await client.query('BEGIN');
       try {
-        const out = await fn();
+        await client.query('BEGIN');
+        const out = await tx.run({ client }, fn);
         await client.query('COMMIT');
         return out;
       } catch (err) {
-        await client.query('ROLLBACK');
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // the connection is toast either way; release it below
+        }
         throw err;
       } finally {
-        holder = null;
         client.release();
       }
     },
