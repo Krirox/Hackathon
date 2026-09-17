@@ -517,9 +517,22 @@ T('cost-per-signal is surfaced: report card, /api/cost-per-signal, cli status fi
   eq(html.includes('cost per signal'), true, 'health-grid card renders:');
   eq(html.includes('OVER GATE'), false, 'gate passing reads as passing:');
 
+  // The read APIs are session-gated (V2.1.1): a routing-economics read
+  // leaks as much as the latency one, so it needs the same auth. This
+  // test never provisions a tenant (unlike seeded()), so claim one —
+  // BEFORE the server boots, which caches its provisioned state.
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/cost-per-signal`);
+    const authed = await ownerSession(server.port);
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/cost-per-signal`, {
+      headers: authed.headers,
+    });
     eq(res.status, 200);
     const body = (await res.json()) as { arrivals: number; modelShare: number; withinGate: boolean };
     eq(body.arrivals, 1);
