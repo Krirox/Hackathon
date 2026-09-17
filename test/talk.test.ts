@@ -209,7 +209,9 @@ T('a live run streams progress into the originating thread', async () => {
         authorType: 'system',
         provenance: sor(),
       });
-      const { request } = await coord.submit(base({ id: 'live1', claimRefs: [clm.id] }));
+      const { request } = await coord.submit(
+        base({ id: 'live1', claimRefs: [clm.id], bid: { dollars: 5, tokens: 100_000 } }),
+      );
       const buzz = createBuzzSurface({ relayUrl: relay.url, signer: stubSigner('room-pubkey'), fetchFn: stubFetch });
       const r = new JcodeRunner(db, ledger, coord);
       watchRun(
@@ -222,7 +224,7 @@ T('a live run streams progress into the originating thread', async () => {
       const out = await r.run(
         TEN,
         request.id,
-        { command: 'do it', claimRefs: [clm.id], onBehalfOf: 'human:priya', maxDollars: 1, maxTokens: 100_000 },
+        { command: 'do it', claimRefs: [clm.id], onBehalfOf: 'human:priya', maxDollars: 5, maxTokens: 100_000 },
         { socketPath: h.path },
       );
       eq(out.status, 'COMPLETED');

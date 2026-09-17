@@ -6,6 +6,8 @@ import type { CoordinationRequest } from '../core/types.ts';
 import { JcodeClient, type JcodeClientOptions } from './client.ts';
 import type { PermissionDecision, ServerFrame } from './protocol.ts';
 import { isShellTool, screenShellCommand } from '../gov/shell.ts';
+import { getRates } from '../attrib/attribution.ts';
+import { FilesystemArtifactStore } from '../ingest/collectors.ts';
 
 /**
  * The jcode connection.
@@ -100,6 +102,8 @@ export const defaultPermissionPolicy =
   };
 
 export class JcodeRunner extends EventEmitter {
+  private readonly artifactStore: FilesystemArtifactStore;
+
   constructor(
     private readonly db: AsyncDb,
     private readonly ledger: Ledger,
@@ -108,8 +112,10 @@ export class JcodeRunner extends EventEmitter {
       new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think']),
       new Set(['write_file', 'edit_file', 'bash', 'delete_file', 'apply_patch']),
     ),
+    artifactStore?: FilesystemArtifactStore,
   ) {
     super();
+    this.artifactStore = artifactStore ?? new FilesystemArtifactStore();
   }
 
   /**
@@ -144,6 +150,14 @@ export class JcodeRunner extends EventEmitter {
       throw new Error(`[jcode:CLAIM_LOST] ${(e as Error).message}`, { cause: e });
     }
 
+    const rates = await getRates(this.db, tenant);
+    const contextClaims = await this.ledger.contextFor(tenant, task.claimRefs, new Date().toISOString());
+    let prompt = task.command;
+    if (contextClaims.length > 0) {
+      const contextLines = contextClaims.map((c) => `- [${c.kind}] (${c.subject}): ${c.statement}`).join('\n');
+      prompt = `[Grounded Context]\n${contextLines}\n\n[Instruction]\n${task.command}`;
+    }
+
     const client = new JcodeClient(clientOpts);
     const transcript: string[] = [];
     const toolCalls: RunResult['toolCalls'] = [];
@@ -164,11 +178,8 @@ export class JcodeRunner extends EventEmitter {
     // spend into the coordinator mid-run (reportUsage touches tokens/dollars
     // only — never rounds, so unlike charge() it cannot self-terminate the
     // run) and emits a ProgressUpdate for watchers (Buzz thread publisher).
-    // A reporting failure halts further reporting but never the run itself:
-    // progress is observability, not control.
     let sessionId = '';
     let step = 0;
-    let reportHalted = false;
     const progress = (toolName?: string): void => {
       step += 1;
       this.emit('progress', {
@@ -254,25 +265,26 @@ export class JcodeRunner extends EventEmitter {
       progress(name);
     };
     const onUsage = (f: ServerFrame) => {
-      const delta = Number(f.input ?? 0) + Number(f.output ?? 0);
+      const deltaTokens = Number(f.input ?? 0) + Number(f.output ?? 0);
+      const deltaDollars = deltaTokens * (rates.dollarPerToken ?? 0);
       usage.input += Number(f.input ?? 0);
       usage.output += Number(f.output ?? 0);
       const tokens = usage.input + usage.output;
-      if (tokens > task.maxTokens) budgetBroken = true;
+      const dollars = tokens * (rates.dollarPerToken ?? 0);
+      if (tokens > task.maxTokens || dollars > task.maxDollars) budgetBroken = true;
       this.emit('usage', tokens);
       // Persist the flow mid-run so a crash loses minutes, not the whole
       // turn — and so a coordinator-side breach stops the run even if the
       // in-memory ceiling hasn't tripped yet.
-      if (!reportHalted && delta > 0) {
+      if (deltaTokens > 0) {
         void track(
           this.coord
-            .reportUsage(tenant, requestId, { tokens: delta })
+            .reportUsage(tenant, requestId, { tokens: deltaTokens, dollars: deltaDollars })
             .then((r) => {
               if (r.state === 'TERMINATED_BUDGET') budgetBroken = true;
               progress();
             })
             .catch((e) => {
-              reportHalted = true;
               // Custom event name: safe without listeners (only 'error' throws).
               this.emit('progressError', { requestId, error: (e as Error).message });
             }),
@@ -301,6 +313,19 @@ export class JcodeRunner extends EventEmitter {
       if (turnError === null) turnError = String(f.message ?? f.code ?? 'harness error');
     };
 
+    // Execution lease heartbeat: actively renew our claim so long-running turns
+    // don't get reclaimed as stale.
+    const leaseHeartbeat = setInterval(() => {
+      void this.coord
+        .renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString())
+        .catch((e) => {
+          if (turnError === null) {
+            turnError = `execution lease lost: ${(e as Error).message}`;
+          }
+        });
+    }, 25_000);
+    leaseHeartbeat.unref?.();
+
     try {
       await client.connect();
       sessionId = await client.createSession(task.workingDir);
@@ -314,7 +339,7 @@ export class JcodeRunner extends EventEmitter {
       client.once('close', () => {
         if (turnError === null) turnError = 'harness disconnected';
       });
-      await client.send(sessionId, task.command);
+      await client.send(sessionId, prompt);
       const turn = await this.waitForTurn(
         client,
         sessionId,
@@ -341,8 +366,21 @@ export class JcodeRunner extends EventEmitter {
         refusalReason = turnError ?? 'harness reported an error';
       }
 
+      // Deliverable artifact persistence: store raw transcript via FilesystemArtifactStore
+      // so rawArtifactRef and fullTextRef point to durable content.
+      const rawTranscript = transcript.join('');
+      let artifactRef: string | undefined;
+      try {
+        const safeTenant = tenant.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const safeReq = requestId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const artifactName = `jcode-${safeTenant}-${safeReq}-${Date.now()}.txt`;
+        artifactRef = this.artifactStore.put(artifactName, rawTranscript);
+      } catch (e) {
+        this.emit('progressError', { requestId, error: `artifact store failed: ${(e as Error).message}` });
+      }
+
       // Deliverable + provenance claim, then close the request.
-      const summary = transcript.join('').slice(0, 4000);
+      const summary = rawTranscript.slice(0, 4000);
       const out = await this.ledger.append({
         tenant,
         subject: `jcode:${req.targetScope}`,
@@ -355,6 +393,7 @@ export class JcodeRunner extends EventEmitter {
           transcriptTruncated,
           usage,
           permissions,
+          fullTextRef: artifactRef ?? null,
         },
         confidence: 1,
         owner: task.onBehalfOf,
@@ -368,6 +407,7 @@ export class JcodeRunner extends EventEmitter {
           extractor: 'jcode-harness-api',
           extractorVersion: 'v1',
           retrievedAt: new Date().toISOString(),
+          rawArtifactRef: artifactRef,
         },
       });
       claimIds.push(out.id);
@@ -378,7 +418,10 @@ export class JcodeRunner extends EventEmitter {
         // double-count. spent.tokens on the request IS the run's total.
         await this.coord.complete(tenant, requestId, {
           claims: claimIds,
-          cost: { tokens: usage.input + usage.output },
+          cost: {
+            tokens: usage.input + usage.output,
+            dollars: (usage.input + usage.output) * (rates.dollarPerToken ?? 0),
+          },
         });
         await this.recordTrace(tenant, req, sessionId, summary, usage);
       } else {
@@ -425,6 +468,7 @@ export class JcodeRunner extends EventEmitter {
         refusalReason,
       };
     } finally {
+      clearInterval(leaseHeartbeat);
       client.close();
     }
   }
@@ -481,8 +525,22 @@ export class JcodeRunner extends EventEmitter {
         finish('done');
       }
       client.on('frame:turn_done', done);
+      const finishTimeout = () => {
+        clearInterval(poll);
+        clearTimeout(limit);
+        client.removeListener('frame:turn_done', done);
+        let settled = false;
+        const fin = (): void => {
+          if (!settled) {
+            settled = true;
+            resolve('timeout');
+          }
+        };
+        client.cancel(sessionId).then(fin, fin);
+        setTimeout(fin, 2000).unref?.();
+      };
       const limit = setTimeout(() => {
-        finish('timeout');
+        finishTimeout();
       }, timeoutMs);
       limit.unref?.();
     });

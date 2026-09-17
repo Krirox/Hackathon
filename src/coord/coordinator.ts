@@ -268,6 +268,18 @@ export interface Coordinator {
     leaseMs?: number,
   ): Promise<CoordinationRequest>;
   /**
+   * F12: renew an active execution lease while work continues.
+   * Atomic CAS on (id, tenant, state='IN_FLIGHT', exec_owner=owner);
+   * throws LEASE_EXPIRED if the lease was lost or reclaimed.
+   */
+  renewExecutionLease(
+    tenant: string,
+    id: string,
+    owner: string,
+    now: string,
+    leaseMs?: number,
+  ): Promise<CoordinationRequest>;
+  /**
    * Release IN_FLIGHT claims whose lease expired back to ADMITTED so a dead
    * worker's work becomes runnable again. Bounded per call, audited per row.
    */
@@ -972,6 +984,30 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return claimed;
   }
 
+  async function renewExecutionLease(
+    tenant: string,
+    id: string,
+    owner: string,
+    now: string,
+    leaseMs = 60_000,
+  ): Promise<CoordinationRequest> {
+    const out = await db
+      .prepare(
+        `UPDATE requests SET claimed_at = ?, lease_ms = ?, updated_at = ?
+           WHERE id = ? AND tenant = ? AND state = 'IN_FLIGHT' AND exec_owner = ?`,
+      )
+      .run(now, leaseMs, now, id, tenant, owner);
+    if (out.changes === 0) {
+      const r = await load(tenant, id);
+      if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+      throw new CoordinationError(
+        'LEASE_EXPIRED',
+        `request ${id} is no longer owned by ${owner} (current state: ${r.state}, owner: ${r.execOwner}) — cannot renew lease`,
+      );
+    }
+    return (await load(tenant, id))!;
+  }
+
   /**
    * Lease expiry (F02): IN_FLIGHT rows whose claimed_at + lease_ms passed are
    * released back to ADMITTED. Selection happens in JS (portable date math),
@@ -1357,6 +1393,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     charge,
     reportUsage,
     claimExecution,
+    renewExecutionLease,
     reclaimStale,
     readmitDeferred,
     decompose,

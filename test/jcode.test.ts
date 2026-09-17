@@ -2,6 +2,8 @@ import { T, eq, TEN, NOW, fresh, sor, base, withHarness, rejects } from './helpe
 import { createServer } from 'node:net';
 import { JcodeClient } from '../src/jcode/client.ts';
 import { JcodeRunner, defaultPermissionPolicy } from '../src/jcode/runner.ts';
+import { socketPathFrom } from '../src/jcode/protocol.ts';
+import { FilesystemArtifactStore } from '../src/ingest/collectors.ts';
 console.log('\n\x1b[1mjcode connection — the wire contract\x1b[0m');
 
 T('a sibling that accepts but never answers surfaces as a timeout, never a hang', async () => {
@@ -56,6 +58,7 @@ T('create_session -> send_message -> turn_done completes and collects the transc
         goal: 'implement the EU streaming flag',
         claimRefs: [clm.id],
         deliverableSchema: 'code-change.v1',
+        bid: { dollars: 5, tokens: 100_000 },
       }),
     );
     const r = new JcodeRunner(db, ledger, coord);
@@ -66,7 +69,7 @@ T('create_session -> send_message -> turn_done completes and collects the transc
         command: 'Add EU region streaming behind a flag; run tests.',
         claimRefs: [clm.id],
         onBehalfOf: 'human:priya',
-        maxDollars: 1,
+        maxDollars: 5,
         maxTokens: 100_000,
       },
       { socketPath: h.path },
@@ -225,12 +228,14 @@ T('a completed run becomes a TRACE eligible for compilation', async () => {
       authorType: 'system',
       provenance: sor(),
     });
-    const { request } = await coord.submit(base({ id: 'j6', claimRefs: [clm.id] }));
+    const { request } = await coord.submit(
+      base({ id: 'j6', claimRefs: [clm.id], bid: { dollars: 5, tokens: 100_000 } }),
+    );
     const r = new JcodeRunner(db, ledger, coord);
     await r.run(
       TEN,
       request.id,
-      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 1, maxTokens: 10_000 },
+      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 5, maxTokens: 10_000 },
       { socketPath: h.path },
     );
     const tr = (await db.prepare('SELECT * FROM traces WHERE request_id = ?').get(request.id)) as Record<
@@ -629,3 +634,173 @@ T('a runaway transcript is capped and the cut is disclosed', async () => {
     server.close();
   }
 });
+
+T('JcodeClient defaults to socketPathFrom() and 15s requestTimeoutMs', () => {
+  const c = new JcodeClient();
+  eq(c.socketPath, socketPathFrom());
+  eq(c.requestTimeoutMs, 15_000);
+});
+
+T('renewExecutionLease enforces CAS and renews lease interval', async () => {
+  const { coord } = await fresh();
+  const { request } = await coord.submit(base({ id: 'jlease' }));
+  await coord.claimExecution(TEN, request.id, 'worker:1', NOW);
+  const renewed = await coord.renewExecutionLease(TEN, request.id, 'worker:1', NOW, 120_000);
+  eq(renewed.state, 'IN_FLIGHT');
+
+  // Attempting renewal from non-owner fails with LEASE_EXPIRED
+  await rejects(
+    async () => await coord.renewExecutionLease(TEN, request.id, 'worker:imposter', NOW),
+    'LEASE_EXPIRED',
+  );
+});
+
+T('timeout in waitForTurn sends cancel frame before failing', async () => {
+  await withHarness(async (h) => {
+    h.hang = true;
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'r',
+      kind: 'OBSERVATION',
+      statement: 'x',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    const { request } = await coord.submit(
+      base({ id: 'jhang', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+    );
+    const r = new JcodeRunner(db, ledger, coord);
+    const out = await r.run(
+      TEN,
+      request.id,
+      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 5, maxTokens: 10_000, turnTimeoutMs: 100 },
+      { socketPath: h.path },
+    );
+    eq(out.status, 'FAILED');
+    eq(out.refusalReason, 'harness turn did not complete');
+    eq(h.requestsOf('cancel').length, 1, 'cancel was sent on turn timeout:');
+  });
+});
+
+T('cited claims in task.claimRefs are resolved and prepended to harness command', async () => {
+  await withHarness(async (h) => {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'repo:auth',
+      kind: 'OBSERVATION',
+      statement: 'JWT expiry is 3600 seconds',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'sync:github',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    // Promote claim to VERIFIED so contextFor includes it
+    await db.prepare("UPDATE claims SET status = 'VERIFIED' WHERE id = ?").run(clm.id);
+
+    const { request } = await coord.submit(base({ id: 'jground', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+    const r = new JcodeRunner(db, ledger, coord);
+    await r.run(
+      TEN,
+      request.id,
+      { command: 'Fix token expiry', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 5, maxTokens: 10_000 },
+      { socketPath: h.path },
+    );
+    const sendMsg = h.requestsOf('send_message')[0]!;
+    eq(typeof sendMsg.content, 'string');
+    const msg = String(sendMsg.content);
+    eq(msg.includes('[Grounded Context]'), true, 'grounded context header present:');
+    eq(msg.includes('JWT expiry is 3600 seconds'), true, 'claim statement included:');
+    eq(msg.includes('[Instruction]\nFix token expiry'), true, 'original command appended:');
+  });
+});
+
+T('dollar budget ceiling terminates run with TERMINATED_BUDGET', async () => {
+  await withHarness(async (h) => {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'r',
+      kind: 'OBSERVATION',
+      statement: 'x',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    // 1500 tokens * 0.001 dollarPerToken = $1.50.
+    // Setting maxDollars to 0.50 triggers a dollar budget breach.
+    const { request } = await coord.submit(base({ id: 'jbudget', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+    const r = new JcodeRunner(db, ledger, coord);
+    const out = await r.run(
+      TEN,
+      request.id,
+      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 0.50, maxTokens: 10_000 },
+      { socketPath: h.path },
+    );
+    eq(out.status, 'TERMINATED_BUDGET');
+    eq(h.requestsOf('cancel').length, 1, 'cancel frame sent when dollar ceiling tripped:');
+  });
+});
+
+T('deliverable transcript is stored in artifact store and linked to observation claim', async () => {
+  await withHarness(async (h) => {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'r',
+      kind: 'OBSERVATION',
+      statement: 'x',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    const storeDir = `data/artifacts/test-${Date.now()}`;
+    const store = new FilesystemArtifactStore(storeDir);
+    try {
+      const { request } = await coord.submit(base({ id: 'jart', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
+      const r = new JcodeRunner(db, ledger, coord, undefined, store);
+      const out = await r.run(
+        TEN,
+        request.id,
+        { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 5, maxTokens: 10_000 },
+        { socketPath: h.path },
+      );
+      eq(out.status, 'COMPLETED');
+      const obsClaim = (await ledger.bySubject(TEN, 'jcode:engineering')).find((c) => c.statement.includes('harness run'))!;
+      eq(!!obsClaim, true, 'observation claim recorded:');
+      const val = obsClaim.value as { fullTextRef?: string };
+      eq(typeof val.fullTextRef, 'string', 'fullTextRef present in value:');
+      eq(typeof obsClaim.provenance.rawArtifactRef, 'string', 'rawArtifactRef present in provenance:');
+      eq(val.fullTextRef, obsClaim.provenance.rawArtifactRef, 'refs agree:');
+
+      // Retrieve from store
+      const bytes = store.get(val.fullTextRef!);
+      eq(bytes.toString('utf8'), out.transcript, 'stored artifact matches transcript:');
+    } finally {
+      const { rmSync } = await import('node:fs');
+      try {
+        rmSync(storeDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+});
+

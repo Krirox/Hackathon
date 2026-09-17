@@ -1,6 +1,12 @@
 import { connect, type Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
-import { API_VERSION_MAJOR, type ClientFrame, type PermissionDecision, type ServerFrame } from './protocol.ts';
+import {
+  API_VERSION_MAJOR,
+  socketPathFrom,
+  type ClientFrame,
+  type PermissionDecision,
+  type ServerFrame,
+} from './protocol.ts';
 
 /**
  * Minimal NDJSON client for the jcode harness API.
@@ -27,10 +33,9 @@ export interface JcodeClientOptions {
   helloTimeoutMs?: number;
   /**
    * Bound on request() legs that expect a correlated reply (hello, create,
-   * attach, cancel, permission_response). 0 (default) = unbounded, matching
-   * historical behavior; set it wherever a missing reply must fail instead
-   * of hanging. send() never waits for a reply (see below), so it is
-   * unaffected by this setting.
+   * attach, cancel, permission_response). Defaults to 15_000ms so an unresponsive
+   * daemon/bridge fails cleanly instead of hanging forever. Set to 0 for unbounded.
+   * send() never waits for a reply (see below), so it is unaffected by this setting.
    */
   requestTimeoutMs?: number;
 }
@@ -62,9 +67,17 @@ export class JcodeClient extends EventEmitter {
     return this.sock !== null;
   }
 
+  get socketPath(): string {
+    return this.opts.socketPath ?? socketPathFrom();
+  }
+
+  get requestTimeoutMs(): number {
+    return this.opts.requestTimeoutMs !== undefined ? this.opts.requestTimeoutMs : 15_000;
+  }
+
   async connect(): Promise<void> {
     if (this.sock) throw new JcodeError('ALREADY_OPEN', 'call close() first');
-    const path = this.opts.socketPath ?? '';
+    const path = this.opts.socketPath ?? socketPathFrom();
     const opener = this.opts.connectFn ?? ((p: string) => connect({ path: p }));
     const budget = this.opts.helloTimeoutMs ?? 15_000;
     const timeout = (ms: number, what: string): Promise<never> =>
@@ -176,7 +189,7 @@ export class JcodeClient extends EventEmitter {
         resolve: (f) => settle(() => resolve(f)),
         reject: (e) => settle(() => reject(e)),
       });
-      const budget = opts.timeoutMs ?? this.opts.requestTimeoutMs ?? 0;
+      const budget = opts.timeoutMs ?? (this.opts.requestTimeoutMs !== undefined ? this.opts.requestTimeoutMs : 15_000);
       if (budget > 0) {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {

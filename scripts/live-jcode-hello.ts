@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { connect } from 'node:net';
-import { JcodeClient } from '../src/jcode/client.ts';
+import { connect, createServer, type Socket, type Server } from 'node:net';
+import { JcodeClient, JcodeError } from '../src/jcode/client.ts';
 import { API_VERSION_MAJOR } from '../src/jcode/protocol.ts';
 
 /**
@@ -13,16 +13,24 @@ import { API_VERSION_MAJOR } from '../src/jcode/protocol.ts';
  *
  * What this proves: the wire contract holds against the actual sibling
  * (framing, hello handshake, version check, error replies), not just the
- * scripted FakeHarness. What it does NOT prove: session/turn work, which
- * need the full daemon behind the bridge's legacy socket AND a model
- * provider key — both named as blockers in TODO V2.1.
+ * scripted FakeHarness. What it does NOT prove: session/turn work with a
+ * real model behind the daemon (needs a provider key — TODO V2.1).
+ *
+ * The bridge dials the legacy daemon socket BEFORE sending hello_ok
+ * (harness-api-server lib.rs: "Do not claim a usable connection before the
+ * native daemon is reachable" — proven live 2026-09-17: hello with no
+ * daemon is dropped with os error 232). So the probe stands a minimal
+ * scripted daemon on the legacy socket — enough to accept the dial and
+ * answer the first `state` frame — and hello_ok then comes from the real
+ * bridge. The daemon here is OUR scripted stub, not jcode's daemon.
  *
  * Run:  tsx scripts/live-jcode-hello.ts
  * Env:  JCODE_BRIDGE_BIN (default: .upstream/jcode-1jehuang/target/debug/...)
  *       JCODE_API_SOCKET (default: a temp path under the OS temp dir)
  *
  * Exit 0: hello_ok from the live bridge + create_session fails CLEANLY
- * (rejection, no crash) without a daemon. Any crash or hang exits nonzero.
+ * (rejection, no crash) once the stub daemon stops answering. Any crash or
+ * hang exits nonzero.
  */
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -54,14 +62,21 @@ function pipeExists(pipe: string): Promise<boolean> {
 
 const bridgeBin = process.env.JCODE_BRIDGE_BIN ?? '.upstream/jcode-1jehuang/target/debug/jcode-harness-api-bridge.exe';
 const apiSock = process.env.JCODE_API_SOCKET ?? `${process.env.TEMP ?? '/tmp'}/vital-live-jcode-api.sock`;
-const legacySock = `${process.env.TEMP ?? '/tmp'}/vital-live-jcode-legacy-absent.sock`;
-const pipe = pipeNameFor(apiSock);
+const legacySock = `${process.env.TEMP ?? '/tmp'}/vital-live-jcode-legacy.sock`;
+const pipe = process.platform === 'win32' ? pipeNameFor(apiSock) : apiSock;
+const legacyPipe = process.platform === 'win32' ? pipeNameFor(legacySock) : legacySock;
 
 let bridge: ChildProcess | null = null;
+let legacyServer: Server | null = null;
 const fail = (msg: string): never => {
   console.error(`LIVE-JCODE FAIL: ${msg}`);
   try {
     bridge?.kill();
+  } catch {
+    /* already gone */
+  }
+  try {
+    legacyServer?.close();
   } catch {
     /* already gone */
   }
@@ -82,6 +97,39 @@ if (!existsSync(bridgeBin)) {
   );
   process.exit(1);
 }
+// The bridge dials the legacy daemon socket before hello_ok, so a scripted
+// stub daemon must be listening first. It answers only the first `state`
+// frame (the attach handshake) with a stable fake session; anything else is
+// ignored — this stub exists so the bridge's hello gate opens, nothing more.
+legacyServer = createServer((sock: Socket) => {
+  console.log('[stub-daemon] bridge dialed the legacy socket');
+  let buf = '';
+  sock.setEncoding('utf8');
+  sock.on('data', (chunk: string) => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let req: { type?: string; id?: number } | null = null;
+      try {
+        req = JSON.parse(line) as { type?: string; id?: number };
+      } catch {
+        continue;
+      }
+      if (req?.type === 'state' && typeof req.id === 'number') {
+        sock.write(JSON.stringify({ type: 'state', id: req.id, session_id: 'stub-session-1', status: 'idle' }) + '\n');
+        console.log('[stub-daemon] answered state frame');
+      }
+    }
+  });
+  sock.on('error', (e) => console.error(`[stub-daemon] connection error: ${e.message}`));
+});
+legacyServer.on('error', (e) => fail(`stub daemon could not listen on ${legacyPipe}: ${e.message}`));
+await new Promise<void>((res) => legacyServer!.listen(legacyPipe, res));
+console.log(`stub daemon listening on ${legacyPipe}`);
+
 bridge = spawn(bridgeBin, [apiSock, legacySock], { stdio: ['ignore', 'pipe', 'pipe'] });
 bridge.stdout?.on('data', (d: Buffer) => process.stdout.write(`[bridge] ${d}`));
 bridge.stderr?.on('data', (d: Buffer) => process.stderr.write(`[bridge:err] ${d}`));
@@ -112,12 +160,14 @@ if (typeof info?.v === 'number' && info.v !== API_VERSION_MAJOR) {
   fail(`bridge speaks v${info.v}, Vital speaks v${API_VERSION_MAJOR}`);
 }
 
-// Boundary probe: no daemon listens on the legacy socket, so session work
-// must fail — the question is HOW. A rejection is a governed boundary;
-// a crash or hang is a bug in us or them.
+// Boundary probe: the stub daemon answers only the attach handshake, and we
+// now close it — session work must then fail. The question is HOW: a
+// rejection is a governed boundary; a crash or hang is a bug in us or them.
+legacyServer.close(() => console.log('[stub-daemon] closed — the daemon boundary is now real'));
+await sleep(200);
 try {
-  const sid = await client.createSession();
-  console.log(`UNEXPECTED: live bridge created session ${sid} with no daemon behind it`);
+  const sid = await client.createSession({ timeoutMs: 5_000 });
+  fail(`UNEXPECTED: live bridge created session ${sid} with no daemon behind it`);
 } catch (e) {
   console.log(`create_session without daemon fails cleanly: ${(e as Error).message}`);
 }
@@ -125,4 +175,5 @@ try {
 client.close();
 await sleep(200);
 bridge.kill();
+legacyServer.close();
 console.log('LIVE-JCODE OK: hello_ok from the real sibling; daemon boundary fails clean, no crash');

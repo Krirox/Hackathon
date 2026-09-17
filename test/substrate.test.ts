@@ -174,7 +174,7 @@ T('engineering is not single-vendor: the same task completes on both adapters', 
     command: 'add the flag',
     claimRefs: [claimId],
     onBehalfOf: 'human:priya',
-    maxDollars: 1,
+    maxDollars: 5,
     maxTokens: 10_000,
   });
   const mk = async (id: string) => {
@@ -191,7 +191,7 @@ T('engineering is not single-vendor: the same task completes on both adapters', 
       authorType: 'system',
       provenance: sor(),
     });
-    const { request } = await coord.submit(base({ id, claimRefs: [clm.id] }));
+    const { request } = await coord.submit(base({ id, claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }));
     return { request, clm };
   };
   const echo = new LocalEchoAdapter(db, ledger, coord);

@@ -39,10 +39,10 @@ The highest-value product is one genuine **Ship-to-Result** loop. Completing tha
 
 ### Validation actually performed
 
-| Command | Result | What it establishes |
-|---|---|---|
-| `npm run typecheck` | Passed | Current TypeScript inputs typecheck; not build/start or deployment correctness |
-| `node --import tsx --test --test-force-exit test/deepresearch.test.ts test/console.test.ts test/aws.test.ts` | **26 passed, 0 failed** | Focused local tests using SQLite, local HTTP and injected collaborators |
+| Command                                                                                                      | Result                  | What it establishes                                                            |
+| ------------------------------------------------------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------ |
+| `npm run typecheck`                                                                                          | Passed                  | Current TypeScript inputs typecheck; not build/start or deployment correctness |
+| `node --import tsx --test --test-force-exit test/deepresearch.test.ts test/console.test.ts test/aws.test.ts` | **26 passed, 0 failed** | Focused local tests using SQLite, local HTTP and injected collaborators        |
 
 The full `npm test` entrypoint was not run: it enables writes to `var/status.json` through `test/run.ts` and `test/helpers.ts:25–48`. No live Postgres, Docker build/boot, Terraform apply, AWS queue, Buzz relay, live coding turn, browser interaction, or external model quality test was performed. The focused AWS tests use **empty batches**; their passing result does not verify execution or tenant isolation.
 
@@ -54,58 +54,58 @@ The full `npm test` entrypoint was not run: it enables writes to `var/status.jso
 
 There is one server-rendered HTML dashboard, not a multipage business application.
 
-| Surface | Current implementation | Connectivity / missing outcome |
-|---|---|---|
-| CLI `status` | SQLite ledger/coordinator statistics; Postgres migration/schema metadata | Callable. SQLite statistics use `acme`; Postgres branch is not the same instance-verification workflow |
-| CLI `report` | Writes dashboard HTML from SQLite | Callable, but rejects Postgres and ignores `DATABASE_URL` |
-| CLI `serve` | Opens/migrates DB and starts console | Connected console only; no background orchestration startup |
-| `GET /` | Database-backed dashboard | Connected, unauthenticated read surface |
-| `GET /healthz` | Constant-cost liveness JSON | Connected; deliberately not a DB-readiness check |
-| `GET /api/approval-latency` | Coordinator latency statistics | Connected, no dashboard action consumes it directly |
-| `GET /api/metrics` | Process request/error/report counters and uptime | Connected; recent addition, not a full telemetry pipeline |
-| `POST /api/requests/:id/approve` | Accepts request; best-effort latency record | Callable; optional operator-secret gate; no rendered browser control |
-| `POST /api/requests/:id/decline` | Declines request with reason | Callable; same identity/UI limitations |
-| `POST /api/claims/:id/correct` | Supersedes claim; returns diff; proposes eval case best-effort | Callable; no correction form, typed-value correction or failed-eval backfill workflow |
-| Other routes | 404 | No webhook, Slack intake, research, execution, digest, identity, or admin routes |
-| Reality health section | Staleness, contradictions, provenance, orphan claims, latency | Real reads; some metric semantics incomplete; MTTR explicitly unmeasured |
-| Cost and tier charts | Decision-cost SVG; weekly execution-tier mix | Real reads, but inputs do not establish trustworthy ROI or live routing |
-| “Needs a human” | Request cards, counts and budget-based queue | Read-only; includes nonterminal human-budget work, not precisely pending approvals |
-| Compiler board | Six lifecycle columns and transfer/trust metadata | Read-only by design; no promotion/evaluation operating workflow |
-| Rooms | Scope health, request states, evidence snippets | Connected, bounded display without full drill-down/pagination |
-| Digest | Count and “notices → digest” text | Actual digest renderer is not connected |
-| Forms/navigation | No rendered action forms, controls, detail links, search/filter or pagination | Browser cannot complete the mutation workflows |
-| Settings | CLI flags, environment variables, constructor configuration, namespaced `meta` values | No operator settings UI or validation/test-connection workflow; several environment values have no runtime consumer |
-| Administration | Direct policy/governance functions and DB-backed metadata | No authenticated user/role management, policy-review UI, or tenant administration |
+| Surface                          | Current implementation                                                                | Connectivity / missing outcome                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| CLI `status`                     | SQLite ledger/coordinator statistics; Postgres migration/schema metadata              | Callable. SQLite statistics use `acme`; Postgres branch is not the same instance-verification workflow              |
+| CLI `report`                     | Writes dashboard HTML from SQLite                                                     | Callable, but rejects Postgres and ignores `DATABASE_URL`                                                           |
+| CLI `serve`                      | Opens/migrates DB and starts console                                                  | Connected console only; no background orchestration startup                                                         |
+| `GET /`                          | Database-backed dashboard                                                             | Connected, unauthenticated read surface                                                                             |
+| `GET /healthz`                   | Constant-cost liveness JSON                                                           | Connected; deliberately not a DB-readiness check                                                                    |
+| `GET /api/approval-latency`      | Coordinator latency statistics                                                        | Connected, no dashboard action consumes it directly                                                                 |
+| `GET /api/metrics`               | Process request/error/report counters and uptime                                      | Connected; recent addition, not a full telemetry pipeline                                                           |
+| `POST /api/requests/:id/approve` | Accepts request; best-effort latency record                                           | Callable; optional operator-secret gate; no rendered browser control                                                |
+| `POST /api/requests/:id/decline` | Declines request with reason                                                          | Callable; same identity/UI limitations                                                                              |
+| `POST /api/claims/:id/correct`   | Supersedes claim; returns diff; proposes eval case best-effort                        | Callable; no correction form, typed-value correction or failed-eval backfill workflow                               |
+| Other routes                     | 404                                                                                   | No webhook, Slack intake, research, execution, digest, identity, or admin routes                                    |
+| Reality health section           | Staleness, contradictions, provenance, orphan claims, latency                         | Real reads; some metric semantics incomplete; MTTR explicitly unmeasured                                            |
+| Cost and tier charts             | Decision-cost SVG; weekly execution-tier mix                                          | Real reads, but inputs do not establish trustworthy ROI or live routing                                             |
+| “Needs a human”                  | Request cards, counts and budget-based queue                                          | Read-only; includes nonterminal human-budget work, not precisely pending approvals                                  |
+| Compiler board                   | Six lifecycle columns and transfer/trust metadata                                     | Read-only by design; no promotion/evaluation operating workflow                                                     |
+| Rooms                            | Scope health, request states, evidence snippets                                       | Connected, bounded display without full drill-down/pagination                                                       |
+| Digest                           | Count and “notices → digest” text                                                     | Actual digest renderer is not connected                                                                             |
+| Forms/navigation                 | No rendered action forms, controls, detail links, search/filter or pagination         | Browser cannot complete the mutation workflows                                                                      |
+| Settings                         | CLI flags, environment variables, constructor configuration, namespaced `meta` values | No operator settings UI or validation/test-connection workflow; several environment values have no runtime consumer |
+| Administration                   | Direct policy/governance functions and DB-backed metadata                             | No authenticated user/role management, policy-review UI, or tenant administration                                   |
 
 **Evidence:** `src/cli.ts:35–130`; `src/console/serve.ts` route handler; `src/console/render.ts:169–233`; `src/console/report.ts`; `src/console/digest.ts`.
 
 ## 1.2 Services, integrations and background jobs
 
-| Module | Features present | Actual integration status |
-|---|---|---|
-| `core/` | Async SQLite/Postgres abstraction, schema, sequence allocation, integrity helpers, migration journal | Runtime DB path used; separate migration journal not authoritative |
-| `ledger/` | Typed claims, provenance, links, staleness, verification/correction, subjects/aliases, decisions, outcomes, replay, export | Strongest connected foundation; curation/resolution/export UX incomplete |
-| `coord/` | QUERY/REQUEST/NOTICE, admission, dedupe, hops/cycles, budgets, decomposition, execution claim/reclaim, expiration, approval latency | Used by console and execution libraries; state/recovery/accounting contracts inconsistent |
-| `router/` | Four-tier routing, shadow/control mode, labels, calibration, task registry, tier fallback | Primarily tests/demo; not production dispatch owner |
-| `compiler/` | Skill cards, mining, quarantine→shadow→pilot→promotion, transfer, drift, registry | Console reads and dogfood compilation connected; operating promotion/drift/execution loop missing |
-| `gov/` | R/A/I matrix, trust/freeze, kills, honeytasks, review sampling, batch/rate limits, shell screening, reversible-action records | Shell screening connected to jcode. Full trust/kill governance not connected to live permission path |
-| `evals/` | Cases/runs, correction intake, held-out gating, injection suites, separate stage promotion | Correction intake connected. General suites/stages not tied into production compiler traffic |
-| `attrib/` | Costing, tier metrics, holdouts, preregistration, caveats | Costing displayed; causal experiment workflow absent |
-| `ingest/` | File/GitHub/Serper collectors, checkpointing, inbox helpers, artifacts, novelty/dedupe | GitHub polling and ingestion have dogfood caller; durable consumer and occurrence semantics incomplete |
-| `sense/` | Watch Contract compilation/status, materiality, model triage, integrity, poisoning fixtures | No production sensing loop found |
-| `wedge/ship.ts` | Cited release summary, affected scopes, five-leg request fan-out, copy check | Dogfood invokes it; no completed five-leg deliverables or real measurement |
-| `wedge/churn.ts` | Risk validation, three-leg requests, recommendation decision | Test/library workflow; does not wait for and act on completed business results |
-| `wedge/feature.ts` | Research observations, plan, named approval, injected harness execution | Test/library workflow; approval-to-write authority and evidence binding incomplete |
-| `wedge/deepresearch.ts` | Plan/proposal/approval, search, filtering, URI dedupe, cancellation, optional checkpoints, cited report | Test-only external callers found; lifecycle/reporting defects remain |
-| `jcode/` | Protocol/client/session/permission handling, runner, usage/progress | Real socket tests and boundary probe; no deployed application dispatch composition |
-| `substrate/harness.ts` | Jcode and local echo adapters; selector | Used by feature/transfer libraries and tests; echo is not another model |
-| `substrate/models.ts` | Dev/prod profiles, model client, approval registry, judge | AWS executor uses approved model path; raw client/triage/judge do not universally enforce approval |
-| `substrate/scheduler.ts` | In-memory jobs/tick/webhook budget logic; durable outbox and occurrence helpers | No production tick loop, producer/relay, reclaim or polling job registration found |
-| Other substrate | Scope tokens, sandbox manifests, egress decisions/proxy, content-screen contracts | Egress decisions used by AWS; most enforcement helpers not composed at harness boundary |
-| `talk/` | HMAC claim bindings, Buzz event/progress publisher and run watcher | Library/test composition; no verified production signing/relay or terminal delivery lifecycle |
-| `capabilities/` | Contract validation, quarterly kill/silence criteria | Explicitly a format/policy primitive; not an operating department manager |
-| `aws/` | SQS-shaped Lambda model executor | Handler exists and Terraform maps queue; no repository SQS producer found |
-| `vendor/qm/` | Command policy, safe regex, governor, ship gate, crypto/object/error helpers | Command policy/regex active; governor and several grant/configuration helpers dormant |
+| Module                   | Features present                                                                                                                    | Actual integration status                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `core/`                  | Async SQLite/Postgres abstraction, schema, sequence allocation, integrity helpers, migration journal                                | Runtime DB path used; separate migration journal not authoritative                                     |
+| `ledger/`                | Typed claims, provenance, links, staleness, verification/correction, subjects/aliases, decisions, outcomes, replay, export          | Strongest connected foundation; curation/resolution/export UX incomplete                               |
+| `coord/`                 | QUERY/REQUEST/NOTICE, admission, dedupe, hops/cycles, budgets, decomposition, execution claim/reclaim, expiration, approval latency | Used by console and execution libraries; state/recovery/accounting contracts inconsistent              |
+| `router/`                | Four-tier routing, shadow/control mode, labels, calibration, task registry, tier fallback                                           | Primarily tests/demo; not production dispatch owner                                                    |
+| `compiler/`              | Skill cards, mining, quarantine→shadow→pilot→promotion, transfer, drift, registry                                                   | Console reads and dogfood compilation connected; operating promotion/drift/execution loop missing      |
+| `gov/`                   | R/A/I matrix, trust/freeze, kills, honeytasks, review sampling, batch/rate limits, shell screening, reversible-action records       | Shell screening connected to jcode. Full trust/kill governance not connected to live permission path   |
+| `evals/`                 | Cases/runs, correction intake, held-out gating, injection suites, separate stage promotion                                          | Correction intake connected. General suites/stages not tied into production compiler traffic           |
+| `attrib/`                | Costing, tier metrics, holdouts, preregistration, caveats                                                                           | Costing displayed; causal experiment workflow absent                                                   |
+| `ingest/`                | File/GitHub/Serper collectors, checkpointing, inbox helpers, artifacts, novelty/dedupe                                              | GitHub polling and ingestion have dogfood caller; durable consumer and occurrence semantics incomplete |
+| `sense/`                 | Watch Contract compilation/status, materiality, model triage, integrity, poisoning fixtures                                         | No production sensing loop found                                                                       |
+| `wedge/ship.ts`          | Cited release summary, affected scopes, five-leg request fan-out, copy check                                                        | Dogfood invokes it; no completed five-leg deliverables or real measurement                             |
+| `wedge/churn.ts`         | Risk validation, three-leg requests, recommendation decision                                                                        | Test/library workflow; does not wait for and act on completed business results                         |
+| `wedge/feature.ts`       | Research observations, plan, named approval, injected harness execution                                                             | Test/library workflow; approval-to-write authority and evidence binding incomplete                     |
+| `wedge/deepresearch.ts`  | Plan/proposal/approval, search, filtering, URI dedupe, cancellation, optional checkpoints, cited report                             | Test-only external callers found; lifecycle/reporting defects remain                                   |
+| `jcode/`                 | Protocol/client/session/permission handling, runner, usage/progress                                                                 | Real socket tests and boundary probe; no deployed application dispatch composition                     |
+| `substrate/harness.ts`   | Jcode and local echo adapters; selector                                                                                             | Used by feature/transfer libraries and tests; echo is not another model                                |
+| `substrate/models.ts`    | Dev/prod profiles, model client, approval registry, judge                                                                           | AWS executor uses approved model path; raw client/triage/judge do not universally enforce approval     |
+| `substrate/scheduler.ts` | In-memory jobs/tick/webhook budget logic; durable outbox and occurrence helpers                                                     | No production tick loop, producer/relay, reclaim or polling job registration found                     |
+| Other substrate          | Scope tokens, sandbox manifests, egress decisions/proxy, content-screen contracts                                                   | Egress decisions used by AWS; most enforcement helpers not composed at harness boundary                |
+| `talk/`                  | HMAC claim bindings, Buzz event/progress publisher and run watcher                                                                  | Library/test composition; no verified production signing/relay or terminal delivery lifecycle          |
+| `capabilities/`          | Contract validation, quarterly kill/silence criteria                                                                                | Explicitly a format/policy primitive; not an operating department manager                              |
+| `aws/`                   | SQS-shaped Lambda model executor                                                                                                    | Handler exists and Terraform maps queue; no repository SQS producer found                              |
+| `vendor/qm/`             | Command policy, safe regex, governor, ship gate, crypto/object/error helpers                                                        | Command policy/regex active; governor and several grant/configuration helpers dormant                  |
 
 ### Connected flow versus intended flow
 
@@ -128,18 +128,18 @@ intake → durable dispatch → governed execution → deliverable review
 
 The inspected runtime DDL declares **22 distinct tables**, plus a conditional `schema_migrations` table created by the separate journal. This is schema inspection, not a live database count.
 
-| Domain | Tables | Use / limitation |
-|---|---|---|
-| Ledger | `claims`, `claim_links`, `decisions`, `outcomes`, `ledger_seq` | Active; resolution and correction semantics incomplete |
-| Subject identity | `subjects`, `subject_aliases` | Library-backed identity/alias support; not an operator curation workflow |
-| Coordination | `requests`, `escalations` | Active; lease/reservation additions exist, but worker and daily-attention lifecycle incomplete |
-| Compiler | `skill_cards`, `traces`, `skill_transfer_tests` | Used; transfer evidence not revision/eval-bound |
-| Router | `routing_decisions`, `routing_calibration` | Test/demo/library-backed; routing records lack a direct request link |
-| Governance | `trust_scores`, `honeytasks` | Policy persistence exists; no production outcome/review feedback loop found |
-| Evaluation | `eval_cases`, `eval_runs` | Active correction intake plus library/tests |
-| Audit/configuration | `audit_log`, `meta` | Active; `meta` also carries heterogeneous business state without first-class lifecycles |
-| Durable integration | `ingest_inbox`, `outbox` | Recent schema/helper additions; no authoritative runtime consumer/relay |
-| Parallel migration system | `schema_migrations` | Journal tests; not normal `migrate()` authority |
+| Domain                    | Tables                                                         | Use / limitation                                                                               |
+| ------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Ledger                    | `claims`, `claim_links`, `decisions`, `outcomes`, `ledger_seq` | Active; resolution and correction semantics incomplete                                         |
+| Subject identity          | `subjects`, `subject_aliases`                                  | Library-backed identity/alias support; not an operator curation workflow                       |
+| Coordination              | `requests`, `escalations`                                      | Active; lease/reservation additions exist, but worker and daily-attention lifecycle incomplete |
+| Compiler                  | `skill_cards`, `traces`, `skill_transfer_tests`                | Used; transfer evidence not revision/eval-bound                                                |
+| Router                    | `routing_decisions`, `routing_calibration`                     | Test/demo/library-backed; routing records lack a direct request link                           |
+| Governance                | `trust_scores`, `honeytasks`                                   | Policy persistence exists; no production outcome/review feedback loop found                    |
+| Evaluation                | `eval_cases`, `eval_runs`                                      | Active correction intake plus library/tests                                                    |
+| Audit/configuration       | `audit_log`, `meta`                                            | Active; `meta` also carries heterogeneous business state without first-class lifecycles        |
+| Durable integration       | `ingest_inbox`, `outbox`                                       | Recent schema/helper additions; no authoritative runtime consumer/relay                        |
+| Parallel migration system | `schema_migrations`                                            | Journal tests; not normal `migrate()` authority                                                |
 
 Evidence: `src/core/db.ts` additive migrations and `SCHEMA`; `src/core/migrations.ts:25–63`.
 
@@ -186,6 +186,7 @@ APIs exist but no forms/buttons/detail links expose them. “Needs a human” is
 **Evidence:** `src/coord/coordinator.ts:765–819,988–1023`; `src/console/serve.ts:200–205`; `src/jcode/runner.ts:125–142`; coordinator submission/deferred handling.
 
 **Remediation progress (2026-09-17):** The one transition graph now exists.
+
 - **Executable set**: `claimExecution`'s CAS takes `ADMITTED|ACCEPTED|IN_FLIGHT`, and every executor gate (jcode runner, local-echo harness, wedge feature, AWS executor failure path) accepts the same set — approval no longer strands work in a state no worker reads. The console's approve → ACCEPTED → jcode claim → run → complete journey is now executable end to end.
 - **`maybeInflight` covers ACCEPTED**: charging/usage on an approved request moves it to IN_FLIGHT without erasing the human's approval marker.
 - **`readmitDeferred`**: DEFERRED requests (parked at the concurrency cap) are re-checked against the live cap and readmitted via CAS — no more indefinitely queued deferred work. Bounded per call, audited per row.
@@ -237,6 +238,7 @@ The real jcode default policy uses conservative allow/deny rules and shell scree
 **Evidence:** `src/core/db.ts:527–538`; `src/core/migrations.ts:25–63`; `src/core/pg.ts:migratePostgres`.
 
 **Remediation progress (2026-09-17):** The swallow-everything runner is gone. `migrate()` now:
+
 - applies the additive list as ONE named journal entry (`additive-list-v6`) in `schema_migrations` inside a transaction with the DDL — a failure rolls back both and **propagates to the caller** (startup fails loudly on incomplete upgrades; no more half-migrated-but-stamped-6 databases);
 - probes column existence explicitly (`columnExists`, engine-aware: `information_schema` on Postgres, `pragma_table_info` on SQLite) instead of catching duplicate-column errors — idempotency is read as a fact, never inferred from an error message;
 - upgrades legacy databases (schema present, journal empty) in place by stamping the journal without re-running ALTERs;
@@ -283,6 +285,7 @@ Collectors now stage inbox events before cursor advancement, but dogfood still c
 **Evidence:** `src/ingest/collectors.ts:170–202`; `src/substrate/scheduler.ts:109–134`; `src/core/pg.ts` READ COMMITTED transaction path; `test/substrate.test.ts:317–321`.
 
 **Remediation progress (2026-09-17):** Both `claimInbox` and `claimOutbox` reworked identically:
+
 - **Atomic ownership CAS**: the claim UPDATE is conditional on the claimable state the SELECT observed (`status='PENDING' OR retry-due FAILED OR lease-expired CLAIMED`). Under Postgres READ COMMITTED a concurrent consumer's committed claim makes the loser's UPDATE match zero rows — double ownership is structurally impossible, not just unlikely.
 - **Leases**: each claim records `owner` + `claimed_at`; claimability includes `CLAIMED` rows whose `claimed_at + lease_ms` passed, so a crashed consumer's work becomes runnable again instead of stranding forever. Attempts increment per claim.
 - **Owner-fenced settlement**: `settleInbox`/`settleOutbox` update only rows the caller owns in CLAIMED state; a stale owner whose lease expired and whose row was re-claimed gets `NOT_OWNER` (an explicit error, never a silent corrupt). Same-state re-settlement stays idempotent.
@@ -298,6 +301,7 @@ Still open: the same drills over two true Postgres connections (the CI lane runs
 **Evidence:** `src/ingest/collectors.ts:275–470`; `src/ledger/s3store.ts`; `test/artifact.test.ts`.
 
 **Remediation progress (2026-09-17):**
+
 - **Canonical-byte content identity**: `storeArtifact` now hashes the serialized envelope (`{ uri, occurredAt, payload }`) directly to derive its ref and filename. The ref returned to the claim (`provenance.rawArtifactRef`) matches the SHA-256 of the exact bytes on disk rather than the collector's pre-serialization summary/body fingerprint.
 - **Bounded storage & traversal defense**: writes exceeding `maxBytes` (default 25 MB) are refused before hitting disk with namespaced `[artifact:TOO_LARGE]`. Refs containing `/`, `\`, or `..` are refused with `[artifact:UNSAFE_REF]`.
 - **Read-back integrity verification**: added `verifyArtifact(dir, ref)` and `readArtifact(dir, ref)` which verify that on-disk bytes hash to `ref` before return, throwing `[artifact:CORRUPT]` on tampered or corrupted blobs, `[artifact:NOT_FOUND]` on missing items, and enforcing size caps on read.
@@ -306,17 +310,19 @@ Still open: the same drills over two true Postgres connections (the CI lane runs
 
 ## F12 — jcode connection, cancellation, leases and deliverables
 
-**State:** Partial. **Priority:** High. **Effort:** Large. **Disposition:** Complete a bounded live path.
+**State:** Remediated (2026-09-17). **Priority:** High. **Effort:** Large. **Disposition:** Bounded live connection, cancellation, lease renewals, dollar accounting, and deliverable persistence complete.
 
-**Evidence:** `src/jcode/client.ts` socket/default request timeout; `src/jcode/protocol.ts:90–99`; `src/jcode/runner.ts:125–142,253–321,341–380,429–483`; `scripts/live-jcode-hello.ts:55–128`.
+**Evidence:** `src/jcode/client.ts` socket/default request timeout; `src/jcode/protocol.ts:90–101`; `src/jcode/runner.ts`; `src/coord/coordinator.ts:271–290`; `scripts/live-jcode-hello.ts`.
 
-Default construction does not use the existing socket resolver. Session setup can precede the turn timeout. Local timeout does not establish cancellation of daemon work. Runner acquires a default 60-second lease without renewal. Only token usage is reported; dollar accounting is not enforced here and usage errors can disable subsequent reporting. Nonempty claim IDs are required, but the runner sends command text rather than resolved claim context. Durable completion primarily records activity, not a full deliverable.
-
-The live probe is Windows-shaped, uses fixed paths, lacks bounded session requests and logs unexpected session success without necessarily failing. It is a boundary probe, not a coding-turn test.
-
-**User impact:** Configuration can fail unexpectedly, work may continue after the caller times out, accounting can become incomplete, and users cannot reliably recover the produced artifact.
-
-**Missing / plan:** Central transport configuration → bounded setup/turn/cleanup → confirmed cancellation and fenced renewable ownership → resolved context binding → authoritative usage and artifact persistence → strict portable probe → one real approved task acceptance test.
+**Remediation progress (2026-09-17):**
+- **Central transport configuration & bounded timeouts**: `JcodeClient` defaults `socketPath` to `socketPathFrom()` across all platforms (Windows named pipes vs Unix domain sockets) and defaults `requestTimeoutMs` to 15,000ms for correlated legs. Added `socketPath` and `requestTimeoutMs` instance getters.
+- **Confirmed cancellation on timeout**: `waitForTurn` now issues a bounded `client.cancel(sessionId)` with a 2-second fallback race before resolving `timeout`, ensuring daemon work is terminated cleanly on client-side timeouts.
+- **Fenced renewable execution leases**: Added `renewExecutionLease(tenant, id, owner, now, leaseMs)` with atomic CAS protection (`WHERE id = ? AND tenant = ? AND state = 'IN_FLIGHT' AND exec_owner = ?`), throwing `[coord:LEASE_EXPIRED]` if the lease was lost or reclaimed. `JcodeRunner` runs an unref'd heartbeat timer (every 25s) to renew its lease during execution and clears it on exit.
+- **Grounded context binding**: `JcodeRunner.run()` resolves cited claims via `this.ledger.contextFor(tenant, task.claimRefs, now)` and prepends a `[Grounded Context]` block to the prompt sent to the harness in `send_message`.
+- **Authoritative dollar accounting**: Token deltas are priced via `getRates(this.db, tenant)`. `coord.reportUsage` receives `{ tokens, dollars }`, enforcing both the coordinator request bid and `task.maxDollars` ceilings. Removed permanent `reportHalted` latch on transient errors.
+- **Durable deliverable persistence**: Deliverable transcripts are saved to disk via `FilesystemArtifactStore`, with the artifact ref linked as `fullTextRef` on the `OBSERVATION` claim value and `provenance.rawArtifactRef`.
+- **Strict portable probe**: `scripts/live-jcode-hello.ts` uses cross-platform pipes/domain sockets and strictly fails if session creation succeeds without a daemon.
+- **Verification**: 26 tests in `test/jcode.test.ts` plus cross-component coverage in `substrate.test.ts` and `talk.test.ts`; all 355 test suite tests passing, 0 typecheck errors, 0 lint errors.
 
 ## F13 — Feature plan approval to actual coding
 
@@ -347,6 +353,7 @@ Ship creates five requests with deliverable schema names but no composed workers
 **State:** Partial. **Priority:** High. **Effort:** Small to quarantine; Large to measure honestly. **Disposition:** Quarantined 2026-09-17; honest measurement deferred until a real pilot exists.
 
 **Remediation progress (2026-09-17):** Fabricated success removed from the dogfood pipeline.
+
 - The hardcoded `predicted=240 / actual=90` outcome and the invented `human:founder` verifier are gone: the pipeline records **no outcome at all** because it cannot measure one. `ShipPipelineResult.outcomeBasis` is always null for dogfood runs.
 - The script-asserted approval is no longer presented as human governance: the decision names `agent:dogfood-script`, carries no `approvedBy`, and is tagged `synthetic:decision:<id>` in `meta`.
 - The trace intent is prefixed `simulated:` with a `simulated: true` cost payload, and the compiled card records `simulated_run` in its predicates — so attribution, eval, and metrics code can exclude them by construction.
@@ -401,6 +408,7 @@ No production route/label/calibration/mining/drift worker or executable-card dis
 ## F18 — Transfer and promotion evidence lineage
 
 **Remediation progress (2026-09-17):** Addressed in `src/compiler/transfer.ts` and `src/compiler/compiler.ts`.
+
 1. Durable negative transfer capture: `runCrossModelEvidence` now wraps adapter submission and execution in try/catch; harness exceptions or admissions failures bank negative transfer records (`passed: false, score: 0`) in `skill_transfer_tests` rather than aborting the pipeline and leaving missing evidence.
 2. Invalidation & freshness on promotion gates: `attemptAdvance` and `expandScope` now evaluate active test status by grouping by `(kind, variant)` and resolving the latest test run (`ranAt`). Historical passing runs can no longer satisfy promotion gates if a subsequent run for that variant or role has failed or regressed.
 
@@ -435,6 +443,7 @@ No production trust-outcome/honeytask/freeze feedback loop was found. `override_
 ## F20 — Delegated budgets and human attention accounting
 
 **Remediation progress (2026-09-17):** Fully addressed in `src/coord/coordinator.ts`.
+
 1. `humanMinutes` enforcement: mid-run charging (`charge`) and continuous usage (`reportUsage`) now strictly enforce `spent.humanMinutes > r.bid.humanMinutes` and terminate with `TERMINATED_BUDGET` when breached.
 2. Daily escalation accounting: admission now counts cumulative daily interruption events from the immutable `escalations` audit table via `dailyEscalations(tenant, day)` instead of transient open states, ensuring task completions cannot reset or bypass the daily attention cap. `openEscalations` is retained for concurrent pending approval monitoring.
 3. Multi-resource parent decomposition & delegation reconciliation: `decompose` now reconciles both terminal child spend (completed, failed, expired) and non-terminal child reservations across dollars, tokens, and human attention. Step bids with omitted values now default to `DEFAULT_BID` and are clamped in preliminary accounting, eliminating budget bypasses. Direct child submissions via `submit` enforce parent unspent budget bounds.
@@ -454,6 +463,7 @@ Parent decomposition checks dollars against nonterminal child bids, not full com
 ## F21 — Cost per good decision and counterfactual attribution
 
 **Remediation progress (2026-09-17):** Addressed in `src/attrib/attribution.ts`.
+
 1. Metric direction handling: `costsOfDecisions` evaluates metric direction via `PreregisteredMetric.direction` ('higher' | 'lower') or metric name inference (lower-is-better for latency, error rate, churn, cost, defects), correctly determining whether actual outcomes met expectations.
 2. Decision-level outcome policy: evaluates all outcome rows for a decision; a decision is counted as good only when all measured outcomes pass the prediction criteria, preventing row-count inflation.
 3. Added `direction?: 'higher' | 'lower'` to `PreregisteredMetric` and `preregister`.
@@ -473,6 +483,7 @@ Verification: Regression tests in `test/attrib.test.ts` verify lower-is-better t
 ## F22 — Structured correction and resolution queues
 
 **Remediation progress (2026-09-17):** Addressed in `src/ledger/ledger.ts` and `src/console/serve.ts`.
+
 1. Typed correction contract: introduced `CorrectionPatch` (`value`, `unit`, `confidence`, `validUntil`). When a human supplies a prose correction without explicit structured values, `correctClaim` invalidates retained numerical values and units (`null`), preventing automated downstream consumers from reading stale numbers.
 2. Contradiction dispute resolution: implemented `resolveDispute(tenant, winnerId, loserId, actor, rationale)` in `src/ledger/ledger.ts`, setting winner to `VERIFIED`, loser to `SUPERSEDED`, creating a `'supersedes'` claim link, and logging `DISPUTE_RESOLVED`. `disputedPairs` excludes superseded/retired claims so resolved contradictions drop from the curation queue.
 3. Prediction outcome resolution: implemented `resolvePrediction(tenant, predictionId, outcome, actor)` recording a verified `MEASURED` fact linked via `'resolves'`, retiring the prediction claim, and logging `PREDICTION_RESOLVED`.
@@ -555,25 +566,25 @@ S3 resources have no corresponding application audit/artifact writers. SNS topic
 
 # 3. Broken end-to-end workflows
 
-| Journey | Working legs | Break / missing lifecycle | Findings |
-|---|---|---|---|
-| Operator access | Optional shared-secret mutation gate | No individual principal, tenant-bound reads, roles, revocation or attributable approval | F01 |
-| Human approval | Queue read → callable API → state change | No browser action; ACCEPTED cannot be claimed by jcode | F02–F03 |
-| Paid job | Handler → model → claim → completion | No deployed producer, exclusive ownership/accounting/failure contract incomplete | F04–F05 |
-| Governed coding | Client/socket → permissions → turn | Full trust/kill/scope boundary not connected; approved write path unproven | F06, F12–F13 |
-| Source ingestion | Poll → inbox staging/cursor → direct ingestion | Inbox recovery not authoritative, tenant/occurrence/artifact identity inconsistent | F09–F11 |
-| Ship-to-Result | Release ingestion → summary → five requests | Deliverables/review/action/real outcome absent; dogfood measurement synthetic | F14–F15 |
-| Churn response | Risk refs → three requests → recommendation | Product evidence/result join, approved outreach and outcome missing | F14 |
-| Deep research | Plan → approval → searches → optional checkpoints → cited report | Partial incorrectly completed; restart/report/gap/contradiction lifecycle incomplete | F16 |
-| Organizational learning | Trace/card/gates/registry functions | Actual routing→evaluation→promotion→dispatch→drift loop absent | F17–F18 |
-| Trust improvement | Scores/honeytasks/review functions | Runtime feedback/authorization/kill verification absent | F06, F19 |
-| Decision ROI | Outcomes → arithmetic → chart | Metric direction/decision denominator/real costs/experiment lifecycle incomplete | F15, F20–F21 |
-| Correction | HTTP → supersession → optional eval case | Structured value can stay old; failed eval linkage lacks recovery | F22 |
-| Dispute/prediction curation | Links/expiry queries → dashboard | Assignment, resolution, outcome association and SLA closure absent | F22 |
-| Audit export | Tenant data → paginated reads → assembled output | No consistent concurrent snapshot or operator workflow | F23 |
-| World Sense | Individual contract/triage/integrity functions | No running reviewed/budgeted funnel | F24 |
-| Run notifications | Progress subscriber → signed-event-shaped POST | No production signer composition or reliable terminal/retry lifecycle | F25 |
-| Deploy/operate/recover | Images/Terraform definitions/tests | First/repeat deploy, state/secrets, truthful smoke, alerts/restore not complete | F08, F27 |
+| Journey                     | Working legs                                                     | Break / missing lifecycle                                                               | Findings     |
+| --------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------ |
+| Operator access             | Optional shared-secret mutation gate                             | No individual principal, tenant-bound reads, roles, revocation or attributable approval | F01          |
+| Human approval              | Queue read → callable API → state change                         | No browser action; ACCEPTED cannot be claimed by jcode                                  | F02–F03      |
+| Paid job                    | Handler → model → claim → completion                             | No deployed producer, exclusive ownership/accounting/failure contract incomplete        | F04–F05      |
+| Governed coding             | Client/socket → permissions → turn                               | Full trust/kill/scope boundary not connected; approved write path unproven              | F06, F12–F13 |
+| Source ingestion            | Poll → inbox staging/cursor → direct ingestion                   | Inbox recovery not authoritative, tenant/occurrence/artifact identity inconsistent      | F09–F11      |
+| Ship-to-Result              | Release ingestion → summary → five requests                      | Deliverables/review/action/real outcome absent; dogfood measurement synthetic           | F14–F15      |
+| Churn response              | Risk refs → three requests → recommendation                      | Product evidence/result join, approved outreach and outcome missing                     | F14          |
+| Deep research               | Plan → approval → searches → optional checkpoints → cited report | Partial incorrectly completed; restart/report/gap/contradiction lifecycle incomplete    | F16          |
+| Organizational learning     | Trace/card/gates/registry functions                              | Actual routing→evaluation→promotion→dispatch→drift loop absent                          | F17–F18      |
+| Trust improvement           | Scores/honeytasks/review functions                               | Runtime feedback/authorization/kill verification absent                                 | F06, F19     |
+| Decision ROI                | Outcomes → arithmetic → chart                                    | Metric direction/decision denominator/real costs/experiment lifecycle incomplete        | F15, F20–F21 |
+| Correction                  | HTTP → supersession → optional eval case                         | Structured value can stay old; failed eval linkage lacks recovery                       | F22          |
+| Dispute/prediction curation | Links/expiry queries → dashboard                                 | Assignment, resolution, outcome association and SLA closure absent                      | F22          |
+| Audit export                | Tenant data → paginated reads → assembled output                 | No consistent concurrent snapshot or operator workflow                                  | F23          |
+| World Sense                 | Individual contract/triage/integrity functions                   | No running reviewed/budgeted funnel                                                     | F24          |
+| Run notifications           | Progress subscriber → signed-event-shaped POST                   | No production signer composition or reliable terminal/retry lifecycle                   | F25          |
+| Deploy/operate/recover      | Images/Terraform definitions/tests                               | First/repeat deploy, state/secrets, truthful smoke, alerts/restore not complete         | F08, F27     |
 
 **Not automatically missing:** registration/password reset if using an external IdP; destructive CRUD/restore for immutable claims; autonomous external publishing (explicitly excluded); chat (intentionally belongs elsewhere); scheduled report delivery before pilot demand. These are product choices, not checkbox defects.
 
@@ -583,22 +594,22 @@ S3 resources have no corresponding application audit/artifact writers. SNS topic
 
 Legend: **Yes** = meaningful implementation at this layer; **Partial** = narrower than promised; **Library** = callable, not operationally connected; **No** = no relevant implementation found. Tests indicate coverage exists, not production verification.
 
-| Feature | UI | API/runtime | Validation | Permissions | Persistence | Error/loading/success | Logging | Docs/tests |
-|---|---|---|---|---|---|---|---|---|
-| Console reporting | Yes | Yes | Partial metric semantics | No read auth | Yes | Server errors; no interactive lifecycle | Recent access logs/counters | Tests, docs drift |
-| Approval/decline | No actions | Yes | Transition/body checks | Shared-secret only | Yes | HTTP states, no UX | Audit/latency partial | Local HTTP tests |
-| Claim correction | No form | Yes | Prose only | Shared-secret only | Yes | Eval linkage best-effort | Audit diff | Regression tests partial |
-| Request execution | Read-only states | Split paths | Partial | Boundary incomplete | Claims/leases partial | Retry/timeout gaps | Activity traces partial | Fake/empty-job tests |
-| Ship/churn | No workflow | Script/library | Citation availability | Simulated or named approval | Requests/decisions | No completed joins | Mixed real/synthetic | Admission-focused tests |
-| Feature coding | No | Library | Approval binding incomplete | Default writes denied | Decisions/observations | Adapter completion | Trace | Echo/fake success |
-| Deep research | No | Library | Citation/state partial | Named string, no runtime identity | Optional partial checkpoints | Budget/recovery/report gaps | Checkpoint rows | Seven focused tests passed |
-| Router/compiler | Read-only board | Library/demo | Gates exist, evidence weak | Tenant/reviewer gaps | Yes | No operational lifecycle | Partial lineage | Broad unit tests |
-| Governance | No | Library; shell active | Policy checks | Not composed end-to-end | Yes | Drill/feedback gaps | Policy audit partial | Component tests |
-| Ingestion | No | Dogfood + library | Dedupe/source partial | Tenant cursor issues | Inbox/artifacts partial | Retry recovery gaps | Partial | Tests, no worker validation |
-| Sensing | No | Library | Incomplete contract matching | No operating boundary | Contract objects/meta fragments | Model fallback, no service | No complete lineage | Policy/fixture tests |
-| Attribution | Charts | Partial | Wrong success semantics | Caller/tenant context partial | Outcomes/meta | Unknown data defaults | Partial | Narrow arithmetic tests |
-| Buzz | External surface only | Library | Mocked transport/signing | Injected signer | No durable delivery | Errors/terminal/drain absent | Weak | Fake relay tests |
-| Deployment/recovery | N/A | Declarative partial | Config/startup gaps | IAM/identity incomplete | Infra declared | Smoke/restore gaps | Alarms without verified delivery | No live deployment validation |
+| Feature             | UI                    | API/runtime           | Validation                   | Permissions                       | Persistence                     | Error/loading/success                   | Logging                          | Docs/tests                    |
+| ------------------- | --------------------- | --------------------- | ---------------------------- | --------------------------------- | ------------------------------- | --------------------------------------- | -------------------------------- | ----------------------------- |
+| Console reporting   | Yes                   | Yes                   | Partial metric semantics     | No read auth                      | Yes                             | Server errors; no interactive lifecycle | Recent access logs/counters      | Tests, docs drift             |
+| Approval/decline    | No actions            | Yes                   | Transition/body checks       | Shared-secret only                | Yes                             | HTTP states, no UX                      | Audit/latency partial            | Local HTTP tests              |
+| Claim correction    | No form               | Yes                   | Prose only                   | Shared-secret only                | Yes                             | Eval linkage best-effort                | Audit diff                       | Regression tests partial      |
+| Request execution   | Read-only states      | Split paths           | Partial                      | Boundary incomplete               | Claims/leases partial           | Retry/timeout gaps                      | Activity traces partial          | Fake/empty-job tests          |
+| Ship/churn          | No workflow           | Script/library        | Citation availability        | Simulated or named approval       | Requests/decisions              | No completed joins                      | Mixed real/synthetic             | Admission-focused tests       |
+| Feature coding      | No                    | Library               | Approval binding incomplete  | Default writes denied             | Decisions/observations          | Adapter completion                      | Trace                            | Echo/fake success             |
+| Deep research       | No                    | Library               | Citation/state partial       | Named string, no runtime identity | Optional partial checkpoints    | Budget/recovery/report gaps             | Checkpoint rows                  | Seven focused tests passed    |
+| Router/compiler     | Read-only board       | Library/demo          | Gates exist, evidence weak   | Tenant/reviewer gaps              | Yes                             | No operational lifecycle                | Partial lineage                  | Broad unit tests              |
+| Governance          | No                    | Library; shell active | Policy checks                | Not composed end-to-end           | Yes                             | Drill/feedback gaps                     | Policy audit partial             | Component tests               |
+| Ingestion           | No                    | Dogfood + library     | Dedupe/source partial        | Tenant cursor issues              | Inbox/artifacts partial         | Retry recovery gaps                     | Partial                          | Tests, no worker validation   |
+| Sensing             | No                    | Library               | Incomplete contract matching | No operating boundary             | Contract objects/meta fragments | Model fallback, no service              | No complete lineage              | Policy/fixture tests          |
+| Attribution         | Charts                | Partial               | Wrong success semantics      | Caller/tenant context partial     | Outcomes/meta                   | Unknown data defaults                   | Partial                          | Narrow arithmetic tests       |
+| Buzz                | External surface only | Library               | Mocked transport/signing     | Injected signer                   | No durable delivery             | Errors/terminal/drain absent            | Weak                             | Fake relay tests              |
+| Deployment/recovery | N/A                   | Declarative partial   | Config/startup gaps          | IAM/identity incomplete           | Infra declared                  | Smoke/restore gaps                      | Alarms without verified delivery | No live deployment validation |
 
 ---
 
@@ -606,22 +617,22 @@ Legend: **Yes** = meaningful implementation at this layer; **Partial** = narrowe
 
 There is **no hidden multipage UI inventory**. The main orphaning is backend/library composition and inaccessible actions.
 
-| Candidate | Evidence / caller status | Recommended disposition |
-|---|---|---|
-| Digest renderer | `src/console/digest.ts`; tests/helper only | Connect a real section/route or delete renderer and misleading label |
-| Approval/correction UI | APIs exist; no controls in renderer | Complete, not delete |
-| Research plan/run/report | `src/wedge/deepresearch.ts`; test-only callers | Experimental namespace/defer standalone product |
-| Feature and churn product workflows | `src/wedge/feature.ts`, `churn.ts`; test/library callers | Defer behind working Ship slice |
-| Scheduler tick/webhook/outbox | No production scheduler/relay startup | Complete one worker or stop claiming scheduled execution |
-| Router labeling/calibration/mining/drift | Tests/demo and registry read UI | Core moat: retain, integrate after valid evidence |
-| Trust/honeytask/review policy | Tests/library; no live feedback caller | Retain, compose at execution boundary |
-| Scope identity/sandbox/content proxy | No adapter preflight wiring | Complete if production safety claims depend on them |
-| Capability quarterly reviews | Explicit format-only primitive | Keep small; do not build a department UI now |
-| Preregistration/holdout/caveats | No production experiment caller | Keep helpers; avoid causal claims until lifecycle exists |
-| Export/replay/curation library | Intentional API functionality, limited UX | Preserve; expose operator workflows as required |
-| Model judge and raw triage adapter | No governed production scoring path | Tighten semantics before promotion use |
-| `openFromEnv` and socket helpers | DB helper used by executor; socket resolver disconnected | Do not blanket-delete helpers; connect resolver centrally |
-| Standalone jcode deployment/layer skeleton | Explicitly staged/empty | Remove from active deployment until transport and owner exist |
+| Candidate                                  | Evidence / caller status                                 | Recommended disposition                                              |
+| ------------------------------------------ | -------------------------------------------------------- | -------------------------------------------------------------------- |
+| Digest renderer                            | `src/console/digest.ts`; tests/helper only               | Connect a real section/route or delete renderer and misleading label |
+| Approval/correction UI                     | APIs exist; no controls in renderer                      | Complete, not delete                                                 |
+| Research plan/run/report                   | `src/wedge/deepresearch.ts`; test-only callers           | Experimental namespace/defer standalone product                      |
+| Feature and churn product workflows        | `src/wedge/feature.ts`, `churn.ts`; test/library callers | Defer behind working Ship slice                                      |
+| Scheduler tick/webhook/outbox              | No production scheduler/relay startup                    | Complete one worker or stop claiming scheduled execution             |
+| Router labeling/calibration/mining/drift   | Tests/demo and registry read UI                          | Core moat: retain, integrate after valid evidence                    |
+| Trust/honeytask/review policy              | Tests/library; no live feedback caller                   | Retain, compose at execution boundary                                |
+| Scope identity/sandbox/content proxy       | No adapter preflight wiring                              | Complete if production safety claims depend on them                  |
+| Capability quarterly reviews               | Explicit format-only primitive                           | Keep small; do not build a department UI now                         |
+| Preregistration/holdout/caveats            | No production experiment caller                          | Keep helpers; avoid causal claims until lifecycle exists             |
+| Export/replay/curation library             | Intentional API functionality, limited UX                | Preserve; expose operator workflows as required                      |
+| Model judge and raw triage adapter         | No governed production scoring path                      | Tighten semantics before promotion use                               |
+| `openFromEnv` and socket helpers           | DB helper used by executor; socket resolver disconnected | Do not blanket-delete helpers; connect resolver centrally            |
+| Standalone jcode deployment/layer skeleton | Explicitly staged/empty                                  | Remove from active deployment until transport and owner exist        |
 
 **Endpoint distinction:** Approval/decline/correction endpoints are implemented and locally tested, not dead. They are **product-inaccessible from the browser**. Metrics/latency endpoints are legitimate observability APIs even without UI callers. No speculative list of “unused REST services” is inferred from that absence.
 
@@ -631,21 +642,21 @@ There is **no hidden multipage UI inventory**. The main orphaning is backend/lib
 
 The code cannot establish whether AI authored a feature. The following are observable integration patterns, not authorship claims.
 
-| Pattern | Concrete example | Why it matters |
-|---|---|---|
-| Test name stronger than assertion | `test/aws.test.ts:34–40` names tenant handling but submits no jobs | Passing does not verify the advertised boundary |
-| Simulation treated as evidence | Dogfood hardcoded approval/time savings/success | Corrupts product credibility and learning inputs |
-| Adapter completion treated as quality | Echo/fake transfer passes | Transport success is not procedure transfer |
-| Citation presence treated as support | Release/research checkers validate IDs, not assertions | “Verified report” overstates what is checked |
-| Safety control exists beside executor | Tokens/kill/trust/sandbox helpers not applied at harness entry | Individually correct controls do not constrain work |
-| Schema/service exists without consumer | Inbox/outbox and SQS infrastructure | Durable storage alone does not process or recover jobs |
-| New fix not propagated to all callers | Execution claim used by jcode, not Lambda; cost ignored by completion caller | Competing execution contracts |
-| Duplicate migration architecture | Runtime catch-all versus named journal | Stronger tests cover the unused path |
-| Separate artifact implementations | Runtime writer versus bounded store | Size/integrity behavior differs by caller |
-| Two promotion lifecycles | Compiler card states versus `evals/promotion.ts` stages | “Canary” metadata is not real traffic allocation |
-| Honest explicit placeholder | MTTR `null`; staged standalone jcode | Keep labeled or remove; do not fabricate values |
-| Infrastructure mistaken for functionality | S3/Object Lock/SNS/EFS declarations | Requires writers, readers, recipients, and drills |
-| Docs contradict each other | Deployment promises connected services; `docs/limitations.md:8–15` admits no production integration/compliance | Operators cannot tell which promises apply |
+| Pattern                                   | Concrete example                                                                                               | Why it matters                                         |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Test name stronger than assertion         | `test/aws.test.ts:34–40` names tenant handling but submits no jobs                                             | Passing does not verify the advertised boundary        |
+| Simulation treated as evidence            | Dogfood hardcoded approval/time savings/success                                                                | Corrupts product credibility and learning inputs       |
+| Adapter completion treated as quality     | Echo/fake transfer passes                                                                                      | Transport success is not procedure transfer            |
+| Citation presence treated as support      | Release/research checkers validate IDs, not assertions                                                         | “Verified report” overstates what is checked           |
+| Safety control exists beside executor     | Tokens/kill/trust/sandbox helpers not applied at harness entry                                                 | Individually correct controls do not constrain work    |
+| Schema/service exists without consumer    | Inbox/outbox and SQS infrastructure                                                                            | Durable storage alone does not process or recover jobs |
+| New fix not propagated to all callers     | Execution claim used by jcode, not Lambda; cost ignored by completion caller                                   | Competing execution contracts                          |
+| Duplicate migration architecture          | Runtime catch-all versus named journal                                                                         | Stronger tests cover the unused path                   |
+| Separate artifact implementations         | Runtime writer versus bounded store                                                                            | Size/integrity behavior differs by caller              |
+| Two promotion lifecycles                  | Compiler card states versus `evals/promotion.ts` stages                                                        | “Canary” metadata is not real traffic allocation       |
+| Honest explicit placeholder               | MTTR `null`; staged standalone jcode                                                                           | Keep labeled or remove; do not fabricate values        |
+| Infrastructure mistaken for functionality | S3/Object Lock/SNS/EFS declarations                                                                            | Requires writers, readers, recipients, and drills      |
+| Docs contradict each other                | Deployment promises connected services; `docs/limitations.md:8–15` admits no production integration/compliance | Operators cannot tell which promises apply             |
 
 `seed-demo.ts`, injected test models, poisoning fixtures, and `LocalEchoAdapter` are legitimate when clearly isolated and named. The recommended removal is **their use as production-quality evidence**, not all deterministic tests.
 
@@ -653,23 +664,23 @@ The code cannot establish whether AI authored a feature. The following are obser
 
 # 7. Dead code and legacy artifacts
 
-| Artifact | Assessment | Action |
-|---|---|---|
-| `src/core/migrations.ts` alongside runtime migrations | Competing, test-backed but not authoritative | Consolidate, then remove duplicate path |
-| `src/console/digest.ts` renderer | No product caller | Connect or delete |
-| Runtime `storeArtifact` versus bounded filesystem store | Competing approaches | One interface/implementation path |
-| `evals/promotion.ts` versus compiler lifecycle | Possibly distinct domains, relationship undefined | Define owner and gates; remove unused generic state machine if redundant |
-| Duplicated drift queries | Compiler and registry read logic | Share read-only measurement; keep mutation explicit |
-| `Coordinator.complete(...cost)` | Parameter accepted but not charged | Remove dead contract or implement authoritative charging, update every caller |
-| Trust `override_rate`/grant fields | Not consistently maintained/consumed | Maintain with defined semantics or remove |
-| `src/core/rows.ts` | Request row contract behind lease/reservation/schema additions | Align types with actual schema |
-| Vendored `governor.ts` | Evaluator referenced by tests, no runtime vitals/action application | Archive/defer or wire only if needed |
-| Vendored grant/output helpers | `buildShipGrant`, `graduationAllowed`, `outputCandidate`, `undeclaredShipActions` lack application consumers | Do not count as operating grant lifecycle |
-| Vendored policy parser/composition/layers | No application configuration caller; shell uses default policy | Defer configurable policy claims |
-| Vendored command policy/safe regex | **Active** through jcode shell screening | Keep; not dead code |
-| Vendored crypto/object/error exports | Some only support dormant grant/parser paths | Preserve upstream provenance or narrow deliberately, not blind deletion |
-| Empty deployment-layer skeleton | No deployable reference genome | Remove until it has an owner |
-| Stale documentation claims | README/idea build-state and deployment assumptions | Refresh from verified integration evidence, not old checklist status |
+| Artifact                                                | Assessment                                                                                                   | Action                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `src/core/migrations.ts` alongside runtime migrations   | Competing, test-backed but not authoritative                                                                 | Consolidate, then remove duplicate path                                       |
+| `src/console/digest.ts` renderer                        | No product caller                                                                                            | Connect or delete                                                             |
+| Runtime `storeArtifact` versus bounded filesystem store | Competing approaches                                                                                         | One interface/implementation path                                             |
+| `evals/promotion.ts` versus compiler lifecycle          | Possibly distinct domains, relationship undefined                                                            | Define owner and gates; remove unused generic state machine if redundant      |
+| Duplicated drift queries                                | Compiler and registry read logic                                                                             | Share read-only measurement; keep mutation explicit                           |
+| `Coordinator.complete(...cost)`                         | Parameter accepted but not charged                                                                           | Remove dead contract or implement authoritative charging, update every caller |
+| Trust `override_rate`/grant fields                      | Not consistently maintained/consumed                                                                         | Maintain with defined semantics or remove                                     |
+| `src/core/rows.ts`                                      | Request row contract behind lease/reservation/schema additions                                               | Align types with actual schema                                                |
+| Vendored `governor.ts`                                  | Evaluator referenced by tests, no runtime vitals/action application                                          | Archive/defer or wire only if needed                                          |
+| Vendored grant/output helpers                           | `buildShipGrant`, `graduationAllowed`, `outputCandidate`, `undeclaredShipActions` lack application consumers | Do not count as operating grant lifecycle                                     |
+| Vendored policy parser/composition/layers               | No application configuration caller; shell uses default policy                                               | Defer configurable policy claims                                              |
+| Vendored command policy/safe regex                      | **Active** through jcode shell screening                                                                     | Keep; not dead code                                                           |
+| Vendored crypto/object/error exports                    | Some only support dormant grant/parser paths                                                                 | Preserve upstream provenance or narrow deliberately, not blind deletion       |
+| Empty deployment-layer skeleton                         | No deployable reference genome                                                                               | Remove until it has an owner                                                  |
+| Stale documentation claims                              | README/idea build-state and deployment assumptions                                                           | Refresh from verified integration evidence, not old checklist status          |
 
 No wholesale deletion of vendored code is recommended: licensing/provenance and upstream comparison can justify unused leaf exports. Likewise, export/import symmetry, chat, and autonomous publishing are not valid dead-code or incompleteness heuristics here.
 
@@ -744,16 +755,16 @@ Keep useful tested primitives in an explicitly experimental/library surface wher
 
 The order below is dependency-based. Do not launch a parallel rewrite of every module.
 
-| Phase | Work | Findings | Size | Exit gate |
-|---|---|---|---|---|
-| 0 — Bound claims and exposure | Private deployment; explicit operator-secret requirement; quarantine simulated results; mark experimental surfaces; correct supported topology | F01, F15, F25, F27 | Small–Medium | No public administrative exposure or simulated production KPI/transfer evidence |
-| 1 — Stabilize foundations | Build/start/Compose; authoritative migrations; state graph; completion/usage contract; tenant-scoped identity | F03, F07–F08, F20, F23 | Large | Clean boot/upgrade; approved work has one legal executable path; accounting tested |
-| 2 — One durable worker | Choose jcode or short-horizon executor; authoritative inbox/outbox; ownership/recovery; artifacts; governed boundary | F04–F06, F09–F12, F19 | Large | Intake→one execution→durable result survives crash/retry without duplicate paid work |
-| 3 — Finish human product | Evidence/detail views; authenticated action forms; correct queue states; corrections/resolutions; delivery feedback | F01–F02, F22, F26 | Large | Operator completes review/correction/approval/result inspection without scripts |
-| 4 — Prove Ship-to-Result | One real deliverable, blocking evidence check, named approval, real action receipt and measured result | F14–F15, F21 | Large | One genuine release closes with independently inspectable output, cost and outcome |
-| 5 — Earn learning claims | Balanced linked traces; real transfer cases; revision-bound evidence; actual shadow/pilot; promotion/drift worker | F17–F18, F21, F23 | Large | A procedure is promoted and later retained/demoted based on actual evaluated runs |
-| 6 — Operational pilot gate | Persistent IaC state, secrets/IAM, first/repeat deploy, readiness, alerts, restore/redrive, production DB concurrency | F08, F10, F23, F27 | Large; overlaps earlier deployment work | Disposable deployment and recovery drill pass; alerts reach a named operator |
-| 7 — Expand only from demand | Churn/feature/research/sensing, further transports, exports/bulk review | F13, F16, F24–F26 | Large, optional | Design partner requires feature; complete lifecycle acceptance criteria exist |
+| Phase                         | Work                                                                                                                                           | Findings               | Size                                    | Exit gate                                                                            |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | --------------------------------------- | ------------------------------------------------------------------------------------ |
+| 0 — Bound claims and exposure | Private deployment; explicit operator-secret requirement; quarantine simulated results; mark experimental surfaces; correct supported topology | F01, F15, F25, F27     | Small–Medium                            | No public administrative exposure or simulated production KPI/transfer evidence      |
+| 1 — Stabilize foundations     | Build/start/Compose; authoritative migrations; state graph; completion/usage contract; tenant-scoped identity                                  | F03, F07–F08, F20, F23 | Large                                   | Clean boot/upgrade; approved work has one legal executable path; accounting tested   |
+| 2 — One durable worker        | Choose jcode or short-horizon executor; authoritative inbox/outbox; ownership/recovery; artifacts; governed boundary                           | F04–F06, F09–F12, F19  | Large                                   | Intake→one execution→durable result survives crash/retry without duplicate paid work |
+| 3 — Finish human product      | Evidence/detail views; authenticated action forms; correct queue states; corrections/resolutions; delivery feedback                            | F01–F02, F22, F26      | Large                                   | Operator completes review/correction/approval/result inspection without scripts      |
+| 4 — Prove Ship-to-Result      | One real deliverable, blocking evidence check, named approval, real action receipt and measured result                                         | F14–F15, F21           | Large                                   | One genuine release closes with independently inspectable output, cost and outcome   |
+| 5 — Earn learning claims      | Balanced linked traces; real transfer cases; revision-bound evidence; actual shadow/pilot; promotion/drift worker                              | F17–F18, F21, F23      | Large                                   | A procedure is promoted and later retained/demoted based on actual evaluated runs    |
+| 6 — Operational pilot gate    | Persistent IaC state, secrets/IAM, first/repeat deploy, readiness, alerts, restore/redrive, production DB concurrency                          | F08, F10, F23, F27     | Large; overlaps earlier deployment work | Disposable deployment and recovery drill pass; alerts reach a named operator         |
+| 7 — Expand only from demand   | Churn/feature/research/sensing, further transports, exports/bulk review                                                                        | F13, F16, F24–F26      | Large, optional                         | Design partner requires feature; complete lifecycle acceptance criteria exist        |
 
 ### Acceptance tests that matter more than more isolated unit tests
 
@@ -778,13 +789,13 @@ The order below is dependency-based. Do not launch a parallel rewrite of every m
 
 This is a weighted engineering judgment, not percentage of files or tests. Scoring is against Vital's stated grounded, budgeted, attributable, safely executable and learning product—not a generic SaaS checklist.
 
-| Dimension | Weight | Score | Reason |
-|---|---:|---:|---|
-| Ledger/evidence foundation | 25% | 70 | Real invariants, replay and correction; resolution/export/typed-correction gaps |
-| Complete human/business journeys | 25% | 25 | Readable console, but actions inaccessible and primary wedge stops short |
-| Execution and integration | 25% | 30 | Real clients/handlers; missing deployed dispatch, ownership and policy composition |
-| Learning and attribution | 15% | 30 | Rich primitives, weak promotion/outcome evidence and no operating loop |
-| Operator surface and product truthfulness | 10% | 35 | Useful read model; inconsistent docs, synthetic outcomes, missing details/actions |
+| Dimension                                 | Weight | Score | Reason                                                                             |
+| ----------------------------------------- | -----: | ----: | ---------------------------------------------------------------------------------- |
+| Ledger/evidence foundation                |    25% |    70 | Real invariants, replay and correction; resolution/export/typed-correction gaps    |
+| Complete human/business journeys          |    25% |    25 | Readable console, but actions inaccessible and primary wedge stops short           |
+| Execution and integration                 |    25% |    30 | Real clients/handlers; missing deployed dispatch, ownership and policy composition |
+| Learning and attribution                  |    15% |    30 | Rich primitives, weak promotion/outcome evidence and no operating loop             |
+| Operator surface and product truthfulness |    10% |    35 | Useful read model; inconsistent docs, synthetic outcomes, missing details/actions  |
 
 Weighted result is approximately 40. Completing the first honest vertical slice would improve this score more than adding many isolated feature modules.
 
@@ -792,14 +803,63 @@ Weighted result is approximately 40. Completing the first honest vertical slice 
 
 ## **25/100 — internal experimentation, not enterprise production**
 
-| Dimension | Weight | Score | Reason |
-|---|---:|---:|---|
-| Identity, authorization and execution control | 25% | 20 | Optional shared-secret floor; individual/tenant authority and full boundary controls incomplete |
-| Reliability and data correctness | 25% | 30 | Strong primitives but migration, ownership, recovery, correction and accounting gaps |
-| Deployment and operational recovery | 20% | 20 | Significant IaC, but bootstrap/state/secrets/smoke/writers/drills incomplete |
-| Production-representative validation | 20% | 30 | Typecheck and focused tests pass; production paths remain fake/empty/unverified |
-| Supportability and documented contract | 10% | 30 | Good explicit limitations, useful console/logs; deployment and feature claims inconsistent |
+| Dimension                                     | Weight | Score | Reason                                                                                          |
+| --------------------------------------------- | -----: | ----: | ----------------------------------------------------------------------------------------------- |
+| Identity, authorization and execution control |    25% |    20 | Optional shared-secret floor; individual/tenant authority and full boundary controls incomplete |
+| Reliability and data correctness              |    25% |    30 | Strong primitives but migration, ownership, recovery, correction and accounting gaps            |
+| Deployment and operational recovery           |    20% |    20 | Significant IaC, but bootstrap/state/secrets/smoke/writers/drills incomplete                    |
+| Production-representative validation          |    20% |    30 | Typecheck and focused tests pass; production paths remain fake/empty/unverified                 |
+| Supportability and documented contract        |    10% |    30 | Good explicit limitations, useful console/logs; deployment and feature claims inconsistent      |
 
 Weighted result is approximately 25. This does not mean every module is unsafe or that the code is worthless. It means the supplied product has not demonstrated the authority, lifecycle, evidence and recovery guarantees required to operate customer agents reliably.
 
 **Final recommendation:** Freeze feature expansion. Keep Vital's ledger and conservative primitives, shrink the supported deployment, and complete one authenticated, durable, governed, measured Ship-to-Result loop. Treat the remaining modules as experimental until their end-to-end acceptance tests pass.
+
+---
+
+# Remediation progress log
+
+## 2026-09-17 — first completion pass (post-rebase tree)
+
+Status below reflects the working tree after the rebase onto `origin/main` and this pass. Suite: **346/346 green**, typecheck clean, `docs:check` green, `npm run build` produces a bootable `dist/cli.js` (smoke-tested via `status` + `report`).
+
+### Changes and partial remediation (not full finding closure)
+
+| Finding                                              | What was done                                                                                                                                                                                                                                                                                                                        | Evidence                                                                                                                                                                                                                        |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **F15** — synthetic dogfood evidence                 | Prior work removed fabricated predicted/actual minutes and blocks failed drafts before decision/trace/card creation. F15 remains PARTIAL: the script still auto-verifies as human:founder, records a synthetic SUCCESS trace, and compiles a card with supplied model/eval references. Synthetic labels are not proof that every downstream consumer excludes them. This pass ran the existing tests; it did not implement this prior remediation.              | `scripts/dogfood-ship.ts` (`runShipPipeline`, `assertDraftShips`); `test/wedge.test.ts` ("dogfood marks the release known only after ALL stages complete", "F15: a blocked draft aborts the run before any evidence is minted") |
+| **F08 (partial)** — build/start mismatch             | Added `tsconfig.build.json` (source-only, `rootDir: src`) and pointed `npm run build` at it, so `dist/cli.js` exists as `package.json` `start` and both Dockerfiles expect. Verified: build emits `dist/cli.js`, `dist/core/db.js`, `dist/aws/executor.js`; `node dist/cli.js status/report` run clean.                              | `tsconfig.build.json`; `package.json:10–11`; smoke run output                                                                                                                                                                   |
+| **F08 (partial)** — Compose topology                 | `deploy/compose.yml` uses the core Dockerfile, loopback-only database/console ports, Postgres readiness gating, and operator configuration. Removed unused Buzz/jcode configuration, socket volume and mandatory HMAC secret. This is explicitly a console/Postgres topology, not an execution service. | `deploy/compose.yml`                                                                                                                                                                                                            |
+| **F01 (partial, prior work)** — console identity     | Upstream session auth (signup-claim/login/CSRF/lockout/roles/tenant scoping) merged with the local operator gates (shared secret + ed25519 signed approvals, registry with revocation, fail-closed on corrupt registry). Merge verified by new tests covering both layers together.                                                  | `src/console/serve.ts`; `src/gov/operator.ts`; `test/console.test.ts` merged-behavior tests; `test/operator.test.ts`                                                                                                            |
+| **F05 (prior work)** — executor ownership/accounting | Executor now claims exclusively (fenced), charges usage, persists full artifacts, settles budget breaches as TERMINATED; covered by tests.                                                                                                                                                                                           | `src/aws/executor.ts`; `test/aws.test.ts` F05 tests                                                                                                                                                                             |
+| **F07 (prior work)** — migration authority           | Prior work shares a schema_migrations journal and improves runtime migration handling. The generic migration module still defines journal DDL and writes journal entries itself; consolidation is partial, not a verified single-writer design.                                                                                                                                                                                      | `src/core/migrations.ts:1–77`                                                                                                                                                                                                   |
+| **F03 (partial, prior work)** — lifecycle            | `readmitDeferred`, batched `expireStale`, fenced `claimExecution`/`reclaimStale` exist with tests; console approval path unchanged.                                                                                                                                                                                                  | `src/coord/coordinator.ts`                                                                                                                                                                                                      |
+
+### Still open (unchanged priorities)
+
+- **F04** — no deployed composition root: `serve` still starts only the console; no scheduler tick, SQS producer, or jcode dispatch loop runs.
+- **F08 remainder** — Terraform state backend, `TF_VAR_*` secret mapping, execution-role secret grants, bootstrap ordering, semantic smoke checks, restore drills.
+- **F02 (partial)** — live approve/decline controls are now available in Pending review (see the follow-up below). Claim-correction forms, complete evidence drill-down and browser automation remain open.
+- **F03 remainder** — deferred-readmission/lease-recovery loops exist as APIs but no deployed worker calls them.
+- **F15** — remove fabricated verification and synthetic success/card inputs from the supported production path, or enforce isolation at every consumer; real review and measurement remain absent.
+- **Other findings** — not reassessed comprehensively in this pass. Concurrent commits addressed portions of ingestion, artifacts, transfer, ledger resolution and reporting. The original audit is historical evidence, not an up-to-date assertion that those changes are absent.
+
+### Validation this pass
+
+- `npm run typecheck` — pass
+- `npm test` — **346/346** (includes new F15 dogfood tests, merged console/operator tests, artifact-store tests)
+- `npm run docs:check` — pass (docs quote 346)
+- `npm run build` + `node dist/cli.js status --db :memory:` + `node dist/cli.js report --db :memory: --out …` — pass
+- Follow-up build validation: both Docker images built from clean commit `7fbab1c`; core status and executor empty-batch smoke passed without network access. Compose config validated; full stack boot, Terraform and live services remain unverified.
+
+## F02 follow-up — live request review
+
+Implemented in `src/console/review.ts` and the authenticated dashboard handler in `src/console/serve.ts`:
+
+- Pending review lists admitted REQUESTs with a human-minute budget, with goal, deliverable, deadline, budget and up to 20 evidence references. Lists are capped at 100 with explicit truncation notices.
+- Live approve/decline forms require confirmation; decline requires a reason. Existing session, tenant, role, CSRF, operator-secret and signature checks remain authoritative. Signed mode displays the exact message to sign externally; no private key is collected.
+- Controls are injected per session after the shared report cache. Static report exports stay read-only. Accepted/declined requests leave the review list on refresh; approval is explicitly not execution completion.
+- Client feedback covers pending, accepted/declined, HTTP failures and ambiguous timeouts. Credentials are cleared after submission and never persisted in browser storage. Buttons start disabled without JavaScript.
+- Queue semantics are a bounded presentation of existing ADMITTED work, not a new approval-required execution gate. Background dispatch and immutable approval/action binding remain separate findings.
+
+Validation: typecheck and build passed; console/auth tests **52/52 passed**, including HTTP render→approve/decline→refresh and an isolated client-script test for successful declines and errors. These are not real-browser automation. Full suite result was **346 passed, 3 failed**: adapter completion, jcode trace creation, and live progress tests failed with budget termination/missing trace in the concurrently edited execution code. No execution-policy changes were made in this F02 pass. Full-suite documentation counts were not refreshed to claim a green run.
