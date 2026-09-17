@@ -7,6 +7,7 @@ import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
+import { CognitiveRouter } from '../router/router.ts';
 
 /**
  * Console serve mode (TODO V2.1 approval surface, local edition): the
@@ -86,6 +87,11 @@ export function startConsoleServer(
       // Approval-latency distribution (TODO 2.3): the curation-cost clock.
       if (req.method === 'GET' && url.pathname === '/api/approval-latency') {
         json(res, 200, await coord.approvalLatencyStats(tenant));
+        return;
+      }
+      // Cost-per-signal (TODO 4.1): the spend-side gate — MODEL share of arrivals vs <1%.
+      if (req.method === 'GET' && url.pathname === '/api/cost-per-signal') {
+        json(res, 200, await new CognitiveRouter(db).costPerSignal(tenant));
         return;
       }
       const act = url.pathname.match(/^\/api\/requests\/([^/]+)\/(approve|decline)$/);

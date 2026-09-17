@@ -6,6 +6,7 @@ import { migratePostgres, openPostgres } from './core/pg.ts';
 import { buildReport } from './console/report.ts';
 import { renderHtml } from './console/render.ts';
 import { startConsoleServer } from './console/serve.ts';
+import { CognitiveRouter } from './router/router.ts';
 import { writeFileSync } from 'node:fs';
 
 /**
@@ -82,6 +83,7 @@ if (cmd === 'status') {
           },
           refusalRate: refusal.rate,
           tierMix: Object.fromEntries(tierMix.map((t) => [String(t.tier), Number(t.n)])),
+          costPerSignal: await new CognitiveRouter(db).costPerSignal('acme'),
           openRequests: (await coord.list('acme')).filter(
             (r) => !['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'].includes(r.state),
           ).length,

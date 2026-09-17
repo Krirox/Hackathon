@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->208/208 GREEN<!-- /vital:testcount --> on committed main (the concurrent session's tree is further ahead)
+tests      <!-- vital:testcount -->209/209 GREEN<!-- /vital:testcount --> on committed main (the concurrent session's tree is further ahead)
 commits    14 on 2026-09-17 (6aa49a3..8623ab9): PG-lane concurrency fix · typed rows · approval-latency + override capture (red→green) · cost-per-signal · security hardening (body caps, URIError DoS, fail-closed screen) · AWS deploy path · Buzz live-watch
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate+reportUsage · router+registry+calibration+costPerSignal
            compiler+mining+registry+trustTier+drift-autoDemote · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
@@ -565,7 +565,7 @@ absorbed here — backup drill, nightly boot, on-call runbook, upgrade path.)
 - [x] live-PG parity proven: CI postgres lane green; concurrent transactions safe (AsyncLocalStorage client scoping, was the shared-`holder` interleaving bug)
 
 ### V2.2 Watch it before it carries weight (repo-doable now)
-- [ ] `S` surface cost-per-signal in the console + `cli status` (gate: MODEL tier < 1% of arrivals; measured in `router.costPerSignal`, not yet rendered anywhere)
+- [x] `S` surface cost-per-signal in the console + `cli status` (done 2026-09-17: report card in the health grid (modelShare %, arrivals, within/OVER GATE), `GET /api/cost-per-signal`, and a `costPerSignal` block in `cli status` — all from `router.costPerSignal`, the passive read-model over `routing_decisions`; test asserts the reflex-handled arrival passes the gate end-to-end through report → HTML → API)
 - [ ] `M` nightly: full instance boot + verify against a real model (needs the deployed topology + one model credential)
 - [x] console health grid: stale-rate, provenance completeness, contradictions+MTTR, today's spend, escalation slots, refusal rate, approval latency (median/p90/slowest human) — served at `/`
 

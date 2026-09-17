@@ -2,6 +2,7 @@ import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { ApprovalLatencyStats, Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler, SkillState } from '../compiler/compiler.ts';
+import { CognitiveRouter } from '../router/router.ts';
 import { describeCard } from '../compiler/registry.ts';
 import { costOfDecision } from '../attrib/attribution.ts';
 
@@ -32,6 +33,9 @@ export interface CostPoint {
   label: string;
   costPerGoodDecision: number | null;
 }
+
+/** Re-exported shape of `router.costPerSignal`, so renderers need no router import. */
+export type CostPerSignal = Awaited<ReturnType<CognitiveRouter['costPerSignal']>>;
 
 export interface TierBucket {
   label: string;
@@ -91,6 +95,8 @@ export interface ConsoleReport {
   rooms: RoomView[];
   /** Approval latency (TODO 2.3): submission → human decision, from APPROVAL_LATENCY audit rows. */
   approvalLatency: ApprovalLatencyStats;
+  /** Cost-per-signal (TODO 4.1): the expensive tier's share of routed arrivals vs the <1% gate. */
+  costPerSignal: CostPerSignal;
 }
 
 const TERMINAL = ['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'];
@@ -122,6 +128,10 @@ export async function buildReport(
   const humanSpent = todays.reduce((s, r) => s + r.spent.humanMinutes, 0);
   const dollarsToday = todays.reduce((s, r) => s + r.spent.dollars, 0);
   const openHuman = requests.filter((r) => !TERMINAL.includes(r.state) && r.bid.humanMinutes > 0);
+  // Cost-per-signal (TODO 4.1): the router is a passive read-model over
+  // routing_decisions — no timers, no writes — so building a throwaway one
+  // here is the cheapest way to surface the spend-side gate.
+  const costPerSignal = await new CognitiveRouter(db).costPerSignal(tenant);
 
   // Cost curve: one point per decision with a measured outcome, in time order.
   const decisions = (await db
@@ -264,5 +274,6 @@ export async function buildReport(
     compiler,
     rooms,
     approvalLatency: await coord.approvalLatencyStats(tenant),
+    costPerSignal,
   };
 }
