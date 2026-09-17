@@ -246,7 +246,7 @@ T('tier mix and misrouting counts come from the same tables as the work', async 
   ]);
   await router.route(rIn());
   const lastId = ((await db.prepare('SELECT max(id) AS m FROM routing_decisions').get()) as { m: number }).m;
-  await router.label(lastId, 'HUMAN');
+  await router.label(TEN, lastId, 'HUMAN', 'human:priya');
   const miss = (await misroutingCounts(db, TEN)).find((m) => m.tier === 'MODEL')!;
   eq(miss.samples, 1);
   eq(miss.misses, 1, 'proposed MODEL, correct HUMAN:');

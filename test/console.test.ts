@@ -15,8 +15,8 @@ import { runInNewContext } from 'node:vm';
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
 T('merged console keeps operator secret checks in addition to session authentication', async () => {
-  const { db, ledger, coord, comp } = await seeded();
-  await coord.submit(base({ id: 'merged-secret', goal: 'review with both credentials' }));
+  const { db, ledger, coord, comp, rel } = await seeded();
+  await coord.submit(base({ id: 'merged-secret', goal: 'review with both credentials', claimRefs: [rel.id] }));
   const server = await startConsoleServer(db, ledger, coord, comp, {
     tenant: TEN,
     now: () => NOW,
@@ -52,11 +52,11 @@ T('merged console keeps operator secret checks in addition to session authentica
 });
 
 T('merged signed approval retains the authenticated session identity', async () => {
-  const { db, ledger, coord, comp } = await seeded();
+  const { db, ledger, coord, comp, rel } = await seeded();
   const key = generateOperatorKey();
   const owner = (await listUsers(db, TEN)).find((u) => u.email === OWNER.email)!;
   const who = `${owner.id} (${owner.email})`;
-  await coord.submit(base({ id: 'merged-signed', goal: 'review with signed session identity' }));
+  await coord.submit(base({ id: 'merged-signed', goal: 'review with signed session identity', claimRefs: [rel.id] }));
   const server = await startConsoleServer(db, ledger, coord, comp, {
     tenant: TEN,
     now: () => NOW,
@@ -671,6 +671,19 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
     { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
     NOW,
   );
+  const evidence = await ledger.append({
+    tenant: TEN,
+    subject: 'release:latency',
+    kind: 'FACT',
+    statement: 'ready for review',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sync:gh',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
   // Mutable so each decision can happen at a chosen instant.
   let clock = NOW;
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => clock });
@@ -680,8 +693,10 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
     // r1 submitted at NOW and approved instantly (0s); r2 submitted a day
     // later and approved 6h after that — the distribution must reflect both.
     // Distinct goals: identical content would dedupe onto one thread (by design).
-    const r1 = await coord.submit(base({ id: 'lat1', now: NOW, goal: 'latency probe one' }));
-    const r2 = await coord.submit(base({ id: 'lat2', now: DAY_LATER, goal: 'latency probe two' }));
+    const r1 = await coord.submit(base({ id: 'lat1', now: NOW, goal: 'latency probe one', claimRefs: [evidence.id] }));
+    const r2 = await coord.submit(
+      base({ id: 'lat2', now: DAY_LATER, goal: 'latency probe two', claimRefs: [evidence.id] }),
+    );
     eq(r1.admitted, true);
     eq(r2.admitted, true);
 
@@ -792,6 +807,340 @@ T('the served console is session-gated: login, then approve through the coordina
   }
 });
 
+T('HTTP approval freezes a replayable receipt once and gates receipt access by session', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const owner = (await listUsers(db, TEN)).find((u) => u.email === OWNER.email)!;
+    const who = `${owner.id} (${owner.email})`;
+    const rq1 = (await coord.get(TEN, 'rq1'))!;
+    const approve = () =>
+      fetch(`${base_}/api/requests/rq1/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ by: 'ignored body identity' }),
+      });
+    const response = await approve();
+    eq(response.status, 200);
+    const result = (await response.json()) as {
+      ok: boolean;
+      state: string;
+      decisionId: string;
+      decisionUrl: string;
+    };
+    eq(result.ok, true);
+    eq(result.state, 'ACCEPTED');
+    eq(typeof result.decisionId, 'string');
+    eq(result.decisionId.trim().length > 0, true);
+    eq(result.decisionUrl, '/console/decisions/' + encodeURIComponent(result.decisionId));
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED');
+
+    const decision = (await ledger.getDecision(TEN, result.decisionId))!;
+    eq(decision.requestId, 'rq1');
+    eq(decision.approvedBy, who, 'the receipt names the session owner, not the body identity:');
+    eq(decision.bundle.claims.map((claim) => claim.id).sort(), [...rq1.claimRefs].sort());
+    const replay = await ledger.replayDecision(TEN, result.decisionId);
+    eq(replay.record.id, result.decisionId);
+    eq(replay.drift.length, rq1.claimRefs.length);
+    eq(
+      replay.drift.every((claim) => !claim.drifted),
+      true,
+    );
+
+    const approvalAudits = () =>
+      db
+        .prepare(
+          `SELECT * FROM audit_log WHERE tenant = ? AND
+           ((action = 'console.approve' AND target = ?) OR (action = 'APPROVAL_LATENCY' AND target = ?))
+           ORDER BY seq`,
+        )
+        .all(TEN, 'request:rq1', 'rq1');
+    const audits = await approvalAudits();
+    eq(audits.filter((row) => row.action === 'console.approve').length, 1);
+    eq(audits.filter((row) => row.action === 'APPROVAL_LATENCY').length, 1);
+    const repeated = await approve();
+    eq(repeated.status, 200);
+    const again = (await repeated.json()) as { ok: boolean; state: string; decisionId: string };
+    eq(again.ok, true);
+    eq(again.state, 'ACCEPTED');
+    eq(again.decisionId, result.decisionId);
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), [
+      { id: result.decisionId },
+    ]);
+    eq(await approvalAudits(), audits, 'retry must not duplicate approval audit or latency:');
+
+    const receipt = await fetch(`${base_}${result.decisionUrl}`, { headers: session.headers });
+    eq(receipt.status, 200);
+    eq((await receipt.text()).includes(result.decisionId), true);
+    const anonymous = await fetch(`${base_}${result.decisionUrl}`, { redirect: 'manual' });
+    eq([303, 401, 403].includes(anonymous.status), true, 'anonymous receipt access is disallowed:');
+    eq((await anonymous.text()).includes(result.decisionId), false);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('HTTP approval rolls back when recording the decision fails and can then be retried', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  let attempts = 0;
+  const failingLedger: typeof ledger = {
+    ...ledger,
+    recordDecision: async () => {
+      attempts++;
+      throw new Error('injected decision write failure');
+    },
+  };
+  const server = await startConsoleServer(db, failingLedger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const before = await coord.get(TEN, 'rq1');
+    const approve = () =>
+      fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: '{}',
+      });
+    const failed = await approve();
+    eq(failed.status >= 400 && failed.status < 600, true);
+    eq(((await failed.json()) as { ok: boolean }).ok, false);
+    eq(attempts, 1, 'the injected decision write was reached:');
+    eq(await coord.get(TEN, 'rq1'), before, 'failed receipt creation must leave the request unchanged:');
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), []);
+    eq(
+      await db
+        .prepare(
+          `SELECT action FROM audit_log WHERE tenant = ? AND
+           ((action = 'console.approve' AND target = ?) OR (action = 'APPROVAL_LATENCY' AND target = ?))`,
+        )
+        .all(TEN, 'request:rq1', 'rq1'),
+      [],
+    );
+
+    failingLedger.recordDecision = ledger.recordDecision;
+    const retried = await approve();
+    eq(retried.status, 200);
+    const result = (await retried.json()) as { ok: boolean; state: string; decisionId: string };
+    eq(result.ok, true);
+    eq(result.state, 'ACCEPTED');
+    eq(typeof result.decisionId, 'string');
+    eq(result.decisionId.trim().length > 0, true);
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED');
+    eq((await ledger.getDecision(TEN, result.decisionId))!.requestId, 'rq1');
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), [
+      { id: result.decisionId },
+    ]);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('ungrounded HTTP approval returns 409 without changing the request', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  // Submission requires a reference; approval must also verify that its evidence exists.
+  const { request } = await coord.submit(
+    base({ id: 'ungrounded', goal: 'review without evidence', claimRefs: ['missing-approval-evidence'] }),
+  );
+  eq(await ledger.get(TEN, 'missing-approval-evidence'), null);
+  eq(request.state, 'ADMITTED');
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const before = await coord.get(TEN, request.id);
+    const audits = await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/${request.id}/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    eq(response.status, 409);
+    eq(((await response.json()) as { ok: boolean }).ok, false);
+    eq(await coord.get(TEN, request.id), before);
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, request.id), []);
+    eq(await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN), audits);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('concurrent HTTP approvals of one request return exactly one decision', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const approve = () =>
+      fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: '{}',
+      });
+    const responses = await Promise.all([approve(), approve()]);
+    eq(
+      responses.map((response) => response.status),
+      [200, 200],
+    );
+    const results = (await Promise.all(responses.map((response) => response.json()))) as {
+      ok: boolean;
+      state: string;
+      decisionId: string;
+    }[];
+    const decisionId = results[0]!.decisionId;
+    eq(typeof decisionId, 'string');
+    eq(decisionId.trim().length > 0, true);
+    for (const result of results) {
+      eq(result.ok, true);
+      eq(result.state, 'ACCEPTED');
+      eq(result.decisionId, decisionId);
+    }
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED');
+    eq((await ledger.getDecision(TEN, decisionId))!.requestId, 'rq1');
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), [
+      { id: decisionId },
+    ]);
+    const audits = await db
+      .prepare(
+        `SELECT action FROM audit_log WHERE tenant = ? AND
+         ((action = 'console.approve' AND target = ?) OR (action = 'APPROVAL_LATENCY' AND target = ?))`,
+      )
+      .all(TEN, 'request:rq1', 'rq1');
+    eq(audits.filter((row) => row.action === 'console.approve').length, 1);
+    eq(audits.filter((row) => row.action === 'APPROVAL_LATENCY').length, 1);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('HTTP acceptance failure rolls back the newly recorded decision', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  let decisionId: string | undefined;
+  let attempts = 0;
+  const failingCoord: typeof coord = {
+    ...coord,
+    accept: async (tenant, requestId) => {
+      attempts++;
+      decisionId = (await ledger.getDecisionByRequest(tenant, requestId))?.id;
+      throw new Error('injected acceptance failure');
+    },
+  };
+  const server = await startConsoleServer(db, ledger, failingCoord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const before = await coord.get(TEN, 'rq1');
+    const audits = await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN);
+    const approve = () =>
+      fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: '{}',
+      });
+    const failed = await approve();
+    eq(failed.status, 409);
+    const error = (await failed.json()) as { ok: boolean; error: string };
+    eq(error.ok, false);
+    eq(error.error.includes('injected acceptance failure'), true);
+    eq(attempts, 1);
+    eq(typeof decisionId, 'string', 'a decision was recorded before acceptance failed:');
+    eq(await ledger.getDecision(TEN, decisionId!), null);
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), []);
+    eq(await coord.get(TEN, 'rq1'), before);
+    eq(await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN), audits);
+
+    failingCoord.accept = coord.accept;
+    const retried = await approve();
+    eq(retried.status, 200);
+    const result = (await retried.json()) as { ok: boolean; state: string; decisionId: string };
+    eq(result.ok, true);
+    eq(result.state, 'ACCEPTED');
+    eq(result.decisionId, decisionId);
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED');
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), [
+      { id: result.decisionId },
+    ]);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('HTTP approval audit failure rolls back both acceptance and the new decision', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  let failAudit = true;
+  let attempts = 0;
+  let decisionId: string | undefined;
+  let stateAtFailure: string | undefined;
+  const failingDb: typeof db = {
+    ...db,
+    prepare: (sql) => {
+      const statement = db.prepare(sql);
+      if (!sql.startsWith('INSERT INTO audit_log')) return statement;
+      return {
+        ...statement,
+        run: async (...params) => {
+          if (failAudit && params[2] === 'console.approve' && params[3] === 'request:rq1') {
+            attempts++;
+            decisionId = (await ledger.getDecisionByRequest(TEN, 'rq1'))?.id;
+            stateAtFailure = (await coord.get(TEN, 'rq1'))?.state;
+            throw new Error('injected approval audit failure');
+          }
+          return statement.run(...params);
+        },
+      };
+    },
+  };
+  const server = await startConsoleServer(failingDb, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const before = await coord.get(TEN, 'rq1');
+    const audits = await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN);
+    const approve = () =>
+      fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: '{}',
+      });
+    const failed = await approve();
+    eq(failed.status, 409);
+    const error = (await failed.json()) as { ok: boolean; error: string };
+    eq(error.ok, false);
+    eq(error.error.includes('injected approval audit failure'), true);
+    eq(attempts, 1);
+    eq(stateAtFailure, 'ACCEPTED', 'acceptance happened before the audit failed:');
+    eq(typeof decisionId, 'string', 'the decision existed before the audit failed:');
+    eq(await ledger.getDecision(TEN, decisionId!), null);
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), []);
+    eq(await coord.get(TEN, 'rq1'), before);
+    eq(await db.prepare('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq').all(TEN), audits);
+
+    failAudit = false;
+    const retried = await approve();
+    eq(retried.status, 200);
+    const result = (await retried.json()) as { ok: boolean; state: string; decisionId: string };
+    eq(result.ok, true);
+    eq(result.state, 'ACCEPTED');
+    eq(result.decisionId, decisionId);
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED');
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), [
+      { id: result.decisionId },
+    ]);
+    eq(
+      (
+        await db
+          .prepare("SELECT action FROM audit_log WHERE tenant = ? AND action = 'console.approve' AND target = ?")
+          .all(TEN, 'request:rq1')
+      ).length,
+      1,
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('malformed ids and body bombs fail loud, never hang or crash the server', async () => {
   const { db, ledger, coord, comp } = await seeded();
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
@@ -837,9 +1186,9 @@ T('malformed ids and body bombs fail loud, never hang or crash the server', asyn
     eq(bigRes.status, 413, 'oversized body is a 413:');
     const big = (await bigRes.json()) as { ok: boolean };
     eq(big.ok, false, 'not a hang:');
-    // The server is still alive for real work afterwards.
+    // rq1 is queued and cites seeded ledger evidence; r1 is already accepted.
     const ok = (await (
-      await fetch(`${base_}/api/requests/r1/approve`, {
+      await fetch(`${base_}/api/requests/rq1/approve`, {
         method: 'POST',
         headers: { ...authed.headers, 'content-type': 'application/json' },
         body: '{}',

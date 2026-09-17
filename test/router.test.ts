@@ -1,4 +1,5 @@
-import { T, eq, TEN, NOW, fresh, rIn } from './helpers.ts';
+import { T, eq, TEN, NOW, fresh, rIn, rejects } from './helpers.ts';
+import { ROUTING_CLASSES, type RoutingClass } from '../src/core/types.ts';
 console.log('\n\x1b[1mCognitive Router — shadow-first\x1b[0m');
 
 T('controlRate starts at 0 — router proposes, policy executes', async () => {
@@ -120,9 +121,9 @@ T('label() feeds precision; budgetBreaches fires past budget', async () => {
     await router.route(rIn());
     ids.push(((await db.prepare('SELECT max(id) AS m FROM routing_decisions').get()) as { m: number }).m);
   }
-  await router.label(ids[0]!, 'MODEL');
-  await router.label(ids[1]!, 'MODEL');
-  await router.label(ids[2]!, 'HUMAN');
+  await router.label(TEN, ids[0]!, 'MODEL', 'human:priya');
+  await router.label(TEN, ids[1]!, 'MODEL', 'human:priya');
+  await router.label(TEN, ids[2]!, 'HUMAN', 'human:priya');
   const p = await router.precision(TEN);
   eq(p.samples, 3);
   eq(p.readyForControl, false, '3 samples never clear a 2000-sample gate:');
@@ -152,6 +153,95 @@ T('label() feeds precision; budgetBreaches fires past budget', async () => {
     true,
     '20% failure blows the 10% MODEL budget:',
   );
+});
+
+T('F23: missing and foreign routing labels fail identically without writes', async () => {
+  const { db, router } = await fresh();
+  await router.route(rIn());
+  await router.route(rIn({ tenant: 'other' }));
+  const id = (await router.labelingQueue('other'))[0]!.id;
+  const before = await db.prepare('SELECT * FROM routing_decisions ORDER BY id').all();
+  const auditBefore = await db.prepare('SELECT * FROM audit_log ORDER BY seq').all();
+  for (const deniedId of [id, id + 1000]) {
+    await rejects(
+      () => router.label(TEN, deniedId, 'HUMAN', 'human:priya'),
+      '[router:NOT_FOUND] routing decision not found',
+    );
+  }
+  eq(await db.prepare('SELECT * FROM routing_decisions ORDER BY id').all(), before);
+  eq(await db.prepare('SELECT * FROM audit_log ORDER BY seq').all(), auditBefore);
+  eq((await router.precision(TEN)).samples, 0);
+  eq((await router.precision('other')).samples, 0);
+});
+
+T('F23: labels and relabels audit the reviewer and before/after state', async () => {
+  const { db, router } = await fresh();
+  await router.route(rIn());
+  await router.route(rIn({ tenant: 'other' }));
+  const id = (await router.labelingQueue(TEN))[0]!.id;
+  const foreignBefore = await db.prepare('SELECT * FROM routing_decisions WHERE tenant = ?').all('other');
+  let before: { labeled: boolean; correctTier: RoutingClass | null } = { labeled: false, correctTier: null };
+  for (const [index, correctTier] of ROUTING_CLASSES.entries()) {
+    const reviewer = `human:reviewer-${index}`;
+    await router.label(TEN, id, correctTier, reviewer);
+    eq(
+      await db.prepare('SELECT labeled, correct_tier FROM routing_decisions WHERE tenant = ? AND id = ?').get(TEN, id),
+      {
+        labeled: 1,
+        correct_tier: correctTier,
+      },
+    );
+    const audits = await db.prepare('SELECT * FROM audit_log ORDER BY seq').all();
+    eq(audits.length, index + 1);
+    const audit = audits[index]!;
+    eq(
+      [audit.tenant, audit.actor, audit.action, audit.target],
+      [TEN, reviewer, 'ROUTING_DECISION_LABELED', String(id)],
+    );
+    const after = { labeled: true, correctTier };
+    eq(JSON.parse(String(audit.detail)), { before, after });
+    eq(Number.isFinite(Date.parse(String(audit.at))), true);
+    before = after;
+  }
+  eq(await db.prepare('SELECT * FROM routing_decisions WHERE tenant = ?').all('other'), foreignBefore);
+  eq((await router.precision(TEN)).samples, 1);
+  eq((await router.precision('other')).samples, 0);
+});
+
+T('F23: invalid reviewers and tiers reject without mutation or audit', async () => {
+  const { db, router } = await fresh();
+  await router.route(rIn());
+  const id = (await router.labelingQueue(TEN))[0]!.id;
+  const before = await db.prepare('SELECT * FROM routing_decisions').all();
+  for (const reviewer of ['', ' \t\n', undefined, null, 42]) {
+    await rejects(() => router.label(TEN, id, 'MODEL', reviewer as string), 'NO_REVIEWER');
+  }
+  for (const tier of ['', 'model', 'UNKNOWN', undefined, null, 42]) {
+    await rejects(() => router.label(TEN, id, tier as RoutingClass, 'human:priya'), 'BAD_TIER');
+  }
+  eq(await db.prepare('SELECT * FROM routing_decisions').all(), before);
+  eq(await db.prepare('SELECT * FROM audit_log').all(), []);
+});
+
+T('F23: audit failure rolls back both initial labels and relabels', async () => {
+  const { db, router } = await fresh();
+  await router.route(rIn());
+  const id = (await router.labelingQueue(TEN))[0]!.id;
+  for (const relabel of [false, true]) {
+    if (relabel) await router.label(TEN, id, 'MODEL', 'human:first');
+    const before = await db.prepare('SELECT * FROM routing_decisions').all();
+    const auditBefore = await db.prepare('SELECT * FROM audit_log ORDER BY seq').all();
+    await db.exec(`CREATE TRIGGER fail_label_audit AFTER INSERT ON audit_log
+      WHEN NEW.action = 'ROUTING_DECISION_LABELED'
+      BEGIN SELECT RAISE(ABORT, 'label audit unavailable'); END`);
+    try {
+      await rejects(() => router.label(TEN, id, 'HUMAN', 'human:second'), 'label audit unavailable');
+      eq(await db.prepare('SELECT * FROM routing_decisions').all(), before);
+      eq(await db.prepare('SELECT * FROM audit_log ORDER BY seq').all(), auditBefore);
+    } finally {
+      await db.exec('DROP TRIGGER fail_label_audit');
+    }
+  }
 });
 
 T('undeclared task types are refused, not guessed', async () => {
@@ -216,7 +306,7 @@ T('the labeling queue proposes with evidence but never auto-labels', async () =>
   eq(q.length, 2);
   eq(q[0]!.evidence, { traces: 1, successRate: 1 });
   eq((await router.precision(TEN)).samples, 0, 'evidence proposes; only label() disposes:');
-  await router.label(q[0]!.id, 'MODEL');
+  await router.label(TEN, q[0]!.id, 'MODEL', 'human:priya');
   eq((await router.precision(TEN)).samples, 1);
 });
 

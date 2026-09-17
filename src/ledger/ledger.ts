@@ -122,6 +122,8 @@ export interface Ledger {
   /** §4.4 — freeze the exact claim versions a decision was made on. */
   recordDecision(input: NewDecisionInput): Promise<DecisionRecord>;
   getDecision(tenant: string, id: string): Promise<DecisionRecord | null>;
+  /** Latest decision for a request (a request may have several); null when none. */
+  getDecisionByRequest(tenant: string, requestId: string): Promise<DecisionRecord | null>;
   /** Reconstruct what was live at decision time + what drifted since. */
   replayDecision(tenant: string, id: string): Promise<DecisionReplay>;
   /** OUTCOME requires a measurement basis — narrative causality is rejected. */
@@ -653,6 +655,13 @@ export function createLedger(db: AsyncDb): Ledger {
   async function getDecision(tenant: string, id: string): Promise<DecisionRecord | null> {
     const r = (await db.prepare('SELECT * FROM decisions WHERE id = ? AND tenant = ?').get(id, tenant)) as
       DecisionRow | undefined;
+    return r ? rowToDecision(r) : null;
+  }
+
+  async function getDecisionByRequest(tenant: string, requestId: string): Promise<DecisionRecord | null> {
+    const r = (await db
+      .prepare('SELECT * FROM decisions WHERE tenant = ? AND request_id = ? ORDER BY signed_at DESC, id DESC LIMIT 1')
+      .get(tenant, requestId)) as DecisionRow | undefined;
     return r ? rowToDecision(r) : null;
   }
 
@@ -1260,6 +1269,7 @@ export function createLedger(db: AsyncDb): Ledger {
     stats,
     recordDecision,
     getDecision,
+    getDecisionByRequest,
     replayDecision,
     recordOutcome,
     supersedeChain,

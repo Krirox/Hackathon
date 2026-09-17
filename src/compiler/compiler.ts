@@ -158,16 +158,15 @@ export class OrganizationalCompiler {
     };
   }
 
+  /** Creation only; lifecycle transitions use separate CAS updates. */
   private async persist(c: SkillCard): Promise<void> {
-    await this.db
+    const out = await this.db
       .prepare(
         `INSERT INTO skill_cards
          (id, tenant, intent, predicates, steps, tests, tool_grants, validated_tier,
           scope_json, state, version, provenance, eval_ref, owner, updated_at, trust_tier)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(id) DO UPDATE SET state=excluded.state, version=excluded.version,
-           scope_json=excluded.scope_json, updated_at=excluded.updated_at, tests=excluded.tests,
-           trust_tier=excluded.trust_tier`,
+         ON CONFLICT(id) DO NOTHING`,
       )
       .run(
         c.id,
@@ -187,6 +186,7 @@ export class OrganizationalCompiler {
         c.updatedAt,
         c.trustTier,
       );
+    if (out.changes === 0) throw new CompilerError('CARD_EXISTS', `card ${c.id} already exists`);
   }
 
   async get(tenant: string, id: string): Promise<SkillCard | null> {
@@ -236,8 +236,9 @@ export class OrganizationalCompiler {
     const now = c.now ?? new Date().toISOString();
     return this.db.transaction(async () => {
       for (const tid of c.traceIds) {
-        const t = (await this.db.prepare('SELECT outcome, router_confidence FROM traces WHERE id = ?').get(tid)) as
-          { outcome: string; router_confidence: number } | undefined;
+        const t = (await this.db
+          .prepare('SELECT outcome, router_confidence FROM traces WHERE tenant = ? AND id = ?')
+          .get(c.tenant, tid)) as { outcome: string; router_confidence: number } | undefined;
         if (!t) throw new CompilerError('UNKNOWN_TRACE', `trace ${tid} not found`);
         if (t.outcome === 'UNRESOLVED') {
           throw new CompilerError('UNRESOLVED_TRACE', `trace ${tid} has no resolved outcome; cannot compile from it`);
@@ -278,20 +279,24 @@ export class OrganizationalCompiler {
   }
 
   async recordTransfer(card: SkillCard, test: TransferTest): Promise<void> {
-    await this.db
+    // Check persisted ownership in the write itself; a caller-supplied card is not proof.
+    const out = await this.db
       .prepare(
         `INSERT INTO skill_transfer_tests (card_id, kind, variant, passed, score, ran_at)
-         VALUES (?,?,?,?,?,?)`,
+         SELECT id, ?, ?, ?, ?, ? FROM skill_cards WHERE tenant = ? AND id = ?`,
       )
-      .run(card.id, test.kind, test.variant, test.passed ? 1 : 0, test.score, test.ranAt);
+      .run(test.kind, test.variant, test.passed ? 1 : 0, test.score, test.ranAt, card.tenant, card.id);
+    if (out.changes === 0) throw new CompilerError('UNKNOWN_CARD', `card ${card.id} not found`);
   }
 
-  async transferResults(cardId: string): Promise<TransferTest[]> {
+  async transferResults(tenant: string, cardId: string): Promise<TransferTest[]> {
     const rows = (await this.db
       .prepare(
-        'SELECT kind, variant, passed, score, ran_at FROM skill_transfer_tests WHERE card_id = ? ORDER BY ran_at DESC',
+        `SELECT t.kind, t.variant, t.passed, t.score, t.ran_at
+         FROM skill_transfer_tests t JOIN skill_cards c ON c.id = t.card_id
+         WHERE c.tenant = ? AND c.id = ? ORDER BY t.ran_at DESC`,
       )
-      .all(cardId)) as SkillTransferTestRow[];
+      .all(tenant, cardId)) as SkillTransferTestRow[];
     return rows.map((r) => ({
       kind: String(r.kind) as TransferTest['kind'],
       variant: String(r.variant),
@@ -315,7 +320,7 @@ export class OrganizationalCompiler {
     const card = await this.get(tenant, cardId);
     if (!card) return { ok: false, card: null, reasons: ['card not found'] };
     const reasons: string[] = [];
-    const tests = await this.transferResults(cardId);
+    const tests = await this.transferResults(tenant, cardId);
     // F18: Latest test result per (kind, variant) determines active status — historical
     // passes must never mask subsequent regressions or failures.
     const latestByKindVariant = new Map<string, TransferTest>();
@@ -400,7 +405,9 @@ export class OrganizationalCompiler {
     const card = await this.get(tenant, cardId);
     if (!card) return { ok: false, card: null, reasons: ['card not found'] };
     if (card.state !== 'PROMOTED') return { ok: false, card, reasons: [`card is ${card.state}, not PROMOTED`] };
-    const roleTests = (await this.transferResults(cardId)).filter((x) => x.kind === 'cross_role' && x.variant === role);
+    const roleTests = (await this.transferResults(tenant, cardId)).filter(
+      (x) => x.kind === 'cross_role' && x.variant === role,
+    );
     const latestRoleTest = roleTests.sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt))[0];
     if (!latestRoleTest?.passed) {
       return {
@@ -511,7 +518,7 @@ export class OrganizationalCompiler {
       if (model && !card.originModels.includes(model)) {
         // F18: only the LATEST cross_model test for this variant determines
         // eligibility — a stale pass must never mask a subsequent regression.
-        const tests = await this.transferResults(card.id);
+        const tests = await this.transferResults(tenant, card.id);
         const forModel = tests.filter((t) => t.kind === 'cross_model' && t.variant === model);
         const latest = forModel.sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt))[0];
         if (!latest?.passed) continue;

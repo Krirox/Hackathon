@@ -30,6 +30,9 @@ novita_api_key     = "CHANGEME"
 # operator_secret = "CHANGEME"
 # ALB HTTPS (empty = HTTP-forward dev only). Pilot: ACM cert ARN.
 # acm_certificate_arn = ""
+# Private ALB posture (keep deployment private first — F01):
+# alb_internal      = true
+# alb_ingress_cidrs = ["10.0.0.0/16"]
 
 # Remote state (see commented backend block in main.tf): create the bucket +
 # lock table once, then uncomment there and init with -backend-config flags

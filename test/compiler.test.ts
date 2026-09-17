@@ -1,5 +1,5 @@
 import { T, eq, TEN, NOW, fresh, seedTrace, cardInput, withHarness, rejects } from './helpers.ts';
-import { mineCandidates } from '../src/compiler/compiler.ts';
+import { mineCandidates, type TransferTest } from '../src/compiler/compiler.ts';
 import { describeCard, describeCardReadOnly, listCards, runCardSuite } from '../src/compiler/registry.ts';
 import { runCrossModelEvidence } from '../src/compiler/transfer.ts';
 import { addCase } from '../src/evals/runner.ts';
@@ -110,6 +110,123 @@ T('compiler refuses unresolved traces', async () => {
   const { db, comp } = await fresh();
   await seedTrace(comp, db, 'tr_unres', 'UNRESOLVED', 0.9);
   await rejects(async () => await comp.compile(cardInput(['tr_unres'])), 'UNRESOLVED_TRACE');
+});
+
+T('F23: foreign source traces are unknown and compilation leaves no card or audit', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tenant_home', 'SUCCESS', 0.95);
+  await seedTrace(comp, db, 'tenant_foreign', 'SUCCESS', 0.95);
+  await db.prepare('UPDATE traces SET tenant = ? WHERE id = ?').run('other-tenant', 'tenant_foreign');
+  const cardsBefore = await db.prepare('SELECT * FROM skill_cards').all();
+  const auditsBefore = await db.prepare('SELECT * FROM audit_log').all();
+
+  for (const outcome of ['SUCCESS', 'UNRESOLVED']) {
+    await db.prepare('UPDATE traces SET outcome = ? WHERE id = ?').run(outcome, 'tenant_foreign');
+    await rejects(() => comp.compile(cardInput(['tenant_home', 'tenant_foreign'])), 'UNKNOWN_TRACE');
+    eq(await db.prepare('SELECT * FROM skill_cards').all(), cardsBefore, 'no card from a mixed-tenant batch:');
+    eq(await db.prepare('SELECT * FROM audit_log').all(), auditsBefore, 'no audit from a refused compile:');
+  }
+
+  const card = await comp.compile(cardInput(['tenant_home']));
+  eq(card.tenant, TEN);
+  eq(card.provenance.traceIds, ['tenant_home']);
+  eq(await comp.get(TEN, card.id), card);
+  eq(
+    (await db.prepare("SELECT * FROM audit_log WHERE action = 'CARD_COMPILED' AND target = ?").all(card.id)).length,
+    1,
+  );
+});
+
+T('F23: transfer reads require the owning tenant, including registry reads', async () => {
+  const { db, comp } = await fresh();
+  const card = await comp.compile(cardInput([]));
+  const test: TransferTest = { kind: 'regression', variant: 'suite', passed: true, score: 0.97, ranAt: NOW };
+  await comp.recordTransfer(card, test);
+  eq(await comp.transferResults(TEN, card.id), [test]);
+  eq(await comp.transferResults('other-tenant', card.id), []);
+  eq(await comp.transferResults(TEN, 'skl_missing'), []);
+  eq((await describeCard(comp, TEN, card.id)).transfers, [test]);
+  eq((await describeCardReadOnly(db, comp, TEN, card.id)).transfers, [test]);
+  await rejects(() => describeCard(comp, 'other-tenant', card.id), 'MISSING_CARD');
+  await rejects(() => describeCardReadOnly(db, comp, 'other-tenant', card.id), 'MISSING_CARD');
+});
+
+T('F23: forged tenant cards cannot record transfer evidence', async () => {
+  const { db, comp } = await fresh();
+  const card = await comp.compile({ ...cardInput([]), tenant: 'other-tenant' });
+  const test: TransferTest = { kind: 'cross_model', variant: 'model', passed: true, score: 1, ranAt: NOW };
+  await comp.recordTransfer(card, test);
+  const transfersBefore = await db.prepare('SELECT * FROM skill_transfer_tests').all();
+  const auditsBefore = await db.prepare('SELECT * FROM audit_log').all();
+
+  await rejects(() => comp.recordTransfer({ ...card, tenant: TEN }, { ...test, passed: false }), 'UNKNOWN_CARD');
+  await rejects(() => comp.recordTransfer({ ...card, id: 'skl_missing' }, test), 'UNKNOWN_CARD');
+  eq(await db.prepare('SELECT * FROM skill_transfer_tests').all(), transfersBefore, 'no foreign or orphan evidence:');
+  eq(await db.prepare('SELECT * FROM audit_log').all(), auditsBefore);
+  eq(await comp.get(card.tenant, card.id), card);
+  eq(await comp.transferResults(card.tenant, card.id), [test]);
+  eq(await comp.transferResults(TEN, card.id), []);
+});
+
+T('F23: an existing id is a creation collision, never an overwrite', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'c_ok', 'SUCCESS', 0.95);
+  await seedTrace(comp, db, 'c_foreign', 'SUCCESS', 0.95);
+  await db.prepare('UPDATE traces SET tenant = ? WHERE id = ?').run('other-tenant', 'c_foreign');
+  const original = await comp.compile({ ...cardInput(['c_ok']), id: 'skl_dup' });
+  const cardsBefore = await db.prepare('SELECT * FROM skill_cards').all();
+  const auditsBefore = await db.prepare('SELECT * FROM audit_log').all();
+
+  // Same tenant, different content: must not touch the original row.
+  await rejects(
+    () =>
+      comp.compile({
+        ...cardInput(['c_ok']),
+        id: 'skl_dup',
+        source: 'imported',
+        originScope: 'engineering',
+        intent: 'other-intent',
+        steps: ['hijack'],
+        tests: ['regression:hijack.v1'],
+        evalRef: 'suite_hijack',
+        owner: 'human:mallory',
+      }),
+    'CARD_EXISTS',
+  );
+  eq(await db.prepare('SELECT * FROM skill_cards').all(), cardsBefore, 'same-tenant card row untouched:');
+  eq(await db.prepare('SELECT * FROM audit_log').all(), auditsBefore, 'no audit from same-tenant refusal:');
+  // Foreign tenant reusing the id: same refusal, no cross-tenant write.
+  await rejects(
+    () =>
+      comp.compile({
+        ...cardInput(['c_foreign']),
+        id: 'skl_dup',
+        tenant: 'other-tenant',
+        source: 'imported',
+        originScope: 'engineering',
+        intent: 'other-intent',
+        steps: ['hijack'],
+        tests: ['regression:hijack.v1'],
+        evalRef: 'suite_hijack',
+        owner: 'human:mallory',
+      }),
+    'CARD_EXISTS',
+  );
+  eq(await db.prepare('SELECT * FROM skill_cards').all(), cardsBefore, 'original card row untouched:');
+  eq(await db.prepare('SELECT * FROM audit_log').all(), auditsBefore, 'no audit rows from refusals:');
+  eq(await comp.get(TEN, 'skl_dup'), original);
+  eq(await comp.get('other-tenant', 'skl_dup'), null);
+
+  // A fresh explicit id still compiles normally.
+  const freshCard = await comp.compile({ ...cardInput(['c_ok']), id: 'skl_new' });
+  eq(freshCard.id, 'skl_new');
+  eq(freshCard.provenance.traceIds, ['c_ok']);
+  eq(await comp.get(TEN, 'skl_new'), freshCard);
+  eq(
+    (await db.prepare("SELECT * FROM audit_log WHERE action = 'CARD_COMPILED' AND target = ?").all(freshCard.id))
+      .length,
+    1,
+  );
 });
 
 T('promotion is blocked without transfer evidence, and says why', async () => {
@@ -318,7 +435,7 @@ T('cross-model evidence runs the same intent on every harness and banks it', asy
       runs.every((r) => r.status === 'COMPLETED' && r.recorded),
       true,
     );
-    const ev = (await comp.transferResults(card.id)).filter((t) => t.kind === 'cross_model');
+    const ev = (await comp.transferResults(TEN, card.id)).filter((t) => t.kind === 'cross_model');
     eq(ev.length, 2);
     eq(
       ev.every((t) => t.passed),
@@ -441,7 +558,7 @@ T('F18: adapter exceptions bank negative transfer results instead of aborting', 
   const crashRun = runs.find((r) => r.adapter === 'crashing-model');
   eq(crashRun?.status, 'FAILED');
 
-  const transferRows = await comp.transferResults(card.id);
+  const transferRows = await comp.transferResults(TEN, card.id);
   const crashTest = transferRows.find((t) => t.variant === 'crashing-model');
   eq(crashTest?.passed, false);
   eq(crashTest?.score, 0);

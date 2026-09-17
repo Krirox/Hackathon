@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve as resolvePath, sep as pathSep } from 'node:path';
 import type { Socket } from 'node:net';
@@ -30,7 +30,7 @@ import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verify
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
 import { renderReview } from './review.ts';
-import { claimDetail, requestDetail } from './detail.ts';
+import { claimDetail, decisionDetail, requestDetail } from './detail.ts';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
 
@@ -770,7 +770,7 @@ export function startConsoleServer(
           res.end(JSON.stringify({ ok: true, engine: db.engine, at }));
           return;
         }
-        const detail = path.match(/^\/console\/(claims|requests)\/([^/]+)$/);
+        const detail = path.match(/^\/console\/(claims|requests|decisions)\/([^/]+)$/);
         if (method === 'GET' && detail) {
           const auth = await sessionOf();
           if (!auth) return redirect(res, '/login');
@@ -795,10 +795,14 @@ export function startConsoleServer(
             operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
             home,
           };
-          const html =
-            detail[1] === 'claims'
-              ? await claimDetail(db, ledger, id, pageIndex, detailOpts)
-              : await requestDetail(coord, ledger, id, pageIndex, detailOpts);
+          let html: string | null;
+          if (detail[1] === 'claims') {
+            html = await claimDetail(db, ledger, id, pageIndex, detailOpts);
+          } else if (detail[1] === 'decisions') {
+            html = await decisionDetail(ledger, id, detailOpts);
+          } else {
+            html = await requestDetail(coord, ledger, id, pageIndex, detailOpts);
+          }
           if (!html) return json(res, 404, { ok: false, error: 'evidence not found' });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(html);
@@ -1001,27 +1005,102 @@ export function startConsoleServer(
           // The approver is the authenticated identity — the body cannot
           // name a human, so "approval theater" needs a compromised session.
           try {
-            const next =
-              action === 'approve'
-                ? await coord.accept(tenant, id)
-                : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
-            await auditConsole(
-              db,
-              tenant,
-              who,
-              action === 'approve' ? 'console.approve' : 'console.decline',
-              `request:${id}`,
-              at,
-            );
-            // Latency rides the same decision, but must never turn a landed
-            // approval into an error response — degrade to null instead.
-            let latencySeconds: number | null = null;
-            try {
-              latencySeconds = (await coord.recordApprovalLatency(tenant, id, action, who, at)).seconds;
-            } catch {
-              latencySeconds = null;
-            }
-            json(res, 200, { ok: action === 'approve', id, state: next.state, by: who, latencySeconds, ...identity });
+            const result = await db.transaction(async () => {
+              // PostgreSQL needs a row lock; SQLite's enclosing BEGIN IMMEDIATE
+              // already serializes competing reviewers and execution claims.
+              await db
+                .prepare(
+                  `SELECT id FROM requests WHERE tenant = ? AND id = ?${db.engine === 'postgres' ? ' FOR UPDATE' : ''}`,
+                )
+                .get(tenant, id);
+              const request = await coord.get(tenant, id);
+              if (!request) throw new Error('Request no longer exists; refresh the review queue.');
+              const decisionId = `dec_console_${createHash('sha256')
+                .update(JSON.stringify([tenant, id]))
+                .digest('hex')}`;
+              if (action === 'approve') {
+                const existing =
+                  (await ledger.getDecision(tenant, decisionId)) ?? (await ledger.getDecisionByRequest(tenant, id));
+                if (existing)
+                  return {
+                    state: request.state,
+                    by: existing.approvedBy,
+                    decisionId: existing.id,
+                    decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
+                    latencySeconds: null,
+                    repeated: true,
+                  };
+                if (request.state === 'ACCEPTED') {
+                  return {
+                    state: request.state,
+                    by: who,
+                    latencySeconds: null,
+                    repeated: true,
+                  };
+                }
+              }
+              if (request.state !== 'ADMITTED')
+                throw new Error(`Request is ${request.state}, not awaiting review. Refresh to see its current status.`);
+              const validClaimIds = (
+                await Promise.all(request.claimRefs.map(async (cid) => ((await ledger.get(tenant, cid)) ? cid : null)))
+              ).filter((cid): cid is string => cid !== null);
+              if (action === 'approve' && validClaimIds.length === 0)
+                throw new Error(
+                  'Request has no valid evidence in the ledger. Review cannot proceed without grounded evidence.',
+                );
+              const decision =
+                action === 'approve'
+                  ? await ledger.recordDecision({
+                      id: decisionId,
+                      tenant,
+                      goal: request.goal,
+                      // This records a begin-work review, not authority to run an
+                      // arbitrary command or approve an unseen final deliverable.
+                      action: JSON.stringify({
+                        approvalStage: 'begin-work',
+                        requestId: id,
+                        requestUpdatedAt: request.updatedAt,
+                        deliverableSchema: request.deliverableSchema,
+                        originScope: request.originScope,
+                        targetScope: request.targetScope,
+                        budget: request.bid,
+                        stopCondition: request.stopCondition,
+                      }),
+                      actionClass: 'RECOMMEND',
+                      claimIds: validClaimIds,
+                      decidedBy: who,
+                      approvedBy: who,
+                      scope: request.targetScope,
+                      autonomy: 'approval',
+                      requestId: id,
+                      now: at,
+                    })
+                  : null;
+              const next =
+                action === 'approve'
+                  ? await coord.accept(tenant, id)
+                  : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
+              await auditConsole(db, tenant, who, `console.${action}`, `request:${id}`, at);
+              let latencySeconds: number | null;
+              try {
+                // Savepoint isolates optional telemetry failure on PostgreSQL.
+                latencySeconds = await db.transaction(
+                  async () => (await coord.recordApprovalLatency(tenant, id, action, who, at)).seconds,
+                );
+              } catch {
+                latencySeconds = null;
+              }
+              return {
+                state: next.state,
+                by: who,
+                latencySeconds,
+                repeated: false,
+                ...(decision
+                  ? { decisionId: decision.id, decisionUrl: `/console/decisions/${encodeURIComponent(decision.id)}` }
+                  : {}),
+              };
+            });
+            json(res, 200, { ok: action === 'approve', id, ...result, ...identity });
           } catch (e) {
             json(res, 409, { ok: false, error: (e as Error).message });
           }

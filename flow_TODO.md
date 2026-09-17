@@ -40,6 +40,8 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-001 — Approval creates a real Ledger decision
 
+**Remediated (2026-09-18):** Full approval-to-decision binding completed. Added tenant-scoped decision lookup, dedicated decision receipt pages (`/console/decisions/:id`), explicit begin-work review action wording, and atomic transaction rollback. Approving ungrounded requests without valid ledger evidence is strictly rejected (409), repeated approvals are idempotent returning the original decision receipt, and acceptance/audit failures cleanly roll back decisions. All 24/24 console tests pass, and full 410-test suite is green.
+
 - [ ] Define the distinction between approval to begin work and approval of a final deliverable.
 - [ ] Replace the misleading “records a decision” copy until the full decision contract is implemented.
 - [ ] Atomically bind acceptance to a Ledger decision and frozen Context Bundle.

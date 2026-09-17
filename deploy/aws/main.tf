@@ -148,13 +148,13 @@ resource "aws_security_group" "alb" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.alb_ingress_cidrs
   }
   ingress {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.alb_ingress_cidrs
   }
   egress {
     from_port   = 0
@@ -584,8 +584,9 @@ resource "aws_ecs_cluster" "main" {
 
 resource "aws_lb" "main" {
   name               = "${local.name}-alb"
+  internal           = var.alb_internal
   load_balancer_type = "application"
-  subnets            = aws_subnet.public[*].id
+  subnets            = var.alb_internal ? aws_subnet.private[*].id : aws_subnet.public[*].id
   security_groups    = [aws_security_group.alb.id]
 }
 

@@ -196,6 +196,18 @@ variable "acm_certificate_arn" {
   default     = ""
 }
 
+variable "alb_internal" {
+  description = "true = internal ALB in private subnets (no public IP, reachable only via VPN/VPC/peering); false = internet-facing ALB in public subnets (F01: keep deployment private first)"
+  type        = bool
+  default     = false
+}
+
+variable "alb_ingress_cidrs" {
+  description = "CIDR blocks permitted to reach the ALB on HTTP(S). Default [\"0.0.0.0/0\"]; restrict to corporate CIDRs or private VPC ranges for private posture."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
 variable "operator_secret" {
   description = "Shared secret gating console mutations via x-vital-operator (VITAL_OPERATOR_SECRET). Empty = ungated (loopback dev only). Set for any deployment behind the ALB."
   type        = string

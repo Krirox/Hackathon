@@ -103,7 +103,7 @@ export async function describeCardReadOnly(
 ): Promise<CardDescription> {
   const card = await comp.get(tenant, id);
   if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
-  const transfers = await comp.transferResults(card.id);
+  const transfers = await comp.transferResults(tenant, card.id);
   const drift = await peekDrift(db, tenant, card);
   return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
 }
@@ -118,7 +118,7 @@ export async function describeCardReadOnly(
 export async function describeCard(comp: OrganizationalCompiler, tenant: string, id: string): Promise<CardDescription> {
   const card = await comp.get(tenant, id);
   if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
-  const transfers = await comp.transferResults(card.id);
+  const transfers = await comp.transferResults(tenant, card.id);
   const drift = card.state === 'PROMOTED' ? await comp.checkDrift(tenant, card.id) : null;
   return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
 }

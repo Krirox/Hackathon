@@ -30,6 +30,7 @@ export async function requestDetail(
 ): Promise<string | null> {
   const r = await coord.get(opts.tenant, id);
   if (!r) return null;
+  const decision = await ledger.getDecisionByRequest(opts.tenant, id);
   const refs = [...new Set([...r.claimRefs, ...r.chainClaimIds])];
   const currentPage = Math.min(page, Math.max(0, Math.ceil(refs.length / PAGE_SIZE) - 1));
   const claims = [];
@@ -44,8 +45,31 @@ export async function requestDetail(
   return detailDocument(
     'Request evidence',
     `<h2>${esc(r.goal)}</h2><p>${esc(r.state)} · ${esc(r.id)}</p>
+${decision ? `<p><a href="/console/decisions/${esc(encodeURIComponent(decision.id))}">View approval receipt</a> — approval to begin work, not final-deliverable authorization or evidence of execution or measurement.</p>` : ''}
 <details><summary>Request, budget and execution metadata</summary><pre>${dump(r)}</pre></details>
 <h2>Evidence (${refs.length})</h2>${pagination(`/console/requests/${encodeURIComponent(id)}`, currentPage, refs.length)}${claims.join('') || '<p>No evidence references.</p>'}`,
+    opts,
+  );
+}
+
+export async function decisionDetail(ledger: Ledger, id: string, opts: ReviewOptions): Promise<string | null> {
+  const decision = await ledger.getDecision(opts.tenant, id);
+  if (!decision) return null;
+  const { record, drift } = await ledger.replayDecision(opts.tenant, id);
+  return detailDocument(
+    'Approval receipt',
+    `<p>This records approval to BEGIN work. It is not final-deliverable authorization and does not establish that execution or measurement has occurred.</p>
+<dl><dt>Decision id</dt><dd>${esc(record.id)}</dd>
+<dt>Actor (decided by)</dt><dd>${esc(record.decidedBy)}</dd>
+<dt>Approved by</dt><dd>${esc(record.approvedBy ?? 'Not recorded')}</dd>
+<dt>Request</dt><dd>${record.requestId === null ? 'No linked request' : `<a href="/console/requests/${esc(encodeURIComponent(record.requestId))}">${esc(record.requestId)}</a>`}</dd>
+<dt>Signed at</dt><dd>${esc(record.signedAt)}</dd>
+<dt>Scope</dt><dd>${esc(record.scope)}</dd></dl>
+<h2>Frozen goal</h2><pre>${esc(record.goal)}</pre>
+<h2>Frozen action</h2><pre>${esc(record.action)}</pre>
+<p>The goal and action above are the strings recorded at decision time, not a claim that an execution specification is enforced.</p>
+<h2>Frozen context bundle</h2><pre>${dump(record.bundle)}</pre>
+<h2>Evidence drift since approval</h2><pre>${dump(drift)}</pre>`,
     opts,
   );
 }

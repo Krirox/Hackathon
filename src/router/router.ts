@@ -1,5 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
-import type { RoutingClass } from '../core/types.ts';
+import { ROUTING_CLASSES, type RoutingClass } from '../core/types.ts';
 
 export class RouterError extends Error {
   constructor(
@@ -344,11 +344,39 @@ export class CognitiveRouter {
     };
   }
 
-  /** Label a routing decision once its outcome is known. */
-  async label(id: number, correctTier: RoutingClass): Promise<void> {
-    await this.db
-      .prepare('UPDATE routing_decisions SET labeled = 1, correct_tier = ? WHERE id = ?')
-      .run(correctTier, id);
+  /** Label a tenant's routing decision with an explicit reviewer and atomic audit. */
+  async label(tenant: string, id: number, correctTier: RoutingClass, reviewer: string): Promise<void> {
+    if (typeof reviewer !== 'string' || !reviewer.trim()) {
+      throw new RouterError('NO_REVIEWER', 'a routing label requires a named reviewer');
+    }
+    if (!ROUTING_CLASSES.includes(correctTier)) {
+      throw new RouterError('BAD_TIER', `correctTier must be one of ${ROUTING_CLASSES.join(', ')}`);
+    }
+    await this.db.transaction(async () => {
+      // Serialize relabels on Postgres so the audit's before state is authoritative.
+      const lock = this.db.engine === 'postgres' ? ' FOR UPDATE' : '';
+      const row = (await this.db
+        .prepare(`SELECT labeled, correct_tier FROM routing_decisions WHERE tenant = ? AND id = ?${lock}`)
+        .get(tenant, id)) as { labeled: number; correct_tier: RoutingClass | null } | undefined;
+      if (!row) throw new RouterError('NOT_FOUND', 'routing decision not found');
+      const updated = await this.db
+        .prepare('UPDATE routing_decisions SET labeled = 1, correct_tier = ? WHERE tenant = ? AND id = ?')
+        .run(correctTier, tenant, id);
+      if (updated.changes === 0) throw new RouterError('NOT_FOUND', 'routing decision not found');
+      await this.db
+        .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+        .run(
+          tenant,
+          reviewer,
+          'ROUTING_DECISION_LABELED',
+          String(id),
+          JSON.stringify({
+            before: { labeled: Boolean(row.labeled), correctTier: row.correct_tier },
+            after: { labeled: true, correctTier },
+          }),
+          new Date().toISOString(),
+        );
+    });
   }
 
   /**

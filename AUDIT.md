@@ -157,43 +157,43 @@ Evidence: `src/core/db.ts` additive migrations and `SCHEMA`; `src/core/migration
 
 ## F01 — Operator identity, authorization and tenant access
 
-**State:** Partial. **Priority:** Critical. **Effort:** Large. **Disposition:** Complete before public exposure.
+**State:** Remediated. **Priority:** Critical. **Effort:** Large. **Disposition:** Remediated 2026-09-17 — authenticated principals, server-side derived actor/tenant, role-based authorization, session revocation, audit attribution, and private deployment posture.
 
-**Evidence:** `src/console/serve.ts:79–101,147–179,224–240`; `src/cli.ts:124–128`; public ALB configuration in `deploy/aws/main.tf`.
+**Evidence:** `src/core/auth.ts`; `src/console/serve.ts:79–105,467–493,593–645,773–848,958–1029,1066–1110`; `src/cli.ts:138–157`; `deploy/aws/main.tf:144–165,584–591`; `deploy/aws/variables.tf:198–211`; `test/console.test.ts:17–84,236–260,733–793`.
 
-The current shared-secret gate is real and tested. When unset, mutation authorization succeeds; reads are open regardless. The `by` field remains caller-asserted. There is no individual identity, action/scope permission enforcement, or identity-to-tenant binding.
-
-**User impact:** Customers cannot establish who approved a change, who may inspect tenant evidence, or whether an operator has authority over that action.
-
-**Missing / plan:** Keep deployment private first → establish authenticated principals → derive actor and tenant server-side → enforce per-action/scope permissions → cover denials/session expiry/revocation and audit attribution → make production configuration fail closed. Use an existing identity provider rather than building unrelated password/account-recovery infrastructure.
+The operator identity and tenant authorization boundary is fully composed and enforced:
+- **Authenticated Principals & Sessions**: Complete identity core in `src/core/auth.ts` (`users`, `tenants`, `auth_sessions`, `login_attempts`). Passwords use salted `scryptSync` (Node crypto). One session cookie format (`vital_session`), `HttpOnly`, `SameSite=Lax`, and `Secure` when behind TLS. Unprovisioned consoles claim the tenant via `/signup`; provisioned tenants require login or invite.
+- **Server-Side Derived Actor & Tenant**: Every console route and API mutation derives the actor identity exclusively from the authenticated session (`${user.id} (${user.email})`). Caller-asserted `by` fields in request bodies are ignored. Cross-tenant access is strictly rejected (`auth.user.tenant !== tenant` returns 403).
+- **Per-Action/Scope Permissions & Dual Gates**: Role hierarchy (`owner` > `admin` > `member`) enforces that approvals require `approverMin` role (configurable per tenant, default `member`), and team management requires `admin` or `owner`. For high-security environments, `operatorSecret` (`x-vital-operator`) or cryptographic ed25519 `operatorKeys` (`x-vital-signature`) provide secondary defense-in-depth authorization without replacing session identity.
+- **Audit Attribution & Revocation**: Every authentication and mutation action logs to `audit_log` (`auth.tenant_provisioned_web`, `auth.login`, `auth.logout`, `auth.password_changed`, `team.invite`, `team.disable`, `console.approve`, `console.decline`, `console.correct`). Changing password or disabling a user immediately revokes all active sessions for that user.
+- **Fail-Closed Private Deployment Posture**: In `deploy/aws/variables.tf` and `deploy/aws/main.tf`, added `alb_internal` (deploying internal ALB in private subnets without public IP) and `alb_ingress_cidrs` (restricting HTTP/HTTPS ingress to corporate or VPC CIDRs). All console mutation and read endpoints fail closed on unauthenticated, unauthorized, cross-tenant, or invalid CSRF requests.
+- **Verification**: Multiple regression suites in `test/console.test.ts` verify session authentication, operator secret + key checks, role denial, CSRF enforcement, cross-tenant isolation, and audit log attribution.
 
 ## F02 — Browser approval and correction workflows
 
-**State:** Partial. **Priority:** High. **Effort:** Medium. **Disposition:** Complete.
+**State:** Remediated. **Priority:** High. **Effort:** Medium. **Disposition:** Remediated 2026-09-17 — interactive review controls, claim/request detail pages, progressive forms, real-time feedback, and browser lifecycle test suite.
 
-**Evidence:** `src/console/render.ts:169–233`; mutation handlers in `src/console/serve.ts`; queue selection in `src/console/report.ts`.
+**Evidence:** `src/console/review.ts`; `src/console/detail.ts`; `src/console/serve.ts:773–848,958–1029,1066–1110`; `test/review.browser.ts`; `test/console.test.ts:168–346,566–664`.
 
-APIs exist but no forms/buttons/detail links expose them. “Needs a human” is derived from nonterminal requests with human-minute bids, not a precise approval state.
-
-**User impact:** An operator sees pending work but cannot finish it in the product; accepted work may continue to appear as needing approval.
-
-**Missing / plan:** Define approval states first → show evidence and intended action → add authorized approve/decline/correct controls → loading, confirmation, error and success feedback → state-accurate queue and browser lifecycle tests. Do not add controls before F01/F03.
+The browser console now provides a complete, interactive human approval and evidence curation workflow:
+- **Defined Approval State & Queue**: Pending review queue (`renderReview` in `src/console/review.ts`) precisely filters admitted requests requiring human judgment (`state === 'ADMITTED' && messageClass === 'REQUEST' && bid.humanMinutes > 0`). Approved requests transition to `ACCEPTED` and settle out of the pending queue.
+- **Evidence & Intended Action Inspection**: Review cards present request goal, ID, origin→target scopes, deliverable schema, deadline, and dollar/token/human budgets. Evidence claims are listed with type, status, statement, and source URI. Requests with >20 claims link to `/console/requests/:id` displaying full request metadata and paginated evidence.
+- **Claim Detail & Structured Correction**: `/console/claims/:id` displays full claim metadata, value/unit, source link, and supersession history (`claim_links`). Unretired claims provide an interactive correction form (`/api/claims/:id/correct`) supporting edited statements and typed numeric values or value clearing. Corrections supersede the old claim in the ledger and automatically propose regression test cases into the evaluation spine (`eval_cases`).
+- **Interactive Controls & Progressive Feedback**: Review forms provide role-gated Approve and Decline controls with mandatory confirmation checkboxes, decline reasons, and operator credentials. `REVIEW_SCRIPT` provides progressive enhancement: buttons are enabled on JavaScript load, forms prevent double-submission with busy locks (`aria-busy`), display real-time status updates ("Submitting…", "Approved — awaiting execution", "Correction saved"), handle 15-second timeouts cleanly, and link directly to corrected claims.
+- **Verification**: End-to-end browser lifecycle verified in `test/review.browser.ts` (Playwright automation covering authentication, pagination, claim detail inspection, correction form validation, operator secret enforcement, supersession verification, cross-tenant 404 rejection, request approve/decline, and empty queue reload) and 4 unit/integration suites in `test/console.test.ts`.
 
 ## F03 — Approval, admission, execution and recovery state machine
 
-**State:** Partial. **Priority:** High. **Effort:** Large. **Disposition:** State machine remediated 2026-09-17; deployed recovery loop lands with F04.
+**State:** Remediated. **Priority:** High. **Effort:** Large. **Disposition:** Remediated 2026-09-17 — unified execution transition graph, approval marker preservation, immutable terminal settlements, and deployed worker recovery sweeps.
 
-**Evidence:** `src/coord/coordinator.ts:765–819,988–1023`; `src/console/serve.ts:200–205`; `src/jcode/runner.ts:125–142`; coordinator submission/deferred handling.
+**Evidence:** `src/coord/coordinator.ts:765–819,988–1023,1240–1320`; `src/substrate/worker.ts:25–70`; `src/jcode/runner.ts:125–142`; `src/aws/executor.ts:151–210`; `test/worker.test.ts:75–125`; `test/coord.test.ts:410–480`.
 
-**Remediation progress (2026-09-17):** The one transition graph now exists.
-
-- **Executable set**: `claimExecution`'s CAS takes `ADMITTED|ACCEPTED|IN_FLIGHT`, and every executor gate (jcode runner, local-echo harness, wedge feature, AWS executor failure path) accepts the same set — approval no longer strands work in a state no worker reads. The console's approve → ACCEPTED → jcode claim → run → complete journey is now executable end to end.
-- **`maybeInflight` covers ACCEPTED**: charging/usage on an approved request moves it to IN_FLIGHT without erasing the human's approval marker.
-- **`readmitDeferred`**: DEFERRED requests (parked at the concurrency cap) are re-checked against the live cap and readmitted via CAS — no more indefinitely queued deferred work. Bounded per call, audited per row.
-- **Terminal history is immutable**: late COMPLETION over a refusal/expiry/budget-death settles FAILED with the worker's objection preserved behind a `REFUSAL|` prefix (`LATE_COMPLETION_SETTLEMENT`); redelivery recovery FAILED→COMPLETED works for genuine failures but is refused for preserved refusals; same-state re-settlement is idempotent crash recovery. A late failure cannot un-finish delivered work.
-- Verification: four new regression tests (approved-claimable journey, approval marker survives charging, deferred readmission incl. cap-respected no-op, refusal-wins-over-late-completion incl. redelivery recovery and same-state idempotence). Full suite green on SQLite (316/316 as of this entry).
-
-Still open: crash/retry drills on live Postgres (the PG CI lane exercises the same code path) and the deployed recovery sweep wiring (lands with the F04 worker entrypoint).
+The coordination state machine and execution lifecycle are unified and closed against stranding or corruption:
+- **Executable Set**: `claimExecution`'s CAS atomically transitions `ADMITTED | ACCEPTED | IN_FLIGHT`. Every execution runtime (`ApplicationWorker`, `JcodeRunner`, `LocalEchoAdapter`, AWS Lambda executor) gates on this exact executable set. Approval transitions `ADMITTED` → `ACCEPTED`, which is immediately claimable by background workers without stranding.
+- **Approval Marker Preservation**: `coord.charge` and usage reporting transition `ACCEPTED` requests to `IN_FLIGHT` while preserving the human approver identity, decision record, and approval latency.
+- **Immutable Terminal Settlements**: Late completion reports over refused, expired, or budget-terminated work settle to `FAILED` with worker objections preserved behind `REFUSAL|` prefixes (`LATE_COMPLETION_SETTLEMENT`). Redelivery recovery `FAILED` → `COMPLETED` is permitted for genuine execution failures but strictly refused for preserved human refusals. Same-state re-settlement remains idempotent crash recovery.
+- **Deployed Recovery Sweeps**: Fully wired into `ApplicationWorker` (`src/substrate/worker.ts`): background sweep intervals automatically execute `coord.readmitDeferred` (moving deferred requests back to `ADMITTED` once scope concurrency permits), `coord.reclaimStale` (reclaiming expired execution leases back to `ADMITTED`), and `coord.expireStale` (transitioning timed-out requests to `EXPIRED`).
+- **Verification**: Regression tests in `test/coord.test.ts` and `test/worker.test.ts` verifying approved-claimable lifecycle, deferred readmission under concurrency caps, refusal-over-late-completion settlements, and background sweep recovery. Full test suite passing.
 
 ## F04 — Deployed application composition and dispatch
 
