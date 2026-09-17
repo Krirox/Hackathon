@@ -2,7 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { openDb, migrate, type AsyncDb } from '../src/core/db.ts';
 import { createLedger, type Ledger } from '../src/ledger/ledger.ts';
 import { createCoordinator, DEFAULT_LIMITS, type Coordinator } from '../src/coord/coordinator.ts';
-import { gitHubReleasesCollector, ingestEvents, type Collector, type RawEvent } from '../src/ingest/collectors.ts';
+import {
+  gitHubReleasesCollector,
+  ingestEvents,
+  stageToInbox,
+  ingestInboxBatch,
+  type Collector,
+  type RawEvent,
+} from '../src/ingest/collectors.ts';
 import {
   summarizeRelease,
   isKnownRelease,
@@ -87,7 +94,11 @@ const SELF_COLLECTOR: Collector = {
   sourceTier: 'PRIMARY',
   extractor: 'self-git-log',
   extractorVersion: '1.0.0',
-  poll: () => selfCommitEvents(),
+  poll: async (db: AsyncDb, now: string, tenant = 'vital') => {
+    const events = selfCommitEvents();
+    await stageToInbox(db, tenant, 'github:vital/self:commits', events, now);
+    return events;
+  },
 };
 
 export interface ShipPipelineResult {
@@ -147,7 +158,8 @@ export async function runShipPipeline(deps: {
   const { db, ledger, coord, comp, tenant, now, collector, events } = deps;
   if (events.length === 0) throw new Error('no release events found');
 
-  const ingested = await ingestEvents(db, ledger, tenant, collector, events, {
+  await stageToInbox(db, tenant, collector.name, events, now);
+  const { claimIds: ingested } = await ingestInboxBatch(db, ledger, tenant, collector, {
     owner: 'human:founder',
     scope: 'engineering',
     now,
@@ -328,9 +340,9 @@ async function main(): Promise<void> {
         },
       }),
     );
-    events = await collector.poll(db, now);
+    events = await collector.poll(db, now, tenant);
   } else {
-    events = selfCommitEvents();
+    events = await collector.poll(db, now, tenant);
   }
   const r = await runShipPipeline({ db, ledger, coord, comp, tenant, now, collector, events });
   if (r.alreadyKnown) {

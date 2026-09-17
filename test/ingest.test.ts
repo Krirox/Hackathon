@@ -5,10 +5,13 @@ import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, rejects } from './helpers.ts';
 import {
   ArtifactStoreError,
   claimInbox,
+  cursorGet,
+  cursorSet,
   FilesystemArtifactStore,
   fileDiffCollector,
   gitHubReleasesCollector,
   ingestEvents,
+  ingestInboxBatch,
   isNovel,
   serperSearchCollector,
   settleInbox,
@@ -402,7 +405,7 @@ T('crash between fetch and cursor loses nothing: the inbox holds the event, retr
   eq(await count(), 1, 'poll stages to the inbox before moving the cursor:');
   // Simulate the crash: the cursor write never happened — rewind it. The
   // event must survive in the inbox (no loss).
-  await db.prepare('DELETE FROM meta WHERE key = ?').run('ingest:cursor:crashy');
+  await db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run('ingest:cursor:crashy', `ingest:cursor:${TEN}:crashy`);
   const retry = await c.poll(db, NOW, TEN);
   eq(retry.length, 1, 'cursor rewound, so the occurrence is re-fetched:');
   eq(await count(), 1, 'same identity collapses onto the existing row (no dup):');
@@ -471,3 +474,150 @@ T('github pagination walks past the first page via Link continuation', async () 
   eq(calls.length, 2, 'follows the explicit continuation:');
   eq((await c.poll(db, NOW, TEN)).length, 0, 'cursor advanced over every page:');
 });
+
+console.log('\n\x1b[1mIngestion — tenant cursors, revisions and receipts (F09)\x1b[0m');
+
+T('F09: multi-tenant cursor isolation and legacy fallback', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-tenant-cursors-'));
+  writeFileSync(join(dir, 'doc.txt'), 'content v1\n');
+
+  const c = fileDiffCollector('shared-docs', dir);
+  // Tenant A polls -> gets 1 event, advances cursor for tenant A
+  const evsA = await c.poll(db, NOW, 'tenant-alpha');
+  eq(evsA.length, 1);
+
+  // Tenant B polls the same collector -> also gets 1 event, because tenant A's cursor is isolated!
+  const evsB = await c.poll(db, NOW, 'tenant-beta');
+  eq(evsB.length, 1);
+
+  // Second poll for tenant A -> 0 events
+  eq((await c.poll(db, NOW, 'tenant-alpha')).length, 0);
+  // Second poll for tenant B -> 0 events
+  eq((await c.poll(db, NOW, 'tenant-beta')).length, 0);
+
+  // Fallback test: set legacy cursor key
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+    .run('ingest:cursor:legacy-col', JSON.stringify({ 'a.txt': 'h1' }));
+  const val = await cursorGet(db, 'new-tenant', 'legacy-col');
+  eq(val, JSON.stringify({ 'a.txt': 'h1' }));
+  // Once tenant cursor is set, scoped cursor takes precedence
+  await cursorSet(db, 'new-tenant', 'legacy-col', JSON.stringify({ 'a.txt': 'h2' }));
+  eq(await cursorGet(db, 'new-tenant', 'legacy-col'), JSON.stringify({ 'a.txt': 'h2' }));
+});
+
+T('F09: gitHubReleasesCollector detects release edits as new revisions', async () => {
+  const { db } = await fresh();
+  let currentNotes = 'initial notes';
+  const currentTag = 'v1.0.0';
+  const fetchFn = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [
+      {
+        id: 42,
+        tag_name: currentTag,
+        name: 'Release 42',
+        html_url: 'https://gh/r42',
+        published_at: NOW,
+        body: currentNotes,
+      },
+    ],
+  });
+
+  const c = gitHubReleasesCollector('acme', 'edited-repo', fetchFn);
+  const first = await c.poll(db, NOW, TEN);
+  eq(first.length, 1);
+  eq(first[0]!.eventId, '42');
+
+  // Second poll without changes -> 0 events
+  const second = await c.poll(db, NOW, TEN);
+  eq(second.length, 0);
+
+  // Edit the existing release body (e.g. changelog updated on github)
+  currentNotes = 'updated notes with security patch details';
+  const third = await c.poll(db, NOW, TEN);
+  eq(third.length, 1, 'release edit detected as a new revision event:');
+  eq(third[0]!.eventId, '42');
+  eq((third[0]!.payload as { notes: string }).notes.includes('security patch'), true);
+
+  // Verify inbox received both revisions for the same occurrence
+  const rows = (await db
+    .prepare('SELECT source_event_id, revision FROM ingest_inbox WHERE tenant = ? AND collector = ?')
+    .all(TEN, c.name)) as { source_event_id: string; revision: string }[];
+  eq(rows.length, 2);
+  eq(rows[0]!.source_event_id, '42');
+  eq(rows[1]!.source_event_id, '42');
+  eq(rows[0]!.revision !== rows[1]!.revision, true, 'distinct revisions in inbox:');
+});
+
+T('F09: atomic claim + receipt persistence with dual identity/fingerprint receipt', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-atomic-receipts-'));
+  writeFileSync(join(dir, 'test.txt'), 'atomic payload\n');
+  const c = fileDiffCollector('atomic-col', dir);
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 1);
+
+  const claimIds = await ingestEvents(db, ledger, TEN, c, evs, {
+    owner: 'worker:ingest',
+    scope: 'infra',
+    now: NOW,
+  });
+  eq(claimIds.length, 1);
+
+  // Both fingerprint receipt and identity receipt exist
+  const fpKey = `ingest:seen:${TEN}:${c.name}:${evs[0]!.fingerprint}`;
+  const idKey = `ingest:seen:${TEN}:${c.name}:${evs[0]!.eventId}:${evs[0]!.revision}`;
+  const fpVal = ((await db.prepare('SELECT value FROM meta WHERE key = ?').get(fpKey)) as { value: string }).value;
+  const idVal = ((await db.prepare('SELECT value FROM meta WHERE key = ?').get(idKey)) as { value: string }).value;
+  eq(fpVal, claimIds[0]!);
+  eq(idVal, claimIds[0]!);
+
+  // Re-ingest with same events is deduped
+  const second = await ingestEvents(db, ledger, TEN, c, evs, {
+    owner: 'worker:ingest',
+    scope: 'infra',
+    now: NOW,
+  });
+  eq(second.length, 0);
+});
+
+T('F09: ingestInboxBatch claims, persists claims and settles inbox rows to DONE', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-inbox-batch-'));
+  writeFileSync(join(dir, 'file1.txt'), 'content 1\n');
+  writeFileSync(join(dir, 'file2.txt'), 'content 2\n');
+  const c = fileDiffCollector('batch-col', dir);
+  await c.poll(db, NOW, TEN);
+
+  // Drain and settle via ingestInboxBatch
+  const res = await ingestInboxBatch(db, ledger, TEN, c, {
+    owner: 'worker:batch',
+    scope: 'product',
+    now: NOW,
+  });
+  eq(res.receipts.length, 2);
+  eq(res.claimIds.length, 2);
+
+  // Check inbox rows status
+  const statuses = (
+    (await db
+      .prepare('SELECT status FROM ingest_inbox WHERE tenant = ? AND collector = ?')
+      .all(TEN, c.name)) as { status: string }[]
+  ).map((r) => r.status);
+  eq(statuses, ['DONE', 'DONE']);
+
+  // Ledger has both claims
+  for (const cid of res.claimIds) {
+    const claim = await ledger.get(TEN, cid);
+    eq(claim?.kind, 'OBSERVATION');
+  }
+
+  // Second run finds nothing pending
+  const second = await ingestInboxBatch(db, ledger, TEN, c);
+  eq(second.receipts.length, 0);
+  eq(second.claimIds.length, 0);
+});
+

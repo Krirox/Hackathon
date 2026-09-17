@@ -90,6 +90,16 @@ async function metaSet(db: AsyncDb, key: string, value: string): Promise<void> {
     .run(key, value);
 }
 
+export async function cursorGet(db: AsyncDb, tenant: string, name: string): Promise<string | null> {
+  const scoped = await metaGet(db, `ingest:cursor:${tenant}:${name}`);
+  if (scoped !== null) return scoped;
+  return metaGet(db, `ingest:cursor:${name}`);
+}
+
+export async function cursorSet(db: AsyncDb, tenant: string, name: string, value: string): Promise<void> {
+  await metaSet(db, `ingest:cursor:${tenant}:${name}`, value);
+}
+
 // ------------------------------------------------------- durable inbox ----
 
 /**
@@ -271,6 +281,73 @@ export async function settleInbox(
       // Already DONE/FAILED by a legitimate earlier settlement: idempotent no-op.
     }
   }
+}
+
+/**
+ * Drains and settles a batch of staged inbox events into the Ledger.
+ * Claims a batch of PENDING/retryable rows, converts each into an OBSERVATION
+ * claim with an artifact ref and identity receipt, and settles the receipts
+ * to 'DONE' (or 'FAILED' on error).
+ */
+export async function ingestInboxBatch(
+  db: AsyncDb,
+  ledger: Ledger,
+  tenant: string,
+  collector: Collector,
+  opts: {
+    batch?: number;
+    owner?: string;
+    scope?: string;
+    now?: string;
+    artifactDir?: string;
+    leaseMs?: number;
+    maxAttempts?: number;
+  } = {},
+): Promise<{ receipts: InboxReceipt[]; claimIds: string[] }> {
+  const receipts = await claimInbox(db, tenant, collector.name, opts.batch ?? 50, {
+    owner: opts.owner,
+    now: opts.now,
+    leaseMs: opts.leaseMs,
+    maxAttempts: opts.maxAttempts,
+  });
+  if (receipts.length === 0) {
+    return { receipts: [], claimIds: [] };
+  }
+  let claimIds: string[];
+  try {
+    claimIds = await ingestEvents(
+      db,
+      ledger,
+      tenant,
+      collector,
+      receipts.map((r) => r.event),
+      {
+        owner: opts.owner ?? 'inbox-worker',
+        scope: opts.scope ?? 'engineering',
+        now: opts.now ?? new Date().toISOString(),
+        artifactDir: opts.artifactDir,
+      },
+    );
+    await settleInbox(
+      db,
+      receipts.map((r) => r.id),
+      'DONE',
+      { owner: opts.owner },
+    );
+  } catch (err) {
+    try {
+      await settleInbox(
+        db,
+        receipts.map((r) => r.id),
+        'FAILED',
+        { owner: opts.owner },
+      );
+    } catch {
+      /* preserve primary err */
+    }
+    throw err;
+  }
+  return { receipts, claimIds };
 }
 
 /**
@@ -475,39 +552,48 @@ export async function ingestEvents(
   }
   const ids: string[] = [];
   for (const e of events) {
+    const { sourceEventId, revision } = eventIdentityOf(e);
     // Identity-scoped receipt first (why: the old global `ingest:seen:<hash>`
     // let one tenant's fetch hide another's); the legacy key is read-only
     // back-compat so upgrades never double-ingest.
-    if (await metaGet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`)) continue;
+    const identityKey = `ingest:seen:${tenant}:${collector.name}:${sourceEventId}:${revision}`;
+    const fingerprintKey = `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`;
+    if (await metaGet(db, identityKey)) continue;
+    if (await metaGet(db, fingerprintKey)) continue;
     if (await metaGet(db, `ingest:seen:${e.fingerprint}`)) {
-      await metaSet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`, 'migrated');
+      await metaSet(db, fingerprintKey, 'migrated');
+      await metaSet(db, identityKey, 'migrated');
       continue;
     }
     const ref = storeArtifact(db, e, opts.artifactDir);
-    const c = await ledger.append({
-      tenant,
-      subject: e.source,
-      kind: 'OBSERVATION',
-      statement: e.summary,
-      value: e.payload === undefined ? undefined : (e.payload as Record<string, unknown>),
-      confidence: 1,
-      owner: opts.owner,
-      scope: opts.scope,
-      authorType: 'system',
-      observedAt: e.occurredAt,
-      validFrom: e.occurredAt,
-      now: opts.now,
-      provenance: {
-        sourceUri: e.uri,
-        sourceTier: collector.sourceTier,
-        extractor: collector.extractor,
-        extractorVersion: collector.extractorVersion,
-        retrievedAt: opts.now,
-        rawArtifactRef: ref,
-      },
+    const claimId = await db.transaction(async () => {
+      const c = await ledger.append({
+        tenant,
+        subject: e.source,
+        kind: 'OBSERVATION',
+        statement: e.summary,
+        value: e.payload === undefined ? undefined : (e.payload as Record<string, unknown>),
+        confidence: 1,
+        owner: opts.owner,
+        scope: opts.scope,
+        authorType: 'system',
+        observedAt: e.occurredAt,
+        validFrom: e.occurredAt,
+        now: opts.now,
+        provenance: {
+          sourceUri: e.uri,
+          sourceTier: collector.sourceTier,
+          extractor: collector.extractor,
+          extractorVersion: collector.extractorVersion,
+          retrievedAt: opts.now,
+          rawArtifactRef: ref,
+        },
+      });
+      await metaSet(db, fingerprintKey, c.id);
+      await metaSet(db, identityKey, c.id);
+      return c.id;
     });
-    await metaSet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`, c.id);
-    ids.push(c.id);
+    ids.push(claimId);
   }
   return ids;
 }
@@ -522,7 +608,7 @@ export function fileDiffCollector(name: string, dir: string, sourceTier: SourceT
     async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
       let prev: Record<string, string>;
       try {
-        prev = JSON.parse((await metaGet(db, `ingest:cursor:${name}`)) ?? '{}') as Record<string, string>;
+        prev = JSON.parse((await cursorGet(db, tenant, name)) ?? '{}') as Record<string, string>;
       } catch {
         prev = {};
       }
@@ -554,7 +640,7 @@ export function fileDiffCollector(name: string, dir: string, sourceTier: SourceT
       // Inbox BEFORE cursor (why: a crash here must leave the event staged
       // for retry, never silently dropped; the retry dedupes on identity).
       await stageToInbox(db, tenant, name, out, now);
-      await metaSet(db, `ingest:cursor:${name}`, JSON.stringify(next));
+      await cursorSet(db, tenant, name, JSON.stringify(next));
       return out;
     },
   };
@@ -640,32 +726,64 @@ export function gitHubReleasesCollector(
           url = null;
         }
       }
-      const cursor = Number((await metaGet(db, `ingest:cursor:${name}`)) ?? 0);
-      let high = cursor;
+      let cursor: { highId: number; revisions: Record<string, string> } = { highId: 0, revisions: {} };
+      const rawCursor = await cursorGet(db, tenant, name);
+      if (rawCursor) {
+        if (rawCursor.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(rawCursor) as { highId?: number; revisions?: Record<string, string> };
+            cursor = {
+              highId: typeof parsed.highId === 'number' ? parsed.highId : 0,
+              revisions: parsed.revisions ?? {},
+            };
+          } catch {
+            cursor = { highId: 0, revisions: {} };
+          }
+        } else {
+          const legacyNum = Number(rawCursor);
+          cursor = { highId: Number.isFinite(legacyNum) ? legacyNum : 0, revisions: {} };
+        }
+      }
+      let high = cursor.highId;
+      const nextRevisions: Record<string, string> = { ...cursor.revisions };
       const out: RawEvent[] = [];
       for (const r of [...releases].reverse()) {
-        if (r.id > cursor) {
+        const rev = `${r.tag_name}:${r.published_at ?? ''}:${fingerprintOf(r.body ?? '').slice(0, 12)}`;
+        const hadRev = cursor.revisions[String(r.id)];
+        const isNew = r.id > cursor.highId;
+        const isModified = hadRev !== undefined && hadRev !== rev;
+
+        if (isNew || isModified) {
           high = Math.max(high, r.id);
           const summary = `${owner}/${repo} ${r.tag_name}: ${r.name ?? 'untitled'}`;
           out.push({
             source: name,
             uri: r.html_url,
-            fingerprint: fingerprintOf(`${r.id}:${r.tag_name}:${r.published_at ?? ''}`),
+            fingerprint: fingerprintOf(`${r.id}:${rev}`),
             // Identity vs content: the occurrence is the release id, the
-            // revision is its tag/published marker. Re-tagging a release is
-            // a new revision of the same occurrence (new inbox row), while
-            // re-fetching it is the same identity (dedupes).
+            // revision is its tag/published/body content. Re-tagging or
+            // updating notes of a release is a new revision of the same
+            // occurrence (new inbox row), while re-fetching it is the same
+            // identity (dedupes).
             eventId: String(r.id),
-            revision: `${r.tag_name}:${r.published_at ?? ''}`,
+            revision: rev,
             occurredAt: r.published_at ?? now,
             summary,
             payload: { tag: r.tag_name, name: r.name, notes: (r.body ?? '').slice(0, 2000) },
           });
         }
+        nextRevisions[String(r.id)] = rev;
+      }
+      // Prune nextRevisions if exceptionally large (keep up to 1000)
+      const revisionKeys = Object.keys(nextRevisions);
+      if (revisionKeys.length > 1000) {
+        for (const k of revisionKeys.slice(0, revisionKeys.length - 1000)) {
+          delete nextRevisions[k];
+        }
       }
       // Inbox BEFORE cursor — same crash ordering as the file collector.
       await stageToInbox(db, tenant, name, out, now);
-      await metaSet(db, `ingest:cursor:${name}`, String(high));
+      await cursorSet(db, tenant, name, JSON.stringify({ highId: high, revisions: nextRevisions }));
       return out;
     },
   };
