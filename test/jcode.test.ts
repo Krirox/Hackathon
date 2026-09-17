@@ -369,6 +369,10 @@ T('send() resolves on flush without a correlated reply (real-bridge semantics)',
   try {
     await c.connect();
     await c.send('sess_1', 'do the thing');
+    // send() resolves on flush by design (real-bridge semantics) — flush does
+    // NOT guarantee the sibling's data handler ran yet. Poll for the sync point
+    // instead of racing it: blind sleeps flake on both sides.
+    for (let i = 0; i < 200 && !seen.includes('send_message'); i++) await new Promise((r) => setTimeout(r, 10));
     eq(seen.includes('send_message'), true, 'frame reached the sibling:');
   } finally {
     c.close();
