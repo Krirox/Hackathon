@@ -6,9 +6,9 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->184/184 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
+tests      <!-- vital:testcount -->189/189 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
 commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
-built      ledger+decisions+replay+export · coord+decompose+escalation gate · router+registry+calibration
+built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
            compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
            evals (suites/promotion/injection/poisoning-vs-gate/heldout) · attrib · ingest (file/github/serper)
            sense (contracts/materiality/integrity/poisoning) · wedge (ship/churn/feature/deepresearch)
@@ -59,7 +59,7 @@ mode the Ledger exists to prevent).
 - [x] `S` add `scripts.format` (prettier) + `format:check` (vendored code excluded via `.prettierignore` to preserve verbatim pins)
 - [x] `S` pin Node 22.x in `.node-version` / `package.json engines`
 - [x] `S` `npm audit` baseline + policy for transitive deps (2026-09-09: 0 vulnerabilities; policy: audit on every dep change, fail on high+)
-- [ ] [G] `npm run typecheck && npm test` green from a clean clone (typecheck/lint/format/tests green in place; `npm install` reproduces node_modules — full clean-clone boot not yet exercised)
+- [x] [G] `npm run typecheck && npm test` green from a clean clone (**exercised 2026-09-17**: fresh clone of the pushed HEAD on Windows — `npm ci` 2.6s/119 pkgs, typecheck+lint+format:check+tests+provenance+verify-instance+audit all green. The exercise **caught a real gate-breaker**: Prettier 3's default `endOfLine: lf` + Windows `autocrlf` checkouts failed `format:check` on all 75 files in a fresh clone while CI on Linux stayed green. Fixed with `.gitattributes` `* text=auto eol=lf` + explicit `endOfLine` in `.prettierrc`; re-verified in a second fresh clone. Stranger-boot time ≈ **40s** (clone 2s + install 3s + checks+tests 35s), comfortably inside the <30-min budget.)
 
 ### 0.2 Upstream provenance
 - [x] `.upstream/qm` cloned — **source to absorb from**, not a host. MIT. SHA `60ba791…` (2026-09-08)
@@ -163,8 +163,8 @@ Already built: `src/core/{types,db}.ts` · `src/ledger/ledger.ts` · `src/coord/
 - [x] `S` decide: `Math.random()` in `route()` for shadow/control split is **untestable and unreproducible** → inject an RNG. `[!]` defect closed
 - [x] `M` Postgres parity pass — `json_extract` is SQLite syntax; `jsonNumber()`/`jsonText()` in `src/core/db.ts` emit the PG equivalents behind the same `Db` interface (dialect unit-tested; no live PG yet)
 - [ ] `S` replace `unknown` row casts with typed row interfaces per table (deferred: mechanical, no behaviour change — do with the next touch of each file)
-- [ ] `M` add `SECURITY.md` + threat model (port QM's structure, add our external-signal vector) — with item 10 docs pass
-- [ ] [G] coverage > 85% on ledger + coord; every invariant in `idea.md` §4.3 has a named test (partial: I1–I7 each have named tests — I3 via property test, I7 via supersede/history tests; no coverage tooling yet, so the % is unmeasured)
+- [x] `M` add `SECURITY.md` + threat model (done at repo root, not `docs/`: 5 threats mapped to code controls + an explicit not-yet-built list; the cross-cutting Docs section records the same file — this line was the stale one)
+- [x] [G] coverage > 85% on ledger + coord; every invariant in `idea.md` §4.3 has a named test — **DONE 2026-09-17**, measurable only after the `node:test` migration brought `--experimental-test-coverage`: ledger.ts 97.8% lines / 84.5% branches / 100% functions; coordinator.ts 96.1% lines / 86.2% branches; whole src 95.2% lines. Weakest real module is `vendor/qm/command-policy.ts` (68.7%) — vendored, exercised only through the shell gate; known and accepted, not hidden. I1–I7 each keep a named test
 
 ---
 
@@ -178,7 +178,7 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 - [x] `M` `replayDecision(tenant, id)` → reconstruct the exact claim set that was live (+ drift vs live state, so "why did we do this" shows what moved)
 - [x] `M` bi-temporal query: "what did we believe on date X" (`believedAt` — transaction-time snapshot + valid-time filter; APPROXIMATE by design, documented: status flips aren't versioned, exact replay is what bundles are for)
 - [x] `S` claim versioning on supersede chains — `supersedeChain` walks `supersedes` links both directions
-- [ ] `M` entity/subject registry — `subject` is currently a free string; needs stable IDs (deferred: needs a migration framework, TODO Ops)
+- [x] `M` entity/subject registry — **DONE 2026-09-17**; the "needs a migration framework" blocker was void since `src/core/migrations.ts` landed. `subjects` table (additive migration, both engines) + `upsertSubject` / `subjectByKey` / `subjectResolve` / `listSubjects`: stable `sub_*` IDs behind the free-string subject, per-tenant unique keys, case-insensitive alias merge, idempotent re-registration (a no-op re-register writes zero rows — audit trail stays honest). `subject` itself stays a free string on claims (no backfill; claims are append-only) — resolution goes through the registry, tested incl. the no-op path
 - [x] `S` `PREDICTION` scheduler: `duePredictions` surfaces past-resolution-date predictions; `voidPrediction` retires the unresolvable
 - [x] `M` `OUTCOME` writer requiring a `basis` (measurement ref) + an existing decision — narrative causality rejected; OUTCOME also appended as a ground claim so it is queryable
 
@@ -197,7 +197,7 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 - [x] `M` correction flow: human edits → old claim SUPERSEDED, new claim, correction counted (`correctClaim` + `correctionCount`, tested)
 - [x] `M` contradiction queue — DISPUTED pairs with owner + SLA (`disputedPairs`; SLA clock deferred to scheduler §0.5)
 - [x] `M` expiry UI — "verify this" prompts before TTL lapse (`dueVerifications`; rendering deferred)
-- [ ] `S` provisional-reality visual treatment (must be unmistakable) (needs a UI surface)
+- [x] `S` provisional-reality visual treatment (must be unmistakable) (built 2026-09-17: read model carries `provisional` (`src/console/report.ts`), `render.ts` draws CANDIDATE chips **dashed** and labeled `· PROVISIONAL OBSERVATION` — verified facts keep their solid `✓ FACT` chip; tested)
 - [ ] [G] **curation cost measured**: human minutes per 100 claims. If > ~5 min, the ledger is not maintainable and the thesis is in trouble. This is a kill-metric, not a nice-to-have. (needs design partners + UI — cannot be measured in this repo alone)
 
 ### 1.4 Buzz binding
@@ -242,7 +242,7 @@ The only phase that must produce a number.
 - [x] `S` all fan-out through the coordinator — **no direct channel posts** (no other code path exists; `FANOUT_REFUSED` if the scheduler denies)
 - [x] `M` REQUEST decomposition into budgeted steps (`coord.decompose`: parented, grounded-inherited, children fit inside unspent budget incl. already-committed siblings — decomposition never prints money; HOP/CYCLE enforced per leg; tested)
 - [x] `S` assert hop limit holds under a real 4-team chain (structural: all legs are depth-1; the fuzz test proves the cap over 120 random graphs)
-- [ ] `M` digest composition — NOTICEs land here, never in the Feed (needs the talk surface render path)
+- [x] `M` digest composition — NOTICEs land here, never in the Feed (built 2026-09-17: `src/console/digest.ts` composes per-scope digest entries with follow-on counts from the same tables the console reads; `renderDigest` renders them; Feed untouched by construction. The work exposed + fixed a real coordinator bug: re-emitted identical NOTICEs crashed on UNIQUE(idem_key) instead of replaying the finished thread — `REQUEST_REPLAYED` now handles terminal twins)
 
 ### 2.3 Human approval (Buzz rooms)
 - [ ] `L` approval surface in-room: draft + evidence chips + confidence + cost + owner (needs Buzz rooms + UI)
@@ -321,9 +321,9 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 - [x] `M` calibration table per (task_type × tier × model), versioned — this is the router's memory (`routing_calibration` table + `recordCalibrationSample`/`calibration`; in SCHEMA and the additive path)
 - [x] `M` label pipeline: outcomes flow back into `routing_decisions.labeled` — **DECIDED 2026-09-09: proposals, never auto-write.** Writing `executed` back as `correct_tier` would agree with the router by construction and inflate precision. `labelingQueue()` returns unlabeled decisions with linked trace-outcome evidence for explicit human review via `label()`; tested.
 - [x] `M` error-budget monitors + auto-revert to fixed policy (`budgetBreaches` feeds `revertBreachedTiers`: breached tiers run the fixed baseline even in control, with a guard note; recovery is manual via `clearTierOverride` after recalibration — auto-revert is immediate, auto-forgive is not a thing; tested)
-- [ ] `M` coupling-guard tests: card at wrong tier / wrong scope / wrong model → must refuse
+- [x] `M` coupling-guard tests: card at wrong tier / wrong scope / wrong model → must refuse — **DONE 2026-09-17, and the test found a real gap:** the guard checked state/validatedAtTier/scopeRoles but never read `scopeModels`, and `RouteInput` did not even carry the model — a card validated on model A could run as WORKFLOW under any model. Fixed: optional `RouteInput.model` (callers that know the model must declare it; selection below the tier decision stays legal and the guard treats an undeclared model as not-a-bypass), `learned()` requires the declared model ∈ scopeModels, and a named `skill_model_mismatch_demoted_to_MODEL` guard note joins its scope sibling. Tests cover all three axes: wrong scope (existed), wrong model (new, incl. the positive path), wrong tier (new). 186/186
 - [x] `M` **model selection below the tier decision**: harness adapter via `selectAdapter` (engineering.* prefers jcode with fallback, never unlisted) + model lanes via `src/substrate/models.ts` (dev = Gemini `gemini-3.8-flash`; production = Novita + DeepSeek V4, OpenAI-compatible Bearer; wire formats verified against vendor docs; keys in headers only; approved-model registry default-deny per lane; model-judge fails closed; fetch-injected so CI spends nothing)
-- [ ] `S` fix the RNG injection issue from 0.5 so shadow/control is reproducible
+- [x] `S` fix the RNG injection issue from 0.5 so shadow/control is reproducible (done 2026-09-09 via `RouterConfig.rng`, verified in source 2026-09-17; the tests use it — this line was the stale one)
 - [x] `M` cost-of-misrouting report: what routing too low cost vs routing too high (`misroutingCounts` from labelled decisions + `tierMix` from traces; dollar-costing needs per-tier rates from pilots)
 - [ ] [G] precision ≥ 0.90 on ≥2,000 labelled tasks
 - [ ] [G] `controlRate` raised from 0 → 0.05 → 0.25, each step with a budget check

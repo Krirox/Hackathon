@@ -1,6 +1,6 @@
 import { openDb, migrate } from '../src/core/db.ts';
 import { jsonNumber, jsonText } from '../src/core/db.ts';
-import { createCoordinator } from '../src/coord/coordinator.ts';
+import { createCoordinator, DEFAULT_LIMITS } from '../src/coord/coordinator.ts';
 import { T, eq, TEN, NOW, DAY_LATER, fresh, base, rejects } from './helpers.ts';
 console.log('\n\x1b[1mCoordination — the channel model\x1b[0m');
 
@@ -20,6 +20,20 @@ T('idempotency: duplicate in-flight ask dedupes to the same thread', async () =>
   const b = await coord.submit(base());
   eq(a.admitted, true);
   eq(b.dedupedTo, a.request.id);
+});
+
+T('idempotency: re-emitted identical NOTICE replays the finished thread', async () => {
+  const { coord } = await fresh();
+  const a = await coord.submit(base({ messageClass: 'NOTICE', claimRefs: [], goal: 'backup ran' }));
+  eq(a.admitted, true);
+  // Same content, later instant — the old code crashed on UNIQUE(tenant, idem_key)
+  // because NOTICEs persist COMPLETED (terminal) and skipped the in-flight check.
+  const b = await coord.submit(base({ messageClass: 'NOTICE', claimRefs: [], goal: 'backup ran', now: DAY_LATER }));
+  eq(b.admitted, false, 'not a new thread:');
+  eq(b.dedupedTo, a.request.id, 'replayed onto the finished one:');
+  eq(b.state, 'COMPLETED');
+  const c = await coord.get(TEN, a.request.id);
+  eq(c?.state, 'COMPLETED', 'and the original thread is untouched');
 });
 
 T('NOTICE never interrupts a human — completes straight to digest', async () => {
@@ -216,9 +230,16 @@ T('agents bid low, never high — the scheduler clamps quotas', async () => {
   eq(r.admitted, true);
   eq(r.request.bid.dollars, 1, 'clamped to the ceiling:');
   eq(r.request.bid.maxDiskBytes, 100);
-  const uncapped = await fresh();
-  const u = await uncapped.coord.submit(base({ id: 'cap2', bid: { dollars: 50 } }));
-  eq(u.request.bid.dollars, 50, 'no ceiling configured means no clamping:');
+  // Out of the box there is a ceiling: the org's daily allowance. An agent
+  // bidding $500 is clamped to $40, never quietly handed a blank cheque.
+  const byDefault = await fresh();
+  const d = await byDefault.coord.submit(base({ id: 'cap2', bid: { dollars: 500 } }));
+  eq(d.request.bid.dollars, 40, 'default ceiling clamps to the daily allowance:');
+
+  // An operator can still say "no ceiling" — but has to say it.
+  const uncapped = await fresh({ ...DEFAULT_LIMITS, maxBid: {} });
+  const u = await uncapped.coord.submit(base({ id: 'cap3', bid: { dollars: 500 } }));
+  eq(u.request.bid.dollars, 500, 'an explicit empty ceiling means no clamping:');
 });
 
 T('disk overruns terminate loudly like every other budget', async () => {

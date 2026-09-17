@@ -38,6 +38,37 @@ T('coupling guard: a card validated for another scope cannot run here', async ()
   eq(d.policyBaseline, 'MODEL');
 });
 
+T('coupling guard: a card cannot run on a model it was not validated on', async () => {
+  const { router } = await fresh(undefined, { controlRate: 1, rng: () => 0 });
+  await router.registerTaskType('memo.draft');
+  const card = {
+    id: 'skl_m2',
+    state: 'PROMOTED',
+    validatedAtTier: 'WORKFLOW' as const,
+    scopeRoles: ['marketing'],
+    scopeModels: ['claude'],
+  };
+  const on = await router.route(rIn({ taskType: 'memo.draft', importance: 0.1, model: 'claude', skillCard: card }));
+  eq(on.tier, 'WORKFLOW', 'the validated model runs the card:');
+  const off = await router.route(
+    rIn({ taskType: 'memo.draft', importance: 0.1, model: 'novita/deepseek-v4', skillCard: card }),
+  );
+  eq(off.tier, 'MODEL', 'an unvalidated model degrades to MODEL:');
+  eq(
+    off.guards.some((g) => g.includes('skill_model_mismatch')),
+    true,
+  );
+  const wrongTier = await router.route(
+    rIn({
+      taskType: 'memo.draft',
+      importance: 0.1,
+      model: 'claude',
+      skillCard: { ...card, validatedAtTier: 'MODEL' as const },
+    }),
+  );
+  eq(wrongTier.tier, 'MODEL', 'a card validated below WORKFLOW never runs as WORKFLOW:');
+});
+
 T('precision gate stays closed until enough labeled samples', async () => {
   const { router } = await fresh();
   const p = await router.precision(TEN);

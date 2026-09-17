@@ -176,6 +176,16 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     tenant TEXT NOT NULL, task_type TEXT NOT NULL, tier TEXT NOT NULL, model TEXT NOT NULL,
     ok INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
     PRIMARY KEY (tenant, task_type, tier, model))`,
+  `CREATE TABLE IF NOT EXISTS subjects (
+    id           TEXT PRIMARY KEY,
+    tenant       TEXT NOT NULL,
+    key          TEXT NOT NULL,
+    display_name TEXT,
+    kind         TEXT,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL,
+    UNIQUE (tenant, key))`,
+  `CREATE INDEX IF NOT EXISTS ix_subjects_tenant ON subjects(tenant, kind)`,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */
@@ -420,7 +430,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   at         TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS ledger_seq (tenant TEXT PRIMARY KEY, next INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ledger_seq (tenant TEXT PRIMARY KEY, "next" INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS routing_calibration (
   tenant TEXT NOT NULL, task_type TEXT NOT NULL, tier TEXT NOT NULL, model TEXT NOT NULL,
@@ -446,14 +456,28 @@ export async function migrate(db: AsyncDb): Promise<void> {
   await stampVersion(db, '4');
 }
 
-/** Tenant-scoped monotonic sequence for the append-only ledger. */
+/**
+ * Tenant-scoped monotonic sequence for the append-only ledger.
+ *
+ * One atomic UPSERT, never SELECT-then-UPDATE. Under Postgres the pool hands
+ * each transaction its own client at READ COMMITTED, so a read-then-write
+ * lets two concurrent appends observe the same `next` and mint the same seq
+ * (the sqlite driver's BEGIN IMMEDIATE hid this; it was never verified
+ * through the production engine). `ON CONFLICT ... DO UPDATE ... RETURNING`
+ * is evaluated under the row lock, so every caller gets a distinct value on
+ * both engines.
+ *
+ * `"next"` is quoted because NEXT is a reserved word in Postgres. It is not
+ * reserved in SQLite, and a double-quoted identifier is portable to both.
+ */
 export async function nextSeq(db: AsyncDb, tenant: string): Promise<number> {
-  return db.transaction(async () => {
-    const row = (await db.prepare('SELECT next FROM ledger_seq WHERE tenant = ?').get(tenant)) as
-      { next: number } | undefined;
-    const n = (row?.next ?? 0) + 1;
-    if (row) await db.prepare('UPDATE ledger_seq SET next = ? WHERE tenant = ?').run(n, tenant);
-    else await db.prepare('INSERT INTO ledger_seq (tenant, next) VALUES (?, ?)').run(tenant, n);
-    return n;
-  });
+  const row = (await db
+    .prepare(
+      `INSERT INTO ledger_seq (tenant, "next") VALUES (?, 1)
+       ON CONFLICT(tenant) DO UPDATE SET "next" = ledger_seq."next" + 1
+       RETURNING "next"`,
+    )
+    .get(tenant)) as { next: number } | undefined;
+  if (!row) throw new Error('[db:SEQ] ledger_seq upsert returned no row');
+  return Number(row.next);
 }

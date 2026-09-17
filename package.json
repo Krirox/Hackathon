@@ -4,13 +4,17 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx test/run.ts",
+    "test": "node --import tsx --test --test-force-exit test/run.ts",
+    "test:postgres": "node --import tsx --test --test-force-exit test/run-postgres.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
     "format": "prettier --write src test scripts *.mjs",
     "format:check": "prettier --check src test scripts *.mjs",
     "verify:provenance": "node scripts/verify-provenance.mjs",
     "verify:jcode-live": "tsx scripts/live-jcode-hello.ts",
+    "docs:refresh": "node scripts/refresh-docs.mjs",
+    "docs:check": "node scripts/refresh-docs.mjs --check",
+    "dogfood": "tsx scripts/dogfood-ship.ts",
     "dev": "tsx src/cli.ts"
   },
   "keywords": [],

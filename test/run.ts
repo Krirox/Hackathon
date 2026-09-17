@@ -1,3 +1,14 @@
+/**
+ * Full suite entry. Imported for its side effects: each file registers its
+ * tests with node:test. Run with the node test runner:
+ *
+ *   npm test   →  node --import tsx --test test/run.ts
+ *
+ * node:test supplies the reporter, per-test timeouts (see `T` in
+ * helpers.ts), and the process exit code. `enableStatusWrites()` is what
+ * lets this run — and only this run — update var/status.json for
+ * `docs:check`.
+ */
 import './ledger.test.ts';
 import './coord.test.ts';
 import './router.test.ts';
@@ -18,6 +29,6 @@ import './models.test.ts';
 import './jcode.test.ts';
 import './vendor.test.ts';
 import './talk.test.ts';
-import { finish } from './helpers.ts';
+import { enableStatusWrites } from './helpers.ts';
 
-await finish();
+enableStatusWrites();
