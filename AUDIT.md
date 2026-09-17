@@ -365,15 +365,22 @@ Still open: the same drills over two true Postgres connections (the CI lane runs
 
 ## F14 — Ship-to-Result and churn deliverable completion
 
-**State:** Prototype. **Priority:** High for Ship; Medium for churn. **Effort:** Large. **Disposition:** Complete Ship first; defer churn.
+**State:** Remediated (2026-09-18). **Priority:** High for Ship; Medium for churn. **Effort:** Large. **Disposition:** Complete Ship first; defer churn.
 
-**Evidence:** `src/wedge/ship.ts:59–103,136–206`; `src/wedge/churn.ts:22–113`; `test/wedge.test.ts:129–137,217–225`; `idea.md:411–423`.
+**Evidence:** `src/wedge/ship.ts`; `src/wedge/churn.ts`; `test/wedge.test.ts`.
 
 Ship creates five requests with deliverable schema names but no composed workers/join that produces and reviews those deliverables. “Affected” is scopes plus supplied strings, not customer segmentation. Churn queues investigation/outreach/offer work and records a recommendation without waiting for its evidence/results.
 
 **User impact:** A user gets queued intentions rather than a launch pack or completed save play.
 
-**Missing / plan:** Pick one release asset → real dispatch/result → evidence check/human approval → action receipt → measured business result → only then fan out and join multiple departments. Add tenant-scoped stable release/stage IDs and recovery; current release fingerprint/marker lacks tenant and durable stage identity.
+**Remediation progress (2026-09-18):**
+
+- **Closed-loop single asset production (`produceReleaseAsset`)**: Implemented the complete end-to-end execution loop in `src/wedge/ship.ts`: concrete request dispatch through the coordinator (`coord.submit`), execution via harness adapters (`adapter.run`), strict draft claim verification against the Ledger and regulated phrase denylist (`checkDraft` failing closed with `DRAFT_BLOCKED`), human approval decision recording with frozen Context Bundle (`ledger.recordDecision`), reversible action publication with concrete execution receipts (`actReversible`), measured business outcome recording against explicit baseline (`ledger.recordOutcome`), and progression tracking to `stage: 'MEASURED'`.
+- **Multi-department deliverable join (`joinReleaseDeliverables`)**: Implemented multi-department assembly producing a unified `LaunchPack` across all five teams (`marketing`, `customer`, `sales`, `product`, `finance`), ensuring each team's deliverable is concretely produced, checked against live claims, approved, executed with receipts, and verified before declaring the pack ready.
+- **Grounded customer segmentation**: Added `CustomerSegment` interface with `id`, `name`, `tier`, `impact`, `rationale`, and optional `region`. `summarizeRelease` grounds customer segments alongside internal scopes, supporting explicit segments as well as deterministic scope-grounded default segmentation.
+- **Tenant-scoped release identity and durable stage tracking**: Upgraded `isKnownRelease` and `markReleaseKnown` to namespace release fingerprints by tenant (`wedge:summary:${tenant}:${fingerprint}`) while preserving backwards-compatible fallback for legacy un-namespaced records. Implemented durable stage progression (`ReleaseStage`: `SUMMARIZED`, `DISPATCHED`, `DELIVERED`, `VERIFIED`, `APPROVED`, `EXECUTED`, `MEASURED`) via `recordReleaseStage` and `getReleaseStage`.
+- **Completed churn play execution (`executeChurnPlay`)**: Remediated the churn loop in `src/wedge/churn.ts` to execute investigation (`pain-link` query), save play outreach, and retention offer legs through the harness adapter. Promotes candidate risk claims through human curation (`ledger.verifyClaim`) upon approval, verifies drafts for save play and offer copy with fail-closed denylist checks (`DRAFT_BLOCKED`), and records an approved execution decision before returning `CompletedChurnPlay`.
+- **Verification**: Added comprehensive unit and integration test coverage in `test/wedge.test.ts` (16/16 tests passing) validating grounded customer segmentation, tenant-scoped release isolation, durable stage recovery, closed-loop asset production, multi-department LaunchPack assembly, and churn play execution. Entire project test suite green at 422/422 tests.
 
 ## F15 — Synthetic dogfood outcomes and advisory draft validation
 

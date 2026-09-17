@@ -1,6 +1,18 @@
 import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base, rejects } from './helpers.ts';
-import { checkDraft, fanOut, isKnownRelease, markReleaseKnown, summarizeRelease } from '../src/wedge/ship.ts';
-import { churnRespond } from '../src/wedge/churn.ts';
+import {
+  checkDraft,
+  fanOut,
+  getReleaseStage,
+  isKnownRelease,
+  joinReleaseDeliverables,
+  markReleaseKnown,
+  produceReleaseAsset,
+  recordReleaseStage,
+  summarizeRelease,
+  type CustomerSegment,
+} from '../src/wedge/ship.ts';
+import { churnRespond, executeChurnPlay } from '../src/wedge/churn.ts';
+import { LocalEchoAdapter } from '../src/substrate/harness.ts';
 import type { Collector } from '../src/ingest/collectors.ts';
 
 console.log('\n\x1b[1mWedge — Ship-to-Result coordination half\x1b[0m');
@@ -441,4 +453,310 @@ T('F15: a blocked draft aborts the run before any evidence is minted', async () 
   eq(await count('SELECT COUNT(*) AS n FROM traces'), 0, 'no trace minted:');
   eq(await count('SELECT COUNT(*) AS n FROM skill_cards'), 0, 'no card minted:');
   eq(await marks(bad.db), 0, 'failed run leaves the release unmarked:');
+});
+
+console.log('\n\x1b[1mWedge — Ship-to-Result closed-loop and churn execution (F14)\x1b[0m');
+
+T('F14: customer segmentation is grounded in summarizeRelease', async () => {
+  const { ledger } = await fresh();
+  const a = await relClaim(ledger, 'release:v3.0', 'Enterprise SSO support launched');
+  const b = await relClaim(ledger, 'release:v3.0', 'Billing webhook latency reduced to 50ms');
+
+  // Default segmentation grounded in affected scopes
+  const sDefault = await summarizeRelease(
+    ledger,
+    TEN,
+    'v3.0',
+    [
+      { text: 'Enterprise SSO support launched', claimIds: [a.id], affected: ['security', 'enterprise'] },
+      { text: 'Billing webhook latency reduced', claimIds: [b.id], affected: ['finance'] },
+    ],
+    NOW,
+  );
+  eq(sDefault.customerSegments.length, 4); // engineering (from relClaim), security, enterprise, finance
+  eq(
+    sDefault.customerSegments.some((c) => c.id === 'seg:enterprise'),
+    true,
+  );
+  eq(
+    sDefault.customerSegments.find((c) => c.id === 'seg:enterprise')!.impact,
+    'Directly affected by changes in enterprise',
+  );
+
+  // Explicit customer segments preserved
+  const explicit: CustomerSegment[] = [
+    {
+      id: 'seg:tier1-emea',
+      name: 'Tier 1 EMEA Customers',
+      tier: 'ENTERPRISE',
+      impact: 'SSO rollout requirement',
+      rationale: 'Mandatory security upgrade',
+      region: 'EMEA',
+    },
+  ];
+  const sExplicit = await summarizeRelease(
+    ledger,
+    TEN,
+    'v3.0',
+    [{ text: 'Enterprise SSO support launched', claimIds: [a.id], affected: ['security'] }],
+    NOW,
+    explicit,
+  );
+  eq(sExplicit.customerSegments, explicit);
+});
+
+T('F14: isKnownRelease and markReleaseKnown support tenant namespacing with fallback', async () => {
+  const { db } = await fresh();
+  const fp = 'fp-tenant-test';
+
+  // Initially unknown for both tenants
+  eq(await isKnownRelease(db, fp, 'tenant-a'), false);
+  eq(await isKnownRelease(db, fp, 'tenant-b'), false);
+
+  // Mark known for tenant-a
+  await markReleaseKnown(db, fp, 'sum_tenant_a', 'tenant-a');
+  eq(await isKnownRelease(db, fp, 'tenant-a'), true);
+  eq(await isKnownRelease(db, fp, 'tenant-b'), false);
+
+  // Legacy record without tenant prefix falls back properly
+  const legacyFp = 'fp-legacy';
+  await markReleaseKnown(db, legacyFp, 'sum_legacy');
+  eq(await isKnownRelease(db, legacyFp, 'tenant-any'), true);
+});
+
+T('F14: durable release stages progress and recover across failures', async () => {
+  const { db } = await fresh();
+  const releaseId = 'rel-stage-test';
+
+  eq(await getReleaseStage(db, TEN, releaseId), null);
+
+  await recordReleaseStage(db, TEN, releaseId, 'SUMMARIZED', NOW, { bulletCount: 3 });
+  const st1 = await getReleaseStage(db, TEN, releaseId);
+  eq(st1?.stage, 'SUMMARIZED');
+  eq((st1?.metadata as { bulletCount: number }).bulletCount, 3);
+
+  await recordReleaseStage(db, TEN, releaseId, 'MEASURED', NOW, { actual: 5 });
+  const st2 = await getReleaseStage(db, TEN, releaseId);
+  eq(st2?.stage, 'MEASURED');
+  eq((st2?.metadata as { actual: number }).actual, 5);
+});
+
+T('F14: produceReleaseAsset executes complete closed loop with receipt and measured outcome', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 100,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 20,
+  });
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+  const a = await relClaim(ledger, 'release:v4.0', 'Postgres streaming replication enabled');
+
+  // Successful production
+  let actionExecuted = false;
+  const asset = await produceReleaseAsset(
+    coord,
+    ledger,
+    adapter,
+    TEN,
+    {
+      releaseId: 'rel-4.0',
+      scope: 'marketing',
+      goal: 'launch blog post for streaming replication',
+      deliverableSchema: 'launch-pack.v1',
+      claimIds: [a.id],
+      onBehalfOf: 'human:founder',
+      approvedBy: 'human:priya',
+      command: 'write marketing blog copy for streaming replication',
+      draftText: 'Postgres streaming replication is now live with 0ms downtime.',
+      now: NOW,
+      measurement: {
+        metric: 'launch_reach_impressions',
+        predicted: 1000,
+        actual: 1250,
+        basis: 'blog views analytics',
+      },
+      executeAction: () => {
+        actionExecuted = true;
+        return {
+          executed: true,
+          receiptId: 'rcpt_blog_published_42',
+          output: { url: 'https://blog.acme.com/v4' },
+        };
+      },
+    },
+    db,
+  );
+
+  eq(actionExecuted, true);
+  eq(asset.stage, 'MEASURED');
+  eq(asset.draftCheck.ok, true);
+  eq(asset.outcome.status, 'COMPLETED');
+  eq(asset.actionReceipt?.receiptId, 'rcpt_blog_published_42');
+  eq(asset.measuredOutcome.metric, 'launch_reach_impressions');
+  eq(asset.measuredOutcome.actual, 1250);
+
+  // Verify stage is recorded in db as MEASURED
+  const stage = await getReleaseStage(db, TEN, 'rel-4.0');
+  eq(stage?.stage, 'MEASURED');
+
+  // Verify draft rejection with denylisted phrase
+  await rejects(
+    async () =>
+      await produceReleaseAsset(
+        coord,
+        ledger,
+        adapter,
+        TEN,
+        {
+          releaseId: 'rel-4.0-bad',
+          scope: 'marketing',
+          goal: 'bad marketing post',
+          deliverableSchema: 'launch-pack.v1',
+          claimIds: [a.id],
+          onBehalfOf: 'human:founder',
+          approvedBy: 'human:priya',
+          command: 'write copy',
+          draftText: 'We guarantee 100% uptime with risk-free migrations.',
+          now: NOW,
+        },
+        db,
+      ),
+    'DRAFT_BLOCKED',
+  );
+
+  // Verify ungrounded asset request is rejected
+  await rejects(
+    async () =>
+      await produceReleaseAsset(
+        coord,
+        ledger,
+        adapter,
+        TEN,
+        {
+          releaseId: 'rel-4.0-ungrounded',
+          scope: 'marketing',
+          goal: 'ungrounded',
+          deliverableSchema: 'launch-pack.v1',
+          claimIds: [],
+          onBehalfOf: 'human:founder',
+          approvedBy: 'human:priya',
+          command: 'write copy',
+          now: NOW,
+        },
+        db,
+      ),
+    'UNGROUNDED_ASSET',
+  );
+});
+
+T('F14: joinReleaseDeliverables aggregates multi-department deliverables into LaunchPack', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 10,
+    maxDailyDollars: 200,
+    maxDailyTokens: 4_000_000,
+    maxHumanEscalationsPerDay: 50,
+  });
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+  const a = await relClaim(ledger, 'release:v5.0', 'High availability clustering launched');
+
+  const summary = await summarizeRelease(
+    ledger,
+    TEN,
+    'v5.0',
+    [{ text: 'High availability clustering launched', claimIds: [a.id], affected: ['product', 'customer'] }],
+    NOW,
+  );
+
+  const legs = await fanOut(coord, TEN, {
+    release: 'v5.0',
+    claimIds: [a.id],
+    onBehalfOf: 'human:founder',
+    now: NOW,
+    summary: summary.whyItMatters,
+  });
+
+  const pack = await joinReleaseDeliverables(
+    coord,
+    ledger,
+    adapter,
+    TEN,
+    {
+      releaseId: 'v5.0',
+      summary,
+      legs,
+      onBehalfOf: 'human:founder',
+      approvedBy: 'human:priya',
+      now: NOW,
+    },
+    db,
+  );
+
+  eq(pack.release, 'v5.0');
+  eq(pack.allVerified, true);
+  eq(Object.keys(pack.deliverables).sort(), ['customer', 'finance', 'marketing', 'product', 'sales']);
+  for (const dept of ['customer', 'finance', 'marketing', 'product', 'sales'] as const) {
+    eq(pack.deliverables[dept].draftCheck.ok, true);
+    eq(pack.deliverables[dept].stage, 'MEASURED');
+  }
+
+  const finalStage = await getReleaseStage(db, TEN, 'v5.0');
+  eq(finalStage?.stage, 'DELIVERED');
+});
+
+T('F14: executeChurnPlay executes investigation, save play, and offer deliverables with draft check', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 10,
+    maxDailyDollars: 200,
+    maxDailyTokens: 4_000_000,
+    maxHumanEscalationsPerDay: 50,
+  });
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+  const risk = await ledger.append({
+    tenant: TEN,
+    subject: 'churn:enterprise-apac',
+    kind: 'BELIEF',
+    statement: 'APAC Enterprise renewal risk due to local compliance requirements',
+    confidence: 0.8,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:cs',
+    scope: 'customer',
+    authorType: 'agent',
+    provenance: { ...sor(), sourceTier: 'CORROBORATED' },
+  });
+
+  // Successful churn play execution
+  const completedPlay = await executeChurnPlay(coord, ledger, adapter, TEN, {
+    segment: 'APAC Enterprise',
+    riskClaimIds: [risk.id],
+    onBehalfOf: 'human:founder',
+    approvedBy: 'human:priya',
+    savePlayDraftText: 'Custom data residency enablement plan for APAC Enterprise renewals.',
+    offerCopyDraftText: 'Complimentary data residency migration assistance for annual commitments.',
+    now: NOW,
+  });
+
+  eq(completedPlay.status, 'COMPLETED');
+  eq(completedPlay.savePlayCheck.ok, true);
+  eq(completedPlay.offerCopyCheck.ok, true);
+  eq(completedPlay.investigationOutcome.status, 'COMPLETED');
+
+  // Verify approval decision was minted
+  const dec = await ledger.getDecision(TEN, completedPlay.decisionId);
+  eq(dec?.approvedBy, 'human:priya');
+  eq(dec?.autonomy, 'approval');
+
+  // Blocked draft with denylist phrase fails closed
+  await rejects(
+    async () =>
+      await executeChurnPlay(coord, ledger, adapter, TEN, {
+        segment: 'APAC Enterprise Bad Draft',
+        riskClaimIds: [risk.id],
+        onBehalfOf: 'human:founder',
+        approvedBy: 'human:priya',
+        savePlayDraftText: 'We guarantee 100% profit with risk-free renewals.',
+        now: NOW,
+      }),
+    'DRAFT_BLOCKED',
+  );
 });
