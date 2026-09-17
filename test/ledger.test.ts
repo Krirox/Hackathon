@@ -720,3 +720,113 @@ T('full ledger export carries claims, links, decisions, outcomes, audit', async 
   eq(dump.outcomes.length, 1);
   eq(dump.audit.length > 0, true);
 });
+
+T('curation: only a named human verifies a CANDIDATE, which then enters context', async () => {
+  const { ledger } = await fresh();
+  const c = await ledger.append({
+    tenant: TEN,
+    subject: 'release',
+    kind: 'OBSERVATION',
+    statement: 'v1.2 shipped',
+    confidence: 1,
+    owner: 'human:priya',
+    scope: 'engineering',
+    authorType: 'system',
+    provisional: true,
+    observedAt: NOW,
+    validFrom: NOW,
+    now: NOW,
+    provenance: { ...sor(), sourceTier: 'PRIMARY' },
+  });
+  eq(c.status, 'CANDIDATE');
+  eq((await ledger.contextFor(TEN, [c.id], NOW)).length, 0, 'unverified claims are not context:');
+  const v = await ledger.verifyClaim(TEN, c.id, 'human:priya', NOW);
+  eq(v.status, 'VERIFIED');
+  eq(v.provisional, false, 'human review clears the provisional flag:');
+  eq((await ledger.contextFor(TEN, [c.id], NOW)).length, 1, 'verified claims enter context:');
+  eq((await ledger.verifyClaim(TEN, c.id, 'human:priya', NOW)).id, c.id, 'verification is idempotent:');
+});
+
+T('curation refuses a claim that is disputed, stale, or replaced', async () => {
+  const { ledger } = await fresh();
+  const a = await ledger.append({
+    tenant: TEN,
+    subject: 'uptime',
+    kind: 'FACT',
+    statement: 'uptime was 99.9%',
+    confidence: 1,
+    owner: 'human:priya',
+    scope: 'engineering',
+    authorType: 'system',
+    observedAt: NOW,
+    validFrom: NOW,
+    now: NOW,
+    provenance: sor(),
+  });
+  const b = await ledger.append({
+    tenant: TEN,
+    subject: 'uptime',
+    kind: 'FACT',
+    statement: 'uptime was 95%',
+    confidence: 1,
+    owner: 'human:priya',
+    scope: 'engineering',
+    authorType: 'system',
+    observedAt: NOW,
+    validFrom: NOW,
+    now: NOW,
+    provenance: sor(),
+  });
+  await ledger.link(TEN, a.id, b.id, 'contradicts');
+  await rejects(async () => await ledger.verifyClaim(TEN, a.id, 'human:priya', NOW), 'UNVERIFIABLE_STATUS');
+});
+
+T('subject registry: stable IDs, alias resolution, idempotent re-registration', async () => {
+  const { db, ledger } = await fresh();
+  const s = await ledger.upsertSubject({
+    tenant: TEN,
+    key: 'repo:acme/widget',
+    displayName: 'Acme Widget',
+    kind: 'product',
+    aliases: ['Acme Corp', 'widget'],
+    now: NOW,
+  });
+  eq(s.id.startsWith('sub_'), true);
+  eq((await ledger.subjectByKey(TEN, 'repo:acme/widget'))?.id, s.id, 'exact-key round-trip:');
+  eq((await ledger.subjectResolve(TEN, 'widget'))?.id, s.id, 'alias resolves (case-insensitive):');
+  eq(await ledger.subjectResolve(TEN, 'nope'), null, 'unknown key resolves to nothing:');
+
+  // The audit trail is the honesty check: an unchanged re-registration must
+  // write nothing; a real change writes exactly one row.
+  const subjectAudits = async () =>
+    Number(
+      (
+        (await db
+          .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ? AND action LIKE 'SUBJECT%'")
+          .get(TEN)) as { n: number }
+      ).n,
+    );
+  const registered = await subjectAudits();
+  await ledger.upsertSubject({
+    tenant: TEN,
+    key: 'repo:acme/widget',
+    displayName: 'Acme Widget',
+    kind: 'product',
+    aliases: ['acme corp'],
+    now: NOW,
+  });
+  eq(await subjectAudits(), registered, 'no-op re-registration writes no rows:');
+  const after = await ledger.upsertSubject({
+    tenant: TEN,
+    key: 'repo:acme/widget',
+    displayName: 'Acme Widget',
+    kind: 'product',
+    aliases: ['new alias'],
+    now: NOW,
+  });
+  eq(await subjectAudits(), registered + 1, 'a real change writes exactly one audit row:');
+  eq(after.aliases.includes('new alias'), true, 'new aliases merge in:');
+  eq(after.aliases.includes('acme corp'), true, 'old aliases survive the merge:');
+  eq((await ledger.listSubjects(TEN, 'product')).length, 1);
+  eq((await ledger.listSubjects(TEN)).length, 1);
+});

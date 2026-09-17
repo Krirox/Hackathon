@@ -74,9 +74,32 @@ const newClaimSchema = z
   })
   .strict();
 
+const upsertSubjectSchema = z
+  .object({
+    tenant: z.string().min(1),
+    /** Stable natural key, e.g. "repo:acme/widget" — claims reference this via `subject`. */
+    key: z.string().min(1),
+    displayName: z.string().min(1),
+    kind: z.string().min(1),
+    aliases: z.array(z.string()).default([]),
+    now: z.string().optional(),
+  })
+  .strict();
+
 export type NewClaimInput = z.input<typeof newClaimSchema>;
 
 const GROUND_TIERS: readonly SourceTier[] = ['SYSTEM_OF_RECORD', 'MEASURED'];
+
+export interface Subject {
+  id: string;
+  tenant: string;
+  /** Stable natural key claims reference. */
+  key: string;
+  displayName: string;
+  kind: string;
+  aliases: string[];
+  createdAt: string;
+}
 
 export interface Ledger {
   append(input: NewClaimInput): Promise<Claim>;
@@ -114,7 +137,32 @@ export interface Ledger {
   dueVerifications(tenant: string, now: string, horizonMs: number): Promise<Claim[]>;
   /** Human correction: old claim SUPERSEDED, new claim appended, counted. */
   correctClaim(tenant: string, id: string, statement: string, by: string, now: string): Promise<Claim>;
+  /**
+   * Human curation: promote a CANDIDATE to VERIFIED, so the organisation may
+   * reason on it. Refuses DISPUTED (resolve the contradiction first), STALE
+   * (re-check the source), SUPERSEDED and RETIRED (append a new claim).
+   */
+  verifyClaim(tenant: string, id: string, verifiedBy: string, now?: string): Promise<Claim>;
   correctionCount(tenant: string): Promise<number>;
+  /**
+   * Register or update the stable identity behind the free-string `subject`.
+   * Idempotent per (tenant, key): re-registering with the same values is a
+   * no-op; new aliases merge in. Returns the row, existing or new.
+   */
+  upsertSubject(input: {
+    tenant: string;
+    key: string;
+    displayName: string;
+    kind: string;
+    aliases?: string[];
+    now?: string;
+  }): Promise<Subject>;
+  /** Exact-key lookup; null when the tenant never registered that key. */
+  subjectByKey(tenant: string, key: string): Promise<Subject | null>;
+  /** Natural-key resolution: exact key first, then alias. */
+  subjectResolve(tenant: string, keyOrAlias: string): Promise<Subject | null>;
+  /** Registry listing, filterable by kind. */
+  listSubjects(tenant: string, kind?: string): Promise<Subject[]>;
 }
 
 export interface LedgerStats {
@@ -778,6 +826,38 @@ export function createLedger(db: AsyncDb): Ledger {
     });
   }
 
+  /**
+   * The governed step between "the system observed something" and "the
+   * organisation may reason on it" (idea §1.1 curation, made explicit).
+   *
+   * Only CANDIDATE may be verified, and only by a named human: DISPUTED has a
+   * contradiction to resolve, STALE has an expired source to re-check, and
+   * SUPERSEDED/RETIRED are history. Verifying a provisional claim clears the
+   * provisional flag — I6 protects against acting on unreviewed inference,
+   * and this human review is precisely that review.
+   */
+  async function verifyClaim(tenant: string, id: string, verifiedBy: string, now?: string): Promise<Claim> {
+    const at = now ?? new Date().toISOString();
+    const c = await get(tenant, id);
+    if (!c) throw new LedgerError('MISSING_CLAIM', `unknown claim ${id}`);
+    if (c.status === 'VERIFIED') return c;
+    if (c.status !== 'CANDIDATE') {
+      throw new LedgerError(
+        'UNVERIFIABLE_STATUS',
+        `claim ${id} is ${c.status}; only CANDIDATE may be verified (resolve, re-check, or supersede instead)`,
+      );
+    }
+    return db.transaction(async () => {
+      await db
+        .prepare("UPDATE claims SET status = 'VERIFIED', verified_at = ?, provisional = 0 WHERE id = ? AND tenant = ?")
+        .run(at, id, tenant);
+      await audit(tenant, verifiedBy, 'CLAIM_VERIFIED', id, c.statement);
+      const updated = await get(tenant, id);
+      if (!updated) throw new LedgerError('CLAIM_LOST', `claim ${id} vanished after verification`);
+      return updated;
+    });
+  }
+
   async function correctionCount(tenant: string): Promise<number> {
     return (
       (await db
@@ -786,6 +866,110 @@ export function createLedger(db: AsyncDb): Ledger {
         n: number;
       }
     ).n;
+  }
+
+  // ---- entity/subject registry (TODO 1.1) ---------------------------------
+
+  const rowToSubject = (r: Record<string, unknown>): Subject => ({
+    id: String(r.id),
+    tenant: String(r.tenant),
+    key: String(r.key),
+    displayName: String(r.display_name),
+    kind: String(r.kind),
+    aliases: JSON.parse(String(r.aliases_json ?? '[]')) as string[],
+    createdAt: String(r.created_at),
+  });
+
+  /**
+   * `subject` stops being a free string: this is the stable identity behind
+   * it. Registration is idempotent per (tenant, key) — re-registering with
+   * unchanged values is a no-op, new aliases merge into the set. Aliases are
+   * case-insensitive at resolution time (lowercased here, query lowercased
+   * there) so "Acme" and "acme" resolve to one entity.
+   */
+  async function upsertSubject(input: {
+    tenant: string;
+    key: string;
+    displayName: string;
+    kind: string;
+    aliases?: string[];
+    now?: string;
+  }): Promise<Subject> {
+    const s = upsertSubjectSchema.parse(input);
+    const at = s.now ?? new Date().toISOString();
+    return db.transaction(async () => {
+      const existing = (await db
+        .prepare('SELECT * FROM subjects WHERE tenant = ? AND key = ?')
+        .get(s.tenant, s.key)) as Record<string, unknown> | undefined;
+      if (existing) {
+        const merged = [
+          ...new Set([
+            ...(JSON.parse(String(existing.aliases_json ?? '[]')) as string[]),
+            ...s.aliases.map((a) => a.toLowerCase()),
+          ]),
+        ];
+        if (
+          existing.display_name === s.displayName &&
+          existing.kind === s.kind &&
+          merged.length === (JSON.parse(String(existing.aliases_json ?? '[]')) as string[]).length
+        ) {
+          return rowToSubject(existing);
+        }
+        await db
+          .prepare('UPDATE subjects SET display_name = ?, kind = ?, aliases_json = ? WHERE id = ?')
+          .run(s.displayName, s.kind, JSON.stringify(merged), String(existing.id));
+        await audit(s.tenant, 'system', 'SUBJECT_UPDATED', String(existing.id), s.key);
+        return rowToSubject({
+          ...existing,
+          display_name: s.displayName,
+          kind: s.kind,
+          aliases_json: JSON.stringify(merged),
+        });
+      }
+      const id = `sub_${crypto.randomUUID()}`;
+      await db
+        .prepare(
+          'INSERT INTO subjects (id, tenant, key, display_name, kind, aliases_json, created_at) VALUES (?,?,?,?,?,?,?)',
+        )
+        .run(id, s.tenant, s.key, s.displayName, s.kind, JSON.stringify(s.aliases.map((a) => a.toLowerCase())), at);
+      await audit(s.tenant, 'system', 'SUBJECT_REGISTERED', id, s.key);
+      return {
+        id,
+        tenant: s.tenant,
+        key: s.key,
+        displayName: s.displayName,
+        kind: s.kind,
+        aliases: s.aliases.map((a) => a.toLowerCase()),
+        createdAt: at,
+      };
+    });
+  }
+
+  async function subjectByKey(tenant: string, key: string): Promise<Subject | null> {
+    const row = (await db.prepare('SELECT * FROM subjects WHERE tenant = ? AND key = ?').get(tenant, key)) as
+      Record<string, unknown> | undefined;
+    return row ? rowToSubject(row) : null;
+  }
+
+  async function subjectResolve(tenant: string, keyOrAlias: string): Promise<Subject | null> {
+    const byKey = await subjectByKey(tenant, keyOrAlias);
+    if (byKey) return byKey;
+    const row = (await db
+      .prepare('SELECT * FROM subjects WHERE tenant = ? AND aliases_json LIKE ? LIMIT 1')
+      .get(tenant, `%"${keyOrAlias.toLowerCase()}"%`)) as Record<string, unknown> | undefined;
+    return row ? rowToSubject(row) : null;
+  }
+
+  async function listSubjects(tenant: string, kind?: string): Promise<Subject[]> {
+    const rows = kind
+      ? ((await db
+          .prepare('SELECT * FROM subjects WHERE tenant = ? AND kind = ? ORDER BY key')
+          .all(tenant, kind)) as Record<string, unknown>[])
+      : ((await db.prepare('SELECT * FROM subjects WHERE tenant = ? ORDER BY key').all(tenant)) as Record<
+          string,
+          unknown
+        >[]);
+    return rows.map(rowToSubject);
   }
 
   async function stats(tenant: string, now: string): Promise<LedgerStats> {
@@ -852,7 +1036,12 @@ export function createLedger(db: AsyncDb): Ledger {
     disputedPairs,
     dueVerifications,
     correctClaim,
+    verifyClaim,
     correctionCount,
+    upsertSubject,
+    subjectByKey,
+    subjectResolve,
+    listSubjects,
   };
 }
 

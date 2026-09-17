@@ -26,9 +26,9 @@ export class RouterError extends Error {
  *   R3  Asymmetric loss. For irreversible actions, misrouting DOWN is
  *       catastrophic — so the router fails UP (escalate).
  *   R4  Per-class error budgets. Breach ⇒ auto-revert to the fixed policy.
- *   R5  Coupling guard. A Skill Card may only run at the tier and in the scope
- *       it was validated at. This is what stops router+compiler compounding
- *       transfer failure.
+ *   R5  Coupling guard. A Skill Card may only run at the tier, in the scope,
+ *       and on the models it was validated at. This is what stops
+ *       router+compiler compounding transfer failure.
  */
 
 export const IRREVERSIBLE = new Set(['ACT_IRREVERSIBLE']);
@@ -46,6 +46,13 @@ export interface RouteInput {
   confidence?: number;
   /** External, unverified content involved? Bias upward. */
   touchesExternalUnverified?: boolean;
+  /**
+   * The model/harness this task will run on, when already known. Model
+   * selection usually happens below the tier decision, so this stays
+   * optional — but a caller that knows must declare it: it is what lets the
+   * coupling guard pin a WORKFLOW card to the models it was validated on.
+   */
+  model?: string;
   /** A candidate Skill Card for this intent, if one exists. */
   skillCard?: {
     id: string;
@@ -161,11 +168,16 @@ export class CognitiveRouter {
   /** Learned/ambiguous path: only consulted when the policy has no opinion. */
   private async learned(input: RouteInput): Promise<RoutingClass> {
     // Coupling guard: a WORKFLOW is only legal if the card is PROMOTED, was
-    // validated at WORKFLOW, and the current scope is inside its validated role
-    // set. Anything else silently degrades to MODEL.
+    // validated at WORKFLOW, the current scope is inside its validated role
+    // set, and — when the caller has declared the model — that model is one
+    // the card was validated on. Anything else silently degrades to MODEL.
+    // An undeclared model is not a bypass: selection happens below the tier
+    // decision there, and the card's own execution is bounded to its
+    // validated models downstream.
     const card = input.skillCard;
     if (card && card.state === 'PROMOTED' && card.validatedAtTier === 'WORKFLOW') {
-      if (card.scopeRoles.includes(input.scope)) return 'WORKFLOW';
+      const modelOk = input.model === undefined || card.scopeModels.includes(input.model);
+      if (card.scopeRoles.includes(input.scope) && modelOk) return 'WORKFLOW';
     }
     if (input.touchesExternalUnverified) return 'MODEL';
     if ((input.confidence ?? 1) < 0.6 || input.importance > 0.7) return 'MODEL';
@@ -213,6 +225,16 @@ export class CognitiveRouter {
     }
     if (input.skillCard && input.skillCard.state === 'PROMOTED' && !input.skillCard.scopeRoles.includes(input.scope)) {
       guards.push('skill_scope_mismatch_demoted_to_MODEL');
+    }
+    // A declared model outside the card's validated set is the same
+    // transfer-without-evidence failure, one axis over — name it too.
+    if (
+      input.skillCard &&
+      input.skillCard.state === 'PROMOTED' &&
+      input.model !== undefined &&
+      !input.skillCard.scopeModels.includes(input.model)
+    ) {
+      guards.push('skill_model_mismatch_demoted_to_MODEL');
     }
 
     // R2: shadow unless control rate grants it. RNG is injectable via

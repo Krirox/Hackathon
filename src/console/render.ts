@@ -116,6 +116,28 @@ function tag(kind: string): string {
   return `<span style="display:inline-block;background:${s.color};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">${s.glyph} ${esc(kind)}</span>`;
 }
 
+/**
+ * Provisional reality must be UNMISTAKABLE (TODO §1.3) — a CANDIDATE chip in
+ * the same visual language as a verified fact is exactly the failure mode
+ * the Ledger exists to prevent. Four redundant signals, so no single
+ * channel (color, glyph, text, spacing) has to be trusted alone:
+ *   1. glyph swaps to the · PROVISIONAL text
+ *   2. label reads "PROVISIONAL", not the bare claim kind
+ *   3. white text → ink on the light chip, every other chip is white-on-dark
+ *   4. dashed border — no other chip in the report has one
+ * Versioned, because the whole point is that this never silently regresses
+ * to looking like every other chip.
+ */
+export const PROVISIONAL_CHIP_VERSION = 1;
+
+function provisionalTag(kind: string): string {
+  return `<span style="display:inline-block;background:${HYPO};color:${INK};font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;border:1px dashed ${RISK};letter-spacing:0.5px;">· PROVISIONAL ${esc(kind)}</span>`;
+}
+
+export function evidenceChip(e: { kind: string; status: string; provisional: boolean }): string {
+  return e.provisional || e.status === 'CANDIDATE' ? provisionalTag(e.kind) : tag(e.kind);
+}
+
 function healthDot(health: string): string {
   let c = MUTED;
   if (health === 'healthy') c = FACT;
@@ -156,7 +178,7 @@ export function renderHtml(r: ConsoleReport): string {
               q,
             ) => `<div style="border-left:3px solid ${q.state === 'COMPLETED' ? FACT : HAIRLINE};padding:6px 10px;margin:6px 0;">
             <div style="font-size:12px;">${esc(q.goal)} <span style="color:${MUTED};font-size:11px">${esc(q.state)} · ${esc(q.originScope)}→${esc(q.targetScope)}</span></div>
-            ${q.evidence.map((e) => `<div style="font-size:11px;margin-top:4px;">${tag(e.kind)} ${esc(e.statement.slice(0, 120))} <span style="color:${MUTED}">${esc(e.tier)} · ${esc(e.status)}</span></div>`).join('')}
+            ${q.evidence.map((e) => `<div style="font-size:11px;margin-top:4px;">${evidenceChip(e)} ${esc(e.statement.slice(0, 120))} <span style="color:${MUTED}">${esc(e.tier)} · ${esc(e.status)}</span></div>`).join('')}
           </div>`,
           )
           .join('')}</div>`,

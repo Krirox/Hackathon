@@ -1,6 +1,7 @@
 import { T, eq, TEN, NOW, fresh, sor, base } from './helpers.ts';
 import { buildReport } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
+import { composeDigest } from '../src/console/digest.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
@@ -123,6 +124,58 @@ T('the HTML report carries headlines, evidence tags, and compiler gaps', async (
   for (const needle of ['Reality health', '$25', 'Needs a human', 'Compiler', 'Rooms', '✓ FACT', 'FAFAF8']) {
     eq(html.includes(needle), true, `report contains "${needle}":`);
   }
+});
+
+T('provisional reality is unmistakable — a CANDIDATE chip never looks like a fact', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const obs = await ledger.append({
+    tenant: TEN,
+    subject: 'release:v2',
+    kind: 'OBSERVATION',
+    statement: 'changelog moved — nobody has reviewed it',
+    confidence: 0.4,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sync:gh',
+    scope: 'engineering',
+    authorType: 'system',
+    provisional: true,
+    provenance: { ...sor(), sourceTier: 'SINGLE_SOURCE' },
+  });
+  await coord.submit(base({ id: 'r2', claimRefs: [obs.id], bid: { dollars: 1 } }));
+
+  const r = await buildReport(db, ledger, coord, comp, TEN, NOW);
+  const eng = r.rooms.find((x) => x.scope === 'engineering')!;
+  const chip = eng.requests.find((q) => q.id === 'r2')!.evidence[0]!;
+  eq(chip.provisional, true, 'the read model carries the flag:');
+
+  const html = renderHtml(r);
+  eq(html.includes('· PROVISIONAL OBSERVATION'), true, 'provisional chip is labeled in text:');
+  eq(html.includes('border:1px dashed'), true, 'provisional chip is the only dashed chip:');
+  eq(html.includes('✓ FACT'), true, 'verified facts keep their chip:');
+});
+
+T('digest composition: NOTICEs land here, grouped, never in the Feed', async () => {
+  const { db, coord } = await fresh();
+  await coord.submit(base({ id: 'n1', messageClass: 'NOTICE', goal: 'v1.2 shipped', claimRefs: [] }));
+  // Distinct idem key (different deliverableSchema): a byte-identical NOTICE
+  // would replay onto n1's thread (by design), not insert a second row.
+  await coord.submit(
+    base({ id: 'n2', messageClass: 'NOTICE', goal: 'v1.2 shipped', claimRefs: [], deliverableSchema: 'notice.v2' }),
+  );
+  await coord.submit(base({ id: 'n3', messageClass: 'NOTICE', goal: 'backup ran', claimRefs: [] }));
+  // A REQUEST is work, not digest material — it must never appear here.
+  await coord.submit(base({ id: 'w1', goal: 'v1.2 shipped' }));
+
+  const entries = await composeDigest(db, TEN, NOW);
+  eq(entries.length, 2, 'two NOTICE topics, one REQUEST excluded:');
+  const shipped = entries.find((e) => e.goal === 'v1.2 shipped')!;
+  eq(shipped.followOnCount, 1, 'the repeat NOTICE became a follow-on count:');
+  eq(shipped.requestId, 'n2', 'newest topic first:');
+  eq(entries.find((e) => e.goal === 'backup ran')!.requestId, 'n3');
+
+  // Not-a-date guard: a NOTICE beyond the query instant is invisible.
+  eq((await composeDigest(db, TEN, '2026-01-01T00:00:00.000Z')).length, 0);
 });
 
 T('the served console approves and declines through the coordinator', async () => {

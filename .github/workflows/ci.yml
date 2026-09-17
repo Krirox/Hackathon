@@ -30,6 +30,14 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The suite writes var/status.json; this fails if README/idea.md/TODO.md
+      # quote a test count older than the latest green run.
+      - run: npm run docs:check
+      # Engine-specific lane: derived schema, dialect helpers, and the
+      # nextSeq atomicity that sqlite's BEGIN IMMEDIATE hides.
+      - run: npm run test:postgres
+        env:
+          TEST_PG_URL: postgres://vital:vital-ci@localhost:5432/vital
       - run: npm run lint
       - run: npm run format:check
       - run: npm run verify:provenance

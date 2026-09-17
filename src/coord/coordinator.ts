@@ -120,8 +120,10 @@ export interface SchedulerLimits {
   /**
    * Bid ceiling per request, applied by the scheduler — never by the
    * proposer. An agent may never raise its own quota; anything asked
-   * above the ceiling is clamped down to it, loudly (the stored bid is
-   * the clamped one). Absent ceilings mean no clamping.
+   * above the ceiling is clamped down to it (the stored bid is the
+   * clamped one). DEFAULT_LIMITS sets one — a single request may never
+   * out-bid the whole org's daily allowance — and `maxBid: {}` is the
+   * explicit opt-out for a caller that really means no ceiling.
    */
   maxBid?: Partial<CostBid>;
 }
@@ -131,6 +133,19 @@ export const DEFAULT_LIMITS: SchedulerLimits = {
   maxDailyDollars: 40,
   maxDailyTokens: 2_000_000,
   maxHumanEscalationsPerDay: 3,
+  // A per-request ceiling that exists by default, because "an agent may never
+  // raise its own quota" is only true if there is a quota to raise. The bound
+  // is the org's own daily allowance: no single request may bid more than the
+  // whole company may spend in a day. An operator may set tighter numbers;
+  // `maxBid: {}` opts out entirely.
+  maxBid: {
+    dollars: 40,
+    tokens: 2_000_000,
+    humanMinutes: 60,
+    maxRounds: 10,
+    maxHops: HARD_MAX_HOPS,
+    maxDiskBytes: 8 * 1024 * 1024 * 1024,
+  },
 };
 
 function rowToRequest(r: Record<string, unknown>): CoordinationRequest {
@@ -342,20 +357,31 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     const idem = idempotencyKeyOf({ ...p, claimRefs: p.claimRefs });
 
     return db.transaction(async (): Promise<AdmissionResult> => {
-      // ---- idempotency: "already in flight, here's the thread" --------------
+      // ---- idempotency: "already exists, here's the thread" -----------------
+      // In-flight: dedupe onto the live thread. Terminal: replay the finished
+      // thread instead of crashing on the UNIQUE(tenant, idem_key) constraint
+      // — a re-emitted identical NOTICE (cron) or re-clicked REQUEST must
+      // return the record, never throw. Callers who need distinct occurrences
+      // of the same content put the occurrence (a date, a run id) in the goal.
       const dup = (await db
-        .prepare(
-          `SELECT * FROM requests WHERE tenant = ? AND idem_key = ?
-             AND state NOT IN (${TERMINAL_REQUEST_STATES.map(() => '?').join(',')})`,
-        )
-        .get(p.tenant, idem, ...TERMINAL_REQUEST_STATES)) as Record<string, unknown> | undefined;
+        .prepare('SELECT * FROM requests WHERE tenant = ? AND idem_key = ? ORDER BY created_at DESC LIMIT 1')
+        .get(p.tenant, idem)) as Record<string, unknown> | undefined;
       if (dup) {
         const existing = rowToRequest(dup);
-        await audit(`${p.originScope}:agent`, 'REQUEST_DEDUPED', existing.id, p.tenant, existing.goal);
+        const terminal = TERMINAL_REQUEST_STATES.includes(existing.state);
+        await audit(
+          `${p.originScope}:agent`,
+          terminal ? 'REQUEST_REPLAYED' : 'REQUEST_DEDUPED',
+          existing.id,
+          p.tenant,
+          existing.goal,
+        );
         return {
           admitted: false,
           state: existing.state,
-          reason: `deduped onto in-flight request ${existing.id}`,
+          reason: terminal
+            ? `identical request already ${existing.state} — replayed ${existing.id}`
+            : `deduped onto in-flight request ${existing.id}`,
           request: existing,
           dedupedTo: existing.id,
         };

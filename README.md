@@ -34,7 +34,7 @@ Requires Node 22.
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit, must be 0 errors
-npm test            # tsx test/run.ts — 74 tests, real sockets, real sqlite
+npm test            # tsx test/run.ts — <!-- vital:testcount -->189 tests, real sockets, real sqlite<!-- /vital:testcount -->
 ```
 
 No Postgres, no Buzz, no jcode needed for the suite: tests run against
@@ -58,12 +58,18 @@ test/         per-module files + helpers + tiny runner (see test/helpers.ts)
 docs/adr/     architecture decisions (0001–0005)
 ```
 
-## Current state (2026-09-09)
+## Current state (2026-09-11)
 
-Typecheck clean, suite 74/74 green. Built: ledger (+decisions/outcomes),
-coordination (+escalation gate), router, compiler, gov matrix, jcode
-connection, talk surface, four vendored QM modules. Not built: scheduler
-substrate, eval spine, attribution, capabilities, wedge, sensing.
+Typecheck clean, suite <!-- vital:testcount -->189/189 green<!-- /vital:testcount -->.
+Built (per `TODO.md` "V2 status"): ledger+decisions+replay+export · coord+
+decompose+escalation gate · router+registry+calibration · compiler+mining+
+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/
+limits) · evals · attrib · ingest (file/github/serper) · sense (contracts/
+materiality/integrity/poisoning) · wedge (ship/churn/feature/deepresearch)
+· talk · substrate (scheduler/sandbox/egress/screen/identity/2 adapters) ·
+capabilities · vendor/qm ×7. Not built: production surface (live
+Buzz/jcode/Postgres, approval rooms), pilot traffic, GTM — the V2 backlog
+in `TODO.md` is the only list that matters now.
 Re-estimate recorded in `TODO.md` §0.5: ~18–23 weeks solo to the first
 instrumented loop, not ~8.
 

@@ -1,3 +1,8 @@
+import { execSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { after, test } from 'node:test';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openDb, migrate } from '../src/core/db.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
 import { createCoordinator, type SchedulerLimits } from '../src/coord/coordinator.ts';
@@ -5,43 +10,75 @@ import { CognitiveRouter, DEFAULT_ROUTER_CONFIG, type RouterConfig } from '../sr
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
 import { FakeHarness } from './fake-harness.ts';
 
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * The single machine-readable source of truth for the suite's size.
+ * `scripts/refresh-docs.mjs` reads this to keep README/idea.md/TODO.md's
+ * marked test-count claims honest; `docs:check` fails CI when they drift.
+ * The PG lane (`TEST_PG_URL`) is a separate runner and must not clobber it.
+ */
+/**
+ * Written only when the FULL suite runs (`run.ts` calls this). A single test
+ * file, or the PG lane, must never rewrite it with a partial count.
+ */
+let statusWrites = false;
+export function enableStatusWrites(): void {
+  statusWrites = true;
+}
+
+export function writeStatusFile(passed: number, failed: number): void {
+  if (!statusWrites) return;
+  let head: string | null;
+  try {
+    head = execSync('git rev-parse HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    head = null;
+  }
+  try {
+    mkdirSync(join(ROOT, 'var'), { recursive: true });
+    writeFileSync(
+      join(ROOT, 'var', 'status.json'),
+      JSON.stringify({ version: 1, tests: { passed, failed }, at: new Date().toISOString(), head }, null, 2) + '\n',
+    );
+  } catch {
+    /* status is a side artifact: never fail the suite over it */
+  }
+}
+
 /**
  * Shared test harness. Each `*.test.ts` file registers tests through `T()`
- * as a side effect of being imported; `test/run.ts` imports the files and
- * then awaits `finish()`. Convention: no assertions outside `T()` blocks,
- * no cross-file state — every test builds its world with `fresh()`.
+ * as a side effect of being imported; `test/run.ts` imports every file and
+ * `node --test` runs them (see the `test` script). Convention: no assertions
+ * outside `T()` blocks, no cross-file state — every test builds its world
+ * with `fresh()`.
  */
 
 let pass = 0;
 let fail = 0;
-const queue: Promise<unknown>[] = [];
 
-export const T = (name: string, fn: () => void | Promise<void>) => {
-  const go = () => {
+/**
+ * node:test-backed registration. Every test is bounded by a timeout: a hang
+ * (the failure mode that already bit the jcode handshake) now fails the suite
+ * instead of wedging CI forever. `node --test` supplies the reporter and the
+ * exit code, so there is no hand-rolled pass/fail plumbing left.
+ */
+export const T = (name: string, fn: () => void | Promise<void>): void => {
+  test(name, { timeout: 15_000 }, async () => {
     try {
-      const maybe = fn();
-      if (maybe && typeof (maybe as Promise<void>).then === 'function') {
-        return (maybe as Promise<void>).then(
-          () => {
-            console.log(`  \x1b[32m\u2713\x1b[0m ${name}`);
-            pass++;
-          },
-          (e: unknown) => {
-            console.log(`  \x1b[31m\u2717\x1b[0m ${name}\n      ${(e as Error).message}`);
-            fail++;
-          },
-        );
-      }
-      console.log(`  \x1b[32m\u2713\x1b[0m ${name}`);
-      pass++;
+      await fn();
+      pass += 1;
     } catch (e) {
-      console.log(`  \x1b[31m\u2717\x1b[0m ${name}\n      ${(e as Error).message}`);
-      fail++;
+      fail += 1;
+      throw e;
     }
-    return Promise.resolve();
-  };
-  queue.push(go());
+  });
 };
+
+// One status file per full run, never per test file.
+after(() => writeStatusFile(pass, fail));
 
 export const eq = (a: unknown, b: unknown, m = '') => {
   if (JSON.stringify(a) !== JSON.stringify(b))
@@ -201,12 +238,4 @@ export async function withHarness<T>(fn: (h: FakeHarness) => Promise<T>): Promis
   } finally {
     await h.close();
   }
-}
-
-export async function finish(): Promise<never> {
-  await Promise.all(queue);
-  console.log('\n════════════════════════════════');
-  console.log(`  ${pass} passed, ${fail} failed`);
-  console.log('════════════════════════════════\n');
-  process.exit(fail ? 1 : 0);
 }

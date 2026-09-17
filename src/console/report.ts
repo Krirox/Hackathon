@@ -74,7 +74,7 @@ export interface RoomView {
     originScope: string;
     targetScope: string;
     updatedAt: string;
-    evidence: { id: string; kind: string; tier: string; statement: string; status: string }[];
+    evidence: { id: string; kind: string; tier: string; statement: string; status: string; provisional: boolean }[];
   }[];
 }
 
@@ -223,6 +223,7 @@ export async function buildReport(
             tier: c.provenance.sourceTier,
             statement: c.statement,
             status: c.status,
+            provisional: c.provisional,
           });
       }
       roomRequests.push({
