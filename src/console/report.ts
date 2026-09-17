@@ -1,6 +1,6 @@
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
-import type { Coordinator } from '../coord/coordinator.ts';
+import type { ApprovalLatencyStats, Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler, SkillState } from '../compiler/compiler.ts';
 import { describeCard } from '../compiler/registry.ts';
 import { costOfDecision } from '../attrib/attribution.ts';
@@ -90,7 +90,7 @@ export interface ConsoleReport {
   compiler: CompilerColumn[];
   rooms: RoomView[];
   /** Approval latency (TODO 2.3): submission → human decision, from APPROVAL_LATENCY audit rows. */
-  approvalLatency: { n: number; medianSeconds: number | null; p90Seconds: number | null; maxSeconds: number | null };
+  approvalLatency: ApprovalLatencyStats;
 }
 
 const TERMINAL = ['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'];

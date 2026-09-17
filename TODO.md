@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->190/190 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
+tests      <!-- vital:testcount -->191/191 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
 commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
            compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)

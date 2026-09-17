@@ -218,7 +218,7 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
       maxSeconds: number | null;
     };
     eq(stats.n, 2, 'both decisions recorded:');
-    eq(stats.medianSeconds, 21600, 'median is the 6h one:');
+    eq(stats.medianSeconds, 10800, 'true median: even count averages the middle pair:');
     eq(stats.p90Seconds, 21600);
     eq(stats.maxSeconds, 21600);
   } finally {
