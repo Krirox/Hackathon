@@ -51,35 +51,57 @@ export async function runCrossModelEvidence(
   const now = task.now ?? new Date().toISOString();
   const out: AdapterRun[] = [];
   for (const adapter of adapters) {
-    const { request } = await coord.submit({
-      tenant,
-      messageClass: 'REQUEST',
-      originScope: task.originScope,
-      targetScope: task.targetScope,
-      goal: `cross-model transfer: ${card.intent} on ${adapter.name}`,
-      claimRefs: task.claimIds,
-      deliverableSchema: task.deliverableSchema ?? 'transfer.v1',
-      bid: { dollars: task.maxDollars, tokens: task.maxTokens },
-      onBehalfOf: task.onBehalfOf,
-      now,
-    });
-    if (!request) throw new TransferError('NOT_ADMITTED', `transfer leg for ${adapter.name} was not admitted`);
-    const outcome = await adapter.run(tenant, request.id, {
-      command: task.command,
-      claimRefs: task.claimIds,
-      onBehalfOf: task.onBehalfOf,
-      maxDollars: task.maxDollars,
-      maxTokens: task.maxTokens,
-    });
-    const passed = outcome.status === 'COMPLETED';
-    await comp.recordTransfer(card, {
-      kind: 'cross_model',
-      variant: adapter.name,
-      passed,
-      score: passed ? 1 : 0,
-      ranAt: now,
-    });
-    out.push({ adapter: adapter.name, status: outcome.status, recorded: true });
+    try {
+      const { request } = await coord.submit({
+        tenant,
+        messageClass: 'REQUEST',
+        originScope: task.originScope,
+        targetScope: task.targetScope,
+        goal: `cross-model transfer: ${card.intent} on ${adapter.name}`,
+        claimRefs: task.claimIds,
+        deliverableSchema: task.deliverableSchema ?? 'transfer.v1',
+        bid: { dollars: task.maxDollars, tokens: task.maxTokens },
+        onBehalfOf: task.onBehalfOf,
+        now,
+      });
+      if (!request) {
+        await comp.recordTransfer(card, {
+          kind: 'cross_model',
+          variant: adapter.name,
+          passed: false,
+          score: 0,
+          ranAt: now,
+        });
+        out.push({ adapter: adapter.name, status: 'DENIED', recorded: true });
+        continue;
+      }
+      const outcome = await adapter.run(tenant, request.id, {
+        command: task.command,
+        claimRefs: task.claimIds,
+        onBehalfOf: task.onBehalfOf,
+        maxDollars: task.maxDollars,
+        maxTokens: task.maxTokens,
+      });
+      const passed = outcome.status === 'COMPLETED';
+      await comp.recordTransfer(card, {
+        kind: 'cross_model',
+        variant: adapter.name,
+        passed,
+        score: passed ? 1 : 0,
+        ranAt: now,
+      });
+      out.push({ adapter: adapter.name, status: outcome.status, recorded: true });
+    } catch (_err) {
+      // F18: Exceptions bank negative transfer results rather than aborting silently
+      await comp.recordTransfer(card, {
+        kind: 'cross_model',
+        variant: adapter.name,
+        passed: false,
+        score: 0,
+        ranAt: now,
+      });
+      out.push({ adapter: adapter.name, status: 'FAILED', recorded: true });
+    }
   }
   return out;
 }

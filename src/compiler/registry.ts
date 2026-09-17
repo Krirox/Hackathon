@@ -5,10 +5,16 @@ import type { OrganizationalCompiler, SkillCard, SkillState, TransferTest } from
 /**
  * Procedure registry, read side (TODO §5): card, state, scope, tests
  * passed, live success rate, and — the column that matters — why it
- * can't be trusted yet. One honest exception to read-only: describing a
- * PROMOTED card runs the drift monitor, which auto-demotes per its own
- * contract when live success breaches baseline. A registry read that
- * hides decay would be the failure mode this system exists to prevent.
+ * can't be trusted yet.
+ *
+ * Presentation never evaluates: `describeCardReadOnly` reports the drift
+ * signal without demoting or writing, so dashboard GETs (report.ts) stay
+ * side-effect free. The evaluating `describeCard` path stays for explicit
+ * evaluation entry points — scheduled evaluation should call it (or
+ * comp.checkDrift directly), never the read-only variant. A registry read
+ * that hides decay would be the failure mode this system exists to
+ * prevent, so the read-only path still SHOWS the drift signal (the
+ * `drifting` trust gap) — it just never acts on it.
  */
 
 export interface CardDescription {
@@ -27,14 +33,13 @@ export function listCards(
   return comp.list(tenant, opts);
 }
 
-export async function describeCard(comp: OrganizationalCompiler, tenant: string, id: string): Promise<CardDescription> {
-  const card = await comp.get(tenant, id);
-  if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
-  const transfers = await comp.transferResults(card.id);
+function trustGapsFor(
+  card: SkillCard,
+  transfers: TransferTest[],
+  drift: { drifting: boolean; demoted: boolean } | null,
+): string[] {
   const passed = (kind: TransferTest['kind'], variant?: string): boolean =>
     transfers.some((t) => t.kind === kind && t.passed && (variant === undefined || t.variant === variant));
-  const drift = card.state === 'PROMOTED' ? await comp.checkDrift(tenant, card.id) : null;
-
   const trustGaps: string[] = [];
   if (!passed('regression')) trustGaps.push('no passing regression test');
   if (!card.evalRef) trustGaps.push('no eval suite reference (evals are the spec)');
@@ -50,8 +55,72 @@ export async function describeCard(comp: OrganizationalCompiler, tenant: string,
   }
   if (drift?.drifting === true) trustGaps.push('drifting: live success below validated baseline');
   if (drift?.demoted === true) trustGaps.push('auto-demoted — see drift ticket');
+  return trustGaps;
+}
 
-  return { card, transfers, drift, trustGaps };
+/**
+ * Read-only drift signal: the same EWMA the evaluating monitor uses, but
+ * computed from a SELECT with no persist and no audit write. `demoted` is
+ * always false here by construction — a GET reports decay, it never acts.
+ * Mirrors OrganizationalCompiler.checkDrift defaults (window 40, alpha 0.2,
+ * threshold 0.9, minimum 10 samples) so the signal matches evaluation.
+ */
+async function peekDrift(
+  db: AsyncDb,
+  tenant: string,
+  card: SkillCard,
+): Promise<{ drifting: boolean; demoted: boolean; ewma: number; samples: number } | null> {
+  if (card.state !== 'PROMOTED') return null;
+  const window = 40;
+  const alpha = 0.2;
+  const threshold = 0.9;
+  const rows = (await db
+    .prepare(
+      `SELECT outcome FROM traces WHERE tenant = ? AND intent = ? AND tier = 'WORKFLOW'
+         AND skill_card = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(tenant, card.intent, card.id, window)) as { outcome: string }[];
+  if (rows.length < 10) return { drifting: false, demoted: false, ewma: 1, samples: rows.length };
+  let ewma = 1;
+  for (const r of [...rows].reverse()) {
+    let s = ewma;
+    if (r.outcome === 'SUCCESS') s = 1;
+    else if (r.outcome === 'FAILURE') s = 0;
+    ewma = alpha * s + (1 - alpha) * ewma;
+  }
+  return { drifting: ewma < threshold, demoted: false, ewma, samples: rows.length };
+}
+
+/**
+ * Presentation path: no evaluation, no writes. Dashboard GETs must call
+ * this, never `describeCard`.
+ */
+export async function describeCardReadOnly(
+  db: AsyncDb,
+  comp: OrganizationalCompiler,
+  tenant: string,
+  id: string,
+): Promise<CardDescription> {
+  const card = await comp.get(tenant, id);
+  if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
+  const transfers = await comp.transferResults(card.id);
+  const drift = await peekDrift(db, tenant, card);
+  return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
+}
+
+/**
+ * Evaluation path: describing a PROMOTED card runs the drift monitor,
+ * which auto-demotes per its own contract when live success breaches
+ * baseline. Reserved for explicit evaluation entry points (scheduled
+ * evaluation should call this or comp.checkDrift directly) — never for
+ * presentation reads.
+ */
+export async function describeCard(comp: OrganizationalCompiler, tenant: string, id: string): Promise<CardDescription> {
+  const card = await comp.get(tenant, id);
+  if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
+  const transfers = await comp.transferResults(card.id);
+  const drift = card.state === 'PROMOTED' ? await comp.checkDrift(tenant, card.id) : null;
+  return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
 }
 
 /**

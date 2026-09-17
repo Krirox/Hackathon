@@ -288,7 +288,9 @@ export class OrganizationalCompiler {
 
   async transferResults(cardId: string): Promise<TransferTest[]> {
     const rows = (await this.db
-      .prepare('SELECT kind, variant, passed, score, ran_at FROM skill_transfer_tests WHERE card_id = ?')
+      .prepare(
+        'SELECT kind, variant, passed, score, ran_at FROM skill_transfer_tests WHERE card_id = ? ORDER BY ran_at DESC',
+      )
       .all(cardId)) as SkillTransferTestRow[];
     return rows.map((r) => ({
       kind: String(r.kind) as TransferTest['kind'],
@@ -314,7 +316,21 @@ export class OrganizationalCompiler {
     if (!card) return { ok: false, card: null, reasons: ['card not found'] };
     const reasons: string[] = [];
     const tests = await this.transferResults(cardId);
-    const has = (k: TransferTest['kind']) => tests.some((t) => t.kind === k && t.passed);
+    // F18: Latest test result per (kind, variant) determines active status — historical
+    // passes must never mask subsequent regressions or failures.
+    const latestByKindVariant = new Map<string, TransferTest>();
+    for (const t of tests) {
+      const key = `${t.kind}:${t.variant}`;
+      const existing = latestByKindVariant.get(key);
+      if (!existing || Date.parse(t.ranAt) > Date.parse(existing.ranAt)) {
+        latestByKindVariant.set(key, t);
+      }
+    }
+    const activeTests = [...latestByKindVariant.values()];
+    const has = (k: TransferTest['kind']) => {
+      const matching = activeTests.filter((t) => t.kind === k);
+      return matching.length > 0 && matching.every((t) => t.passed);
+    };
 
     if (STATE_ORDER[to] !== STATE_ORDER[card.state] + 1 && to !== 'DEMOTED' && to !== 'RETIRED') {
       reasons.push(`illegal transition ${card.state} → ${to}; advance one step at a time`);
@@ -351,12 +367,24 @@ export class OrganizationalCompiler {
 
     if (reasons.length) return { ok: false, card, reasons };
 
-    return this.db.transaction(async () => {
-      const next: SkillCard = { ...card, state: to, version: card.version + 1, updatedAt: new Date().toISOString() };
-      await this.persist(next);
-      await this.audit(tenant, 'compiler', `CARD_${to}`, cardId, `v${next.version}`);
-      return { ok: true, card: next, reasons: [] };
-    });
+    // Expected-state CAS: the row moves only if it still holds the state
+    // this call gated against. A concurrent advancer wins the single UPDATE;
+    // this call sees zero changed rows and throws instead of writing over
+    // the winner's version with a stale base. Version rides along atomically
+    // (version + 1 in-statement), so no two writers mint the same version.
+    const at = new Date().toISOString();
+    const out = await this.db
+      .prepare('UPDATE skill_cards SET state = ?, version = version + 1, updated_at = ? WHERE id = ? AND state = ?')
+      .run(to, at, cardId, card.state);
+    if (out.changes === 0) {
+      throw new CompilerError(
+        'STATE_CONFLICT',
+        `card ${cardId} moved under this advance (was ${card.state}) — re-read and gate again`,
+      );
+    }
+    const next = (await this.get(tenant, cardId))!;
+    await this.audit(tenant, 'compiler', `CARD_${to}`, cardId, `v${next.version}`);
+    return { ok: true, card: next, reasons: [] };
   }
 
   /**
@@ -372,8 +400,9 @@ export class OrganizationalCompiler {
     const card = await this.get(tenant, cardId);
     if (!card) return { ok: false, card: null, reasons: ['card not found'] };
     if (card.state !== 'PROMOTED') return { ok: false, card, reasons: [`card is ${card.state}, not PROMOTED`] };
-    const t = (await this.transferResults(cardId)).find((x) => x.kind === 'cross_role' && x.variant === role);
-    if (!t?.passed) {
+    const roleTests = (await this.transferResults(cardId)).filter((x) => x.kind === 'cross_role' && x.variant === role);
+    const latestRoleTest = roleTests.sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt))[0];
+    if (!latestRoleTest?.passed) {
       return {
         ok: false,
         card,
@@ -384,13 +413,38 @@ export class OrganizationalCompiler {
     }
     if (card.scopeRoles.includes(role)) return { ok: false, card, reasons: ['role already in scope'] };
     return this.db.transaction(async () => {
+      // CAS on version: two concurrent expansions for different roles must
+      // not merge-lose one role (read-modify-write on scope_json). The loser
+      // re-reads and retries rather than silently dropping a role.
+      const fresh = await this.get(tenant, cardId);
+      if (!fresh || fresh.state !== 'PROMOTED' || fresh.version !== card.version) {
+        throw new CompilerError(
+          'STATE_CONFLICT',
+          `card ${cardId} moved during scope expansion — re-read and gate again`,
+        );
+      }
+      if (fresh.scopeRoles.includes(role)) return { ok: false, card: fresh, reasons: ['role already in scope'] };
       const next: SkillCard = {
-        ...card,
-        scopeRoles: [...card.scopeRoles, role],
-        version: card.version + 1,
+        ...fresh,
+        scopeRoles: [...fresh.scopeRoles, role],
+        version: fresh.version + 1,
         updatedAt: new Date().toISOString(),
       };
-      await this.persist(next);
+      const out = await this.db
+        .prepare('UPDATE skill_cards SET scope_json = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?')
+        .run(
+          JSON.stringify({ originScope: next.originScope, originModels: next.originModels, roles: next.scopeRoles }),
+          next.version,
+          next.updatedAt,
+          cardId,
+          fresh.version,
+        );
+      if (out.changes === 0) {
+        throw new CompilerError(
+          'STATE_CONFLICT',
+          `card ${cardId} moved during scope expansion — re-read and gate again`,
+        );
+      }
       await this.audit(tenant, 'compiler', 'CARD_SCOPE_EXPANDED', cardId, role);
       return { ok: true, card: next, reasons: [] };
     });
@@ -435,15 +489,16 @@ export class OrganizationalCompiler {
     const drifting = ewma < threshold;
     let demoted = false;
     if (drifting) {
-      await this.db.transaction(async () => {
-        await this.persist({
-          ...card,
-          state: 'DEMOTED',
-          version: card.version + 1,
-          updatedAt: new Date().toISOString(),
-        });
-        await this.audit(tenant, 'compiler', 'CARD_AUTO_DEMOTED', cardId, `ewma ${ewma.toFixed(3)} < ${threshold}`);
-      });
+      // Same CAS as promotion: only a still-PROMOTED row demotes. A
+      // concurrent advance/retire that already moved the card wins; the
+      // zero-change outcome means "already handled", not an error here.
+      const out = await this.db
+        .prepare(
+          "UPDATE skill_cards SET state = 'DEMOTED', version = version + 1, updated_at = ? WHERE id = ? AND state = 'PROMOTED'",
+        )
+        .run(new Date().toISOString(), cardId);
+      if (out.changes === 0) return { drifting, ewma, samples: rows.length, demoted: false };
+      await this.audit(tenant, 'compiler', 'CARD_AUTO_DEMOTED', cardId, `ewma ${ewma.toFixed(3)} < ${threshold}`);
       demoted = true;
     }
     return { drifting, ewma, samples: rows.length, demoted };
@@ -453,12 +508,13 @@ export class OrganizationalCompiler {
   async executableFor(tenant: string, intent: string, scope: string, model: string): Promise<SkillCard | null> {
     for (const card of await this.byIntent(tenant, intent, 'PROMOTED')) {
       if (!card.scopeRoles.includes(scope)) continue;
-      if (
-        model &&
-        !card.originModels.includes(model) &&
-        !(await this.transferResults(card.id)).some((t) => t.kind === 'cross_model' && t.variant === model && t.passed)
-      ) {
-        continue;
+      if (model && !card.originModels.includes(model)) {
+        // F18: only the LATEST cross_model test for this variant determines
+        // eligibility — a stale pass must never mask a subsequent regression.
+        const tests = await this.transferResults(card.id);
+        const forModel = tests.filter((t) => t.kind === 'cross_model' && t.variant === model);
+        const latest = forModel.sort((a, b) => Date.parse(b.ranAt) - Date.parse(a.ranAt))[0];
+        if (!latest?.passed) continue;
       }
       return card;
     }

@@ -1,9 +1,9 @@
 import { T, eq, TEN, NOW, fresh, seedTrace, cardInput, withHarness, rejects } from './helpers.ts';
 import { mineCandidates } from '../src/compiler/compiler.ts';
-import { describeCard, listCards, runCardSuite } from '../src/compiler/registry.ts';
+import { describeCard, describeCardReadOnly, listCards, runCardSuite } from '../src/compiler/registry.ts';
 import { runCrossModelEvidence } from '../src/compiler/transfer.ts';
 import { addCase } from '../src/evals/runner.ts';
-import { JcodeAdapter, LocalEchoAdapter } from '../src/substrate/harness.ts';
+import { JcodeAdapter, LocalEchoAdapter, type HarnessAdapter } from '../src/substrate/harness.ts';
 console.log('\n\x1b[1mOrganizational Compiler — transfer before trust\x1b[0m');
 
 T('git-imported packs always enter at QUARANTINE', async () => {
@@ -148,6 +148,29 @@ T('scope expansion needs a per-role cross_role test', async () => {
   eq(ok.card!.scopeRoles.includes('sales'), true);
 });
 
+T('concurrent scope expansions do not merge-lose a role', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_r', 'SUCCESS', 0.95);
+  const c = await comp.compile(cardInput(['tr_r']));
+  const promoted = { ...c, state: 'PROMOTED' as const };
+  await db.prepare("UPDATE skill_cards SET state='PROMOTED' WHERE id = ?").run(c.id);
+  for (const role of ['sales', 'support']) {
+    await comp.recordTransfer(promoted, { kind: 'cross_role', variant: role, passed: true, score: 0.97, ranAt: NOW });
+  }
+  const settled = await Promise.allSettled([
+    comp.expandScope(TEN, c.id, 'sales'),
+    comp.expandScope(TEN, c.id, 'support'),
+  ]);
+  const wins = settled.filter((s) => s.status === 'fulfilled' && s.value.ok);
+  const conflicts = settled.filter(
+    (s) => s.status === 'rejected' && String((s as PromiseRejectedResult).reason).includes('STATE_CONFLICT'),
+  );
+  eq(wins.length, 1, 'exactly one expansion wins:');
+  eq(conflicts.length, 1, 'the loser fails loud with STATE_CONFLICT, not a quiet ok:false:');
+  const final = (await comp.get(TEN, c.id))!;
+  eq(final.scopeRoles.includes('sales') !== final.scopeRoles.includes('support'), true, 'winner kept, no merge:');
+});
+
 T('drift detection auto-demotes a decaying procedure', async () => {
   const { db, comp } = await fresh();
   await seedTrace(comp, db, 'tr_d', 'SUCCESS', 0.95);
@@ -177,6 +200,76 @@ T('drift detection auto-demotes a decaying procedure', async () => {
   eq(d.drifting, true);
   eq(d.demoted, true);
   eq((await comp.get(TEN, c.id))!.state, 'DEMOTED');
+});
+
+T('F06: the read-only description reports drift without acting; evaluation still demotes', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'ro_ok', 'SUCCESS', 0.95);
+  const c = await comp.compile(cardInput(['ro_ok']));
+  await db.prepare("UPDATE skill_cards SET state='PROMOTED' WHERE id = ?").run(c.id);
+  for (let i = 0; i < 20; i++) {
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        `robad${i}`,
+        TEN,
+        'marketing',
+        'x',
+        'draft-launch-copy',
+        '[]',
+        'WORKFLOW',
+        'FAILURE',
+        '{}',
+        c.id,
+        0.9,
+        `2026-09-0${(i % 9) + 1}T00:00:00Z`,
+      );
+  }
+  const auditsBefore = Number(
+    ((await db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ?').get(TEN)) as { n: number }).n,
+  );
+  const peeked = await describeCardReadOnly(db, comp, TEN, c.id);
+  eq(peeked.drift?.drifting, true, 'decay is visible on the read-only path:');
+  eq(peeked.drift?.demoted, false, 'but the read never demotes:');
+  eq(
+    peeked.trustGaps.includes('drifting: live success below validated baseline'),
+    true,
+    'the gap line still names it:',
+  );
+  eq((await comp.get(TEN, c.id))!.state, 'PROMOTED', 'state untouched:');
+  eq(
+    Number(((await db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ?').get(TEN)) as { n: number }).n),
+    auditsBefore,
+    'no audit rows from a read:',
+  );
+  const evaluated = await describeCard(comp, TEN, c.id);
+  eq(evaluated.drift?.demoted, true, 'the evaluating path still demotes:');
+  eq((await comp.get(TEN, c.id))!.state, 'DEMOTED');
+});
+
+T('concurrent advances: the stale writer throws STATE_CONFLICT', async () => {
+  // Both callers read CANDIDATE and both pass the gate; the row itself moves
+  // exactly once. The loser must throw, never mint a second version over the
+  // winner's state with a stale base.
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'cc_ok', 'SUCCESS', 0.95);
+  const c = await comp.compile(cardInput(['cc_ok']));
+  const [a, b] = await Promise.allSettled([
+    comp.attemptAdvance(TEN, c.id, 'QUARANTINE'),
+    comp.attemptAdvance(TEN, c.id, 'QUARANTINE'),
+  ]);
+  const wins = [a, b].filter((r) => r.status === 'fulfilled') as PromiseFulfilledResult<{
+    ok: boolean;
+  }>[];
+  const losses = [a, b].filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+  eq(wins.length, 1, 'one advancer wins:');
+  eq(wins[0]!.value.ok, true);
+  eq(losses.length, 1, 'the other loses:');
+  eq(String(losses[0]!.reason?.message ?? losses[0]!.reason).includes('STATE_CONFLICT'), true, 'to a conflict:');
+  eq((await comp.get(TEN, c.id))!.state, 'QUARANTINE');
+  eq((await comp.get(TEN, c.id))!.version, 2, 'a single version bump — no double advance:');
 });
 
 T('cross-model evidence runs the same intent on every harness and banks it', async () => {
@@ -249,4 +342,107 @@ T('cross-model evidence runs the same intent on every harness and banks it', asy
     code = (e as Error).message;
   }
   eq(code.includes('MISSING_CARD'), true);
+});
+
+T('F18: subsequent failure in a variant invalidates historical pass in attemptAdvance', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_f18', 'SUCCESS', 0.95);
+  const card = await comp.compile({ ...cardInput(['tr_f18']), evalRef: 'suite_f18' });
+
+  // Record an initial passing regression test at T0
+  await comp.recordTransfer(card, {
+    kind: 'regression',
+    variant: 'suite_v1',
+    passed: true,
+    score: 1.0,
+    ranAt: '2026-09-17T10:00:00.000Z',
+  });
+
+  // Advance to QUARANTINE
+  const q = await comp.attemptAdvance(TEN, card.id, 'QUARANTINE');
+  eq(q.ok, true);
+
+  // Advance to SHADOW should succeed because regression passed
+  const s = await comp.attemptAdvance(TEN, card.id, 'SHADOW');
+  eq(s.ok, true);
+
+  // Now record a subsequent FAILING regression test for the same variant at T1
+  await comp.recordTransfer(card, {
+    kind: 'regression',
+    variant: 'suite_v1',
+    passed: false,
+    score: 0.2,
+    ranAt: '2026-09-17T11:00:00.000Z',
+  });
+
+  // Now attempt to advance to BOUNDED_PILOT:
+  // Even though there is a historical pass at 10:00, the latest run at 11:00 failed!
+  const pilot = await comp.attemptAdvance(TEN, card.id, 'BOUNDED_PILOT', { shadowRuns: 30, shadowSuccessRate: 0.95 });
+  eq(pilot.ok, false);
+  eq(
+    pilot.reasons.some((r) => r.includes('regression tests not passing')),
+    true,
+  );
+});
+
+T('F18: adapter exceptions bank negative transfer results instead of aborting', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_f18_ex', 'SUCCESS', 0.95);
+  const card = await comp.compile(cardInput(['tr_f18_ex']));
+
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'x',
+    kind: 'OBSERVATION',
+    statement: 'ground',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: {
+      sourceUri: 'u',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'e',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+
+  // Create a failing adapter that throws an error
+  const crashingAdapter: HarnessAdapter = {
+    name: 'crashing-model',
+    async run() {
+      throw new Error('connection refused: model unavailable');
+    },
+  };
+
+  const runs = await runCrossModelEvidence(
+    coord,
+    comp,
+    TEN,
+    card.id,
+    [crashingAdapter, new LocalEchoAdapter(db, ledger, coord)],
+    {
+      originScope: 'marketing',
+      targetScope: 'engineering',
+      command: 'draft it',
+      claimIds: [clm.id],
+      onBehalfOf: 'human:priya',
+      maxDollars: 2,
+      maxTokens: 20_000,
+      now: NOW,
+    },
+  );
+
+  // Both adapters finished: crashing-model banked a FAILED result, local-echo succeeded
+  eq(runs.length, 2);
+  const crashRun = runs.find((r) => r.adapter === 'crashing-model');
+  eq(crashRun?.status, 'FAILED');
+
+  const transferRows = await comp.transferResults(card.id);
+  const crashTest = transferRows.find((t) => t.variant === 'crashing-model');
+  eq(crashTest?.passed, false);
+  eq(crashTest?.score, 0);
 });
