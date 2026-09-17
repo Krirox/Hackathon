@@ -830,3 +830,310 @@ T('subject registry: stable IDs, alias resolution, idempotent re-registration', 
   eq((await ledger.listSubjects(TEN, 'product')).length, 1);
   eq((await ledger.listSubjects(TEN)).length, 1);
 });
+
+T('F18: alias resolution is an exact normalized hit, never a substring scan', async () => {
+  const { ledger } = await fresh();
+  const s = await ledger.upsertSubject({
+    tenant: TEN,
+    key: 'repo:acme/widget',
+    displayName: 'Acme Widget',
+    kind: 'product',
+    aliases: ['  Acme Corp '],
+    now: NOW,
+  });
+  // Normalization (trim + lowercase) is shared by write and read.
+  eq((await ledger.subjectResolve(TEN, 'acme corp'))?.id, s.id, 'exact normalized hit:');
+  eq((await ledger.subjectResolve(TEN, '  ACME CORP  '))?.id, s.id, 'unclean input still hits exactly:');
+  // A mid-string fragment lives inside the JSON text but is no alias.
+  eq(await ledger.subjectResolve(TEN, 'cme c'), null, 'substring fragments do not resolve:');
+  eq(await ledger.subjectResolve(TEN, 'corp x'), null, 'near-misses do not resolve:');
+});
+
+T('F18: an ambiguous alias refuses instead of silently merging two identities', async () => {
+  const { ledger } = await fresh();
+  const a = await ledger.upsertSubject({
+    tenant: TEN,
+    key: 'repo:acme/a',
+    displayName: 'A',
+    kind: 'product',
+    aliases: ['widget'],
+    now: NOW,
+  });
+  await rejects(
+    async () =>
+      await ledger.upsertSubject({
+        tenant: TEN,
+        key: 'repo:acme/b',
+        displayName: 'B',
+        kind: 'product',
+        aliases: ['Widget'],
+        now: NOW,
+      }),
+    'AMBIGUOUS_ALIAS',
+    'the second claimant is refused:',
+  );
+  // The alias still belongs to its first owner — nothing merged, nothing moved.
+  eq((await ledger.subjectResolve(TEN, 'widget'))?.id, a.id, 'alias stays with its owner:');
+  eq((await ledger.subjectByKey(TEN, 'repo:acme/b'))?.id ?? null, null, 'the refused subject was never created:');
+});
+
+T('F18: novelty is a SQL EXISTS probe — live matches, history does not count', async () => {
+  const { ledger } = await fresh();
+  const live = await ledger.append({
+    tenant: TEN,
+    subject: 'gh:releases',
+    kind: 'FACT',
+    statement: 'v2.14 shipped',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'x',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  void live;
+  eq(await ledger.hasLiveClaim(TEN, 'gh:releases', 'v2.14 shipped'), true, 'live statement matches:');
+  eq(await ledger.hasLiveClaim(TEN, 'gh:releases', 'v2.15 shipped'), false, 'unseen statement is novel:');
+  eq(await ledger.hasLiveClaim(TEN, 'other:subject', 'v2.14 shipped'), false, 'other subjects do not match:');
+  // Superseded history is not prior art.
+  const neu = await ledger.append({
+    tenant: TEN,
+    subject: 'gh:releases',
+    kind: 'FACT',
+    statement: 'v2.14 shipped, corrected',
+    confidence: 1,
+    observedAt: DAY_LATER,
+    validFrom: DAY_LATER,
+    owner: 's',
+    scope: 'x',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  await ledger.link(TEN, neu.id, live.id, 'supersedes');
+  eq(await ledger.hasLiveClaim(TEN, 'gh:releases', 'v2.14 shipped'), false, 'superseded rows do not count:');
+});
+
+T('F19: chunked export keeps its shape on a small ledger and covers a large one', async () => {
+  const { db, ledger } = await fresh();
+  const a = await ledger.append({
+    tenant: TEN,
+    subject: 'p',
+    kind: 'FACT',
+    statement: 'x',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'x',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const dec = await ledger.recordDecision({
+    tenant: TEN,
+    goal: 'g',
+    action: 'a',
+    actionClass: 'READ',
+    claimIds: [a.id],
+    decidedBy: 'h',
+    scope: 'x',
+    autonomy: 'autonomous',
+    now: NOW,
+  });
+  const small = await exportLedger(db, TEN, NOW);
+  eq(small.version, 1, 'same output shape as the unchunked export:');
+  eq(small.claims.length, 1);
+  eq(small.decisions.length, 1);
+  eq(small.decisions[0]!.id, dec.id);
+  // Large ledger: 650 claims paginate past the 500-row batch more than once.
+  for (let i = 0; i < 649; i++) {
+    await ledger.append({
+      tenant: TEN,
+      subject: `bulk:${i % 7}`,
+      kind: 'OBSERVATION',
+      statement: `bulk statement ${i}`,
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'x',
+      authorType: 'system',
+      provenance: { ...sor(), sourceTier: 'SINGLE_SOURCE' },
+    });
+  }
+  const big = await exportLedger(db, TEN, NOW);
+  eq(big.claims.length, 650, 'full coverage across batches:');
+  const seqs = big.claims.map((c) => Number(c.seq));
+  eq(
+    [...seqs].sort((x, y) => x - y),
+    seqs,
+    'claims stay in seq order:',
+  );
+});
+
+T('F19: the staleness sweep chunks past one batch and terminates with full coverage', async () => {
+  const { ledger } = await fresh();
+  // 520 expired VERIFIED facts: two batches at a 500-row batch size.
+  for (let i = 0; i < 520; i++) {
+    await ledger.append({
+      tenant: TEN,
+      subject: `sweep:${i}`,
+      kind: 'FACT',
+      statement: `expiring ${i}`,
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      validUntil: NOW,
+      owner: 's',
+      scope: 'x',
+      authorType: 'system',
+      provenance: sor(),
+    });
+  }
+  const ids = await ledger.markStale(TEN, DAY_LATER);
+  eq(ids.length, 520, 'every expired claim marked, nothing dropped between chunks:');
+  eq(new Set(ids).size, 520, 'no double-marking across chunk boundaries:');
+  eq((await ledger.stats(TEN, DAY_LATER)).stale, 520);
+  // Second sweep is a cheap no-op that still terminates.
+  eq(await ledger.markStale(TEN, DAY_LATER), []);
+});
+
+T('F22: prose correction invalidates retained values, while typed patch updates them', async () => {
+  const { ledger } = await fresh();
+  const c = await ledger.append({
+    tenant: TEN,
+    subject: 'perf:latency',
+    kind: 'MEASUREMENT',
+    statement: 'p99 latency is 500ms',
+    value: 500,
+    unit: 'ms',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'system',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  // 1. Prose-only correction changing the statement invalidates the old numeric value.
+  const proseCorrected = await ledger.correctClaim(
+    TEN,
+    c.id,
+    'p99 latency is 120ms after hotfix',
+    'human:operator',
+    NOW,
+  );
+  eq(proseCorrected.statement, 'p99 latency is 120ms after hotfix');
+  eq(proseCorrected.value ?? null, null, 'old value invalidated so machine does not read stale 500:');
+  eq(proseCorrected.unit ?? null, null);
+  eq((await ledger.get(TEN, c.id))!.status, 'SUPERSEDED');
+
+  // 2. Typed patch updates statement AND machine value together.
+  const typedCorrected = await ledger.correctClaim(
+    TEN,
+    proseCorrected.id,
+    'p99 latency is 120ms confirmed',
+    'human:operator',
+    NOW,
+    { value: 120, unit: 'ms', confidence: 0.99 },
+  );
+  eq(typedCorrected.value, 120, 'typed value stored for machine readers:');
+  eq(typedCorrected.unit, 'ms');
+  eq(typedCorrected.confidence, 0.99);
+});
+
+T('F22: dispute resolution marks the winner verified, supersedes the loser, and closes the dispute', async () => {
+  const { ledger } = await fresh();
+  const a = await ledger.append({
+    tenant: TEN,
+    subject: 'auth:status',
+    kind: 'FACT',
+    statement: 'SSO is required',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sec',
+    scope: 'security',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const b = await ledger.append({
+    tenant: TEN,
+    subject: 'auth:status',
+    kind: 'FACT',
+    statement: 'SSO is optional for contractors',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sec',
+    scope: 'security',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  await ledger.link(TEN, a.id, b.id, 'contradicts');
+  eq((await ledger.get(TEN, a.id))!.status, 'DISPUTED');
+  eq((await ledger.get(TEN, b.id))!.status, 'DISPUTED');
+  eq((await ledger.disputedPairs(TEN)).length, 1, 'dispute is open in curation queue:');
+
+  // Resolve the dispute in favor of A
+  const res = await ledger.resolveDispute(
+    TEN,
+    a.id,
+    b.id,
+    a.id,
+    'Security policy mandate overrides contractor exception',
+    'human:ciso',
+    NOW,
+  );
+  eq(res.winner.id, a.id);
+  eq(res.winner.status, 'VERIFIED', 'winner is restored to VERIFIED:');
+  eq(res.loser.id, b.id);
+  eq(res.loser.status, 'SUPERSEDED', 'loser is superseded:');
+
+  // Open curation queue no longer returns the resolved dispute
+  eq((await ledger.disputedPairs(TEN)).length, 0, 'disputedPairs queue is now clean:');
+});
+
+T(
+  'F22: prediction resolution creates an outcome fact, retires the prediction, and removes it from duePredictions',
+  async () => {
+    const { ledger } = await fresh();
+    const p = await ledger.append({
+      tenant: TEN,
+      subject: 'revenue:q3',
+      kind: 'PREDICTION',
+      statement: 'ARR reaches $10M by Q3',
+      value: 10_000_000,
+      unit: 'USD',
+      confidence: 0.8,
+      observedAt: NOW,
+      validFrom: NOW,
+      validUntil: DAY_LATER,
+      owner: 'finance',
+      scope: 'finance',
+      authorType: 'human',
+      provenance: sor(),
+    });
+
+    const due = await ledger.duePredictions(TEN, DAY_LATER);
+    eq(due.length, 1);
+    eq(due[0]!.id, p.id);
+
+    // Resolve prediction with verified outcome
+    const res = await ledger.resolvePrediction(
+      TEN,
+      p.id,
+      { statement: 'ARR reached $10.4M in audited Q3 report', value: 10_400_000, unit: 'USD' },
+      'human:cfo',
+      DAY_LATER,
+    );
+    eq(res.prediction.id, p.id);
+    eq(res.prediction.status, 'RETIRED', 'prediction is settled:');
+    eq(res.outcomeClaim.kind, 'FACT');
+    eq(res.outcomeClaim.value, 10_400_000);
+    eq(res.outcomeClaim.unit, 'USD');
+
+    // Due predictions queue is cleared
+    eq((await ledger.duePredictions(TEN, DAY_LATER)).length, 0, 'resolved prediction leaves due queue:');
+  },
+);

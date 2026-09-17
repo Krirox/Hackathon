@@ -47,7 +47,7 @@ const newClaimSchema = z
     kind: z.enum(CLAIM_KINDS),
     statement: z.string().min(1),
     value: z.unknown().optional(),
-    unit: z.string().optional(),
+    unit: z.string().nullable().optional(),
     confidence: z.number().min(0).max(1),
     provenance: z.object({
       sourceUri: z.string().min(1),
@@ -102,6 +102,13 @@ export interface Subject {
   createdAt: string;
 }
 
+export interface CorrectionPatch {
+  value?: number | null;
+  unit?: string | null;
+  confidence?: number;
+  validUntil?: string | null;
+}
+
 export interface Ledger {
   append(input: NewClaimInput): Promise<Claim>;
   get(tenant: string, id: string): Promise<Claim | null>;
@@ -136,8 +143,39 @@ export interface Ledger {
   disputedPairs(tenant: string): Promise<{ a: Claim; b: Claim }[]>;
   /** Expiry prompts: VERIFIED FACTs whose TTL lapses within `horizonMs`. */
   dueVerifications(tenant: string, now: string, horizonMs: number): Promise<Claim[]>;
-  /** Human correction: old claim SUPERSEDED, new claim appended, counted. */
-  correctClaim(tenant: string, id: string, statement: string, by: string, now: string): Promise<Claim>;
+  /** Human correction: old claim SUPERSEDED, new claim appended, counted. Optional typed patch. */
+  correctClaim(
+    tenant: string,
+    id: string,
+    statement: string,
+    by: string,
+    now: string,
+    patch?: CorrectionPatch,
+  ): Promise<Claim>;
+  /** Resolve an open prediction to an outcome fact claim, retiring the prediction. */
+  resolvePrediction(
+    tenant: string,
+    id: string,
+    outcome: {
+      statement: string;
+      value?: number | null;
+      unit?: string | null;
+      confidence?: number;
+      refuted?: boolean;
+    },
+    by: string,
+    now: string,
+  ): Promise<{ prediction: Claim; outcomeClaim: Claim }>;
+  /** Resolve an active contradiction dispute with a chosen winner; loser is superseded. */
+  resolveDispute(
+    tenant: string,
+    idA: string,
+    idB: string,
+    winnerId: string,
+    rationale: string,
+    by: string,
+    now: string,
+  ): Promise<{ winner: Claim; loser: Claim }>;
   /**
    * Human curation: promote a CANDIDATE to VERIFIED, so the organisation may
    * reason on it. Refuses DISPUTED (resolve the contradiction first), STALE
@@ -162,6 +200,12 @@ export interface Ledger {
   subjectByKey(tenant: string, key: string): Promise<Subject | null>;
   /** Natural-key resolution: exact key first, then alias. */
   subjectResolve(tenant: string, keyOrAlias: string): Promise<Subject | null>;
+  /**
+   * Novelty probe: true when no live claim says this statement about this
+   * subject. SQL EXISTS — never hydrates the subject's history. History
+   * (RETIRED/STALE/SUPERSEDED) does not count as prior art.
+   */
+  hasLiveClaim(tenant: string, subject: string, statement: string): Promise<boolean>;
   /** Registry listing, filterable by kind. */
   listSubjects(tenant: string, kind?: string): Promise<Subject[]>;
 }
@@ -473,20 +517,32 @@ export function createLedger(db: AsyncDb): Ledger {
 
   /** I5 — staleness is computed on a sweep, not felt. */
   async function markStale(tenant: string, now: string): Promise<string[]> {
+    // Chunked sweep: each round selects and updates at most SWEEP_BATCH ids,
+    // so neither the SELECT nor the IN (...) update ever grows with history.
+    // MAX_SWEEP_BATCHES bounds total work per call (the sweep terminates);
+    // the audit carries a count, not the id list, so it stays bounded too.
+    const SWEEP_BATCH = 500;
+    const MAX_SWEEP_BATCHES = 1_000;
+    const done: string[] = [];
     return db.transaction(async () => {
-      const rows = (await db
-        .prepare(
-          `SELECT id FROM claims WHERE tenant = ? AND status = 'VERIFIED'
-             AND valid_until IS NOT NULL AND valid_until <= ?`,
-        )
-        .all(tenant, now)) as { id: string }[];
-      const ids = rows.map((r) => String(r.id));
-      if (ids.length) {
+      for (let round = 0; round < MAX_SWEEP_BATCHES; round++) {
+        const rows = (await db
+          .prepare(
+            `SELECT id FROM claims WHERE tenant = ? AND status = 'VERIFIED'
+               AND valid_until IS NOT NULL AND valid_until <= ? LIMIT ?`,
+          )
+          .all(tenant, now, SWEEP_BATCH)) as { id: string }[];
+        if (rows.length === 0) break;
+        const ids = rows.map((r) => String(r.id));
         const ph = ids.map(() => '?').join(',');
         await db.prepare(`UPDATE claims SET status = 'STALE' WHERE tenant = ? AND id IN (${ph})`).run(tenant, ...ids);
-        await audit(tenant, 'ledger', 'STALENESS_SWEEP', `${ids.length}`, ids.join(','));
+        done.push(...ids);
+        if (rows.length < SWEEP_BATCH) break;
       }
-      return ids;
+      if (done.length > 0) {
+        await audit(tenant, 'ledger', 'STALENESS_SWEEP', `${done.length}`, `${done.length} claim(s) marked STALE`);
+      }
+      return done;
     });
   }
 
@@ -765,10 +821,12 @@ export function createLedger(db: AsyncDb): Ledger {
   async function disputedPairs(tenant: string): Promise<{ a: Claim; b: Claim }[]> {
     const rows = (await db
       .prepare(
-        `SELECT DISTINCT from_id AS x, to_id AS y FROM claim_links
-          WHERE link = 'contradicts'
-            AND EXISTS (SELECT 1 FROM claims WHERE id = from_id AND tenant = ?)
-            AND EXISTS (SELECT 1 FROM claims WHERE id = to_id AND tenant = ?)`,
+        `SELECT DISTINCT l.from_id AS x, l.to_id AS y FROM claim_links l
+          JOIN claims ca ON ca.id = l.from_id AND ca.tenant = ?
+          JOIN claims cb ON cb.id = l.to_id AND cb.tenant = ?
+          WHERE l.link = 'contradicts'
+            AND ca.status NOT IN ('RETIRED','SUPERSEDED')
+            AND cb.status NOT IN ('RETIRED','SUPERSEDED')`,
       )
       .all(tenant, tenant)) as { x: string; y: string }[];
     const out: { a: Claim; b: Claim }[] = [];
@@ -778,6 +836,91 @@ export function createLedger(db: AsyncDb): Ledger {
       if (a && b) out.push({ a, b });
     }
     return out;
+  }
+
+  async function resolveDispute(
+    tenant: string,
+    idA: string,
+    idB: string,
+    winnerId: string,
+    rationale: string,
+    by: string,
+    _now: string,
+  ): Promise<{ winner: Claim; loser: Claim }> {
+    if (winnerId !== idA && winnerId !== idB) {
+      throw new LedgerError('INVALID_WINNER', `winner ${winnerId} must be one of the disputed claims (${idA}, ${idB})`);
+    }
+    const loserId = winnerId === idA ? idB : idA;
+    const a = await get(tenant, idA);
+    const b = await get(tenant, idB);
+    if (!a || !b) throw new LedgerError('MISSING_CLAIM', 'both claims must exist to resolve dispute');
+    return db.transaction(async () => {
+      // Winner is restored to VERIFIED if it was DISPUTED
+      await db
+        .prepare("UPDATE claims SET status = 'VERIFIED' WHERE id = ? AND tenant = ? AND status = 'DISPUTED'")
+        .run(winnerId, tenant);
+      // Loser is marked SUPERSEDED
+      await db.prepare("UPDATE claims SET status = 'SUPERSEDED' WHERE id = ? AND tenant = ?").run(loserId, tenant);
+      // Link winner supersedes loser
+      await link(tenant, winnerId, loserId, 'supersedes');
+      await audit(tenant, by, 'DISPUTE_RESOLVED', `${idA}<>${idB}`, `winner=${winnerId}; rationale=${rationale}`);
+      const winner = (await get(tenant, winnerId))!;
+      const loser = (await get(tenant, loserId))!;
+      return { winner, loser };
+    });
+  }
+
+  async function resolvePrediction(
+    tenant: string,
+    id: string,
+    outcome: {
+      statement: string;
+      value?: number | null;
+      unit?: string | null;
+      confidence?: number;
+      refuted?: boolean;
+    },
+    by: string,
+    now: string,
+  ): Promise<{ prediction: Claim; outcomeClaim: Claim }> {
+    const p = await get(tenant, id);
+    if (!p) throw new LedgerError('MISSING_CLAIM', `unknown claim ${id}`);
+    if (p.kind !== 'PREDICTION') throw new LedgerError('NOT_A_PREDICTION', `${id} is ${p.kind}, not PREDICTION`);
+    return db.transaction(async () => {
+      const outcomeClaim = await append({
+        tenant,
+        subject: p.subject,
+        kind: 'FACT',
+        statement: outcome.statement,
+        value: outcome.value ?? null,
+        unit: outcome.unit ?? null,
+        confidence: outcome.confidence ?? 1.0,
+        owner: p.owner,
+        scope: p.scope,
+        authorType: 'system',
+        observedAt: now,
+        validFrom: now,
+        now,
+        provenance: {
+          sourceUri: `prediction-resolution:${id}`,
+          sourceTier: 'MEASURED',
+          extractor: 'prediction-resolver',
+          extractorVersion: '1.0.0',
+          retrievedAt: now,
+        },
+      });
+      await link(tenant, outcomeClaim.id, id, 'supersedes');
+      await db.prepare("UPDATE claims SET status = 'RETIRED' WHERE id = ? AND tenant = ?").run(id, tenant);
+      await audit(
+        tenant,
+        by,
+        'PREDICTION_RESOLVED',
+        `${id}->${outcomeClaim.id}`,
+        `outcome=${outcomeClaim.id}; refuted=${Boolean(outcome.refuted)}`,
+      );
+      const updatedP = (await get(tenant, id))!;
+      return { prediction: updatedP, outcomeClaim };
+    });
   }
 
   async function dueVerifications(tenant: string, now: string, horizonMs: number): Promise<Claim[]> {
@@ -793,25 +936,49 @@ export function createLedger(db: AsyncDb): Ledger {
     ).map((r) => rowToClaim(r as ClaimRow));
   }
 
-  async function correctClaim(tenant: string, id: string, statement: string, by: string, now: string): Promise<Claim> {
+  async function correctClaim(
+    tenant: string,
+    id: string,
+    statement: string,
+    by: string,
+    now: string,
+    patch?: CorrectionPatch,
+  ): Promise<Claim> {
     const old = await get(tenant, id);
     if (!old) throw new LedgerError('MISSING_CLAIM', `unknown claim ${id}`);
     if (!statement) throw new LedgerError('EMPTY_CORRECTION', 'a correction with no statement corrects nothing');
     return db.transaction(async () => {
+      // F22: Typed correction contract. If the human edits prose without explicitly
+      // supplying a new typed value, invalidate the old structured value/unit rather
+      // than silently retaining stale numbers for machine readers.
+      const hasExplicitValue = patch && 'value' in patch && patch.value !== undefined;
+      const statementChanged = statement.trim() !== old.statement.trim();
+      let resolvedValue = old.value;
+      let resolvedUnit: string | null | undefined = old.unit;
+      if (hasExplicitValue) {
+        resolvedValue = patch.value;
+        resolvedUnit = patch.unit ?? (patch.value === null ? null : old.unit);
+      } else if (statementChanged) {
+        resolvedValue = null;
+        resolvedUnit = null;
+      }
+      const resolvedConfidence = patch?.confidence ?? old.confidence;
+      const resolvedValidUntil = patch?.validUntil !== undefined ? patch.validUntil : old.validUntil;
+
       const neu = await append({
         tenant,
         subject: old.subject,
         kind: old.kind,
         statement,
-        value: old.value,
-        unit: old.unit,
-        confidence: old.confidence,
+        value: resolvedValue,
+        unit: resolvedUnit,
+        confidence: resolvedConfidence,
         owner: old.owner,
         scope: old.scope,
         authorType: 'human',
         observedAt: now,
         validFrom: now,
-        validUntil: old.validUntil,
+        validUntil: resolvedValidUntil,
         now,
         provenance: {
           sourceUri: `correction:${id}`,
@@ -871,6 +1038,37 @@ export function createLedger(db: AsyncDb): Ledger {
 
   // ---- entity/subject registry (TODO 1.1) ---------------------------------
 
+  /**
+   * Alias normalization: trim + lowercase, so " Acme " and "acme" are one
+   * identity. Applied on write (upsertSubject) and on read
+   * (subjectResolve) alike — the alias table only ever holds normalized
+   * forms, which is what makes the lookup an exact match instead of a
+   * substring scan.
+   */
+  const aliasNorm = (a: string): string => a.trim().toLowerCase();
+
+  /** Insert alias rows; a conflicting alias owned by another subject is a
+   *  hard refusal — fuzzy suggests, never silently merges. */
+  async function claimAliases(tenant: string, subjectId: string, norms: string[]): Promise<void> {
+    for (const norm of norms) {
+      if (!norm) continue;
+      const owner = (await db
+        .prepare('SELECT subject_id FROM subject_aliases WHERE tenant = ? AND alias_norm = ?')
+        .get(tenant, norm)) as { subject_id: string } | undefined;
+      if (owner && String(owner.subject_id) !== subjectId) {
+        throw new LedgerError(
+          'AMBIGUOUS_ALIAS',
+          `alias "${norm}" already resolves to another subject — refusing to merge two identities`,
+        );
+      }
+      await db
+        .prepare(
+          'INSERT INTO subject_aliases (tenant, subject_id, alias_norm) VALUES (?,?,?) ON CONFLICT(tenant, alias_norm) DO NOTHING',
+        )
+        .run(tenant, subjectId, norm);
+    }
+  }
+
   const rowToSubject = (r: SubjectRow): Subject => ({
     id: String(r.id),
     tenant: String(r.tenant),
@@ -898,17 +1096,16 @@ export function createLedger(db: AsyncDb): Ledger {
   }): Promise<Subject> {
     const s = upsertSubjectSchema.parse(input);
     const at = s.now ?? new Date().toISOString();
+    const norms = [...new Set(s.aliases.map(aliasNorm).filter((a) => a.length > 0))];
     return db.transaction(async () => {
       const existing = (await db
         .prepare('SELECT * FROM subjects WHERE tenant = ? AND key = ?')
         .get(s.tenant, s.key)) as SubjectRow | undefined;
       if (existing) {
-        const merged = [
-          ...new Set([
-            ...(JSON.parse(String(existing.aliases_json ?? '[]')) as string[]),
-            ...s.aliases.map((a) => a.toLowerCase()),
-          ]),
-        ];
+        const merged = [...new Set([...(JSON.parse(String(existing.aliases_json ?? '[]')) as string[]), ...norms])];
+        // Claim alias rows before persisting: an alias owned elsewhere
+        // refuses here, before any merge could silently steal it.
+        await claimAliases(s.tenant, String(existing.id), norms);
         if (
           existing.display_name === s.displayName &&
           existing.kind === s.kind &&
@@ -932,7 +1129,8 @@ export function createLedger(db: AsyncDb): Ledger {
         .prepare(
           'INSERT INTO subjects (id, tenant, key, display_name, kind, aliases_json, created_at) VALUES (?,?,?,?,?,?,?)',
         )
-        .run(id, s.tenant, s.key, s.displayName, s.kind, JSON.stringify(s.aliases.map((a) => a.toLowerCase())), at);
+        .run(id, s.tenant, s.key, s.displayName, s.kind, JSON.stringify(norms), at);
+      await claimAliases(s.tenant, id, norms);
       await audit(s.tenant, 'system', 'SUBJECT_REGISTERED', id, s.key);
       return {
         id,
@@ -940,7 +1138,7 @@ export function createLedger(db: AsyncDb): Ledger {
         key: s.key,
         displayName: s.displayName,
         kind: s.kind,
-        aliases: s.aliases.map((a) => a.toLowerCase()),
+        aliases: norms,
         createdAt: at,
       };
     });
@@ -955,10 +1153,45 @@ export function createLedger(db: AsyncDb): Ledger {
   async function subjectResolve(tenant: string, keyOrAlias: string): Promise<Subject | null> {
     const byKey = await subjectByKey(tenant, keyOrAlias);
     if (byKey) return byKey;
+    // Exact normalized-alias hit first: indexed equality, no wildcards.
+    const norm = aliasNorm(keyOrAlias);
+    const hit = (await db
+      .prepare('SELECT subject_id FROM subject_aliases WHERE tenant = ? AND alias_norm = ?')
+      .get(tenant, norm)) as { subject_id: string } | undefined;
+    if (hit) {
+      const row = (await db
+        .prepare('SELECT * FROM subjects WHERE tenant = ? AND id = ?')
+        .get(tenant, String(hit.subject_id))) as SubjectRow | undefined;
+      if (row) return rowToSubject(row);
+    }
+    // Legacy fallback for subjects registered before the alias table
+    // existed (their aliases live only in aliases_json). Best-effort
+    // suggestion path only: it must never be used to merge identities —
+    // only upsertSubject's UNIQUE-guarded claim can attach an alias.
     const row = (await db
       .prepare('SELECT * FROM subjects WHERE tenant = ? AND aliases_json LIKE ? LIMIT 1')
       .get(tenant, `%"${keyOrAlias.toLowerCase()}"%`)) as SubjectRow | undefined;
     return row ? rowToSubject(row) : null;
+  }
+
+  /**
+   * Novelty as SQL EXISTS: one indexed probe instead of hydrating every
+   * live claim for the subject into memory and comparing in JS.
+   *
+   * No statement-hash column by design: adding one to append-only rows
+   * would leave every historical row NULL (a backfill rewrites history,
+   * which append-only forbids; lazy computation splits the read path in
+   * two). Direct (tenant, subject, statement) equality uses columns that
+   * already exist on both engines and answers the exact question asked.
+   */
+  async function hasLiveClaim(tenant: string, subject: string, statement: string): Promise<boolean> {
+    const row = (await db
+      .prepare(
+        `SELECT 1 AS one FROM claims WHERE tenant = ? AND subject = ? AND statement = ?
+           AND status NOT IN ('RETIRED','STALE','SUPERSEDED') LIMIT 1`,
+      )
+      .get(tenant, subject, statement)) as { one: number } | undefined;
+    return row !== undefined;
   }
 
   async function listSubjects(tenant: string, kind?: string): Promise<Subject[]> {
@@ -1033,7 +1266,9 @@ export function createLedger(db: AsyncDb): Ledger {
     believedAt,
     duePredictions,
     voidPrediction,
+    resolvePrediction,
     disputedPairs,
+    resolveDispute,
     dueVerifications,
     correctClaim,
     verifyClaim,
@@ -1041,6 +1276,7 @@ export function createLedger(db: AsyncDb): Ledger {
     upsertSubject,
     subjectByKey,
     subjectResolve,
+    hasLiveClaim,
     listSubjects,
   };
 }

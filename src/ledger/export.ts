@@ -23,23 +23,38 @@ export interface LedgerExport {
 
 export async function exportLedger(db: AsyncDb, tenant: string, now?: string): Promise<LedgerExport> {
   const at = now ?? new Date().toISOString();
-  const all = async <R>(sql: string, ...args: unknown[]): Promise<R[]> => (await db.prepare(sql).all(...args)) as R[];
+  // Bounded batches: each roundtrip carries at most EXPORT_BATCH rows, so
+  // the per-query working set never grows with history. The accumulated
+  // output is the export itself (unavoidable); what stays bounded is the
+  // database read shape — paginated LIMIT/OFFSET with stable ORDER BY.
+  const EXPORT_BATCH = 500;
+  const page = async <R>(sql: string, offset: number): Promise<R[]> =>
+    (await db.prepare(`${sql} LIMIT ? OFFSET ?`).all(tenant, EXPORT_BATCH, offset)) as R[];
+  const pageAll = async <R>(sql: string): Promise<R[]> => {
+    const out: R[] = [];
+    for (let offset = 0; ; offset += EXPORT_BATCH) {
+      const rows = await page<R>(sql, offset);
+      out.push(...rows);
+      if (rows.length < EXPORT_BATCH) break;
+    }
+    return out;
+  };
   const claimIds = new Set(
-    (await all<{ id: string }>('SELECT id FROM claims WHERE tenant = ?', tenant)).map((r) => r.id),
+    (await pageAll<{ id: string }>('SELECT id FROM claims WHERE tenant = ? ORDER BY seq')).map((r) => String(r.id)),
   );
-  const links = await all<ClaimLinkRow>(
+  const links = await pageAll<ClaimLinkRow>(
     `SELECT l.from_id, l.to_id, l.link FROM claim_links l
-      WHERE EXISTS (SELECT 1 FROM claims c WHERE c.id = l.from_id AND c.tenant = ?)`,
-    tenant,
+      WHERE EXISTS (SELECT 1 FROM claims c WHERE c.id = l.from_id AND c.tenant = ?)
+      ORDER BY l.from_id, l.to_id, l.link`,
   );
   return {
     version: 1,
     tenant,
     exportedAt: at,
-    claims: await all<ClaimRow>('SELECT * FROM claims WHERE tenant = ? ORDER BY seq', tenant),
+    claims: await pageAll<ClaimRow>('SELECT * FROM claims WHERE tenant = ? ORDER BY seq'),
     claimLinks: links.filter((l) => claimIds.has(String(l.to_id))),
-    decisions: await all<DecisionRow>('SELECT * FROM decisions WHERE tenant = ? ORDER BY signed_at', tenant),
-    outcomes: await all<OutcomeRow>('SELECT * FROM outcomes WHERE tenant = ? ORDER BY created_at', tenant),
-    audit: await all<AuditLogRow>('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq', tenant),
+    decisions: await pageAll<DecisionRow>('SELECT * FROM decisions WHERE tenant = ? ORDER BY signed_at'),
+    outcomes: await pageAll<OutcomeRow>('SELECT * FROM outcomes WHERE tenant = ? ORDER BY created_at'),
+    audit: await pageAll<AuditLogRow>('SELECT * FROM audit_log WHERE tenant = ? ORDER BY seq'),
   };
 }

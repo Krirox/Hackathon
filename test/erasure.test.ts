@@ -33,7 +33,15 @@ async function seedTenantData(db: AsyncDb, tenant: string) {
        VALUES ('clm_e1', ?, 'release:v1', 'FACT', 'ships', 1, 'https://x.test/1', 'SYSTEM_OF_RECORD', 'e', '1', ?, ?, ?, 'CURRENT', 'sync:gh', 'eng', ?, 1)`,
     )
     .run(tenant, at, at, at, at);
-  await db.prepare(`INSERT INTO claim_links (from_id, to_id, link) VALUES ('clm_e1', 'clm_other', 'relates')`).run();
+  // Another tenant's data that MUST survive.
+  await db
+    .prepare(
+      `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor,
+        extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, created_at, seq)
+       VALUES ('clm_z1', 'zenith', 'release:z', 'FACT', 'ships', 1, 'https://x.test/2', 'SYSTEM_OF_RECORD', 'e', '1', ?, ?, ?, 'CURRENT', 'sync:gh', 'eng', ?, 1)`,
+    )
+    .run(at, at, at, at);
+  await db.prepare(`INSERT INTO claim_links (from_id, to_id, link) VALUES ('clm_e1', 'clm_z1', 'relates')`).run();
   await db
     .prepare(
       `INSERT INTO decisions (id, tenant, goal, action, action_class, context_bundle, decided_by, scope, autonomy, signed_at)
@@ -55,14 +63,6 @@ async function seedTenantData(db: AsyncDb, tenant: string) {
   await db
     .prepare(`INSERT INTO audit_log (tenant, actor, action, target, at) VALUES (?, 'a', 'auth.login', 'login', ?)`)
     .run(tenant, at);
-  // Another tenant's data that MUST survive.
-  await db
-    .prepare(
-      `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor,
-        extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, created_at, seq)
-       VALUES ('clm_z1', 'zenith', 'release:z', 'FACT', 'ships', 1, 'https://x.test/2', 'SYSTEM_OF_RECORD', 'e', '1', ?, ?, ?, 'CURRENT', 'sync:gh', 'eng', ?, 1)`,
-    )
-    .run(at, at, at, at);
   await db
     .prepare(
       `INSERT INTO audit_log (tenant, actor, action, target, at) VALUES ('zenith', 'a', 'auth.login', 'login', ?)`,
@@ -207,7 +207,7 @@ T('erasure is atomic: a failure inside the transaction restores the tenant and i
   // transaction must fail and roll back in full. The drop itself happened
   // outside the transaction and stays dropped — atomicity is asserted on the
   // tables that still exist.
-  await db.exec('DROP TABLE claims');
+  await db.exec('DROP TABLE claim_links; DROP TABLE claims');
   await rejects(() => eraseTenant(db, TEN, 'op', NOW), 'no such table', 'the sabotaged erasure fails:');
   eq(
     ((await db.prepare('SELECT COUNT(*) AS n FROM users WHERE tenant = ?').get(TEN)) as { n: number }).n,

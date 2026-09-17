@@ -105,6 +105,7 @@ export async function eraseTenant(db: AsyncDb, tenant: string, actor: string, no
       tenant,
     );
     deleted['ledger_seq'] = await del('DELETE FROM ledger_seq WHERE tenant = ?', tenant);
+    deleted['outcomes'] = await del('DELETE FROM outcomes WHERE tenant = ?', tenant);
 
     // 5. Every tenant-scoped table — the loop is the source of truth (the
     //    test asserts it covers all of them). audit_log lands here too; the

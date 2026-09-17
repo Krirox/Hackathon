@@ -102,6 +102,11 @@ export type RequestRow = {
   parent_request: string | null;
   created_at: string;
   updated_at: string;
+  /** Added by additive migration (F02/F03); null on unclaimed rows. */
+  exec_owner: string | null;
+  exec_attempt: number;
+  claimed_at: string | null;
+  lease_ms: number;
 };
 
 export type SkillCardRow = {
