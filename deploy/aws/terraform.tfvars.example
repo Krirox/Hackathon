@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and fill in. Never commit real values.
+region  = "eu-central-1"
+project = "vital"
+
+# Filled by the deploy workflow after `docker push` (ECR image URIs with :tag).
+core_image     = ""
+executor_image = ""
+jcode_image    = "ghcr.io/1jehuang/jcode:v0.84.0"
+
+desired_count     = 2
+db_instance_class = "db.t4g.micro"
+db_multi_az       = true
+
+# All secrets via TF_VAR_* env in CI (see .github/workflows/deploy-aws.yml).
+tenant_hmac_secret = "CHANGEME"
+vital_core_secret  = "CHANGEME"
+webhook_secret     = "CHANGEME"
+serper_api_key     = "CHANGEME"
+gemini_api_key     = "CHANGEME"
+novita_api_key     = "CHANGEME"
+
+allowed_egress_hosts         = "api.novita.ai,generativelanguage.googleapis.com,api.serper.dev"
+lambda_memory_mb             = 2048
+lambda_reserved_concurrency  = 20

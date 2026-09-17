@@ -1,0 +1,16 @@
+# Vital Lambda executor (Firecracker microVM plane). Container image for SQS-triggered short tasks.
+FROM node:22-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+FROM public.ecr.aws/lambda/nodejs:22 AS runtime
+WORKDIR /var/task
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/dist ./dist
+# Lambda entry: dist/aws/executor.handler (see src/aws/executor.ts)
+CMD ["dist/aws/executor.handler"]

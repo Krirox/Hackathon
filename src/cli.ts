@@ -113,16 +113,20 @@ if (cmd === 'status') {
   console.log(`wrote ${out} (${report.rooms.length} rooms, ${report.needsHuman.length} open approvals)`);
   await db.close();
 } else if (cmd === 'serve') {
-  const path = flag('--db') ?? 'var/vital.db';
-  const tenant = flag('--tenant') ?? 'acme';
-  const port = Number(flag('--port') ?? '3100');
-  const db = openDb(path);
-  await migrate(db);
+  const tenant = flag('--tenant') ?? process.env.VITAL_TENANT ?? 'acme';
+  const port = Number(flag('--port') ?? process.env.PORT ?? '3100');
+  const host = flag('--host') ?? process.env.HOST ?? '127.0.0.1';
+  const dbUrl = flag('--db') ?? process.env.DATABASE_URL ?? 'var/vital.db';
+  const usePostgres = dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://');
+  const db = usePostgres ? openPostgres(dbUrl) : openDb(dbUrl);
+  if (usePostgres) await migratePostgres(db);
+  else await migrate(db);
   const server = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
     port,
+    host,
     tenant,
   });
-  console.log(`vital console on http://127.0.0.1:${server.port} (db ${path})`);
+  console.log(`vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl})`);
 } else {
   console.error(`unknown command "${cmd}" (try: status | report | serve)`);
   process.exit(1);
