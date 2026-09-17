@@ -1,4 +1,5 @@
 import { T, eq, TEN, NOW, fresh, rejects } from './helpers.ts';
+import type { AsyncDb } from '../src/core/db.ts';
 import { authorize } from '../src/gov/raci.ts';
 import { isShellTool, screenShellCommand } from '../src/gov/shell.ts';
 import {
@@ -161,6 +162,109 @@ T('kill switches halt at every level and the drill proves it', async () => {
   eq(await checkKill(db, TEN, 'engineering', 'ACT_REVERSIBLE'), false, 'drill releases afterwards:');
 });
 
+T('AUDIT F19: a policy drill preserves every existing emergency switch and its attribution', async () => {
+  const { db } = await fresh();
+  for (const kill of [
+    { scope: '*', actionClass: '*' },
+    { scope: 'engineering', actionClass: '*' },
+    { scope: '*', actionClass: 'ACT_REVERSIBLE' },
+    { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' },
+  ]) {
+    await setKill(db, TEN, kill, 'human:incident-commander', NOW);
+  }
+  const before = await db.prepare('SELECT key, value FROM meta ORDER BY key').all();
+  const drill = await killDrill(db, TEN, 'human:drill-operator', NOW);
+  eq(drill.allHalted, true);
+  eq(await db.prepare('SELECT key, value FROM meta ORDER BY key').all(), before);
+  eq(await checkKill(db, TEN, 'engineering', 'ACT_REVERSIBLE'), true);
+  eq(await checkKill(db, TEN, 'marketing', 'READ'), true);
+  const cleared = await db.prepare("SELECT * FROM audit_log WHERE action = 'KILL_CLEARED'").all();
+  eq(cleared.length, 0);
+});
+
+T('AUDIT F19: policy drill checks each wildcard independently and records bounded evidence', async () => {
+  const { db } = await fresh();
+  const drill = await killDrill(db, TEN, 'human:drill-operator', NOW);
+  eq(drill.mode, 'policy-only');
+  eq(
+    drill.checks,
+    ['*/*', 'engineering/*', '*/ACT_REVERSIBLE', 'engineering/ACT_REVERSIBLE'].map((level) => ({
+      level,
+      halted: true,
+      isolated: true,
+      released: true,
+    })),
+  );
+  const rows = await db.prepare("SELECT * FROM audit_log WHERE action = 'KILL_DRILL'").all();
+  eq(rows.length, 1);
+  eq(rows[0]?.tenant, TEN);
+  eq(rows[0]?.actor, 'human:drill-operator');
+  const detail = JSON.parse(String(rows[0]?.detail)) as { mode: string; checks: unknown };
+  eq(detail.mode, 'policy-only');
+  eq(detail.checks, drill.checks);
+});
+
+T('AUDIT F19: missed and overbroad kill matches cannot pass a policy drill', async () => {
+  for (const fault of ['missed', 'overbroad'] as const) {
+    const { db } = await fresh();
+    const faulty: AsyncDb = {
+      ...db,
+      prepare(sql) {
+        const statement = db.prepare(sql);
+        if (sql !== 'SELECT value FROM meta WHERE key = ?') return statement;
+        return {
+          ...statement,
+          get: async (...params: unknown[]) => {
+            const key = String(params[0]);
+            if (fault === 'missed' && key.endsWith(':engineering:*')) return undefined;
+            if (fault === 'overbroad' && key.endsWith(':marketing:READ')) {
+              const scopeKey = key.replace(/:marketing:READ$/, ':engineering:*');
+              return statement.get(scopeKey);
+            }
+            return statement.get(...params);
+          },
+        };
+      },
+    };
+    const drill = await killDrill(faulty, TEN, 'human:drill-operator', NOW);
+    const scopeCheck = drill.checks.find((check) => check.level === 'engineering/*');
+    eq(scopeCheck, {
+      level: 'engineering/*',
+      halted: fault !== 'missed',
+      isolated: fault !== 'overbroad',
+      released: true,
+    });
+    eq(drill.allHalted, false);
+    const row = await db.prepare("SELECT detail FROM audit_log WHERE action = 'KILL_DRILL'").get();
+    const detail = JSON.parse(String(row?.detail)) as { allHalted: boolean; checks: unknown };
+    eq(detail.allHalted, false);
+    eq(detail.checks, drill.checks);
+    eq((await db.prepare("SELECT key FROM meta WHERE key LIKE 'kill:%'").all()).length, 0);
+  }
+});
+
+T('AUDIT F19: failed policy drills roll back temporary switches without touching emergency state', async () => {
+  const { db } = await fresh();
+  await setKill(db, TEN, { scope: '*', actionClass: '*' }, 'human:incident-commander', NOW);
+  const before = await db.prepare('SELECT key, value FROM meta ORDER BY key').all();
+  const failing: AsyncDb = {
+    ...db,
+    prepare(sql) {
+      const statement = db.prepare(sql);
+      if (sql !== 'SELECT value FROM meta WHERE key = ?') return statement;
+      return {
+        ...statement,
+        get: async () => {
+          throw new Error('DRILL_READ_FAILED');
+        },
+      };
+    },
+  };
+  await rejects(() => killDrill(failing, TEN, 'human:drill-operator', NOW), 'DRILL_READ_FAILED');
+  eq(await db.prepare('SELECT key, value FROM meta ORDER BY key').all(), before);
+  eq((await db.prepare("SELECT * FROM audit_log WHERE action = 'KILL_DRILL'").all()).length, 0);
+});
+
 console.log('\n\x1b[1mGovernance — the shell gate\x1b[0m');
 
 T('the hard-deny list names the rule, not just the tool', async () => {
@@ -258,4 +362,35 @@ T('external actions are rate-limited per capability per day', async () => {
   const third = await checkRateLimit(db, TEN, 'market', 2, NOW);
   eq(third.allowed, false);
   eq(third.remaining, 0);
+});
+
+T('parallel trust outcomes never lose increments', async () => {
+  // The regression: recordTrustOutcome read clean/total, added in JS, and
+  // overwrote — parallel reports collapsed onto one value.
+  const { db } = await fresh();
+  await Promise.all(
+    Array.from({ length: 50 }, () =>
+      recordTrustOutcome(db, TEN, 'marketing', 'ACT_REVERSIBLE', { clean: true, now: NOW }),
+    ),
+  );
+  eq((await trustFor(db, TEN, 'marketing', 'ACT_REVERSIBLE')).cleanInstances, 50, 'every clean report counted:');
+  const row = (await db
+    .prepare('SELECT total FROM trust_scores WHERE tenant = ? AND scope = ? AND action_class = ?')
+    .get(TEN, 'marketing', 'ACT_REVERSIBLE')) as { total: number };
+  eq(Number(row.total), 50, 'every report counted in total too:');
+});
+
+T('parallel rate-limit checks admit exactly the cap', async () => {
+  // Ten racers, cap five: CAS retries serialize the grants, so the sixth
+  // through tenth all see the exhausted counter instead of sharing one slot.
+  const { db } = await fresh();
+  const outs = await Promise.all(Array.from({ length: 10 }, () => checkRateLimit(db, TEN, 'burst', 5, NOW)));
+  eq(outs.filter((o) => o.allowed).length, 5, 'exactly the cap:');
+  eq(outs.filter((o) => !o.allowed).length, 5, 'the rest refused:');
+  const row = (await db
+    .prepare('SELECT value FROM meta WHERE key = ?')
+    .get(`ratelimit:${TEN}:burst:${NOW.slice(0, 10)}`)) as {
+    value: string;
+  };
+  eq(Number(row.value), 5, 'the counter holds every grant:');
 });

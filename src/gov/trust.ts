@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
 import {
   authorize,
@@ -70,6 +71,10 @@ export async function recordTrustOutcome(
   outcome: TrustOutcome,
 ): Promise<void> {
   const now = outcome.now ?? new Date().toISOString();
+  // Every counter move is ONE UPDATE computed from the row's own values —
+  // never read-modify-write. Concurrent outcomes each apply under the row
+  // lock, so parallel clean reports all count and parallel overrides cannot
+  // resurrect a streak the other just reset.
   await db.transaction(async () => {
     await db
       .prepare(
@@ -78,18 +83,12 @@ export async function recordTrustOutcome(
        ON CONFLICT(tenant, scope, action_class) DO NOTHING`,
       )
       .run(tenant, scope, actionClass, 0, 0, 0, 0, 0, 0, now);
-    const cur = (await db
-      .prepare(
-        'SELECT clean, total, honey_misses FROM trust_scores WHERE tenant = ? AND scope = ? AND action_class = ?',
-      )
-      .get(tenant, scope, actionClass)) as { clean: number; total: number; honey_misses: number };
-    const total = Number(cur.total) + 1;
     if (outcome.honeyMiss === true) {
       await db
         .prepare(
-          'UPDATE trust_scores SET honey_misses = honey_misses + 1, frozen = 1, clean = 0, total = ?, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+          'UPDATE trust_scores SET honey_misses = honey_misses + 1, frozen = 1, clean = 0, total = total + 1, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
         )
-        .run(total, now, tenant, scope, actionClass);
+        .run(now, tenant, scope, actionClass);
       await audit(
         db,
         tenant,
@@ -104,18 +103,19 @@ export async function recordTrustOutcome(
     if (outcome.override === true || !outcome.clean) {
       await db
         .prepare(
-          'UPDATE trust_scores SET clean = 0, total = ?, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+          'UPDATE trust_scores SET clean = 0, total = total + 1, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
         )
-        .run(total, now, tenant, scope, actionClass);
+        .run(now, tenant, scope, actionClass);
       return;
     }
-    const clean = Number(cur.clean) + 1;
-    const granted = clean >= REVERSIBLE_CLEAN_THRESHOLD ? 1 : 0;
+    // The grant flag derives from the post-increment value inside the same
+    // statement: reaching the threshold and counting the instance are one
+    // atomic move, never two writers racing past each other.
     await db
       .prepare(
-        'UPDATE trust_scores SET clean = ?, total = ?, granted = max(granted, ?), updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+        'UPDATE trust_scores SET clean = clean + 1, total = total + 1, granted = CASE WHEN clean + 1 >= ? THEN 1 ELSE granted END, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
       )
-      .run(clean, total, granted, now, tenant, scope, actionClass);
+      .run(REVERSIBLE_CLEAN_THRESHOLD, now, tenant, scope, actionClass);
   });
 }
 
@@ -245,28 +245,62 @@ export async function checkKill(db: AsyncDb, tenant: string, scope: string, acti
 }
 
 export interface KillDrill {
+  mode: 'policy-only';
   levels: string[];
+  checks: { level: string; halted: boolean; isolated: boolean; released: boolean }[];
   allHalted: boolean;
   elapsedMs: number;
 }
 
-/** Quarterly drill, runnable any time: engage all three levels, verify halt, release, audit. */
 export async function killDrill(db: AsyncDb, tenant: string, by: string, now?: string): Promise<KillDrill> {
   const at = now ?? new Date().toISOString();
   const t0 = Date.now();
+  const drillTenant = `drill-${randomUUID()}`;
   const levels: KillScope[] = [
     { scope: '*', actionClass: '*' },
     { scope: 'engineering', actionClass: '*' },
+    { scope: '*', actionClass: 'ACT_REVERSIBLE' },
     { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' },
   ];
-  for (const l of levels) await setKill(db, tenant, l, by, at);
-  const allHalted =
-    (await checkKill(db, tenant, 'engineering', 'ACT_REVERSIBLE')) &&
-    (await checkKill(db, tenant, 'marketing', 'READ'));
-  for (const l of levels) await clearKill(db, tenant, l, by, at);
-  const elapsedMs = Date.now() - t0;
-  await audit(db, tenant, by, 'KILL_DRILL', tenant, `halted=${allHalted} elapsedMs=${elapsedMs}`, at);
-  return { levels: levels.map((l) => `${l.scope}/${l.actionClass}`), allHalted, elapsedMs };
+  const probes = [
+    { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' },
+    { scope: 'engineering', actionClass: 'READ' },
+    { scope: 'marketing', actionClass: 'ACT_REVERSIBLE' },
+    { scope: 'marketing', actionClass: 'READ' },
+  ];
+  return db.transaction(async () => {
+    const checks: KillDrill['checks'] = [];
+    for (const level of levels) {
+      const key = killKey(drillTenant, level.scope, level.actionClass);
+      await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(key, JSON.stringify({ by, at }));
+      let halted = true;
+      let isolated = true;
+      for (const probe of probes) {
+        const expected =
+          (level.scope === '*' || level.scope === probe.scope) &&
+          (level.actionClass === '*' || level.actionClass === probe.actionClass);
+        const actual = await checkKill(db, drillTenant, probe.scope, probe.actionClass);
+        if (expected) halted = halted && actual;
+        else isolated = isolated && !actual;
+      }
+      isolated = isolated && !(await checkKill(db, `${drillTenant}-other`, 'engineering', 'ACT_REVERSIBLE'));
+      await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+      const released = !(await checkKill(db, drillTenant, 'engineering', 'ACT_REVERSIBLE'));
+      checks.push({ level: `${level.scope}/${level.actionClass}`, halted, isolated, released });
+    }
+    const allHalted = checks.every((check) => check.halted && check.isolated && check.released);
+    const elapsedMs = Date.now() - t0;
+    await audit(
+      db,
+      tenant,
+      by,
+      'KILL_DRILL',
+      tenant,
+      JSON.stringify({ mode: 'policy-only', allHalted, elapsedMs, checks }),
+      at,
+    );
+    return { mode: 'policy-only', levels: checks.map((check) => check.level), checks, allHalted, elapsedMs };
+  });
 }
 
 // ------------------------------------------------------------------ composed ----

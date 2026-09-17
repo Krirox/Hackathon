@@ -73,11 +73,25 @@ export async function checkRateLimit(
 ): Promise<{ allowed: boolean; remaining: number }> {
   const day = now.slice(0, 10);
   const key = `ratelimit:${tenant}:${capability}:${day}`;
-  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as { value: string } | undefined;
-  const used = row ? Number(row.value) : 0;
-  if (used >= maxPerDay) return { allowed: false, remaining: 0 };
-  await db
-    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, String(used + 1));
-  return { allowed: true, remaining: maxPerDay - used - 1 };
+  // Compare-and-swap with bounded retries: the read and the write are one
+  // guarded move (UPDATE ... WHERE value = observed), so concurrent callers
+  // serialize on the retry instead of overwriting each other's increment.
+  // A blind read-then-write would hand two callers the same `used` and count
+  // one of them twice — the counter would under-count and the cap would leak.
+  await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, '0');
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as { value: string } | undefined;
+    const used = Number(row?.value ?? 0);
+    if (!Number.isFinite(used)) {
+      await db.prepare('UPDATE meta SET value = ? WHERE key = ?').run('0', key);
+      continue;
+    }
+    if (used >= maxPerDay) return { allowed: false, remaining: 0 };
+    const out = await db
+      .prepare('UPDATE meta SET value = ? WHERE key = ? AND value = ?')
+      .run(String(used + 1), key, String(used));
+    if (out.changes === 0) continue;
+    return { allowed: true, remaining: maxPerDay - used - 1 };
+  }
+  return { allowed: false, remaining: 0 };
 }
