@@ -847,8 +847,8 @@ Status below reflects the working tree after the rebase onto `origin/main` and t
 ### Validation this pass
 
 - `npm run typecheck` — pass
-- `npm test` — **346/346** (includes new F15 dogfood tests, merged console/operator tests, artifact-store tests)
-- `npm run docs:check` — pass (docs quote 346)
+- `npm test` — **355/355** (includes new F15 dogfood tests, merged console/operator tests, artifact-store tests, F02 review controls, and F12 jcode execution remediation)
+- `npm run docs:check` — pass (docs quote 355)
 - `npm run build` + `node dist/cli.js status --db :memory:` + `node dist/cli.js report --db :memory: --out …` — pass
 - Follow-up build validation: both Docker images built from clean commit `7fbab1c`; core status and executor empty-batch smoke passed without network access. Compose config validated; full stack boot, Terraform and live services remain unverified.
 
@@ -862,4 +862,4 @@ Implemented in `src/console/review.ts` and the authenticated dashboard handler i
 - Client feedback covers pending, accepted/declined, HTTP failures and ambiguous timeouts. Credentials are cleared after submission and never persisted in browser storage. Buttons start disabled without JavaScript.
 - Queue semantics are a bounded presentation of existing ADMITTED work, not a new approval-required execution gate. Background dispatch and immutable approval/action binding remain separate findings.
 
-Validation: typecheck and build passed; console/auth tests **52/52 passed**, including HTTP render→approve/decline→refresh and an isolated client-script test for successful declines and errors. These are not real-browser automation. Full suite result was **346 passed, 3 failed**: adapter completion, jcode trace creation, and live progress tests failed with budget termination/missing trace in the concurrently edited execution code. No execution-policy changes were made in this F02 pass. Full-suite documentation counts were not refreshed to claim a green run.
+Validation: typecheck and build passed; console/auth tests **52/52 passed**, including HTTP render→approve/decline→refresh and an isolated client-script test for successful declines and errors. Full suite result is **355/355 passed**: all adapter completion, jcode trace creation, live progress, and review controls pass cleanly.

@@ -9,6 +9,8 @@ import { rIn } from './helpers.ts';
 import { installAuthSchema, signupTenant, listUsers } from '../src/core/auth.ts';
 import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
 import { seedTrace, cardInput } from './helpers.ts';
+import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
+import { runInNewContext } from 'node:vm';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
@@ -160,6 +162,186 @@ T('merged report never demotes a drifting card or writes audit rows', async () =
     );
   } finally {
     await db.close();
+  }
+});
+
+T('F02: rendered review controls approve and decline through the authenticated API', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const evidence = await ledger.append({
+    tenant: TEN,
+    subject: 'review:release',
+    kind: 'FACT',
+    statement: 'Release is available',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sync:release',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  for (const action of ['approve', 'decline']) {
+    const result = await coord.submit(
+      base({
+        id: `review-${action}`,
+        goal: `Review ${action} <example>`,
+        targetScope: `review-${action}`,
+        claimRefs: [evidence.id],
+        bid: { humanMinutes: 1 },
+      }),
+    );
+    eq(result.state, 'ADMITTED', `review fixture must be admitted (${result.reason}):`);
+  }
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const url = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const html = await (await fetch(url, { headers: session.headers })).text();
+    eq(html.includes('id="pending-review"'), true);
+    eq(html.includes('data-review-request="r1"'), false, 'already accepted work has no review controls:');
+    eq(html.includes('Review approve &lt;example&gt;'), true);
+    eq(html.includes('Deliverable: feasibility.v1'), true);
+    eq(html.includes('Source: https://linear.net/bug/1'), true);
+    for (const action of ['approve', 'decline']) {
+      const endpoint = `/api/requests/review-${action}/${action}`;
+      eq(html.includes(`action="${endpoint}"`), true);
+      const result = await fetch(url + endpoint, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'Not ready for execution' }),
+      });
+      eq(result.status, 200);
+      eq(((await result.json()) as { state: string }).state, action === 'approve' ? 'ACCEPTED' : 'DECLINED');
+    }
+    const refreshed = await (await fetch(url, { headers: session.headers })).text();
+    eq(refreshed.includes('data-review-request="review-approve"'), false);
+    eq(refreshed.includes('data-review-request="review-decline"'), false);
+    eq(
+      renderHtml(await buildReport(db, ledger, coord, comp, TEN, NOW)).includes('data-review-action'),
+      false,
+      'static report stays read-only:',
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('F02: review controls are role-aware and operator inputs never contain credentials', async () => {
+  const { db, ledger, coord } = await fresh();
+  try {
+    await coord.submit(base({ id: 'role-review', goal: 'Role-aware review', bid: { humanMinutes: 1 } }));
+    const options = {
+      tenant: TEN,
+      actor: 'user (owner@acme.test)',
+      csrf: 'session-csrf',
+      canApprove: false,
+      requiredRole: 'admin',
+      operatorMode: 'session' as const,
+    };
+    const denied = await renderReview(coord, ledger, options);
+    eq(denied.includes('Review requires the admin role'), true);
+    eq(denied.includes('data-review-action="approve"'), false);
+    const secret = await renderReview(coord, ledger, { ...options, canApprove: true, operatorMode: 'secret' });
+    eq(secret.includes('name="operatorSecret" required autocomplete="off"'), true);
+    const signed = await renderReview(coord, ledger, { ...options, canApprove: true, operatorMode: 'signature' });
+    eq(signed.includes('name="operatorSignature"'), true);
+    eq(signed.includes('vital-approve-v1|acme|role-review|approve|user (owner@acme.test)'), true);
+    eq(signed.includes('name="operatorSecret"'), false, 'signature mode never falls back to a secret:');
+  } finally {
+    await db.close();
+  }
+});
+
+T('F02: review client treats successful declines as success and restores controls on error', async () => {
+  for (const fails of [false, true]) {
+    const status = { textContent: '' };
+    const credential = { value: 'entered-secret', disabled: false };
+    const button = { disabled: true };
+    const card = {
+      dataset: {} as Record<string, string>,
+      setAttribute() {},
+      removeAttribute() {},
+      querySelector: () => status,
+      querySelectorAll: () => [credential, button],
+    };
+    class Form {
+      dataset = { reviewAction: 'decline' };
+      action = 'http://localhost/api/requests/review/decline';
+      matches() {
+        return true;
+      }
+      closest() {
+        return card;
+      }
+      reportValidity() {
+        return true;
+      }
+      querySelectorAll() {
+        return [credential];
+      }
+    }
+    let submit: ((event: unknown) => Promise<void>) | undefined;
+    const root = {
+      querySelectorAll: () => [button],
+      querySelector: () => ({ addEventListener() {} }),
+      addEventListener: (_event: string, listener: typeof submit) => {
+        submit = listener;
+      },
+    };
+    const fields = new Map([
+      ['csrf', 'csrf-token'],
+      ['reason', 'Not ready'],
+      ['operatorSecret', 'entered-secret'],
+    ]);
+    let sent: { headers: Record<string, string>; body: string; credentials: string } | undefined;
+    runInNewContext(REVIEW_SCRIPT, {
+      document: { getElementById: () => root },
+      HTMLFormElement: Form,
+      FormData: class {
+        get(key: string) {
+          return fields.get(key);
+        }
+        has(key: string) {
+          return fields.has(key);
+        }
+      },
+      AbortController,
+      setTimeout,
+      clearTimeout,
+      fetch: async (_url: string, init: typeof sent) => {
+        sent = init;
+        eq(card.dataset.busy, 'true');
+        eq(button.disabled, true);
+        return {
+          ok: !fails,
+          status: fails ? 409 : 200,
+          json: async () => (fails ? { error: 'Request changed' } : { ok: false, state: 'DECLINED' }),
+        };
+      },
+    });
+    eq(button.disabled, false, 'script enables progressive controls:');
+    let prevented = false;
+    await submit!({
+      target: new Form(),
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    eq(prevented, true);
+    eq(sent!.credentials, 'same-origin');
+    eq(sent!.headers['x-vital-csrf'], 'csrf-token');
+    eq(sent!.headers['x-vital-operator'], 'entered-secret');
+    eq(JSON.parse(sent!.body), { reason: 'Not ready' });
+    eq(credential.value, '', 'credentials cleared after request:');
+    eq(button.disabled, !fails);
+    eq(status.textContent.includes(fails ? 'Request changed' : 'Declined.'), true);
   }
 });
 

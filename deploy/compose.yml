@@ -1,7 +1,6 @@
-# Single-box dev topology (TODO §0.4): Buzz + Vital core + Postgres.
-# Production shape is VPS-1 Buzz · VPS-2 Vital core + Postgres · VPS-3 jcode
-# (sibling process over the harness API). This file is the dev approximation:
-# everything on one box, jcode reached at JCODE_API_SOCKET.
+# Local authenticated console + Postgres only.
+# This does not start Buzz, jcode, an SQS producer, or execution workers.
+# Bind published ports to loopback: claim the first owner before sharing access.
 services:
   postgres:
     image: postgres:16
@@ -12,20 +11,28 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-vital} -d ${POSTGRES_DB:-vital}']
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   vital-core:
-    build: ..
+    build:
+      context: ..
+      dockerfile: deploy/aws/Dockerfile.vital-core
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-vital}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vital}
-      JCODE_API_SOCKET: ${JCODE_API_SOCKET:-/run/jcode-api.sock}
-      TALK_SURFACE: ${TALK_SURFACE:-buzz}
-      TENANT_HMAC_SECRET: ${TENANT_HMAC_SECRET:?set TENANT_HMAC_SECRET (see .env.example)}
-    volumes:
-      - jcode-api:/run
+
+      VITAL_TENANT: ${VITAL_TENANT:-acme}
+      VITAL_OPERATOR_SECRET: ${VITAL_OPERATOR_SECRET:-}
+      VITAL_OPERATOR_KEYS: ${VITAL_OPERATOR_KEYS:-}
+    ports:
+      - '127.0.0.1:3100:3100'
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:
-  jcode-api:

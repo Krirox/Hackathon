@@ -29,6 +29,7 @@ import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verifyApproval } from '../gov/operator.ts';
 import { buildReport } from './report.ts';
 import { renderHtml } from './render.ts';
+import { renderReview } from './review.ts';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
 
@@ -774,7 +775,17 @@ export function startConsoleServer(
           if (!auth) return redirect(res, '/login');
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const html = await reportHtml(tenant, at);
+          const report = await reportHtml(tenant, at);
+          const fallbackMode = operatorSecret ? 'secret' : 'session';
+          const review = await renderReview(coord, ledger, {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: atLeast(auth.user.role, approverMin),
+            requiredRole: approverMin,
+            operatorMode: keyAuth ? 'signature' : fallbackMode,
+          });
+          const html = report.replace('<h1>Reality health</h1>', `${review}<h1>Reality health</h1>`);
           // The CSRF token rides in the page so same-origin form posts and
           // same-origin fetches can both present it.
           const withCsrf = html.replace(
