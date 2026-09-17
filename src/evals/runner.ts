@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AsyncDb } from '../core/db.ts';
+import type { AuditLogRow, EvalCaseRow, EvalRunRow } from '../core/rows.ts';
 
 /**
  * Eval spine, part 1 (TODO §3.1): the store + the suite runner.
@@ -67,7 +68,7 @@ export interface SuiteRun {
   ranAt: string;
 }
 
-function rowToCase(r: Record<string, unknown>): EvalCase {
+function rowToCase(r: EvalCaseRow): EvalCase {
   return {
     id: String(r.id),
     tenant: String(r.tenant),
@@ -92,7 +93,7 @@ export async function addCase(db: AsyncDb, input: NewCaseInput): Promise<EvalCas
   await db
     .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
     .run(c.tenant, 'evals', 'CASE_ADDED', id, `${c.capability}/${c.suite}`, now);
-  return rowToCase((await db.prepare('SELECT * FROM eval_cases WHERE id = ?').get(id)) as Record<string, unknown>);
+  return rowToCase((await db.prepare('SELECT * FROM eval_cases WHERE id = ?').get(id)) as EvalCaseRow);
 }
 
 export async function listCases(
@@ -114,7 +115,7 @@ async function listCasesRaw(db: AsyncDb, tenant: string, suite?: string): Promis
       ? 'SELECT * FROM eval_cases WHERE tenant = ? AND suite = ? ORDER BY created_at'
       : 'SELECT * FROM eval_cases WHERE tenant = ? ORDER BY created_at';
   const args = suite !== undefined ? [tenant, suite] : [tenant];
-  return (await db.prepare(sql).all(...args)).map((r) => rowToCase(r as Record<string, unknown>));
+  return (await db.prepare(sql).all(...args)).map((r) => rowToCase(r as EvalCaseRow));
 }
 
 export async function runSuite(
@@ -160,7 +161,7 @@ export async function runSuite(
 
 export async function getRun(db: AsyncDb, tenant: string, id: string): Promise<SuiteRun | null> {
   const r = (await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND tenant = ?').get(id, tenant)) as
-    Record<string, unknown> | undefined;
+    EvalRunRow | undefined;
   if (!r) return null;
   const results = JSON.parse(String(r.detail_json)) as CaseResult[];
   return {
@@ -193,7 +194,7 @@ export async function proposeEvalFromCorrection(
   now?: string,
 ): Promise<EvalCase> {
   const row = (await db.prepare('SELECT * FROM audit_log WHERE seq = ? AND tenant = ?').get(auditSeq, tenant)) as
-    Record<string, unknown> | undefined;
+    AuditLogRow | undefined;
   if (!row || String(row.action) !== 'CLAIM_CORRECTED') {
     throw new EvalError('NOT_A_CORRECTION', `audit seq ${auditSeq} is not a CLAIM_CORRECTED row`);
   }

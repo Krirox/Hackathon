@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { groupConcat, type AsyncDb } from '../core/db.ts';
+import type { SkillCardRow, SkillTransferTestRow } from '../core/rows.ts';
 import type { RoutingClass } from '../core/types.ts';
 
 /**
@@ -128,7 +129,7 @@ export function entryStateFor(source: 'compiled' | 'imported'): SkillState {
 export class OrganizationalCompiler {
   constructor(private readonly db: AsyncDb) {}
 
-  private rowToCard(r: Record<string, unknown>): SkillCard {
+  private rowToCard(r: SkillCardRow): SkillCard {
     const prov = JSON.parse(String(r.provenance)) as { traceIds: string[]; compiledAt: string };
     const scope = JSON.parse(String(r.scope_json)) as {
       originScope: string;
@@ -190,7 +191,7 @@ export class OrganizationalCompiler {
 
   async get(tenant: string, id: string): Promise<SkillCard | null> {
     const r = (await this.db.prepare('SELECT * FROM skill_cards WHERE id = ? AND tenant = ?').get(id, tenant)) as
-      Record<string, unknown> | undefined;
+      SkillCardRow | undefined;
     return r ? this.rowToCard(r) : null;
   }
 
@@ -202,7 +203,7 @@ export class OrganizationalCompiler {
       : await this.db
           .prepare('SELECT * FROM skill_cards WHERE tenant = ? AND intent = ? ORDER BY version DESC')
           .all(tenant, intent);
-    return (rows as Record<string, unknown>[]).map((r) => this.rowToCard(r));
+    return (rows as SkillCardRow[]).map((r) => this.rowToCard(r));
   }
 
   /** Registry listing: every card, filterable. Read-only. */
@@ -220,7 +221,7 @@ export class OrganizationalCompiler {
     return (
       (await this.db
         .prepare(`SELECT * FROM skill_cards WHERE ${where.join(' AND ')} ORDER BY updated_at DESC`)
-        .all(...args)) as Record<string, unknown>[]
+        .all(...args)) as SkillCardRow[]
     ).map((r) => this.rowToCard(r));
   }
 
@@ -288,7 +289,7 @@ export class OrganizationalCompiler {
   async transferResults(cardId: string): Promise<TransferTest[]> {
     const rows = (await this.db
       .prepare('SELECT kind, variant, passed, score, ran_at FROM skill_transfer_tests WHERE card_id = ?')
-      .all(cardId)) as Record<string, unknown>[];
+      .all(cardId)) as SkillTransferTestRow[];
     return rows.map((r) => ({
       kind: String(r.kind) as TransferTest['kind'],
       variant: String(r.variant),
