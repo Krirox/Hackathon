@@ -2,18 +2,18 @@
 
 Phase-divided build checklist. Companion to `idea.md` (the spec). Where they disagree, `idea.md` wins.
 
-## V2 status (2026-09-09)
+## V2 status (2026-09-17)
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->208/208 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
-commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
-built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
-           compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
-           evals (suites/promotion/injection/poisoning-vs-gate/heldout) · attrib · ingest (file/github/serper)
-           sense (contracts/materiality/integrity/poisoning) · wedge (ship/churn/feature/deepresearch)
-           talk · substrate (scheduler/sandbox/egress/screen/identity/2 adapters) · capabilities · vendor/qm ×7
-not built  production surface · pilot traffic · GTM (see V2 backlog below — the only list that matters now)
+tests      <!-- vital:testcount -->208/208 GREEN<!-- /vital:testcount --> on committed main (the concurrent session's tree is further ahead)
+commits    14 on 2026-09-17 (6aa49a3..8623ab9): PG-lane concurrency fix · typed rows · approval-latency + override capture (red→green) · cost-per-signal · security hardening (body caps, URIError DoS, fail-closed screen) · AWS deploy path · Buzz live-watch
+built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate+reportUsage · router+registry+calibration+costPerSignal
+           compiler+mining+registry+trustTier+drift-autoDemote · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
+           evals (suites/promotion/injection/poisoning-vs-gate/heldout + overrides-from-console) · attrib · ingest (file/github/serper)
+           sense · wedge · talk (HMAC surface + buzz live-watch publisher) · substrate (scheduler/sandbox/egress/screen/identity/2 adapters)
+           console (report/approve/decline/correct/latency/digest, hardened) · aws-deploy path (terraform: ALB/ECS/Lambda executor/RDS+PITR/SecretsManager, dispatch-only workflow)
+not built  an APPLIED deployment (path exists, nobody has run apply) · live jcode/Buzz traffic · pilot + GTM (V2 backlog below — the only list that matters now)
 ```
 
 Phases 0–6 below are substantially complete as tested code; remaining items
@@ -546,28 +546,43 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 
 ---
 
-## V2 backlog — production hardening + wedge completion (the only list that matters now)
+## V2 backlog — production readiness (the only list that matters now)
 
-Everything above is built as tested code. What remains needs things a repo
-alone cannot provide. Ordered; each item names its unblocker.
+Everything above is built as tested code. The repo is no longer the bottleneck:
+production is **apply the terraform, point jcode at it, put traffic through it**.
+Ordered by dependency; each item names its unblocker. (Ops/DX leftovers above are
+absorbed here — backup drill, nightly boot, on-call runbook, upgrade path.)
 
-### V2.1 Production surface (needs: VPS + credentials + a stranger to time the boot)
-- [x] `L` live Postgres deployment path (`src/core/pg.ts`: `AsyncDb` driver with per-transaction checkout + savepoints, schema DERIVED from the one SCHEMA by translation — zero drift, `?`→`$n` outside literals, `DATABASE_URL` wiring via `openFromEnv`, `migratePostgres`, CI postgres service running `verify-instance` on every push; offline-tested: derivation, placeholders, dialects, wiring)
-- [x] [!] `L` port every module from sync `Db` to `AsyncDb` — DONE 2026-09-09, one commit, green throughout. `src/core/db.ts` owns the single `AsyncDb` interface (`engine: 'sqlite'|'postgres'`); sqlite wraps its sync driver behind promises with a transaction lock (multi-statement bodies hold it whole; single statements stay lock-free/atomic); `migrate`/`nextSeq`/`stampVersion` unified and engine-aware (`PG_SCHEMA` derived in the same file, zero drift); `pg.ts` keeps driver + `openPostgres` + unified `openFromEnv`. 19 modules + CLI + seed-demo + all 20 test files ported; `throws` superseded by `rejects` in tests. Verified: typecheck 0, 181/181, lint/format/provenance clean, seed + `cli status/report` + `verify-instance` green. Live-PG verification stays with CI/deployment (unchanged).
-- [ ] `M` live jcode sibling run: a real code change through the Ledger, zero ambient credentials (the §0.6 gate)
-- [ ] `M` Buzz rooms binding: claim IDs ↔ signed Nostr events live (relay/SDK verify; HMAC fallback stays)
-- [x] `M` approval surface: working Approve/Decline through the coordinator (`src/console/serve.ts` + `cli serve`; anonymous approval refused, transitions land in the ledger path, tested over real HTTP. Buzz-room rendering stays V2.1.)
-- [x] `M` packet-filtering egress proxy enforcing `src/substrate/egress.ts` decisions (`src/substrate/egress-proxy.ts`: absolute-URI forwarding + CONNECT tunneling, denied closes before any upstream byte moves, every decision audited; origin-form refused. Caught in review: first draft built the server on `node:net`, so `request` events never fired — now on `node:http`, proven by the timeout it caused.)
-- [ ] `S` stranger boots the topology from the README alone in < 30 min, timed
+### V2.1 Ship the stack (needs: an AWS account, a domain, a human to run apply)
+- [ ] `M` first deploy: OIDC role + `TF_VAR_*` secrets in GitHub → one local `terraform apply` → then `workflow_dispatch` deploys (unblocker: AWS account + domain; the workflow is dispatch-only by design)
+- [ ] `S` HTTPS: ACM cert → `acm_certificate_arn` var (the ALB currently serves plain HTTP on 80; the redirect listener already exists, it just needs the cert)
+- [ ] `S` CloudWatch alarms: ALB 5xx rate, unhealthy-target count, ECS task count, RDS connections+storage, Lambda errors+throttles (logs keep 90 days and nothing watches them)
+- [ ] `M` ECS autoscaling on ALB request count (desired_count is fixed at 2 today)
+- [ ] `M` rehearse the failure drills before traffic: PITR restore to a point pre-migration, image rollback via the workflow's explicit tag input, kill-switch drill against the deployed core
+- [ ] `S` smoke the public surface from OUTSIDE the VPC: approve/decline round-trip, claim correction, 413 body-cap refusal, malformed-`%`-id refusal (the URIError DoS fix must be proven from the internet side)
+- [ ] `S` on-call runbook rewritten against the real topology (`docs/deployment.md` predates ECS — task names, secret paths, and log groups differ)
+- [x] migrations at boot (`VITAL_MIGRATE_ON_BOOT`, executor opt-out), RDS PITR(7d) + deletion protection, Secrets Manager for every credential, OIDC-only CI (no long-lived AWS keys)
+- [x] live-PG parity proven: CI postgres lane green; concurrent transactions safe (AsyncLocalStorage client scoping, was the shared-`holder` interleaving bug)
 
-### V2.2 First loop with traffic (needs: 5 design partners at ≥2 releases/month)
+### V2.2 Watch it before it carries weight (repo-doable now)
+- [ ] `S` surface cost-per-signal in the console + `cli status` (gate: MODEL tier < 1% of arrivals; measured in `router.costPerSignal`, not yet rendered anywhere)
+- [ ] `M` nightly: full instance boot + verify against a real model (needs the deployed topology + one model credential)
+- [x] console health grid: stale-rate, provenance completeness, contradictions+MTTR, today's spend, escalation slots, refusal rate, approval latency (median/p90/slowest human) — served at `/`
+
+### V2.3 Close the agent loop live (needs: a live jcode sibling + a Buzz relay)
+- [ ] `M` live jcode sibling run: a real code change through the Ledger, zero ambient credentials (the §0.6 gate — timeouts/fire-and-forget/progress are in; this needs the sibling process)
+- [ ] `M` Buzz claim-binding: claim IDs ↔ signed Nostr events verified by the relay/SDK (HMAC fallback stays)
+- [ ] `S` Buzz live-watch end-to-end: `postProgress` against a real relay (fake-relay tested only; the `POST {relay}/events` body-shape assumption gets its one-line fix here if the relay wants the raw `["EVENT", …]` envelope)
+- [ ] `M` one mission watched start→turn_done in a Buzz room, progress posted live
+
+### V2.4 First loop with traffic (needs: 5 design partners at ≥2 releases/month)
 - [ ] `L` ≥50 launches through Ship-to-Result; ship→launch-ready −50%, hours −40%, claim error <1%, zero regulatory, cost net-positive
 - [ ] [!] `[G]` KILL CHECK at day 90: no delta on ≥3 of top 5 ⇒ the wedge is wrong, stop, re-read `idea.md` §21
 - [ ] `M` 2,000 labelled routing tasks → precision gate → `controlRate` 0 → 0.05 → 0.25 with budget checks
 - [ ] `M` honeytask human baseline → detection threshold → autonomy-freeze tuning
 - [ ] `M` curation cost per 100 claims across tenants (kill-metric: ~5 min or the thesis is in trouble)
 
-### V2.3 GTM + fundraising (needs: founder time, lawyers, designers)
+### V2.5 GTM + fundraising (needs: founder time, lawyers, designers)
 - [ ] `M` name the wedge buyer; sign 5 design partners; baseline instrumented before pilots
 - [ ] `M` pricing (platform fee + outcome-metered, never per-seat) + pilot→production conversion plan
 - [ ] `M` Grok Bot diligence trial (the five unknowns stay "not documented" until checked)
