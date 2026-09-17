@@ -111,6 +111,18 @@ T('the content screen shadows before it enforces, and fails closed', async () =>
   eq(dead.check('user_input', 'hello').verdict, 'deny', 'a dead classifier denies:');
 });
 
+T('a classifier returning NaN denies instead of waving content through', async () => {
+  // NaN >= threshold is false — without an explicit gate a broken judge
+  // passes every attack unexamined.
+  const nan = createContentScreen(
+    { scoreText: () => ({ score: NaN, flags: [] as string[] }) },
+    { threshold: 0.5, mode: 'enforce' },
+  );
+  const r = nan.check('user_input', 'hello');
+  eq(r.verdict, 'deny', 'non-finite scores fail closed:');
+  eq(r.flags.includes('classifier_malformed'), true);
+});
+
 T('scope tokens bind scope + grants + expiry, and nothing else crosses', async () => {
   const secret = 'core-secret';
   const tok = mintScopeToken(secret, {
@@ -123,6 +135,11 @@ T('scope tokens bind scope + grants + expiry, and nothing else crosses', async (
   eq(g.scope, 'engineering');
   eq(g.grants, ['code.read', 'code.write']);
   await rejects(async () => verifyScopeToken(secret, tok + 'x', NOW), 'BAD_SIGNATURE');
+  await rejects(
+    async () => verifyScopeToken(secret, tok + '.anything', NOW),
+    'MALFORMED_TOKEN',
+    'appended segments are rejected, not ignored:',
+  );
   await rejects(
     async () => verifyScopeToken(secret, tok.slice(0, -2) + 'zz', NOW),
     'BAD_SIGNATURE',

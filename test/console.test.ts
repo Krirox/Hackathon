@@ -1,4 +1,5 @@
 import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base } from './helpers.ts';
+import { request as httpRequest } from 'node:http';
 import { buildReport } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
@@ -325,6 +326,54 @@ T('the served console approves and declines through the coordinator', async () =
       })
     ).json()) as { ok: boolean };
     eq(missing.ok, false);
+  } finally {
+    await server.close();
+  }
+});
+
+T('malformed ids and body bombs fail loud, never hang or crash the server', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  // fetch (undici) refuses to send malformed percent-encoding client-side,
+  // so the crash probe goes over a raw socket — exact bytes on the wire.
+  const postRaw = (path: string, body: string): Promise<{ status: number; json: { ok: boolean } }> =>
+    new Promise((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: server.port,
+          path,
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c: Buffer) => {
+            data += c.toString();
+          });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, json: JSON.parse(data) as { ok: boolean } }));
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const bad = await postRaw('/api/requests/%E0%A4%A/approve', JSON.stringify({ by: 'human:priya' }));
+    eq(bad.status, 400, 'malformed percent-encoding is a 400:');
+    eq(bad.json.ok, false, 'not a crash:');
+    const bigRes = await fetch(`${base_}/api/requests/r1/approve`, { method: 'POST', body: 'x'.repeat(1_000_001) });
+    eq(bigRes.status, 413, 'oversized body is a 413:');
+    const big = (await bigRes.json()) as { ok: boolean };
+    eq(big.ok, false, 'not a hang:');
+    // The server is still alive for real work afterwards.
+    const ok = (await (
+      await fetch(`${base_}/api/requests/r1/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ by: 'human:priya' }),
+      })
+    ).json()) as { ok: boolean };
+    eq(ok.ok, true, 'server survives both:');
   } finally {
     await server.close();
   }

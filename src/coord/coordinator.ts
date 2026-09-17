@@ -244,6 +244,16 @@ export interface Coordinator {
   redirect(tenant: string, id: string, toScope: string): Promise<AdmissionResult>;
   fail(tenant: string, id: string, reason: string): Promise<CoordinationRequest>;
   charge(tenant: string, id: string, cost: Partial<CoordinationRequest['spent']>): Promise<CoordinationRequest>;
+  /**
+   * Continuous usage flow for long-lived executions (jcode turns, Lambda
+   * workers): accumulate tokens/dollars WITHOUT consuming a round. charge()
+   * counts coordination rounds, so per-event charging through it would
+   * self-terminate any run longer than maxRounds tool calls — this path
+   * enforces only the token/dollar ceilings and may TERMINATE_BUDGET the
+   * request mid-run. Callers must honor a TERMINATED_BUDGET return by
+   * stopping work, the same as the in-memory ceiling trip.
+   */
+  reportUsage(tenant: string, id: string, usage: { tokens?: number; dollars?: number }): Promise<CoordinationRequest>;
   expireStale(tenant: string, now: string): Promise<string[]>;
   /** Refusal-rate health metric: 0% refusal across all agents means sycophancy. */
   refusalStats(tenant: string): Promise<{ total: number; refused: number; rate: number }>;
@@ -588,6 +598,32 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return transition(tenant, id, r.state === 'ADMITTED' ? 'IN_FLIGHT' : r.state, { spent });
   }
 
+  async function reportUsage(
+    tenant: string,
+    id: string,
+    usage: { tokens?: number; dollars?: number },
+  ): Promise<CoordinationRequest> {
+    const r = await load(tenant, id);
+    if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
+    const spent = {
+      ...r.spent,
+      tokens: r.spent.tokens + (usage.tokens ?? 0),
+      dollars: r.spent.dollars + (usage.dollars ?? 0),
+    };
+    // Rounds deliberately untouched (see interface note): a token flow is
+    // continuous activity, not coordination rounds.
+    const breached: string[] = [];
+    if (spent.dollars > r.bid.dollars) breached.push(`$${spent.dollars.toFixed(3)}/${r.bid.dollars}`);
+    if (spent.tokens > r.bid.tokens) breached.push(`${spent.tokens}/${r.bid.tokens} tokens`);
+    if (breached.length) {
+      return transition(tenant, id, 'TERMINATED_BUDGET', {
+        spent,
+        refusalReason: `budget exhausted mid-run (${breached.join(', ')})`,
+      });
+    }
+    return transition(tenant, id, r.state === 'ADMITTED' ? 'IN_FLIGHT' : r.state, { spent });
+  }
+
   async function decompose(
     tenant: string,
     parentId: string,
@@ -716,10 +752,12 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     const p90 =
       seconds.length === 0
         ? null
-        : Math.min(
-            seconds[Math.min(seconds.length - 1, Math.floor(0.9 * seconds.length))]!,
-            seconds[seconds.length - 1]!,
-          );
+        : (() => {
+            // Percentiles rank over sorted values — `seconds` arrives in
+            // audit-`at` order, which is insertion order, not rank order.
+            const s = [...seconds].sort((a, b) => a - b);
+            return Math.min(s[Math.min(s.length - 1, Math.floor(0.9 * s.length))]!, s[s.length - 1]!);
+          })();
     return {
       n: seconds.length,
       medianSeconds: overall,
@@ -806,6 +844,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       });
     },
     charge,
+    reportUsage,
     decompose,
     expireStale,
     refusalStats,

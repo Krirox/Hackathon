@@ -42,6 +42,12 @@ export function createContentScreen(backend: ScreenBackend, opts: ScreenOptions)
         return { verdict: 'deny', score: 1, flags: ['classifier_error'], shadowed: false };
       }
       const over = scored.score >= opts.threshold;
+      // A non-finite score (NaN from an unparseable judge, ±Infinity) fails
+      // the comparison to `false` — without this gate a broken classifier
+      // waves content through unexamined. Fail closed instead.
+      if (!Number.isFinite(scored.score)) {
+        return { verdict: 'deny', score: 1, flags: [...scored.flags, 'classifier_malformed'], shadowed: false };
+      }
       if (!over) return { verdict: 'allow', score: scored.score, flags: scored.flags, shadowed: false };
       if (opts.mode === 'shadow') {
         return { verdict: 'allow', score: scored.score, flags: scored.flags, shadowed: true };
