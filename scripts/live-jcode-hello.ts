@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { JcodeClient } from '../src/jcode/client.ts';
 import { API_VERSION_MAJOR } from '../src/jcode/protocol.ts';
@@ -70,6 +71,17 @@ const fail = (msg: string): never => {
 console.log(`bridge : ${bridgeBin}`);
 console.log(`socket : ${apiSock}`);
 console.log(`pipe   : ${pipe}`);
+// .upstream/ is gitignored, so a fresh clone has no bridge binary — fail
+// loud with the rebuild path instead of a spawn-ENOENT crash or a 15 s
+// hang waiting on a pipe that will never appear.
+if (!existsSync(bridgeBin)) {
+  console.error(
+    `LIVE-JCODE FAIL: bridge binary not found at ${bridgeBin} — clone the pinned jcode (` +
+      `docs/upstream.md) to .upstream/jcode-1jehuang and build the harness-api bridge first, ` +
+      `or set JCODE_BRIDGE_BIN to a built binary.`,
+  );
+  process.exit(1);
+}
 bridge = spawn(bridgeBin, [apiSock, legacySock], { stdio: ['ignore', 'pipe', 'pipe'] });
 bridge.stdout?.on('data', (d: Buffer) => process.stdout.write(`[bridge] ${d}`));
 bridge.stderr?.on('data', (d: Buffer) => process.stderr.write(`[bridge:err] ${d}`));
