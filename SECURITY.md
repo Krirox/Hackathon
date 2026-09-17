@@ -56,7 +56,12 @@
   disable an owner or themselves, disabled users' sessions die instantly,
   and invited users are forced to change their password at first login.
   Approvals additionally honor a configurable minimum role
-  (`--approver-role`, default `member`). No seeded default
+  (`--approver-role`, default `member`). Per-tenant GDPR erasure
+  (`src/core/erasure.ts`) is export-first — the portable record and the
+  deletion commit or roll back together — complete by store introspection
+  (a future tenant-scoped table that skips erasure fails the test suite),
+  kills live sessions with the deleted users, and leaves a receipt under
+  `erased:<tenant>` naming the operator and the row counts. No seeded default
   credential exists anywhere.
 
 ## Explicitly not yet built (do not claim these)

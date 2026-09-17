@@ -20,6 +20,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
  *                       [--site site] [--approver-role member|admin|owner]
  *   tsx src/cli.ts signup --tenant acme --email o@a.test --password '...'
  *   tsx src/cli.ts passwd --tenant acme --email o@a.test --password '...'
+ *   tsx src/cli.ts erase --tenant acme --actor op@a.test [--export-to dir] [--yes]
  */
 
 /**
@@ -208,7 +209,13 @@ if (cmd === 'status') {
     .filter(([, n]) => n > 0)
     .map(([t, n]) => `${t}=${n}`)
     .join(' ');
+<<<<<<< HEAD
   console.log(`tenant "${tenant}" erased at ${result.erasedAt} (receipt: ${ERASURE_DONE_ACTION} under erased:${tenant})`);
+=======
+  console.log(
+    `tenant "${tenant}" erased at ${result.erasedAt} (receipt: ${ERASURE_DONE_ACTION} under erased:${tenant})`,
+  );
+>>>>>>> 94ea89d (Add per-tenant GDPR data erasure: export-first, introspection-complete, audited)
   console.log(`rows deleted: ${rows || 'none'}`);
   await db.close();
 } else {
