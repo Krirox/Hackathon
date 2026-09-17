@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->193/193 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
+tests      <!-- vital:testcount -->199/199 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
 commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
            compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
@@ -257,7 +257,7 @@ The only phase that must produce a number.
 - [x] `L` holdout lanes — segment/geo split so "adoption rose" means something (`assignHoldout`: deterministic lanes; the lanes themselves live in customer systems)
 - [x] `M` `OUTCOME` claims with `basis` + `holdout_ref` (`recordOutcome`, tested)
 - [x] `M` cost roll-up per launch → `cost_per_good_decision` (`costOfDecision`: request spend + trace tokens × rate + human minutes × rate; null when unknown, never 0)
-- [ ] `S` baseline capture UI — you cannot prove a delta you never measured (needs UI surface)
+- [x] `S` baseline capture UI — you cannot prove a delta you never measured (the console IS the surface now: health grid renders stale-fact rate, provenance completeness, orphan count, contradictions+MTTR, today's spend, escalation slots, refusal rate, approval latency (median/p90/slowest human); intelligence-cost curve per decision; tier mix stack; all served at `/` and computed from the same tables the eval spine reads)
 
 ### 2.5 Write-back + first compile
 - [x] `S` DECISION + Context Bundle + OUTCOME all persisted (`recordDecision` + `recordOutcome`, tested)
@@ -339,7 +339,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 - [x] `L` **cross-model tests via harness swap** — run the same card through every harness we adapt (`src/compiler/transfer.ts` `runCrossModelEvidence`: same intent on every adapter, `cross_model` result banked per harness — failures banked as FAILED, never excused; proven with jcode-over-socket + local-echo in one run)
 - [ ] `M` skill materialisation + admin-gated org promotion — **ours now**. QM's `skills/` is 1,940 tightly-coupled lines; we adopt the model (pack → normalise → eligibility → review → publish) and write a much smaller version
 - [x] `M` imported packs enter at QUARANTINE; carry a `trustTier: internal|third-party` field on every pack (done 2026-09-09: schema + `trust_tier` column via additive migration; imported forces third-party even if the importer claims internal; tested incl. persistence round-trip)
-- [ ] `M` drift monitors (EWMA) + auto-demote + rollback to MODEL/HUMAN
+- [x] `M` drift monitors (EWMA) + auto-demote + rollback to MODEL/HUMAN (already built: `OrganizationalCompiler.checkDrift` — EWMA over live success vs validated baseline, breach ⇒ `DEMOTED` to MODEL/HUMAN + drift ticket; tested `drift detection auto-demotes a decaying procedure`; registry surfaces per-card drift; error-budget revert is the router-side rollback)
 - [x] `M` procedure registry UI — card, state, scope, tests passed, live success rate, **why it can't be trusted yet** (read side done 2026-09-09: `src/compiler/registry.ts` `listCards`/`describeCard` with trust gaps incl. drift; the UI rendering is deferred. Honest exception documented: describing a PROMOTED card runs the drift monitor, which may auto-demote — a read that hid decay would be the failure mode.)
 - [x] `M` **coupling-guard integration test**: router may not redeploy a card outside its validated scope (unit-tested in shadow AND under router control with isolated config; `fresh()` now isolates router config per test so control-rate/rng/types never leak)
 - [x] `S` compiler-refusal tests already pass (low-confidence / unresolved traces) — extend to mixed batches (done 2026-09-09: refusal names the bad trace)
@@ -367,8 +367,8 @@ Deliberately late. External intelligence is worthless while internal coordinatio
 - [x] `M` deterministic diffing + webhooks + polling with rate budgets (`fileDiffCollector` + `Scheduler.webhook` with per-source budgets)
 - [x] `M` L1: dedup · novelty-vs-Ledger · classifier · entity resolution (dedup via fingerprints + `isNovel` + model-backed `triageSignal` with injected model fn: classifies category + entity refs, degrades to UNSPECIFIED on failure/unparseable/unknown — classification informs routing, never asserts truth; tested)
 - [x] `S` L2 escalation only for signals passing L1 **and** materiality (`materialityCheck` + `integrityScreen` gate the path; the model call itself is pilot work)
-- [ ] `M` build the scheduler (`§0.5`) — crons, watches, inbound webhooks with rate budgets. **This is now our work, not QM's.** QM's `cron`/`monitors`/`webhooks` are the shape to copy; keep ours deliberately small (no Slack coupling)
-- [ ] `S` cost-per-signal telemetry; prove the expensive tier sees <1% of arrivals
+- [x] `M` build the scheduler (`§0.5`) — crons, watches, inbound webhooks with rate budgets (already built: `src/substrate/scheduler.ts` — cron registry with per-job daily caps, webhook intake with per-source rate limits + shared-secret auth, injected time; tested in `substrate.test.ts`; no Slack coupling by design)
+- [x] `S` cost-per-signal telemetry; prove the expensive tier sees <1% of arrivals (built 2026-09-17: `router.costPerSignal` reads `routing_decisions` executed-tier shares — arrivals, modelShare/humanShare, byTier, strict `< 0.01` gate; tested at exactly 1.00% (fails, gate is strict) and at 0% (passes) in router control mode)
 
 - [ ] `M` **Distinguish the two injection problems.** A harness that signs into
   tools can be prompt-injected; a world model that feeds strategy can be

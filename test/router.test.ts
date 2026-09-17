@@ -193,6 +193,41 @@ T('reflex coverage measures how much traffic policy handles alone', async () => 
   eq(cov.reflex, 2, 'two deterministic, one model-floor:');
 });
 
+T('cost-per-signal: the expensive tier sees a minority of arrivals, gate at <1%', async () => {
+  const { router } = await fresh(undefined, { controlRate: 1, rng: () => 0.5 });
+  router.registerTaskType('memo.draft'); // not reflex/modelFloor-listed → WORKFLOW-proposable via a validated card
+  const card = {
+    id: 'skl_cps',
+    state: 'PROMOTED' as const,
+    validatedAtTier: 'WORKFLOW' as const,
+    scopeRoles: ['marketing'],
+    scopeModels: ['m'],
+  };
+  // 50 reflex arrivals, 49 workflow arrivals, and exactly 1 model-priced one.
+  for (let i = 0; i < 50; i++) await router.route(rIn({ taskType: 'release.detect', importance: 0.1 }));
+  for (let i = 0; i < 49; i++) await router.route(rIn({ taskType: 'memo.draft', skillCard: card, model: 'm' }));
+  await router.route(rIn({ taskType: 'memo.draft', model: 'm' }));
+
+  const cps = await router.costPerSignal(TEN);
+  eq(cps.arrivals, 100);
+  eq(cps.byTier['MODEL'], 1, 'exactly one model-priced arrival:');
+  eq(cps.byTier['WORKFLOW'], 49);
+  eq(cps.byTier['REFLEX'], 50);
+  eq(cps.modelShare, 0.01);
+  eq(cps.withinGate, false, '1.00% is not <1% — the gate is strict:');
+  eq(cps.gate, 0.01);
+});
+
+T('cost-per-signal passes comfortably when the inbox is sorted', async () => {
+  const { router } = await fresh();
+  for (let i = 0; i < 200; i++) await router.route(rIn({ taskType: 'release.detect', importance: 0.1 }));
+  const cps = await router.costPerSignal(TEN);
+  eq(cps.arrivals, 200);
+  eq(cps.byTier['MODEL'] ?? 0, 0, 'reflex handled everything:');
+  eq(cps.modelShare, 0);
+  eq(cps.withinGate, true);
+});
+
 T('a tier past its error budget reverts to the fixed policy, even in control', async () => {
   const { db, router } = await fresh(undefined, { controlRate: 1, rng: () => 0 });
   await router.registerTaskType('memo.draft');
