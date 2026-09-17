@@ -55,6 +55,11 @@ export function startConsoleServer(
         res.end(html);
         return;
       }
+      // Approval-latency distribution (TODO 2.3): the curation-cost clock.
+      if (req.method === 'GET' && url.pathname === '/api/approval-latency') {
+        json(res, 200, await coord.approvalLatencyStats(tenant));
+        return;
+      }
       const act = url.pathname.match(/^\/api\/requests\/([^/]+)\/(approve|decline)$/);
       if (req.method === 'POST' && act) {
         let body: { by?: string; reason?: string };
@@ -74,14 +79,22 @@ export function startConsoleServer(
           json(res, 404, { ok: false, error: `unknown request ${id}` });
           return;
         }
+        const at = now();
         try {
-          if (act[2] === 'approve') {
-            const next = await coord.accept(tenant, id);
-            json(res, 200, { ok: true, id, state: next.state, by: body.by });
-          } else {
-            const next = await coord.decline(tenant, id, body.reason ?? `declined by ${body.by}`);
-            json(res, 200, { ok: false, id, state: next.state, by: body.by });
+          const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
+          const next =
+            action === 'approve'
+              ? await coord.accept(tenant, id)
+              : await coord.decline(tenant, id, body.reason ?? `declined by ${body.by}`);
+          // Latency rides the same decision, but must never turn a landed
+          // approval into an error response — degrade to null instead.
+          let latencySeconds: number | null = null;
+          try {
+            latencySeconds = (await coord.recordApprovalLatency(tenant, id, action, body.by, at)).seconds;
+          } catch {
+            latencySeconds = null;
           }
+          json(res, 200, { ok: action === 'approve', id, state: next.state, by: body.by, latencySeconds });
         } catch (e) {
           json(res, 409, { ok: false, error: (e as Error).message });
         }

@@ -89,6 +89,8 @@ export interface ConsoleReport {
   digestCount: number;
   compiler: CompilerColumn[];
   rooms: RoomView[];
+  /** Approval latency (TODO 2.3): submission → human decision, from APPROVAL_LATENCY audit rows. */
+  approvalLatency: { n: number; medianSeconds: number | null; p90Seconds: number | null; maxSeconds: number | null };
 }
 
 const TERMINAL = ['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'];
@@ -261,5 +263,6 @@ export async function buildReport(
     digestCount,
     compiler,
     rooms,
+    approvalLatency: await coord.approvalLatencyStats(tenant),
   };
 }

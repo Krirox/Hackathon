@@ -1,4 +1,4 @@
-import { T, eq, TEN, NOW, fresh, sor, base } from './helpers.ts';
+import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base } from './helpers.ts';
 import { buildReport } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
@@ -153,6 +153,7 @@ T('provisional reality is unmistakable — a CANDIDATE chip never looks like a f
   eq(html.includes('· PROVISIONAL OBSERVATION'), true, 'provisional chip is labeled in text:');
   eq(html.includes('border:1px dashed'), true, 'provisional chip is the only dashed chip:');
   eq(html.includes('✓ FACT'), true, 'verified facts keep their chip:');
+  eq(html.includes('approval latency'), true, 'latency card renders even with no data (—):');
 });
 
 T('digest composition: NOTICEs land here, grouped, never in the Feed', async () => {
@@ -176,6 +177,53 @@ T('digest composition: NOTICEs land here, grouped, never in the Feed', async () 
 
   // Not-a-date guard: a NOTICE beyond the query instant is invisible.
   eq((await composeDigest(db, TEN, '2026-01-01T00:00:00.000Z')).length, 0);
+});
+
+T('approval latency is instrumented: recorded per decision, aggregated, served', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  // Mutable so each decision can happen at a chosen instant.
+  let clock = NOW;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => clock });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    // r1 submitted at NOW and approved instantly (0s); r2 submitted a day
+    // later and approved 6h after that — the distribution must reflect both.
+    // Distinct goals: identical content would dedupe onto one thread (by design).
+    const r1 = await coord.submit(base({ id: 'lat1', now: NOW, goal: 'latency probe one' }));
+    const r2 = await coord.submit(base({ id: 'lat2', now: DAY_LATER, goal: 'latency probe two' }));
+    eq(r1.admitted, true);
+    eq(r2.admitted, true);
+
+    const a1 = (await (
+      await fetch(`${base_}/api/requests/lat1/approve`, { method: 'POST', body: JSON.stringify({ by: 'human:priya' }) })
+    ).json()) as {
+      ok: boolean;
+      latencySeconds: number | null;
+    };
+    eq(a1.ok, true);
+    eq(a1.latencySeconds, 0, 'instant approval measures ~0s:');
+
+    const at2 = '2026-09-10T18:00:00.000Z';
+    clock = at2;
+    const a2 = (await (
+      await fetch(`${base_}/api/requests/lat2/approve`, { method: 'POST', body: JSON.stringify({ by: 'human:priya' }) })
+    ).json()) as { ok: boolean; latencySeconds: number | null };
+    eq(a2.ok, true);
+    eq(a2.latencySeconds, (Date.parse(at2) - Date.parse(DAY_LATER)) / 1000, 'stale approval measures the gap:');
+
+    const stats = (await (await fetch(`${base_}/api/approval-latency`)).json()) as {
+      n: number;
+      medianSeconds: number | null;
+      p90Seconds: number | null;
+      maxSeconds: number | null;
+    };
+    eq(stats.n, 2, 'both decisions recorded:');
+    eq(stats.medianSeconds, 21600, 'median is the 6h one:');
+    eq(stats.p90Seconds, 21600);
+    eq(stats.maxSeconds, 21600);
+  } finally {
+    await server.close();
+  }
 });
 
 T('the served console approves and declines through the coordinator', async () => {

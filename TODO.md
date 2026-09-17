@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->189/189 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
+tests      <!-- vital:testcount -->190/190 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
 commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
            compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
@@ -250,7 +250,7 @@ The only phase that must produce a number.
 - [x] `M` **claims checker** — scan drafts for unverifiable assertions; block on `CANDIDATE`/`SELF_SERVED` sources (`checkDraft`: unverified citations block, regulated denylist forces human)
 - [x] `M` regulated-claim denylist (health/finance/superlatives/guarantees) → forces human (tested: `deniedPhrases`)
 - [x] `S` publish is **always** human-command in year 1 (`ACT_IRREVERSIBLE`) (enforced in R/A/I matrix + `recordDecision`)
-- [ ] `M` approval-latency instrumentation (needs approval surface)
+- [x] `M` approval-latency instrumentation (built 2026-09-17 on the console approval surface: every approve/decline records submission→decision as an `APPROVAL_LATENCY` audit row via `coord.recordApprovalLatency` (clamped at 0s, degrades to null — never fails a landed approval); `coord.approvalLatencyStats` aggregates n/median/p90/max; served at `/api/approval-latency`, rendered as a health-grid card, and returned in each decision's HTTP response)
 
 ### 2.4 Outcome measurement
 - [x] `M` pre-registration: metrics + thresholds agreed **before** pilot start (`preregister` + audit-visible; tested)
