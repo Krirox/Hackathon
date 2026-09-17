@@ -209,13 +209,9 @@ if (cmd === 'status') {
     .filter(([, n]) => n > 0)
     .map(([t, n]) => `${t}=${n}`)
     .join(' ');
-<<<<<<< HEAD
-  console.log(`tenant "${tenant}" erased at ${result.erasedAt} (receipt: ${ERASURE_DONE_ACTION} under erased:${tenant})`);
-=======
   console.log(
     `tenant "${tenant}" erased at ${result.erasedAt} (receipt: ${ERASURE_DONE_ACTION} under erased:${tenant})`,
   );
->>>>>>> 94ea89d (Add per-tenant GDPR data erasure: export-first, introspection-complete, audited)
   console.log(`rows deleted: ${rows || 'none'}`);
   await db.close();
 } else {

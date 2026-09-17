@@ -4,6 +4,7 @@ import { startConsoleServer } from '../src/console/serve.ts';
 import { advanceStage, currentStage, rollbackStage } from '../src/evals/promotion.ts';
 import { INJECTION_CORPUS, runInjectionSuite, runInjectionSuiteAsync } from '../src/evals/injection.ts';
 import { denylistBackend } from '../src/substrate/screen.ts';
+import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 
 console.log('\n\x1b[1mEval spine — evals are the spec\x1b[0m');
 
@@ -156,6 +157,14 @@ T('a human correction becomes a regression eval that stays green', async () => {
 
 T('a captured override catches the stale reader it exists for (red→green)', async () => {
   const { db, ledger, coord, comp } = await fresh();
+  // The console API is session-gated: provision an owner and sign in before
+  // driving the correction through it.
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
   const claim = await ledger.append({
     tenant: TEN,
     subject: 'pricing',
@@ -178,9 +187,24 @@ T('a captured override catches the stale reader it exists for (red→green)', as
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   let correction!: { ok: boolean; supersedes: string; supersededBy: string; evalCaseId: string | null };
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/claims/${claim.id}/correct`, {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    // HTTP-login as the owner and pull the CSRF token off the console page.
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const loginRes = await fetch(`${base_}/login`, {
       method: 'POST',
-      body: JSON.stringify({ by: 'human:priya', statement: 'the launch plan is $149/mo' }),
+      headers: { cookie: preCookie },
+      body: 'csrf=' + preToken + '&email=owner%40acme.test&password=the-console-password',
+      redirect: 'manual',
+    });
+    const cookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const home = await (await fetch(`${base_}/`, { headers: { cookie }, redirect: 'manual' })).text();
+    const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+    const res = await fetch(`${base_}/api/claims/${claim.id}/correct`, {
+      method: 'POST',
+      headers: { cookie, 'x-vital-csrf': csrf, 'content-type': 'application/json' },
+      body: JSON.stringify({ statement: 'the launch plan is $149/mo' }),
     });
     correction = (await res.json()) as {
       supersedes: string;

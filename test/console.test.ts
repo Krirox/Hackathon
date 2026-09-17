@@ -10,9 +10,41 @@ import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
+const OWNER = { email: 'owner@acme.test', password: 'the-console-password' };
+
+/**
+ * HTTP-login as the provisioned owner (seeded() provisions the tenant) and
+ * return { cookie, csrf, headers } — the headers carry the session cookie
+ * AND the page's CSRF token, ready to spread into authenticated API calls.
+ */
+async function ownerSession(port: number) {
+  const base_ = `http://127.0.0.1:${port}`;
+  const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+  const preCsrf = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+  const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+  const loginRes = await fetch(`${base_}/login`, {
+    method: 'POST',
+    headers: { cookie: preCsrf },
+    body: `csrf=${preToken}&email=${encodeURIComponent(OWNER.email)}&password=${encodeURIComponent(OWNER.password)}`,
+    redirect: 'manual',
+  });
+  const cookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+  const home = await (await fetch(`${base_}/`, { headers: { cookie }, redirect: 'manual' })).text();
+  const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+  return { cookie, csrf, headers: { cookie, 'x-vital-csrf': csrf } as Record<string, string> };
+}
+
 async function seeded() {
   const ctx = await fresh();
   const { db, ledger, coord } = ctx;
+  // Every served-console test below posts approvals over HTTP: the auth
+  // layer is unconditional, so provision the tenant + owner once here.
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
   const rel = await ledger.append({
     tenant: TEN,
     subject: 'release:v1',
@@ -50,12 +82,14 @@ async function seeded() {
       0.9,
       NOW,
     );
-  // A second request left open for the served-console approval flow.
+  // A second request left open for the served-console approval flow. Id
+  // 'rq1' — remote-side tests own 'r2', and a colliding id would UPDATE that
+  // row (persist is upsert-by-id), corrupting their evidence.
   // Distinct goal → distinct idempotency key (same goal would dedupe to r1).
-  const r2 = await coord.submit(
-    base({ id: 'r2', goal: 'queued for approval', claimRefs: [rel.id], bid: { dollars: 1, humanMinutes: 5 } }),
+  const rq1 = await coord.submit(
+    base({ id: 'rq1', goal: 'queued for approval', claimRefs: [rel.id], bid: { dollars: 1, humanMinutes: 5 } }),
   );
-  const r2State = r2.request.state;
+  const rqState = rq1.request.state;
   const dec = await ledger.recordDecision({
     tenant: TEN,
     goal: 'launch',
@@ -85,7 +119,7 @@ async function seeded() {
       'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
     )
     .run('tr2', TEN, null, 'marketing', 'release.detect', 'i', '[]', 'REFLEX', 'SUCCESS', '{}', null, 0.9, NOW);
-  return { ...ctx, rel, dec, r2State };
+  return { ...ctx, rel, dec, rqState };
 }
 
 T('the report aggregates health, cost, tiers, queue, and rooms from the database', async () => {
@@ -196,9 +230,16 @@ T('digest composition: NOTICEs land here, grouped, never in the Feed', async () 
 
 T('override capture: correcting a claim stores the diff and feeds the eval spine', async () => {
   const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
+    const authed = await ownerSession(server.port);
     const claim = await ledger.append({
       tenant: TEN,
       subject: 'pricing',
@@ -216,7 +257,8 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
     const r = (await (
       await fetch(`${base_}/api/claims/${claim.id}/correct`, {
         method: 'POST',
-        body: JSON.stringify({ by: 'human:priya', statement: 'the launch plan is $149/mo' }),
+        headers: { ...authed.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ statement: 'the launch plan is $149/mo' }),
       })
     ).json()) as {
       ok: boolean;
@@ -250,15 +292,20 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
 
     // Validation and unknown-claim refusals keep the surface honest.
     const noBy = (await (
-      await fetch(`${base_}/api/claims/${claim.id}/correct`, { method: 'POST', body: '{}' })
+      await fetch(`${base_}/api/claims/${claim.id}/correct`, {
+        method: 'POST',
+        headers: { cookie: authed.cookie },
+        body: '{}',
+      })
     ).json()) as {
       ok: boolean;
     };
-    eq(noBy.ok, false, 'anonymous corrections refused:');
+    eq(noBy.ok, false, 'a correction without a statement refused:');
     const missing = (await (
       await fetch(`${base_}/api/claims/clm_nope/correct`, {
         method: 'POST',
-        body: JSON.stringify({ by: 'h', statement: 'x' }),
+        headers: { ...authed.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ statement: 'x' }),
       })
     ).json()) as { ok: boolean };
     eq(missing.ok, false);
@@ -269,11 +316,18 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
 
 T('approval latency is instrumented: recorded per decision, aggregated, served', async () => {
   const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
   // Mutable so each decision can happen at a chosen instant.
   let clock = NOW;
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => clock });
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
+    const authed = await ownerSession(server.port);
     // r1 submitted at NOW and approved instantly (0s); r2 submitted a day
     // later and approved 6h after that — the distribution must reflect both.
     // Distinct goals: identical content would dedupe onto one thread (by design).
@@ -283,7 +337,11 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
     eq(r2.admitted, true);
 
     const a1 = (await (
-      await fetch(`${base_}/api/requests/lat1/approve`, { method: 'POST', body: JSON.stringify({ by: 'human:priya' }) })
+      await fetch(`${base_}/api/requests/lat1/approve`, {
+        method: 'POST',
+        headers: { ...authed.headers, 'content-type': 'application/json' },
+        body: '{}',
+      })
     ).json()) as {
       ok: boolean;
       latencySeconds: number | null;
@@ -293,13 +351,22 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
 
     const at2 = '2026-09-10T18:00:00.000Z';
     clock = at2;
+    // The clock jumped 30h: the first session (12h TTL, issued at NOW) has
+    // expired — re-login at the new instant before the second approval.
+    const authed2 = await ownerSession(server.port);
     const a2 = (await (
-      await fetch(`${base_}/api/requests/lat2/approve`, { method: 'POST', body: JSON.stringify({ by: 'human:priya' }) })
+      await fetch(`${base_}/api/requests/lat2/approve`, {
+        method: 'POST',
+        headers: { ...authed2.headers, 'content-type': 'application/json' },
+        body: '{}',
+      })
     ).json()) as { ok: boolean; latencySeconds: number | null };
     eq(a2.ok, true);
     eq(a2.latencySeconds, (Date.parse(at2) - Date.parse(DAY_LATER)) / 1000, 'stale approval measures the gap:');
 
-    const stats = (await (await fetch(`${base_}/api/approval-latency`)).json()) as {
+    const stats = (await (
+      await fetch(`${base_}/api/approval-latency`, { headers: { cookie: authed2.cookie } })
+    ).json()) as {
       n: number;
       medianSeconds: number | null;
       p90Seconds: number | null;
@@ -315,14 +382,8 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
 });
 
 T('the served console is session-gated: login, then approve through the coordinator', async () => {
-  const { db, ledger, coord, comp, r2State } = await seeded();
-  // The console is a per-tenant surface: its tenant must exist and have an owner.
-  await installAuthSchema(db, NOW);
-  await signupTenant(
-    db,
-    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
-    NOW,
-  );
+  const { db, ledger, coord, comp, rqState } = await seeded();
+  // (seeded() provisions the tenant + owner — the auth layer is unconditional.)
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
@@ -353,13 +414,13 @@ T('the served console is session-gated: login, then approve through the coordina
     const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
     // CSRF required even with a valid session.
     const csrfLess = (await (
-      await fetch(`${base_}/api/requests/r2/approve`, { method: 'POST', headers: { cookie }, body: '{}' })
+      await fetch(`${base_}/api/requests/rq1/approve`, { method: 'POST', headers: { cookie }, body: '{}' })
     ).json()) as { ok: boolean };
     eq(csrfLess.ok, false, 'a session without the CSRF token cannot approve:');
-    eq((await coord.get(TEN, 'r2'))!.state, r2State, 'the refused call moved nothing:');
+    eq((await coord.get(TEN, 'rq1'))!.state, rqState, 'the refused call moved nothing:');
     // Approve the queued request as the session identity.
     const approved = (await (
-      await fetch(`${base_}/api/requests/r2/approve`, {
+      await fetch(`${base_}/api/requests/rq1/approve`, {
         method: 'POST',
         headers: { cookie, 'x-vital-csrf': csrf, 'content-type': 'application/json' },
         body: '{}',
@@ -368,7 +429,7 @@ T('the served console is session-gated: login, then approve through the coordina
     eq(approved.ok, true, `approve failed: ${JSON.stringify(approved)}`);
     eq(approved.state, 'ACCEPTED', `unexpected state: ${JSON.stringify(approved)}`);
     eq(approved.by.includes('owner@acme.test'), true, 'the approver is the authenticated user:');
-    eq((await coord.get(TEN, 'r2'))!.state, 'ACCEPTED', 'the transition landed in the ledger path:');
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ACCEPTED', 'the transition landed in the ledger path:');
     const missing = (await (
       await fetch(`${base_}/api/requests/nope/decline`, {
         method: 'POST',
@@ -385,6 +446,7 @@ T('the served console is session-gated: login, then approve through the coordina
 T('malformed ids and body bombs fail loud, never hang or crash the server', async () => {
   const { db, ledger, coord, comp } = await seeded();
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const authed = await ownerSession(server.port);
   // fetch (undici) refuses to send malformed percent-encoding client-side,
   // so the crash probe goes over a raw socket — exact bytes on the wire.
   const postRaw = (path: string, body: string): Promise<{ status: number; json: { ok: boolean } }> =>
@@ -395,7 +457,12 @@ T('malformed ids and body bombs fail loud, never hang or crash the server', asyn
           port: server.port,
           path,
           method: 'POST',
-          headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(body),
+            cookie: authed.cookie,
+            'x-vital-csrf': authed.csrf,
+          },
         },
         (res) => {
           let data = '';
@@ -413,7 +480,11 @@ T('malformed ids and body bombs fail loud, never hang or crash the server', asyn
     const bad = await postRaw('/api/requests/%E0%A4%A/approve', JSON.stringify({ by: 'human:priya' }));
     eq(bad.status, 400, 'malformed percent-encoding is a 400:');
     eq(bad.json.ok, false, 'not a crash:');
-    const bigRes = await fetch(`${base_}/api/requests/r1/approve`, { method: 'POST', body: 'x'.repeat(1_000_001) });
+    const bigRes = await fetch(`${base_}/api/requests/r1/approve`, {
+      method: 'POST',
+      headers: { cookie: authed.cookie },
+      body: 'x'.repeat(1_000_001),
+    });
     eq(bigRes.status, 413, 'oversized body is a 413:');
     const big = (await bigRes.json()) as { ok: boolean };
     eq(big.ok, false, 'not a hang:');
@@ -421,7 +492,8 @@ T('malformed ids and body bombs fail loud, never hang or crash the server', asyn
     const ok = (await (
       await fetch(`${base_}/api/requests/r1/approve`, {
         method: 'POST',
-        body: JSON.stringify({ by: 'human:priya' }),
+        headers: { ...authed.headers, 'content-type': 'application/json' },
+        body: '{}',
       })
     ).json()) as { ok: boolean };
     eq(ok.ok, true, 'server survives both:');

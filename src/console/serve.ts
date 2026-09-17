@@ -816,10 +816,21 @@ export function startConsoleServer(
           try {
             call = await parseCall(req);
           } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
+            bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
+            return;
           }
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const id = decodeURIComponent(act[1]!);
+          let id: string;
+          try {
+            // decodeURIComponent throws URIError on malformed % sequences —
+            // outside a try this escapes the async handler and kills the
+            // process (unauthenticated single-request DoS, notable because
+            // the ALB exposes this port publicly).
+            id = decodeURIComponent(act[1]!);
+          } catch {
+            json(res, 400, { ok: false, error: 'malformed request id' });
+            return;
+          }
           const current = await coord.get(tenant, id);
           if (!current) {
             json(res, 404, { ok: false, error: `unknown request ${id}` });
@@ -829,15 +840,28 @@ export function startConsoleServer(
           // name a human, so "approval theater" needs a compromised session.
           const who = by(auth.user);
           try {
-            if (act[2] === 'approve') {
-              const next = await coord.accept(tenant, id);
-              await auditConsole(db, tenant, who, 'console.approve', `request:${id}`, at);
-              json(res, 200, { ok: true, id, state: next.state, by: who });
-            } else {
-              const next = await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
-              await auditConsole(db, tenant, who, 'console.decline', `request:${id}`, at);
-              json(res, 200, { ok: false, id, state: next.state, by: who });
+            const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
+            const next =
+              action === 'approve'
+                ? await coord.accept(tenant, id)
+                : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
+            await auditConsole(
+              db,
+              tenant,
+              who,
+              action === 'approve' ? 'console.approve' : 'console.decline',
+              `request:${id}`,
+              at,
+            );
+            // Latency rides the same decision, but must never turn a landed
+            // approval into an error response — degrade to null instead.
+            let latencySeconds: number | null = null;
+            try {
+              latencySeconds = (await coord.recordApprovalLatency(tenant, id, action, who, at)).seconds;
+            } catch {
+              latencySeconds = null;
             }
+            json(res, 200, { ok: action === 'approve', id, state: next.state, by: who, latencySeconds });
           } catch (e) {
             json(res, 409, { ok: false, error: (e as Error).message });
           }
