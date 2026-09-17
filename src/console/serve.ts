@@ -22,10 +22,28 @@ export interface ConsoleServer {
   close(): Promise<void>;
 }
 
+/** Cap on JSON bodies: the approve/decline/correct payloads are tens of
+ *  bytes — anything near a megabyte is a body bomb, not an approval. */
+const MAX_BODY_BYTES = 1_000_000;
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = '';
+    let size = 0;
+    let capped = false;
     req.on('data', (c: Buffer) => {
+      if (capped) return; // draining after the cap tripped: discard, don't keep
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        // Reject once, then resume-discard the rest: destroying the socket
+        // here poisons the client's keep-alive pool (every later request on
+        // the pooled connection dies with socket hang up). Memory — the
+        // actual threat — is protected because chunks are discarded, not kept.
+        capped = true;
+        reject(new Error('[console:BODY_TOO_LARGE] body exceeds 1MB cap'));
+        req.resume();
+        return;
+      }
       body += c.toString();
     });
     req.on('end', () => resolve(body));
@@ -36,6 +54,15 @@ function readBody(req: IncomingMessage): Promise<string> {
 const json = (res: ServerResponse, code: number, value: unknown): void => {
   res.writeHead(code, { 'content-type': 'application/json' });
   res.end(JSON.stringify(value));
+};
+
+/** Oversized bodies are 413, malformed JSON is 400 — never conflated. */
+const bodyError = (res: ServerResponse, e: unknown): void => {
+  if ((e as Error).message.includes('BODY_TOO_LARGE')) {
+    json(res, 413, { ok: false, error: 'body exceeds 1MB cap' });
+    return;
+  }
+  json(res, 400, { ok: false, error: 'malformed JSON body' });
 };
 
 export function startConsoleServer(
@@ -66,15 +93,25 @@ export function startConsoleServer(
         let body: { by?: string; reason?: string };
         try {
           body = JSON.parse((await readBody(req)) || '{}') as { by?: string; reason?: string };
-        } catch {
-          json(res, 400, { ok: false, error: 'malformed JSON body' });
+        } catch (e) {
+          bodyError(res, e);
           return;
         }
         if (!body.by) {
           json(res, 400, { ok: false, error: 'approval without a named human is theater — pass { by }' });
           return;
         }
-        const id = decodeURIComponent(act[1]!);
+        let id: string;
+        try {
+          // decodeURIComponent throws URIError on malformed % sequences —
+          // outside a try this escapes the async handler and kills the
+          // process (unauthenticated single-request DoS, notable because
+          // the ALB exposes this port publicly).
+          id = decodeURIComponent(act[1]!);
+        } catch {
+          json(res, 400, { ok: false, error: 'malformed request id' });
+          return;
+        }
         const current = await coord.get(tenant, id);
         if (!current) {
           json(res, 404, { ok: false, error: `unknown request ${id}` });
@@ -110,8 +147,8 @@ export function startConsoleServer(
         let body: { by?: string; statement?: string };
         try {
           body = JSON.parse((await readBody(req)) || '{}') as { by?: string; statement?: string };
-        } catch {
-          json(res, 400, { ok: false, error: 'malformed JSON body' });
+        } catch (e) {
+          bodyError(res, e);
           return;
         }
         if (!body.by || !body.statement) {
@@ -121,7 +158,13 @@ export function startConsoleServer(
           });
           return;
         }
-        const id = decodeURIComponent(fix[1]!);
+        let id: string;
+        try {
+          id = decodeURIComponent(fix[1]!);
+        } catch {
+          json(res, 400, { ok: false, error: 'malformed claim id' });
+          return;
+        }
         try {
           const old = await ledger.get(tenant, id);
           if (!old) {

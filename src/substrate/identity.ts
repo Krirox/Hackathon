@@ -38,7 +38,11 @@ export function mintScopeToken(secret: string, grant: ScopeGrant): string {
 }
 
 export function verifyScopeToken(secret: string, token: string, now: string): ScopeGrant {
-  const [body, sig] = token.split('.');
+  const parts = token.split('.');
+  // Exactly two segments: destructuring alone would silently ignore a
+  // trailing `.anything` appended to a valid token.
+  if (parts.length !== 2) throw new IdentityError('MALFORMED_TOKEN', 'token is not body.signature');
+  const [body, sig] = parts as [string, string];
   if (!body || !sig) throw new IdentityError('MALFORMED_TOKEN', 'token is not body.signature');
   const expect = createHmac('sha256', secret).update(body).digest('hex');
   // Strict hex check first: Buffer.from(x, 'hex') silently drops invalid
