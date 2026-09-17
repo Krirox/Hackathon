@@ -7,7 +7,7 @@
     "test": "node --import tsx --test --test-force-exit test/run.ts",
     "test:postgres": "node --import tsx --test --test-force-exit test/run-postgres.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/cli.js serve",
     "lint": "eslint src test",
     "format": "prettier --write src test scripts *.mjs",
