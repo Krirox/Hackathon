@@ -3,11 +3,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, rejects } from './helpers.ts';
 import {
+  ArtifactStoreError,
+  claimInbox,
+  FilesystemArtifactStore,
   fileDiffCollector,
   gitHubReleasesCollector,
   ingestEvents,
   isNovel,
   serperSearchCollector,
+  settleInbox,
+  stageToInbox,
 } from '../src/ingest/collectors.ts';
 import { createHmacSurface, statementHashOf, verifyClaimEnvelope } from '../src/talk/surface.ts';
 
@@ -269,6 +274,71 @@ T('novelty-vs-ledger: history is not news', async () => {
   eq(await isNovel(ledger, TEN, 'gh:releases', 'v2.15 shipped'), true);
 });
 
+T('F18: novelty ignores superseded history without hydrating the subject', async () => {
+  const { ledger } = await fresh();
+  const old = await ledger.append({
+    tenant: TEN,
+    subject: 'gh:releases',
+    kind: 'FACT',
+    statement: 'v2.14 shipped',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'x',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  eq(await isNovel(ledger, TEN, 'gh:releases', 'v2.14 shipped'), false, 'live statement is not novel:');
+  const neu = await ledger.append({
+    tenant: TEN,
+    subject: 'gh:releases',
+    kind: 'FACT',
+    statement: 'v2.14 shipped, corrected',
+    confidence: 1,
+    observedAt: DAY_LATER,
+    validFrom: DAY_LATER,
+    owner: 's',
+    scope: 'x',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  await ledger.link(TEN, neu.id, old.id, 'supersedes');
+  eq(await isNovel(ledger, TEN, 'gh:releases', 'v2.14 shipped'), true, 'superseded history is not prior art:');
+  eq(await isNovel(ledger, TEN, 'gh:releases', 'v2.14 shipped, corrected'), false, 'the live row still matches:');
+});
+
+T('F19: the artifact store refuses oversized trees loudly instead of hashing them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-art-'));
+  const store = new FilesystemArtifactStore(dir, 16);
+  eq(store.put('small.txt', 'tiny'), 'small.txt', 'under-cap writes land:');
+  eq(store.get('small.txt').toString(), 'tiny', 'and read back:');
+  let code = '';
+  try {
+    store.put('big.txt', 'x'.repeat(17));
+  } catch (e) {
+    code = (e as Error).message;
+  }
+  eq(code.includes('TOO_LARGE'), true, 'oversized writes refuse with a named error:');
+  eq(code.includes('[artifact:'), true, 'namespaced like every other refusal:');
+  writeFileSync(join(dir, ' smuggled.txt'.trim()), 'x'.repeat(64));
+  let getCode = '';
+  try {
+    store.get('smuggled.txt');
+  } catch (e) {
+    getCode = (e as Error).message;
+  }
+  eq(getCode.includes('TOO_LARGE'), true, 'oversized reads refuse before hashing:');
+  let unsafe = '';
+  try {
+    store.put('../escape.txt', 'x');
+  } catch (e) {
+    unsafe = (e as Error).message;
+  }
+  eq(unsafe.includes('UNSAFE_REF'), true, 'escaping refs refuse:');
+  void ArtifactStoreError;
+});
+
 T('serper search maps results to raw events; the key travels in headers only', async () => {
   const { db, ledger } = await fresh();
   const seen: { url: string; init: { headers: Record<string, string>; body: string } }[] = [];
@@ -316,4 +386,88 @@ T('serper search maps results to raw events; the key travels in headers only', a
     code = (e as Error).message;
   }
   eq(code.includes('SERPER_FETCH'), true);
+});
+
+console.log('\n\x1b[1mIngestion — durable inbox (F03)\x1b[0m');
+
+T('crash between fetch and cursor loses nothing: the inbox holds the event, retry dedupes', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-inbox-'));
+  writeFileSync(join(dir, 'a.md'), 'v1\n');
+  const c = fileDiffCollector('crashy', dir);
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 1);
+  const count = async () =>
+    ((await db.prepare('SELECT COUNT(*) AS n FROM ingest_inbox WHERE tenant = ?').get(TEN)) as { n: number }).n;
+  eq(await count(), 1, 'poll stages to the inbox before moving the cursor:');
+  // Simulate the crash: the cursor write never happened — rewind it. The
+  // event must survive in the inbox (no loss).
+  await db.prepare('DELETE FROM meta WHERE key = ?').run('ingest:cursor:crashy');
+  const retry = await c.poll(db, NOW, TEN);
+  eq(retry.length, 1, 'cursor rewound, so the occurrence is re-fetched:');
+  eq(await count(), 1, 'same identity collapses onto the existing row (no dup):');
+  // And the staged row is actually processable: claim → settle lifecycle.
+  const claimed = await claimInbox(db, TEN, 'crashy', 10);
+  eq(claimed.length, 1);
+  eq(claimed[0]!.event.summary, evs[0]!.summary);
+  await settleInbox(
+    db,
+    claimed.map((r) => r.id),
+    'DONE',
+  );
+  eq(((await db.prepare('SELECT status AS s FROM ingest_inbox WHERE tenant = ?').get(TEN)) as { s: string }).s, 'DONE');
+  eq((await claimInbox(db, TEN, 'crashy', 10)).length, 0, 'settled rows are never re-claimed:');
+});
+
+T('duplicate delivery collapses to one inbox receipt — per tenant', async () => {
+  const { db } = await fresh();
+  const ev = {
+    source: 's',
+    uri: 'https://example.com/e1',
+    fingerprint: 'fp1',
+    eventId: 'e1',
+    revision: 'r1',
+    occurredAt: NOW,
+    summary: 's',
+    payload: {},
+  };
+  eq(await stageToInbox(db, TEN, 'col', [ev], NOW), 1);
+  eq(await stageToInbox(db, TEN, 'col', [ev], NOW), 0, 'same identity inserts nothing:');
+  eq(await stageToInbox(db, TEN, 'col', [{ ...ev, revision: 'r2' }], NOW), 1, 'new revision is a new receipt:');
+  eq(await stageToInbox(db, 'other-tenant', 'col', [ev], NOW), 1, 'identity is tenant-scoped:');
+});
+
+T('github pagination walks past the first page via Link continuation', async () => {
+  const { db } = await fresh();
+  const mk = (id: number) => ({
+    id,
+    tag_name: `v${id}.0`,
+    name: `R${id}`,
+    html_url: `https://gh/r${id}`,
+    published_at: NOW,
+    body: 'x',
+  });
+  const page1 = Array.from({ length: 20 }, (_, i) => mk(i + 1));
+  const page2 = Array.from({ length: 5 }, (_, i) => mk(21 + i));
+  const calls: string[] = [];
+  const fetchFn = async (url: string) => {
+    calls.push(url);
+    const isPage2 = url.includes('page=2');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => (isPage2 ? page2 : page1),
+      headers: {
+        get: (n: string) =>
+          n.toLowerCase() === 'link' && !isPage2
+            ? '<https://api.github.com/repos/acme/app/releases?per_page=100&page=2>; rel="next"'
+            : null,
+      },
+    };
+  };
+  const c = gitHubReleasesCollector('acme', 'app', fetchFn);
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 25, 'walks all 25 releases, not just the first page:');
+  eq(calls.length, 2, 'follows the explicit continuation:');
+  eq((await c.poll(db, NOW, TEN)).length, 0, 'cursor advanced over every page:');
 });

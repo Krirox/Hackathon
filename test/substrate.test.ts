@@ -1,8 +1,16 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { T, eq, TEN, NOW, fresh, sor, base, withHarness, rejects } from './helpers.ts';
-import { Scheduler } from '../src/substrate/scheduler.ts';
+import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base, withHarness, rejects } from './helpers.ts';
+import {
+  Scheduler,
+  claimOutbox,
+  enqueueOutbox,
+  recordSchedulerOccurrence,
+  settleOutbox,
+} from '../src/substrate/scheduler.ts';
+import { claimInbox, settleInbox, stageToInbox } from '../src/ingest/collectors.ts';
+import { runJob } from '../src/aws/executor.ts';
 import { buildManifest, rebuildSandbox, scopeDir, verifySandbox } from '../src/substrate/sandbox.ts';
 import { decideEgress, hostMatches } from '../src/substrate/egress.ts';
 import { createContentScreen, denylistBackend } from '../src/substrate/screen.ts';
@@ -72,6 +80,17 @@ T('files outside the manifest fail verification and count toward disk', async ()
   eq(v.ok, false, 'unauthorized files fail the check:');
   eq(v.extra, ['debug.log']);
   eq(v.bytesOnDisk >= 1000, true, 'disk counts everything on disk, authorized or not:');
+});
+
+T('verification refuses loudly past a byte budget instead of hashing unbounded trees', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vital-sbx3-'));
+  const manifest = buildManifest('engineering', { 'src/a.ts': 'export const a = 1;\n' });
+  rebuildSandbox(root, manifest, { 'src/a.ts': 'export const a = 1;\n' });
+  writeFileSync(join(scopeDir(root, 'engineering'), 'core.dump'), 'x'.repeat(10_000));
+  const v = verifySandbox(root, manifest, { maxBytes: 100 });
+  eq(v.ok, false);
+  eq(v.overBudget, true, 'names the refusal:');
+  eq(verifySandbox(root, manifest).ok, false, 'uncapped check still fails normally (extra file):');
 });
 
 T('egress denies metadata, link-local, and anything unlisted — fail closed', async () => {
@@ -298,4 +317,207 @@ T('the egress proxy forwards the allowed, kills the denied before dialing, and a
   );
   await proxy.close();
   await new Promise<void>((res) => upstream.close(() => res()));
+});
+
+console.log('\n\x1b[1mSubstrate — durable outbox + executor redelivery (F15)\x1b[0m');
+
+T('outbox enqueue→claim→settle lifecycle, with FAILED retry on schedule', async () => {
+  const { db } = await fresh();
+  const id1 = await enqueueOutbox(db, TEN, 'sqs-send', { to: 'q', body: 'a' }, { now: NOW });
+  const id2 = await enqueueOutbox(db, TEN, 'sqs-send', { to: 'q', body: 'b' }, { now: NOW });
+  const occ = await recordSchedulerOccurrence(db, TEN, 'watch', NOW);
+  const claimed = await claimOutbox(db, 10, NOW);
+  eq(claimed.map((r) => r.id).sort(), [id1, id2, occ].sort(), 'one atomic claim takes the whole due batch:');
+  eq(
+    claimed.every((r) => r.status === 'CLAIMED' && r.attempts === 1),
+    true,
+  );
+  // A concurrent relay cannot claim the same rows twice.
+  eq((await claimOutbox(db, 10, NOW)).length, 0);
+  await settleOutbox(db, [id1, occ], 'DONE');
+  await settleOutbox(db, [id2], 'FAILED', { retryAt: DAY_LATER });
+  eq((await claimOutbox(db, 10, NOW)).length, 0, 'failed-not-yet-due is not reclaimed:');
+  const retry = await claimOutbox(db, 10, DAY_LATER);
+  eq(
+    retry.map((r) => r.id),
+    [id2],
+    'FAILED retries work once due:',
+  );
+  eq(retry[0]!.attempts, 2);
+  await settleOutbox(db, [id2], 'DONE');
+  eq((await claimOutbox(db, 10, DAY_LATER)).length, 0, 'DONE is terminal:');
+});
+
+T('executor acks a redelivered COMPLETED job, rejects key mismatch, retries FAILED', async () => {
+  const { db, ledger, coord } = await fresh();
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'r',
+    kind: 'OBSERVATION',
+    statement: 'x',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const first = await coord.submit(base({ id: 'ex1', claimRefs: [clm.id] }));
+  await coord.accept(TEN, first.request.id);
+  await coord.complete(TEN, first.request.id, { claims: [clm.id], cost: {} });
+  const stored = (await coord.get(TEN, first.request.id))!;
+  // SQS at-least-once redelivery of a success: ack, no new model spend, no DLQ.
+  const dup = await runJob(
+    db,
+    { tenant: TEN, requestId: first.request.id, prompt: 'do it', idempotencyKey: stored.idempotencyKey },
+    {},
+  );
+  eq(dup.status, 'COMPLETED');
+  eq(dup.usage, { input: 0, output: 0 }, 'a duplicate ack spends no tokens:');
+  // Same id, different key: a different job wearing a familiar id — refuse.
+  await rejects(
+    async () =>
+      await runJob(db, { tenant: TEN, requestId: first.request.id, prompt: 'do it', idempotencyKey: 'wrong' }, {}),
+    'different idempotency key',
+  );
+  // FAILED is retryable: the redelivered job re-runs and completes.
+  const retryable = await coord.submit(base({ id: 'ex2', goal: 'retry me', claimRefs: [clm.id] }));
+  await coord.fail(TEN, retryable.request.id, 'boom');
+  const chat = async () => ({ text: 'done', usage: { input: 1, output: 1 } });
+  const out = await runJob(
+    db,
+    { tenant: TEN, requestId: retryable.request.id, prompt: 'retry me', lane: 'dev' },
+    { GEMINI_API_KEY: 'test-key' },
+    chat,
+  );
+  eq(out.status, 'COMPLETED');
+  eq((await coord.get(TEN, retryable.request.id))!.state, 'COMPLETED', 'redelivery of FAILED retries work:');
+});
+
+T('scheduler deliveries are bounded: cap + drop-oldest with a count', async () => {
+  const s = new Scheduler(() => 1_000_000, null, 10_000, 3);
+  for (let i = 0; i < 5; i++) s.webhook('gh', null, { i });
+  eq(s.deliveriesFrom('gh').length, 3, 'only the newest cap entries survive:');
+  eq(s.deliveriesFrom('gh')[0]!.payload, { i: 2 }, 'drop-oldest, not drop-newest:');
+  eq(s.droppedCount(), 2, 'the drops are counted, never silent:');
+});
+
+// ---- F10: ownership, leases, and stale-settlement fencing --------------
+
+T("F10: two interleaved outbox claims cannot both own a row; a crashed relay's lease is recoverable", async () => {
+  const { db } = await fresh();
+  for (let i = 0; i < 6; i++) await enqueueOutbox(db, TEN, 'sqs-send', { i }, { now: NOW });
+  // Relay A claims everything, then "crashes" (never settles).
+  const a = await claimOutbox(db, 10, NOW, { owner: 'relay-a', leaseMs: 60_000 });
+  eq(a.length, 6);
+  // Relay B arrives 30s later: every row is CLAIMED with a live lease — B gets nothing.
+  const bAt = new Date(Date.parse(NOW) + 30_000).toISOString();
+  eq((await claimOutbox(db, 10, bAt, { owner: 'relay-b', leaseMs: 60_000 })).length, 0, 'live leases are respected:');
+  // Lease expires: relay B recovers the crashed work.
+  const bAfter = new Date(Date.parse(NOW) + 61_000).toISOString();
+  const recovered = await claimOutbox(db, 10, bAfter, { owner: 'relay-b', leaseMs: 60_000 });
+  eq(recovered.length, 6, 'expired leases release the work:');
+  eq(
+    recovered.every((r) => r.attempts === 2),
+    true,
+    'recovery counts an attempt:',
+  );
+  // The crashed relay A wakes up and tries to settle its stale claim: refused.
+  await rejects(
+    async () =>
+      await settleOutbox(
+        db,
+        a.map((r) => r.id),
+        'DONE',
+        { owner: 'relay-a' },
+      ),
+    'NOT_OWNER',
+  );
+  // Relay B settles what it owns: clean.
+  await settleOutbox(
+    db,
+    recovered.map((r) => r.id),
+    'DONE',
+    { owner: 'relay-b' },
+  );
+  eq((await claimOutbox(db, 10, bAfter, { owner: 'relay-b', leaseMs: 60_000 })).length, 0, 'settled work is done:');
+});
+
+T('F10: a poison outbox row exhausts attempts and stops being claimed (dead-letter shape)', async () => {
+  const { db } = await fresh();
+  const poison = await enqueueOutbox(db, TEN, 'sqs-send', { bad: true }, { now: NOW });
+  for (let round = 0; round < 12; round++) {
+    const claimed = await claimOutbox(db, 10, NOW, { owner: 'relay', maxAttempts: 3 });
+    if (claimed.length === 0) {
+      eq(round >= 3, true, `stops being claimed after the attempt cap (stopped at round ${round}):`);
+      break;
+    }
+    await settleOutbox(
+      db,
+      claimed.map((r) => r.id),
+      'FAILED',
+      { owner: 'relay' },
+    );
+  }
+  const row = (await db.prepare('SELECT status, attempts FROM outbox WHERE id = ?').get(poison)) as {
+    status: string;
+    attempts: number;
+  };
+  eq(row.attempts, 3, 'attempts capped:');
+  eq(row.status, 'FAILED', 'row stays FAILED (inspectable), never re-claimed past the cap:');
+});
+
+T('F10: inbox claims are owner-fenced with lease recovery, same as the outbox', async () => {
+  const { db, ledger } = await fresh();
+  const stage = async (n: number) =>
+    await stageToInbox(
+      db,
+      TEN,
+      'col',
+      [
+        {
+          source: 's',
+          uri: `https://example.com/e${n}`,
+          fingerprint: `fp${n}`,
+          eventId: `e${n}`,
+          revision: 'r1',
+          occurredAt: NOW,
+          summary: `event ${n}`,
+          payload: {},
+        },
+      ],
+      NOW,
+    );
+  for (let n = 0; n < 4; n++) await stage(n);
+  // Fixed clock basis: every claim passes `now` explicitly so lease math is
+  // deterministic (the default is the real clock, which breaks the expiry test).
+  const a = await claimInbox(db, TEN, 'col', 10, { owner: 'consumer-a', leaseMs: 60_000, now: NOW });
+  eq(a.length, 4);
+  // Consumer B at +30s: nothing claimable (leases live).
+  const at30 = new Date(Date.parse(NOW) + 30_000).toISOString();
+  eq((await claimInbox(db, TEN, 'col', 10, { owner: 'consumer-b', leaseMs: 60_000, now: at30 })).length, 0);
+  // Consumer A crashes; B recovers at +61s.
+  const at61 = new Date(Date.parse(NOW) + 61_000).toISOString();
+  const recovered = await claimInbox(db, TEN, 'col', 10, { owner: 'consumer-b', leaseMs: 60_000, now: at61 });
+  eq(recovered.length, 4, "crashed consumer's work is recoverable:");
+  // Stale A cannot settle; B can.
+  await rejects(
+    async () =>
+      await settleInbox(
+        db,
+        a.map((r) => r.id),
+        'DONE',
+        { owner: 'consumer-a' },
+      ),
+    'NOT_OWNER',
+  );
+  await settleInbox(
+    db,
+    recovered.map((r) => r.id),
+    'DONE',
+    { owner: 'consumer-b' },
+  );
+  eq((await claimInbox(db, TEN, 'col', 10, { owner: 'consumer-b', leaseMs: 60_000, now: at61 })).length, 0);
+  void ledger;
 });

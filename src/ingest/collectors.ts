@@ -11,6 +11,25 @@ import type { SourceTier } from '../core/types.ts';
  *   poll() → RawEvent[]   idempotent, checkpointed (cursors in `meta`)
  *   ingestEvents()        maps events → OBSERVATION claims, never FACT
  *
+ * Durability shape (why the inbox exists): a collector used to advance its
+ * cursor as soon as it had fetched events, so a crash between fetch and
+ * downstream ingestion lost the event, and dedup was a separate
+ * read→append→write keyed by content hash alone. Now every poll stages
+ * fetched events into the durable `ingest_inbox` FIRST (idempotent insert on
+ * the UNIQUE(tenant, collector, source_event_id, revision) key) and advances
+ * the cursor only after that insert commits. Crash between fetch and cursor:
+ * the event survives in the inbox (no loss); retry re-stages the same
+ * identity and collapses onto the existing row (no dup). Consumers claim a
+ * batch with `claimInbox`, process it, and close it with `settleInbox`.
+ *
+ * Identity vs content, kept apart on purpose: `fingerprint` is the ARTIFACT
+ * content hash (the key into `data/artifacts/<sha256>`, so every
+ * `rawArtifactRef` resolves); it says what the bytes were. Event identity —
+ * which occurrence of which source, at which revision — is
+ * (tenant, collector, source_event_id, revision). Two deliveries of the same
+ * occurrence share an identity even if re-serialized; two revisions of one
+ * file share an identity prefix but differ in revision.
+ *
  * No collector may write FACT directly — promotion from OBSERVATION is a
  * separate governed step (curation). Raw payloads land content-addressed in
  * `data/artifacts/<sha256>` so every `rawArtifactRef` resolves.
@@ -21,8 +40,22 @@ export interface RawEvent {
   source: string;
   /** Canonical URI of the underlying occurrence. */
   uri: string;
-  /** Content fingerprint — the idempotency key. */
+  /**
+   * Content fingerprint — the ARTIFACT content hash (store key), not the
+   * event identity. Two revisions have different fingerprints; two
+   * deliveries of one revision share both fingerprint AND identity.
+   */
   fingerprint: string;
+  /**
+   * Stable per-source occurrence id, e.g. the GitHub release id or the
+   * watched filename. Defaults to `uri` when the source names nothing else.
+   */
+  eventId?: string;
+  /**
+   * Occurrence revision, e.g. tag+published_at or the content hash at fetch
+   * time. Defaults to `fingerprint` (every byte-change is a new revision).
+   */
+  revision?: string;
   occurredAt: string;
   summary: string;
   payload: unknown;
@@ -34,8 +67,12 @@ export interface Collector {
   readonly sourceTier: SourceTier;
   readonly extractor: string;
   readonly extractorVersion: string;
-  /** Sync collectors return events; network collectors return a promise. */
-  poll(db: AsyncDb, now: string): RawEvent[] | Promise<RawEvent[]>;
+  /**
+   * Sync collectors return events; network collectors return a promise.
+   * `tenant` scopes the durable inbox staging (identity is per-tenant);
+   * callers that predate the inbox omit it and stage under 'default'.
+   */
+  poll(db: AsyncDb, now: string, tenant?: string): RawEvent[] | Promise<RawEvent[]>;
 }
 
 const GROUND_TIERS: readonly SourceTier[] = ['SYSTEM_OF_RECORD', 'MEASURED'];
@@ -53,22 +90,375 @@ async function metaSet(db: AsyncDb, key: string, value: string): Promise<void> {
     .run(key, value);
 }
 
-/** Content-addressed raw-artifact store. `dir` defaults to `data/artifacts`. */
-export function storeArtifact(db: AsyncDb, event: RawEvent, dir = join('data', 'artifacts')): string {
-  mkdirSync(dir, { recursive: true });
-  const ref = join(dir, event.fingerprint);
-  try {
-    statSync(ref);
-  } catch {
-    writeFileSync(ref, JSON.stringify({ uri: event.uri, occurredAt: event.occurredAt, payload: event.payload }));
+// ------------------------------------------------------- durable inbox ----
+
+/**
+ * Durable inbox row: one staged occurrence. `status` moves
+ * PENDING → CLAIMED → DONE (or FAILED, which a later claim may retry).
+ * The UNIQUE key is the event identity — duplicate deliveries collapse onto
+ * one receipt instead of fanning out twice.
+ */
+export interface InboxReceipt {
+  id: string;
+  tenant: string;
+  collector: string;
+  sourceEventId: string;
+  revision: string;
+  status: string;
+  attempts: number;
+  createdAt: string;
+  event: RawEvent;
+}
+
+/** Event identity, split out from the artifact content hash (see RawEvent). */
+export function eventIdentityOf(e: RawEvent): { sourceEventId: string; revision: string } {
+  return { sourceEventId: e.eventId ?? e.uri, revision: e.revision ?? e.fingerprint };
+}
+
+/** Self-creating inbox (idempotent): safe on DBs migrated before F03. */
+export async function ensureInboxTable(db: AsyncDb): Promise<void> {
+  await db.exec(
+    `CREATE TABLE IF NOT EXISTS ingest_inbox (
+      id TEXT PRIMARY KEY, tenant TEXT NOT NULL, collector TEXT NOT NULL,
+      source_event_id TEXT NOT NULL, revision TEXT NOT NULL, payload_json TEXT NOT NULL,
+      status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+      owner TEXT, claimed_at TEXT,
+      UNIQUE (tenant, collector, source_event_id, revision))`,
+  );
+  await db.exec(`CREATE INDEX IF NOT EXISTS ix_inbox_claim ON ingest_inbox(tenant, collector, status, created_at)`);
+  // F10: lease recovery columns on databases created before the owner/lease
+  // work. Additive ALTERs are guarded by pragma probes (idempotent re-run).
+  if (db.engine === 'sqlite') {
+    const cols = new Set(
+      ((await db.prepare('SELECT name FROM pragma_table_info(?)').all('ingest_inbox')) as { name: string }[]).map((r) =>
+        String(r.name),
+      ),
+    );
+    if (!cols.has('owner')) await db.exec(`ALTER TABLE ingest_inbox ADD COLUMN owner TEXT`);
+    if (!cols.has('claimed_at')) await db.exec(`ALTER TABLE ingest_inbox ADD COLUMN claimed_at TEXT`);
+  } else {
+    await db.exec(`ALTER TABLE ingest_inbox ADD COLUMN IF NOT EXISTS owner TEXT`);
+    await db.exec(`ALTER TABLE ingest_inbox ADD COLUMN IF NOT EXISTS claimed_at TEXT`);
   }
-  void db;
-  return event.fingerprint;
 }
 
 /**
- * Map raw events to OBSERVATION claims. Idempotent per fingerprint; ground
- * tiers refused; every claim carries its artifact ref.
+ * Stage fetched events into the inbox FIRST, before any cursor moves.
+ * Idempotent per identity (`ON CONFLICT DO NOTHING`): returns the count of
+ * newly staged rows, so a retried fetch reports 0 without duplicating.
+ */
+export async function stageToInbox(
+  db: AsyncDb,
+  tenant: string,
+  collector: string,
+  events: RawEvent[],
+  now: string,
+): Promise<number> {
+  await ensureInboxTable(db);
+  let inserted = 0;
+  for (const e of events) {
+    const { sourceEventId, revision } = eventIdentityOf(e);
+    const r = await db
+      .prepare(
+        `INSERT INTO ingest_inbox
+           (id, tenant, collector, source_event_id, revision, payload_json, status, attempts, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?)
+         ON CONFLICT(tenant, collector, source_event_id, revision) DO NOTHING`,
+      )
+      .run(crypto.randomUUID(), tenant, collector, sourceEventId, revision, JSON.stringify(e), now);
+    inserted += r.changes;
+  }
+  return inserted;
+}
+
+/**
+ * F10: atomically mark the oldest claimable batch CLAIMED for one named
+ * owner. Claimable = PENDING, retry-due FAILED (attempts < maxAttempts), or
+ * CLAIMED with an EXPIRED lease (a crashed consumer's work becomes runnable
+ * again). The ownership CAS is per-row and conditional on the status the
+ * SELECT observed — under Postgres READ COMMITTED a concurrent relay's
+ * committed claim makes our UPDATE match zero rows for that row, so two
+ * consumers can never both own it. The winner is recorded (owner,
+ * claimed_at) and `settleInbox` refuses settlement from any other owner,
+ * so an expired owner cannot settle a row that has been re-claimed.
+ */
+export async function claimInbox(
+  db: AsyncDb,
+  tenant: string,
+  collector: string,
+  batch: number,
+  opts: { owner?: string; now?: string; leaseMs?: number; maxAttempts?: number } = {},
+): Promise<InboxReceipt[]> {
+  await ensureInboxTable(db);
+  const owner = opts.owner ?? 'inbox-worker';
+  const nowMs = Date.parse(opts.now ?? new Date().toISOString());
+  const leaseMs = opts.leaseMs ?? 60_000;
+  const maxAttempts = opts.maxAttempts ?? 10;
+  const now = new Date(nowMs).toISOString();
+  const leaseCutoff = new Date(nowMs - leaseMs).toISOString();
+  return db.transaction(async () => {
+    // No LIMIT placeholder: slice in JS so sqlite and postgres share the SQL.
+    const rows = (await db
+      .prepare(
+        `SELECT * FROM ingest_inbox WHERE tenant = ? AND collector = ?
+           AND (status = 'PENDING'
+                OR (status = 'FAILED' AND attempts < ?)
+                OR (status = 'CLAIMED' AND claimed_at IS NOT NULL AND claimed_at <= ?))
+         ORDER BY created_at`,
+      )
+      .all(tenant, collector, maxAttempts, leaseCutoff)) as Record<string, unknown>[];
+    const out: InboxReceipt[] = [];
+    for (const r of rows.slice(0, Math.max(0, batch))) {
+      // Ownership CAS: only the PENDING/FAILED/lease-expired state the SELECT
+      // observed converts. A concurrent relay that already claimed this row
+      // (status now CLAIMED with a fresh claimed_at) matches zero rows here.
+      const claimed = await db
+        .prepare(
+          `UPDATE ingest_inbox SET status = 'CLAIMED', attempts = attempts + 1,
+             owner = ?, claimed_at = ?
+           WHERE id = ?
+             AND (status = 'PENDING'
+                  OR (status = 'FAILED' AND attempts < ?)
+                  OR (status = 'CLAIMED' AND claimed_at IS NOT NULL AND claimed_at <= ?))`,
+        )
+        .run(owner, now, String(r['id']), maxAttempts, leaseCutoff);
+      if (claimed.changes === 0) continue; // someone else won this row
+      out.push({
+        id: String(r['id']),
+        tenant: String(r['tenant']),
+        collector: String(r['collector']),
+        sourceEventId: String(r['source_event_id']),
+        revision: String(r['revision']),
+        status: 'CLAIMED',
+        attempts: Number(r['attempts']) + 1,
+        createdAt: String(r['created_at']),
+        event: JSON.parse(String(r['payload_json'])) as RawEvent,
+      });
+    }
+    return out;
+  });
+}
+
+/**
+ * Close claimed rows: DONE is terminal, FAILED stays retryable by claim
+ * policy (attempts-capped). F10: settlement is owner-checked — a consumer
+ * whose lease expired and whose row was re-claimed by another worker CANNOT
+ * settle it (the stale worker's late write would corrupt the new owner's
+ * processing). Pass the owner received from `claimInbox`; the default
+ * matches the default claim owner.
+ */
+export async function settleInbox(
+  db: AsyncDb,
+  ids: string[],
+  outcome: 'DONE' | 'FAILED',
+  opts: { owner?: string } = {},
+): Promise<void> {
+  await ensureInboxTable(db);
+  const owner = opts.owner ?? 'inbox-worker';
+  for (const id of ids) {
+    const out = await db
+      .prepare(`UPDATE ingest_inbox SET status = ? WHERE id = ? AND owner = ? AND status = 'CLAIMED'`)
+      .run(outcome, id, owner);
+    if (out.changes === 0) {
+      const row = (await db.prepare('SELECT status, owner FROM ingest_inbox WHERE id = ?').get(id)) as
+        { status: string; owner: string | null } | undefined;
+      if (!row) continue; // row vanished: nothing to settle
+      if (row.status === 'CLAIMED' && row.owner !== owner) {
+        throw new Error(
+          `[inbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'} — settlement refused`,
+        );
+      }
+      // Already DONE/FAILED by a legitimate earlier settlement: idempotent no-op.
+    }
+  }
+}
+
+/**
+ * Content-addressed raw-artifact store.
+ * Keyed by the SHA-256 content hash of the serialized envelope
+ * (`{ uri, occurredAt, payload }`), NOT by event identity or collector fingerprint.
+ * One revision, one blob; re-deliveries of identical bytes land on the same
+ * path and are a no-op.
+ * Bounded by maxBytes (default 25 MB) and safe against path traversal.
+ * `dir` defaults to `data/artifacts`.
+ */
+export function storeArtifact(
+  db: AsyncDb,
+  event: RawEvent,
+  dir = join('data', 'artifacts'),
+  maxBytes: number = 25_000_000,
+): string {
+  const serialized = JSON.stringify({
+    uri: event.uri,
+    occurredAt: event.occurredAt,
+    payload: event.payload,
+  });
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (bytes > maxBytes) {
+    throw new ArtifactStoreError(
+      'TOO_LARGE',
+      `artifact for "${event.uri}" is ${bytes} bytes, over the ${maxBytes}-byte cap — refusing instead of storing an unbounded tree`,
+    );
+  }
+  const ref = createHash('sha256').update(serialized, 'utf8').digest('hex');
+  if (ref.startsWith('/') || ref.includes('..') || ref.includes('\\')) {
+    throw new ArtifactStoreError('UNSAFE_REF', `artifact ref escapes the store: "${ref}"`);
+  }
+  mkdirSync(dir, { recursive: true });
+  const full = join(dir, ref);
+  try {
+    statSync(full);
+  } catch {
+    writeFileSync(full, serialized, 'utf8');
+  }
+  void db;
+  return ref;
+}
+
+/**
+ * Read-back integrity verification for stored artifacts.
+ * Accepts either (ref, dir?, maxBytes?) or (dir, ref, maxBytes?).
+ * Reads the bytes, verifies the SHA-256 hash matches `ref`, and returns the verified Buffer.
+ * Throws ArtifactStoreError:
+ *   - UNSAFE_REF if ref contains traversal characters
+ *   - NOT_FOUND if file does not exist
+ *   - TOO_LARGE if file exceeds maxBytes
+ *   - CORRUPT if file contents do not match ref
+ */
+export function verifyArtifact(dirOrRef: string, refOrDir?: string, maxBytes: number = 25_000_000): Buffer {
+  let dir = join('data', 'artifacts');
+  let ref: string;
+
+  if (refOrDir === undefined) {
+    ref = dirOrRef;
+  } else if (/^[0-9a-f]{64}$/i.test(refOrDir)) {
+    dir = dirOrRef;
+    ref = refOrDir;
+  } else if (/^[0-9a-f]{64}$/i.test(dirOrRef)) {
+    ref = dirOrRef;
+    dir = refOrDir;
+  } else {
+    dir = dirOrRef;
+    ref = refOrDir;
+  }
+
+  if (ref.includes('/') || ref.includes('\\') || ref.includes('..')) {
+    throw new ArtifactStoreError('UNSAFE_REF', `artifact ref escapes the store: "${ref}"`);
+  }
+
+  const full = join(dir, ref);
+  let size: number;
+  try {
+    size = statSync(full).size;
+  } catch {
+    throw new ArtifactStoreError('NOT_FOUND', `artifact "${ref}" not found in "${dir}"`);
+  }
+
+  if (size > maxBytes) {
+    throw new ArtifactStoreError(
+      'TOO_LARGE',
+      `artifact "${ref}" is ${size} bytes, over the ${maxBytes}-byte cap — refusing instead of hashing an unbounded tree`,
+    );
+  }
+
+  const bytes = readFileSync(full);
+  const actualHash = createHash('sha256').update(bytes).digest('hex');
+  if (actualHash !== ref) {
+    throw new ArtifactStoreError(
+      'CORRUPT',
+      `artifact "${ref}" failed content-address verification (actual sha256: "${actualHash}") — refusing tampered blob`,
+    );
+  }
+
+  return bytes;
+}
+
+/**
+ * Read and decode a stored artifact envelope after verifying its integrity.
+ */
+export function readArtifact(
+  dirOrRef: string,
+  refOrDir?: string,
+  maxBytes: number = 25_000_000,
+): { uri: string; occurredAt: string; payload: unknown } {
+  const bytes = verifyArtifact(dirOrRef, refOrDir, maxBytes);
+  return JSON.parse(bytes.toString('utf8')) as { uri: string; occurredAt: string; payload: unknown };
+}
+
+/**
+ * Bounded artifact store seam (F19, scoped): artifacts stay
+ * filesystem-backed — an S3 store is out of scope and deliberately not
+ * built here. This interface is the seam a future S3 implementation plugs
+ * into; the filesystem implementation below is the only backend. The
+ * maxBytes guard refuses loudly instead of hashing unbounded trees.
+ */
+export interface ArtifactStore {
+  /** Persist bytes under `ref`; refuses with [artifact:TOO_LARGE] past maxBytes. */
+  put(ref: string, body: string | Buffer): string;
+  /** Read bytes back; refuses past maxBytes before hashing/returning. */
+  get(ref: string): Buffer;
+}
+
+export class ArtifactStoreError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(`[artifact:${code}] ${message}`);
+  }
+}
+
+export class FilesystemArtifactStore implements ArtifactStore {
+  constructor(
+    private readonly dir: string = join('data', 'artifacts'),
+    private readonly maxBytes: number = 25_000_000,
+  ) {}
+
+  put(ref: string, body: string | Buffer): string {
+    const bytes = typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : body.length;
+    // Bound the write before touching disk: an unbounded artifact tree is
+    // how a cache becomes a foothold.
+    if (bytes > this.maxBytes) {
+      throw new ArtifactStoreError(
+        'TOO_LARGE',
+        `artifact "${ref}" is ${bytes} bytes, over the ${this.maxBytes}-byte cap — refusing instead of storing an unbounded tree`,
+      );
+    }
+    if (ref.includes('/') || ref.includes('\\') || ref.includes('..')) {
+      throw new ArtifactStoreError('UNSAFE_REF', `artifact ref escapes the store: "${ref}"`);
+    }
+    mkdirSync(this.dir, { recursive: true });
+    writeFileSync(join(this.dir, ref), body);
+    return ref;
+  }
+
+  get(ref: string): Buffer {
+    if (ref.includes('/') || ref.includes('\\') || ref.includes('..')) {
+      throw new ArtifactStoreError('UNSAFE_REF', `artifact ref escapes the store: "${ref}"`);
+    }
+    const full = join(this.dir, ref);
+    let size: number;
+    try {
+      size = statSync(full).size;
+    } catch {
+      throw new ArtifactStoreError('NOT_FOUND', `artifact "${ref}" not found in "${this.dir}"`);
+    }
+    if (size > this.maxBytes) {
+      throw new ArtifactStoreError(
+        'TOO_LARGE',
+        `artifact "${ref}" is ${size} bytes, over the ${this.maxBytes}-byte cap — refusing instead of hashing an unbounded tree`,
+      );
+    }
+    return readFileSync(full);
+  }
+}
+
+/**
+ * Map raw events to OBSERVATION claims. Idempotent per (tenant, collector,
+ * fingerprint); ground tiers refused; every claim carries its artifact ref.
+ * The dedup key carries tenant AND collector identity: two tenants watching
+ * one repo must not suppress each other, and the legacy global key is
+ * honored on read so pre-fix receipts are not re-ingested.
  */
 export async function ingestEvents(
   db: AsyncDb,
@@ -85,7 +475,14 @@ export async function ingestEvents(
   }
   const ids: string[] = [];
   for (const e of events) {
-    if (await metaGet(db, `ingest:seen:${e.fingerprint}`)) continue;
+    // Identity-scoped receipt first (why: the old global `ingest:seen:<hash>`
+    // let one tenant's fetch hide another's); the legacy key is read-only
+    // back-compat so upgrades never double-ingest.
+    if (await metaGet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`)) continue;
+    if (await metaGet(db, `ingest:seen:${e.fingerprint}`)) {
+      await metaSet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`, 'migrated');
+      continue;
+    }
     const ref = storeArtifact(db, e, opts.artifactDir);
     const c = await ledger.append({
       tenant,
@@ -109,7 +506,7 @@ export async function ingestEvents(
         rawArtifactRef: ref,
       },
     });
-    await metaSet(db, `ingest:seen:${e.fingerprint}`, c.id);
+    await metaSet(db, `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`, c.id);
     ids.push(c.id);
   }
   return ids;
@@ -122,7 +519,7 @@ export function fileDiffCollector(name: string, dir: string, sourceTier: SourceT
     sourceTier,
     extractor: 'file-diff',
     extractorVersion: '1.0.0',
-    async poll(db: AsyncDb, now: string): Promise<RawEvent[]> {
+    async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
       let prev: Record<string, string>;
       try {
         prev = JSON.parse((await metaGet(db, `ingest:cursor:${name}`)) ?? '{}') as Record<string, string>;
@@ -142,12 +539,21 @@ export function fileDiffCollector(name: string, dir: string, sourceTier: SourceT
             source: `${name}:${f}`,
             uri: `file://${p}`,
             fingerprint: fp,
+            // Identity, distinct from the content hash: the occurrence is
+            // "this path", the revision is "these bytes". A re-fetch of
+            // unchanged bytes is the same revision (dedupes); an edit is a
+            // new revision of the same occurrence (new inbox row).
+            eventId: f,
+            revision: fp,
             occurredAt: now,
             summary: `${f} ${prev[p] === undefined ? 'appeared' : 'changed'}`,
-            payload: { bytes: body.length },
+            payload: { bytes: body.length, content: body },
           });
         }
       }
+      // Inbox BEFORE cursor (why: a crash here must leave the event staged
+      // for retry, never silently dropped; the retry dedupes on identity).
+      await stageToInbox(db, tenant, name, out, now);
       await metaSet(db, `ingest:cursor:${name}`, JSON.stringify(next));
       return out;
     },
@@ -163,7 +569,37 @@ export interface GitHubRelease {
   body: string | null;
 }
 
-type FetchFn = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+type FetchFn = (url: string) => Promise<{
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+  /** Present on real fetch Responses; absent on old test stubs (treated as "no next page"). */
+  headers?: { get(name: string): string | null } | Record<string, string | undefined> | Headers;
+}>;
+
+/**
+ * Read the RFC 5988 `Link` header's `rel="next"` URL, across the header
+ * shapes a fetch injection may carry (Headers instance, getter object, or
+ * plain record). Null means "no explicit continuation".
+ */
+export function nextPageLinkOf(
+  headers: { get(name: string): string | null } | Record<string, string | undefined> | Headers | undefined,
+): string | null {
+  if (!headers) return null;
+  let raw: string | null | undefined;
+  if (typeof (headers as { get?: unknown }).get === 'function') {
+    raw = (headers as { get(name: string): string | null }).get('link');
+  } else {
+    const rec = headers as Record<string, string | undefined>;
+    raw = rec['link'] ?? rec['Link'];
+  }
+  if (!raw) return null;
+  for (const part of raw.split(',')) {
+    const m = part.match(/<([^>]+)>\s*;\s*[^,]*rel="next"/);
+    if (m) return m[1]!;
+  }
+  return null;
+}
 
 /** GitHub releases + tags. `fetchFn` is injected so tests never hit network. */
 export function gitHubReleasesCollector(
@@ -178,10 +614,32 @@ export function gitHubReleasesCollector(
     sourceTier,
     extractor: 'github-releases',
     extractorVersion: '1.0.0',
-    async poll(db: AsyncDb, now: string): Promise<RawEvent[]> {
-      const res = await fetchFn(`https://api.github.com/repos/${owner}/${repo}/releases?per_page=20`);
-      if (!res.ok) throw new Error(`[ingest:GITHUB_FETCH] ${owner}/${repo} → ${res.status}`);
-      const releases = (await res.json()) as GitHubRelease[];
+    async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
+      // Explicit continuation, never a fixed first page (why the old code
+      // lost history: `?per_page=20` read page 1 and stopped, so release 21+
+      // never entered the inbox). Follow `rel="next"` when the API offers
+      // it; otherwise walk `?page=` while full pages keep arriving.
+      const PER_PAGE = 100;
+      const base = `https://api.github.com/repos/${owner}/${repo}/releases?per_page=${PER_PAGE}`;
+      const releases: GitHubRelease[] = [];
+      let url: string | null = `${base}&page=1`;
+      let fetches = 0;
+      while (url !== null && fetches < 25) {
+        fetches += 1;
+        const res = await fetchFn(url);
+        if (!res.ok) throw new Error(`[ingest:GITHUB_FETCH] ${owner}/${repo} → ${res.status}`);
+        const batch = (await res.json()) as GitHubRelease[];
+        if (batch.length === 0) break;
+        releases.push(...batch);
+        const viaLink = nextPageLinkOf(res.headers);
+        if (viaLink) {
+          url = viaLink;
+        } else if (batch.length >= PER_PAGE) {
+          url = `${base}&page=${fetches + 1}`;
+        } else {
+          url = null;
+        }
+      }
       const cursor = Number((await metaGet(db, `ingest:cursor:${name}`)) ?? 0);
       let high = cursor;
       const out: RawEvent[] = [];
@@ -193,12 +651,20 @@ export function gitHubReleasesCollector(
             source: name,
             uri: r.html_url,
             fingerprint: fingerprintOf(`${r.id}:${r.tag_name}:${r.published_at ?? ''}`),
+            // Identity vs content: the occurrence is the release id, the
+            // revision is its tag/published marker. Re-tagging a release is
+            // a new revision of the same occurrence (new inbox row), while
+            // re-fetching it is the same identity (dedupes).
+            eventId: String(r.id),
+            revision: `${r.tag_name}:${r.published_at ?? ''}`,
             occurredAt: r.published_at ?? now,
             summary,
             payload: { tag: r.tag_name, name: r.name, notes: (r.body ?? '').slice(0, 2000) },
           });
         }
       }
+      // Inbox BEFORE cursor — same crash ordering as the file collector.
+      await stageToInbox(db, tenant, name, out, now);
       await metaSet(db, `ingest:cursor:${name}`, String(high));
       return out;
     },
@@ -208,10 +674,12 @@ export function gitHubReleasesCollector(
 /**
  * L1 novelty-vs-Ledger: a signal is novel only if no live claim already
  * says the same thing about the same subject. Retired, stale, and
- * superseded rows do not count — history is not news.
+ * superseded rows do not count — history is not news. Answered by a SQL
+ * EXISTS probe (ledger.hasLiveClaim), never by hydrating the subject's
+ * full history into memory first.
  */
 export async function isNovel(ledger: Ledger, tenant: string, subject: string, statement: string): Promise<boolean> {
-  return !(await ledger.bySubject(tenant, subject)).some((c) => c.statement === statement);
+  return !(await ledger.hasLiveClaim(tenant, subject, statement));
 }
 
 export interface SerperResult {
