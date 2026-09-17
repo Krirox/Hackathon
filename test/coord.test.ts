@@ -60,6 +60,40 @@ T('approval latency breaks down per human and per target scope', async () => {
   eq(s.byScope[1]!.medianSeconds, 1);
 });
 
+T('p90 ranks over sorted values, not insertion order', async () => {
+  const { coord } = await fresh();
+  await coord.submit(base({ id: 'p1', goal: 'slow first', now: NOW }));
+  await coord.submit(base({ id: 'p2', goal: 'fast second', now: NOW }));
+  // Audit order is [21600, 1]: reading the percentile off insertion order
+  // reported p90 = 1 for a distribution whose slow tail is 6h.
+  await coord.recordApprovalLatency(TEN, 'p1', 'approve', 'human:a', '2026-09-09T18:00:00.000Z');
+  await coord.recordApprovalLatency(TEN, 'p2', 'approve', 'human:b', '2026-09-09T12:00:01.000Z');
+  const s = await coord.approvalLatencyStats(TEN);
+  eq(s.n, 2);
+  eq(s.p90Seconds, 21600, 'p90 is the slow tail regardless of arrival order:');
+  eq(s.maxSeconds, 21600);
+});
+
+T('reportUsage flows spend mid-run without burning rounds', async () => {
+  const { coord } = await fresh();
+  await coord.submit(base({ id: 'u1' }));
+  await coord.reportUsage(TEN, 'u1', { tokens: 400 });
+  await coord.reportUsage(TEN, 'u1', { tokens: 100 });
+  const r = await coord.get(TEN, 'u1');
+  eq(r!.spent.tokens, 500);
+  eq(r!.spent.rounds, 0, 'a token flow is continuous activity, not coordination rounds:');
+  eq(r!.state, 'IN_FLIGHT', 'first flow moves ADMITTED to IN_FLIGHT:');
+});
+
+T('reportUsage budget-death terminates the run mid-flight', async () => {
+  const { coord } = await fresh();
+  await coord.submit(base({ id: 'u2', bid: { tokens: 100 } }));
+  const r = await coord.reportUsage(TEN, 'u2', { tokens: 101 });
+  eq(r.state, 'TERMINATED_BUDGET');
+  eq(r.refusalReason!.includes('mid-run'), true, 'the breach names itself:');
+  eq((await coord.get(TEN, 'u2'))!.spent.tokens, 101, 'overspend is recorded, not dropped:');
+});
+
 T('NOTICE never interrupts a human — completes straight to digest', async () => {
   const { coord } = await fresh();
   const r = await coord.submit(
