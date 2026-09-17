@@ -1,0 +1,23 @@
+import './ledger.test.ts';
+import './coord.test.ts';
+import './router.test.ts';
+import './compiler.test.ts';
+import './gov.test.ts';
+import './ingest.test.ts';
+import './wedge.test.ts';
+import './feature.test.ts';
+import './deepresearch.test.ts';
+import './evals.test.ts';
+import './sense.test.ts';
+import './substrate.test.ts';
+import './attrib.test.ts';
+import './capabilities.test.ts';
+import './core.test.ts';
+import './console.test.ts';
+import './models.test.ts';
+import './jcode.test.ts';
+import './vendor.test.ts';
+import './talk.test.ts';
+import { finish } from './helpers.ts';
+
+await finish();

@@ -1,0 +1,14 @@
+# Weekly upstream drift notice. Informational only — never fails the build.
+# Upstream moves (Buzz: ~1.5k issues / ~2k PRs); we pin and rebase on
+# cadence or on need. A human reads this log and decides.
+name: upstream-drift
+on:
+  schedule:
+    - cron: '7 8 * * 1'
+  workflow_dispatch:
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/upstream-drift.mjs

@@ -1,0 +1,65 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+/**
+ * Substrate, part 5 (TODO §0.5): identity — who is this agent acting as,
+ * with what grants, and how is that audited.
+ *
+ * A scope token binds (scope, grants, expiry) under HMAC with the Vital
+ * core secret. Harnesses present it; adapters verify it before executing.
+ * No ambient credentials cross the boundary: the token IS the credential,
+ * scoped and expiring, and every verification is auditable by the caller.
+ */
+
+export class IdentityError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(`[identity:${code}] ${message}`);
+  }
+}
+
+export interface ScopeGrant {
+  scope: string;
+  grants: string[];
+  issuedAt: string;
+  expiresAt: string;
+}
+
+const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
+const unb64 = (s: string): string => Buffer.from(s, 'base64url').toString('utf8');
+
+export function mintScopeToken(secret: string, grant: ScopeGrant): string {
+  if (!secret) throw new IdentityError('NO_SECRET', 'cannot mint without a core secret');
+  if (!grant.scope) throw new IdentityError('NO_SCOPE', 'a token without a scope is ambient authority');
+  const body = b64(JSON.stringify(grant));
+  const sig = createHmac('sha256', secret).update(body).digest('hex');
+  return `${body}.${sig}`;
+}
+
+export function verifyScopeToken(secret: string, token: string, now: string): ScopeGrant {
+  const [body, sig] = token.split('.');
+  if (!body || !sig) throw new IdentityError('MALFORMED_TOKEN', 'token is not body.signature');
+  const expect = createHmac('sha256', secret).update(body).digest('hex');
+  // Strict hex check first: Buffer.from(x, 'hex') silently drops invalid
+  // trailing characters, which would accept appended garbage as valid.
+  if (!/^[0-9a-f]{64}$/.test(sig) || sig.length !== expect.length) {
+    throw new IdentityError('BAD_SIGNATURE', 'scope token signature fails');
+  }
+  const a = Buffer.from(sig, 'hex');
+  const b = Buffer.from(expect, 'hex');
+  if (!timingSafeEqual(a, b)) {
+    throw new IdentityError('BAD_SIGNATURE', 'scope token signature fails');
+  }
+  let grant: ScopeGrant;
+  try {
+    grant = JSON.parse(unb64(body)) as ScopeGrant;
+  } catch {
+    throw new IdentityError('MALFORMED_TOKEN', 'scope token body is not JSON');
+  }
+  if (!grant.scope || !Array.isArray(grant.grants))
+    throw new IdentityError('MALFORMED_TOKEN', 'scope token carries no scope/grants');
+  if (now > grant.expiresAt)
+    throw new IdentityError('EXPIRED_TOKEN', `scope "${grant.scope}" token lapsed at ${grant.expiresAt}`);
+  return grant;
+}

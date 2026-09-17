@@ -1,0 +1,215 @@
+import { connect, type Socket } from 'node:net';
+import { EventEmitter } from 'node:events';
+import { API_VERSION_MAJOR, type ClientFrame, type PermissionDecision, type ServerFrame } from './protocol.ts';
+
+/**
+ * Minimal NDJSON client for the jcode harness API.
+ *
+ * Deliberately NOT the published @1jehuang/jcode-sdk: we speak the wire
+ * directly so Vital has no npm dependency on a runtime that also ships
+ * platform binaries, and so the permission round-trip is ours to govern.
+ *
+ * Transport note: on macOS/Linux this is a Unix socket; Windows uses a named
+ * pipe. node:net handles both when given the right path string, but Windows
+ * has no live upstream e2e coverage, so we treat it as untested (README says
+ * the same) and keep the transport injectable for that reason.
+ */
+export interface JcodeClientOptions {
+  socketPath?: string;
+  clientLabel?: string;
+  connectFn?: (path: string) => Socket;
+  /**
+   * Bound on each handshake leg (transport connect, then hello). A live
+   * sibling that accepts and never answers (e.g. the bridge waiting on an
+   * absent daemon) must surface as a rejection, never a hang — found live
+   * 2026-09-09.
+   */
+  helloTimeoutMs?: number;
+}
+
+export class JcodeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(`[jcode:${code}] ${message}`);
+  }
+}
+
+export class JcodeClient extends EventEmitter {
+  private sock: Socket | null = null;
+  private buf = '';
+  private nextId = 1;
+  private pending = new Map<number, { resolve: (f: ServerFrame) => void; reject: (e: Error) => void }>();
+  private helloOk: ServerFrame | null = null;
+
+  constructor(private readonly opts: JcodeClientOptions = {}) {
+    super();
+  }
+
+  get isOpen(): boolean {
+    return this.sock !== null;
+  }
+
+  async connect(): Promise<void> {
+    if (this.sock) throw new JcodeError('ALREADY_OPEN', 'call close() first');
+    const path = this.opts.socketPath ?? '';
+    const opener = this.opts.connectFn ?? ((p: string) => connect({ path: p }));
+    const budget = this.opts.helloTimeoutMs ?? 15_000;
+    const timeout = (ms: number, what: string): Promise<never> =>
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new JcodeError('HELLO_TIMEOUT', `${what} exceeded ${ms}ms`)), ms);
+        t.unref?.();
+      });
+    this.sock = opener(path);
+    await Promise.race([
+      new Promise<void>((res, rej) => {
+        this.sock!.once('connect', res);
+        this.sock!.once('error', (e) => rej(new JcodeError('CONNECT', `${path}: ${e.message}`)));
+      }),
+      timeout(budget, `connect ${path}`),
+    ]).catch((e) => {
+      this.close();
+      throw e;
+    });
+    this.sock.setEncoding('utf8');
+    this.sock.on('data', (chunk: string) => this.onData(chunk));
+    this.sock.on('close', () => {
+      this.sock = null;
+      this.emit('close');
+    });
+
+    // hello must be first
+    const f = await Promise.race([
+      this.request('hello', {
+        min_version: API_VERSION_MAJOR,
+        max_version: API_VERSION_MAJOR,
+        client: this.opts.clientLabel ?? 'vital/0.0.1',
+      }),
+      timeout(budget, `hello ${path}`),
+    ]).catch((e) => {
+      this.close();
+      throw e;
+    });
+    if (f.ev !== 'hello_ok') {
+      throw new JcodeError('HANDSHAKE', `expected hello_ok, got "${f.ev}"`);
+    }
+    if (typeof f.v === 'number' && f.v !== API_VERSION_MAJOR) {
+      throw new JcodeError('VERSION', `server speaks v${f.v}, Vital speaks v${API_VERSION_MAJOR}`);
+    }
+    this.helloOk = f;
+  }
+
+  get serverInfo(): ServerFrame | null {
+    return this.helloOk;
+  }
+
+  private onData(chunk: string): void {
+    this.buf += chunk;
+    let nl: number;
+    while ((nl = this.buf.indexOf('\n')) >= 0) {
+      const line = this.buf.slice(0, nl).trim();
+      this.buf = this.buf.slice(nl + 1);
+      if (!line) continue;
+      let frame: ServerFrame;
+      try {
+        frame = JSON.parse(line) as ServerFrame;
+      } catch {
+        continue;
+      } // unknown/garbage frame: skip, never crash the loop
+      if (typeof frame.reply_to === 'number') {
+        const w = this.pending.get(frame.reply_to);
+        if (w) {
+          this.pending.delete(frame.reply_to);
+          // An `error` reply is a rejection, never a resolution. Resolving it
+          // would let callers treat a denial as success; and emitting it as a
+          // bare 'error' event would kill the process (ERR_UNHANDLED_ERROR).
+          if (frame.ev === 'error') {
+            w.reject(new JcodeError(String(frame.code ?? 'API'), String(frame.message ?? 'rejected')));
+          } else {
+            w.resolve(frame);
+          }
+        }
+      }
+      this.emit('event', frame);
+      // Namespaced so Node never sees a bare 'error' event name. Listeners
+      // subscribe to `frame:<ev>` (e.g. `frame:turn_done`).
+      if (frame.ev) this.emit(`frame:${frame.ev}`, frame);
+    }
+  }
+
+  request(req: string, fields: Record<string, unknown> = {}): Promise<ServerFrame> {
+    if (!this.sock) return Promise.reject(new JcodeError('NOT_CONNECTED', 'connect() first'));
+    const id = this.nextId++;
+    const frame: ClientFrame = { v: API_VERSION_MAJOR, id, req, ...fields };
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.sock!.write(JSON.stringify(frame) + '\n', (err) => {
+        if (err) {
+          this.pending.delete(id);
+          reject(new JcodeError('WRITE', err.message));
+        }
+      });
+    });
+  }
+
+  /** Throws on an `error` event so callers cannot silently ignore a failure. */
+  async requestOk(req: string, fields?: Record<string, unknown>): Promise<ServerFrame> {
+    const f = await this.request(req, fields);
+    if (f.ev === 'error') throw new JcodeError(String(f.code ?? 'API'), String(f.message ?? 'rejected'));
+    return f;
+  }
+
+  /** Reply to create_session / attach_session is `attached { session }`. */
+  private sessionIdFrom(f: ServerFrame, what: string): string {
+    if (f.ev !== 'attached') {
+      throw new JcodeError('UNEXPECTED_REPLY', `${what} replied "${f.ev}", expected "attached"`);
+    }
+    const s = (f.session ?? {}) as { session_id?: string };
+    if (!s.session_id) throw new JcodeError('NO_SESSION', `${what} returned no session_id`);
+    return String(s.session_id);
+  }
+
+  async createSession(workingDir?: string): Promise<string> {
+    const f = await this.requestOk('create_session', workingDir ? { working_dir: workingDir } : {});
+    return this.sessionIdFrom(f, 'create_session');
+  }
+
+  async attach(sessionId: string): Promise<void> {
+    const f = await this.requestOk('attach_session', { session_id: sessionId });
+    if (f.ev !== 'attached' && f.ev !== 'ok') {
+      throw new JcodeError('UNEXPECTED_REPLY', `attach_session replied "${f.ev}"`);
+    }
+  }
+
+  async send(sessionId: string, content: string, opts: { noReply?: boolean } = {}): Promise<void> {
+    await this.requestOk('send_message', {
+      session_id: sessionId,
+      content,
+      images: [],
+      no_reply: opts.noReply ?? false,
+    });
+  }
+
+  async cancel(sessionId: string): Promise<void> {
+    await this.request('cancel', { session_id: sessionId });
+  }
+
+  async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
+    await this.request('soft_interrupt', { session_id: sessionId, content, images: [], urgent });
+  }
+
+  /** The governance round-trip: answer a PermissionRequest. */
+  async respondPermission(sessionId: string, requestId: string, decision: PermissionDecision): Promise<void> {
+    await this.request('permission_response', {
+      session_id: sessionId,
+      request_id: requestId,
+      decision,
+    });
+  }
+
+  close(): void {
+    this.sock?.destroy();
+    this.sock = null;
+  }
+}
