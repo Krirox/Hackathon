@@ -11,4 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # .upstream/ is gitignored by design, so a fresh runner has no clones
+      # and the drift script would report "not cloned" for everything — a
+      # watch that watches nothing. Shallow-clone best-effort: each repo
+      # independently, so one failure still leaves the other three watched.
+      # The job stays informational (drift.mjs exits 0 always).
+      - run: git clone --depth 1 https://github.com/yc-software/qm .upstream/qm || echo "CLONE_FAILED_qm"
+      - run: git clone --depth 1 https://github.com/block/buzz.git .upstream/buzz || echo "CLONE_FAILED_buzz"
+      - run: git clone --depth 1 https://github.com/1jehuang/jcode .upstream/jcode-1jehuang || echo "CLONE_FAILED_jcode"
+      - run: git clone --depth 1 https://github.com/TencentCloud/TencentDB-Agent-Memory.git .upstream/tdam || echo "CLONE_FAILED_tdam"
       - run: node scripts/upstream-drift.mjs

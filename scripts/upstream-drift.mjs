@@ -5,7 +5,7 @@
 // rebase on cadence or on need, never floating.
 import { execFileSync } from 'node:child_process';
 
-for (const r of ['qm', 'buzz', 'jcode-1jehuang']) {
+for (const r of ['qm', 'buzz', 'jcode-1jehuang', 'tdam']) {
   const dir = `.upstream/${r}`;
   let local = '';
   try {
