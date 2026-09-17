@@ -7,7 +7,9 @@ import { buildReport } from './console/report.ts';
 import { renderHtml } from './console/render.ts';
 import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
-import { writeFileSync } from 'node:fs';
+import { installAuthSchema, signupTenant, changePassword } from './core/auth.ts';
+import { eraseTenant, ERASURE_DONE_ACTION } from './core/erasure.ts';
+import { writeFileSync, mkdirSync } from 'node:fs';
 
 /**
  * Minimal dev CLI + instance verifier (TODO §§0.4, V2.1).
@@ -15,6 +17,9 @@ import { writeFileSync } from 'node:fs';
  *   tsx src/cli.ts status [--db path]              sqlite file, :memory:, or postgres:// URL
  *   tsx src/cli.ts report [--db path] [--out report.html] [--tenant acme]
  *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme]
+ *                       [--site site] [--approver-role member|admin|owner]
+ *   tsx src/cli.ts signup --tenant acme --email o@a.test --password '...'
+ *   tsx src/cli.ts passwd --tenant acme --email o@a.test --password '...'
  */
 
 /**
@@ -123,13 +128,90 @@ if (cmd === 'status') {
   const db = usePostgres ? openPostgres(dbUrl) : openDb(dbUrl);
   if (usePostgres) await migratePostgres(db);
   else await migrate(db);
+  const site = flag('--site');
+  const approverRole = flag('--approver-role') as 'member' | 'admin' | 'owner' | undefined;
+  if (approverRole && !['member', 'admin', 'owner'].includes(approverRole))
+    throw new Error('--approver-role must be member | admin | owner');
   const server = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
     port,
     host,
     tenant,
+    siteDir: site,
+    approverRole,
   });
-  console.log(`vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl})`);
+  console.log(
+    `vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl}, tenant ${tenant}, auth on${site ? ', site ./site' : ''})`,
+  );
+} else if (cmd === 'signup') {
+  // Creates the tenant, its first owner, and the auth tables. The owner's
+  // password is not forced to change (the founder chose it interactively);
+  // invited users, by contrast, always get a forced change.
+  const path = flag('--db') ?? 'var/vital.db';
+  const tenant = flag('--tenant');
+  const email = flag('--email');
+  const password = flag('--password');
+  const name = flag('--name') ?? 'Owner';
+  if (!tenant || !email || !password)
+    throw new Error('usage: vital signup --tenant <slug> --email <email> --password <password> [--name "Owner"]');
+  const db = openDb(path);
+  await migrate(db);
+  await installAuthSchema(db);
+  await signupTenant(db, { slug: tenant, name: tenant, email, password, ownerName: name }, new Date().toISOString());
+  console.log(`tenant "${tenant}" created; owner ${email} can sign in at the console`);
+  await db.close();
+} else if (cmd === 'passwd') {
+  // Operator password reset: sets a user's password and revokes their sessions.
+  // For lost passwords and incident response; the user is not required to be logged in.
+  const path = flag('--db') ?? 'var/vital.db';
+  const tenant = flag('--tenant');
+  const email = flag('--email');
+  const password = flag('--password');
+  if (!tenant || !email || !password)
+    throw new Error('usage: vital passwd --tenant <slug> --email <email> --password <new-password>');
+  const db = openDb(path);
+  await migrate(db);
+  await installAuthSchema(db);
+  const user = (await db
+    .prepare('SELECT id FROM users WHERE tenant = ? AND email = ?')
+    .get(tenant, email.trim().toLowerCase())) as { id: string } | undefined;
+  if (!user) throw new Error(`no user ${email} in tenant ${tenant}`);
+  await changePassword(db, tenant, user.id, password, new Date().toISOString());
+  console.log(`password changed for ${email}; all their sessions were revoked`);
+  await db.close();
+} else if (cmd === 'erase') {
+  // GDPR Article 17 per-tenant erasure. Export is mandatory by design and
+  // runs INSIDE the erasure transaction (see src/core/erasure.ts): the
+  // portable record and the deletion commit or roll back together.
+  const path = flag('--db') ?? 'var/vital.db';
+  const tenant = flag('--tenant');
+  const actor = flag('--actor') ?? 'cli:erase';
+  const exportDir = flag('--export-to');
+  const confirmed = args.includes('--yes');
+  if (!tenant) throw new Error('usage: vital erase --tenant <slug> --actor <who> [--export-to <dir>] [--yes]');
+  if (!confirmed) {
+    console.error(
+      `refusing to erase tenant "${tenant}" without --yes (this deletes ALL of its data and cannot be undone)`,
+    );
+    process.exit(1);
+  }
+  const db = openDb(path);
+  await migrate(db);
+  await installAuthSchema(db);
+  const result = await eraseTenant(db, tenant, actor);
+  if (exportDir) {
+    mkdirSync(exportDir, { recursive: true });
+    const file = `${exportDir}/${tenant}-erasure-export-${result.erasedAt.replace(/[:.]/g, '-')}.json`;
+    writeFileSync(file, JSON.stringify(result.export, null, 2));
+    console.log(`export written: ${file}`);
+  }
+  const rows = Object.entries(result.deleted)
+    .filter(([, n]) => n > 0)
+    .map(([t, n]) => `${t}=${n}`)
+    .join(' ');
+  console.log(`tenant "${tenant}" erased at ${result.erasedAt} (receipt: ${ERASURE_DONE_ACTION} under erased:${tenant})`);
+  console.log(`rows deleted: ${rows || 'none'}`);
+  await db.close();
 } else {
-  console.error(`unknown command "${cmd}" (try: status | report | serve)`);
+  console.error(`unknown command "${cmd}" (try: status | report | serve | signup | passwd | erase)`);
   process.exit(1);
 }

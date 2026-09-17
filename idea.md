@@ -563,7 +563,7 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 | **7 Act** | ongoing | `ACT_REVERSIBLE` autonomy via Trust Ledger | honeytask detection ≥ threshold; kill-switch drills pass; legal review |
 | **8 Runtime** | 12mo+ | expand beyond launches; sell to COO/CFO | `cost_per_good_decision` falling **3 consecutive quarters** — the only proof the thesis is true |
 
-**v2 progress (2026-09-09, <!-- vital:testcount -->209/209 tests green<!-- /vital:testcount -->).** Phase 0 substrate exists
+**v2 progress (2026-09-09, <!-- vital:testcount -->251/251 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
 as tested code (scheduler, sandbox, egress core, screen, identity, two
 harness adapters) — deployment, not design, is what's left. Ledger v0 is
 built past its gate shape (decisions, bundles, replay, outcomes, curation

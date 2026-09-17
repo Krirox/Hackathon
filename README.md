@@ -34,7 +34,25 @@ Requires Node 22.
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit, must be 0 errors
-npm test            # tsx test/run.ts — <!-- vital:testcount -->209 tests, real sockets, real sqlite<!-- /vital:testcount -->
+npm test            # tsx test/run.ts — <!-- vital:testcount -->251 tests, real sockets, real sqlite<!-- /vital:testcount -->
+
+# The console is authenticated. Boot it, then claim the tenant in the browser:
+tsx src/cli.ts serve --db var/vital.db --tenant acme --port 3100
+# → http://127.0.0.1:3100 redirects to /signup while the tenant has no owner.
+#   Claiming makes you the owner and signs you straight in; afterwards the
+#   console is login-only and membership is invite-only — admins manage the
+#   team at /team (invite/disable; invited users must change their password at
+#   first login). Raise the approval bar with --approver-role admin|owner, and
+#   serve the marketing site from the same process with --site site (the site
+#   owns /, the console moves to /console). The site links into this console
+#   via <meta name="vital-console-url"> and shows a live pill from GET
+#   /api/health.
+#
+# Headless alternative (CI, scripts): pre-provision from the environment or CLI.
+VITAL_BOOTSTRAP_EMAIL=you@acme.test VITAL_BOOTSTRAP_PASSWORD='a-long-password' \
+  tsx src/cli.ts serve --db var/vital.db --tenant acme
+#   … or: tsx src/cli.ts signup --db var/vital.db --tenant acme \
+#          --email you@acme.test --password 'a-long-password'
 ```
 
 No Postgres, no Buzz, no jcode needed for the suite: tests run against
@@ -45,7 +63,7 @@ sockets (`test/fake-harness.ts`).
 
 ```
 src/
-  core/       types + sqlite driver + engine-dialect JSON helpers
+  core/       types + sqlite driver + dialect helpers + auth (tenants, users, sessions)
   ledger/     Reality Ledger: typed claims, decisions + Context Bundles, outcomes, replay
   coord/      QUERY/REQUEST/NOTICE + scheduler (budget, hops, cycles, escalation cap)
   router/     4-class Cognitive Router (shadow-first, injectable RNG)
@@ -58,20 +76,23 @@ test/         per-module files + helpers + tiny runner (see test/helpers.ts)
 docs/adr/     architecture decisions (0001–0005)
 ```
 
-## Current state (2026-09-11)
+## Current state (2026-09-17)
 
-Typecheck clean, suite <!-- vital:testcount -->209/209 green<!-- /vital:testcount -->.
-Built (per `TODO.md` "V2 status"): ledger+decisions+replay+export · coord+
-decompose+escalation gate · router+registry+calibration · compiler+mining+
-registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/
-limits) · evals · attrib · ingest (file/github/serper) · sense (contracts/
-materiality/integrity/poisoning) · wedge (ship/churn/feature/deepresearch)
-· talk · substrate (scheduler/sandbox/egress/screen/identity/2 adapters) ·
-capabilities · vendor/qm ×7. Not built: production surface (live
-Buzz/jcode/Postgres, approval rooms), pilot traffic, GTM — the V2 backlog
-in `TODO.md` is the only list that matters now.
-Re-estimate recorded in `TODO.md` §0.5: ~18–23 weeks solo to the first
-instrumented loop, not ~8.
+Typecheck clean, suite <!-- vital:testcount -->251/251 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->223/223 green<!-- /vital:testcount -->.
+Built: ledger (+decisions/outcomes), coordination (+escalation gate),
+router, compiler, gov matrix (trust, honeytasks, kills), eval spine,
+attribution, ingest, sensing (Watch Contracts + Integrity Gate), the wedge
+loops, jcode connection, talk surface, session-authenticated console
+(signup-claim/login/CSRF/lockout/team invite+disable with role
+gates/approver-role floor/override capture with session identity/approval
+latency/health endpoint — `SECURITY.md`), per-tenant GDPR erasure
+(export-first, audited, `vital erase`), a static site wired to the console,
+and the four vendored QM modules. Not built: live
+Buzz/jcode/production traffic, the remaining auth items in `TODO.md`
+V2.1.1 (service tokens, owner-field resolution), GTM. See `TODO.md` "V2
+status" — this file's older state lines have rotted before; TODO.md is the
+build truth.
 
 ## Rules for working here
 

@@ -6,6 +6,7 @@ import { composeDigest } from '../src/console/digest.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import { listCases } from '../src/evals/runner.ts';
 import { rIn } from './helpers.ts';
+import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
@@ -49,6 +50,12 @@ async function seeded() {
       0.9,
       NOW,
     );
+  // A second request left open for the served-console approval flow.
+  // Distinct goal → distinct idempotency key (same goal would dedupe to r1).
+  const r2 = await coord.submit(
+    base({ id: 'r2', goal: 'queued for approval', claimRefs: [rel.id], bid: { dollars: 1, humanMinutes: 5 } }),
+  );
+  const r2State = r2.request.state;
   const dec = await ledger.recordDecision({
     tenant: TEN,
     goal: 'launch',
@@ -78,7 +85,7 @@ async function seeded() {
       'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
     )
     .run('tr2', TEN, null, 'marketing', 'release.detect', 'i', '[]', 'REFLEX', 'SUCCESS', '{}', null, 0.9, NOW);
-  return { ...ctx, rel, dec };
+  return { ...ctx, rel, dec, r2State };
 }
 
 T('the report aggregates health, cost, tiers, queue, and rooms from the database', async () => {
@@ -100,10 +107,15 @@ T('the report aggregates health, cost, tiers, queue, and rooms from the database
 T('the approval queue lists human-minute work with slots', async () => {
   const { db, ledger, coord, comp } = await seeded();
   const r = await buildReport(db, ledger, coord, comp, TEN, NOW);
-  eq(r.needsHuman.length, 1);
-  eq(r.needsHuman[0]!.scope, 'engineering');
-  eq(r.health.escalations, { open: 1, cap: 3 });
-  eq(r.health.humanMinutes.spentToday, 20);
+  // r1 (accepted+charged) and r2 (queued for the served-console flow) both
+  // need a human; the console flow approves r2 in the authed test below.
+  eq(r.needsHuman.length, 2);
+  eq(
+    r.needsHuman.every((n) => n.scope === 'engineering'),
+    true,
+  );
+  eq(r.health.escalations, { open: 2, cap: 3 });
+  eq(r.health.humanMinutes.spentToday, 20, 'r2 has not spent anything yet:');
 });
 
 T('charts draw data, not decoration — values appear in the SVG', async () => {
@@ -302,28 +314,66 @@ T('approval latency is instrumented: recorded per decision, aggregated, served',
   }
 });
 
-T('the served console approves and declines through the coordinator', async () => {
-  const { db, ledger, coord, comp } = await seeded();
+T('the served console is session-gated: login, then approve through the coordinator', async () => {
+  const { db, ledger, coord, comp, r2State } = await seeded();
+  // The console is a per-tenant surface: its tenant must exist and have an owner.
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
-    const home: string = await (await fetch(`${base_}/`)).text();
-    eq(home.includes('Reality health'), true, 'serves the report:');
-    const anon = (await (await fetch(`${base_}/api/requests/r1/approve`, { method: 'POST', body: '{}' })).json()) as {
-      ok: boolean;
-      error: string;
-    };
+    const anon = (await (
+      await fetch(`${base_}/api/requests/r1/approve`, { method: 'POST', body: '{}', redirect: 'manual' })
+    ).json()) as { ok: boolean; error: string };
     eq(anon.ok, false, 'anonymous approval refused:');
+    const homeAnon = await fetch(`${base_}/`, { redirect: 'manual' });
+    eq(homeAnon.status, 303, 'the report itself is behind the login:');
+    // Sign in and carry the session cookie — the login form itself is
+    // CSRF-protected via the double-submit pre-session cookie.
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCsrf = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const loginRes = await fetch(`${base_}/login`, {
+      method: 'POST',
+      headers: { cookie: preCsrf },
+      body: `csrf=${preToken}&email=owner%40acme.test&password=the-console-password`,
+      redirect: 'manual',
+    });
+    eq(loginRes.status, 303, 'login redirects to the console:');
+    const cookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    eq(cookie.includes('vital_session='), true);
+    // One session for the whole flow — the CSRF token is per-session, so the
+    // page and the API call must carry the SAME cookie.
+    const home: string = await (await fetch(`${base_}/`, { headers: { cookie }, redirect: 'manual' })).text();
+    eq(home.includes('Reality health'), true, 'serves the report:');
+    const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+    // CSRF required even with a valid session.
+    const csrfLess = (await (
+      await fetch(`${base_}/api/requests/r2/approve`, { method: 'POST', headers: { cookie }, body: '{}' })
+    ).json()) as { ok: boolean };
+    eq(csrfLess.ok, false, 'a session without the CSRF token cannot approve:');
+    eq((await coord.get(TEN, 'r2'))!.state, r2State, 'the refused call moved nothing:');
+    // Approve the queued request as the session identity.
     const approved = (await (
-      await fetch(`${base_}/api/requests/r1/approve`, { method: 'POST', body: JSON.stringify({ by: 'human:priya' }) })
-    ).json()) as { ok: boolean; state: string };
-    eq(approved.ok, true);
-    eq(approved.state, 'ACCEPTED');
-    eq((await coord.get(TEN, 'r1'))!.state, 'ACCEPTED', 'the transition landed in the ledger path:');
+      await fetch(`${base_}/api/requests/r2/approve`, {
+        method: 'POST',
+        headers: { cookie, 'x-vital-csrf': csrf, 'content-type': 'application/json' },
+        body: '{}',
+      })
+    ).json()) as { ok: boolean; state: string; by: string };
+    eq(approved.ok, true, `approve failed: ${JSON.stringify(approved)}`);
+    eq(approved.state, 'ACCEPTED', `unexpected state: ${JSON.stringify(approved)}`);
+    eq(approved.by.includes('owner@acme.test'), true, 'the approver is the authenticated user:');
+    eq((await coord.get(TEN, 'r2'))!.state, 'ACCEPTED', 'the transition landed in the ledger path:');
     const missing = (await (
       await fetch(`${base_}/api/requests/nope/decline`, {
         method: 'POST',
-        body: JSON.stringify({ by: 'h', reason: 'no' }),
+        headers: { cookie, 'x-vital-csrf': csrf, 'content-type': 'application/json' },
+        body: '{"reason":"no"}',
       })
     ).json()) as { ok: boolean };
     eq(missing.ok, false);

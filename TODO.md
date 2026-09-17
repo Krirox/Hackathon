@@ -5,15 +5,20 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 ## V2 status (2026-09-17)
 
 ```
-typecheck  0 errors
-tests      <!-- vital:testcount -->209/209 GREEN<!-- /vital:testcount --> on committed main (the concurrent session's tree is further ahead)
+typecheck  0 errors (re-verified 2026-09-17)
+tests      <!-- vital:testcount -->251/251 GREEN<!-- /vital:testcount --> (2026-09-17, incl. 34 auth/console + 7 erasure tests:
+           signup-claim flow, login+pre-session CSRF, lockout, rate limit, tenant isolation,
+           provision/unprovisioned boot, HTTP invite/disable + role gate, opt-in site serving)
 commits    14 on 2026-09-17 (6aa49a3..8623ab9): PG-lane concurrency fix · typed rows · approval-latency + override capture (red→green) · cost-per-signal · security hardening (body caps, URIError DoS, fail-closed screen) · AWS deploy path · Buzz live-watch
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate+reportUsage · router+registry+calibration+costPerSignal
            compiler+mining+registry+trustTier+drift-autoDemote · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
            evals (suites/promotion/injection/poisoning-vs-gate/heldout + overrides-from-console) · attrib · ingest (file/github/serper)
            sense · wedge · talk (HMAC surface + buzz live-watch publisher) · substrate (scheduler/sandbox/egress/screen/identity/2 adapters)
-           console (report/approve/decline/correct/latency/digest, hardened) · aws-deploy path (terraform: ALB/ECS/Lambda executor/RDS+PITR/SecretsManager, dispatch-only workflow)
-not built  an APPLIED deployment (path exists, nobody has run apply) · live jcode/Buzz traffic · pilot + GTM (V2 backlog below — the only list that matters now)
+           console (session-authenticated: signup-claim/login/CSRF/lockout/roles/health + report/approve/decline/correct/latency/digest) ·
+           aws-deploy path (terraform: ALB/ECS/Lambda executor/RDS+PITR/SecretsManager, dispatch-only workflow) ·
+           V2.1.1 identity layer (web signup-claim, /team invite+disable, per-tenant GDPR erasure via `vital erase`)
+not built  an APPLIED deployment (path exists, nobody has run apply) · live jcode/Buzz traffic · the auth remainders in V2.1.1
+           (service tokens for headless callers, owner-field resolution) · pilot + GTM (V2 backlog below — the only list that matters now)
 ```
 
 Phases 0–6 below are substantially complete as tested code; remaining items
@@ -323,7 +328,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 - [x] `M` error-budget monitors + auto-revert to fixed policy (`budgetBreaches` feeds `revertBreachedTiers`: breached tiers run the fixed baseline even in control, with a guard note; recovery is manual via `clearTierOverride` after recalibration — auto-revert is immediate, auto-forgive is not a thing; tested)
 - [x] `M` coupling-guard tests: card at wrong tier / wrong scope / wrong model → must refuse — **DONE 2026-09-17, and the test found a real gap:** the guard checked state/validatedAtTier/scopeRoles but never read `scopeModels`, and `RouteInput` did not even carry the model — a card validated on model A could run as WORKFLOW under any model. Fixed: optional `RouteInput.model` (callers that know the model must declare it; selection below the tier decision stays legal and the guard treats an undeclared model as not-a-bypass), `learned()` requires the declared model ∈ scopeModels, and a named `skill_model_mismatch_demoted_to_MODEL` guard note joins its scope sibling. Tests cover all three axes: wrong scope (existed), wrong model (new, incl. the positive path), wrong tier (new). 186/186
 - [x] `M` **model selection below the tier decision**: harness adapter via `selectAdapter` (engineering.* prefers jcode with fallback, never unlisted) + model lanes via `src/substrate/models.ts` (dev = Gemini `gemini-3.8-flash`; production = Novita + DeepSeek V4, OpenAI-compatible Bearer; wire formats verified against vendor docs; keys in headers only; approved-model registry default-deny per lane; model-judge fails closed; fetch-injected so CI spends nothing)
-- [x] `S` fix the RNG injection issue from 0.5 so shadow/control is reproducible (done 2026-09-09 via `RouterConfig.rng`, verified in source 2026-09-17; the tests use it — this line was the stale one)
+- [x] `S` fix the RNG injection issue from 0.5 so shadow/control is reproducible (fixed 2026-09-09 via `RouterConfig.rng`; the checkbox here had gone stale — CORRECTED 2026-09-17. This file's own rule: `[x]` means done and verified; both this line and the now-stale 184/184 test figure above rotted anyway, which is worth remembering)
 - [x] `M` cost-of-misrouting report: what routing too low cost vs routing too high (`misroutingCounts` from labelled decisions + `tierMix` from traces; dollar-costing needs per-tier rates from pilots)
 - [ ] [G] precision ≥ 0.90 on ≥2,000 labelled tasks
 - [ ] [G] `controlRate` raised from 0 → 0.05 → 0.25, each step with a budget check
@@ -502,6 +507,10 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 - [x] `M` observability: tier-mix, cost/decision, stale-fact rate, override rate, refusal rate (`src/cli.ts status` reports ledger health + refusal rate + tier mix + open requests; cost/decision via `costOfDecision`)
 - [ ] `S` on-call runbook incl. kill-switch procedure (partial: `killDrill` + `docs/deployment.md` cover the procedure; paging/rotations need a team)
 - [ ] `M` versioning + upgrade path for the deployment layer (deferred: single-box dev only)
+- [ ] `S` alerting on the self-halt conditions we already enforce — budget death, kill switch,
+      autonomy freeze, SUSPENDED_BUDGET contracts all terminate loudly in-process but nobody gets
+      told: wire each to an out-of-band notification (even email) so a dead system is visible;
+      an un-noticed kill switch is a UI element by our own definition
 
 ---
 
@@ -564,6 +573,59 @@ absorbed here — backup drill, nightly boot, on-call runbook, upgrade path.)
 - [x] migrations at boot (`VITAL_MIGRATE_ON_BOOT`, executor opt-out), RDS PITR(7d) + deletion protection, Secrets Manager for every credential, OIDC-only CI (no long-lived AWS keys)
 - [x] live-PG parity proven: CI postgres lane green; concurrent transactions safe (AsyncLocalStorage client scoping, was the shared-`holder` interleaving bug)
 
+### V2.1.1 Identity, tenancy & human access — ADDED 2026-09-17, core BUILT same day
+
+Was missing from this list entirely despite gating every surface item above:
+`console/serve.ts` already refused anonymous approvals — but there was no account to be.
+The core layer now exists as tested code (`src/core/auth.ts` + authed console):
+signup (tenant + owner, one transaction, validated), login with lockout,
+DB-backed rolling sessions with revocation + sweep, scrypt password hashing (12-char floor),
+CSRF on every POST, roles (owner/admin/member), forced password change, single-use password-
+reset tokens, session/tenant isolation tests, and a provision/unprovisioned boot model (no
+tenant+owner ⇒ `/signup` claims the bound tenant — no seeded default credential). CLI: `vital
+signup`, `vital passwd`.
+
+- [x] `M` signup flow: web signup at `/signup` claims the console's ONE bound tenant on first
+      boot (unprovisioned → claim → auto-login → signup closes; invite-only thereafter), plus
+      `vital signup` (CLI) and env-credential headless bootstrap. Validated, CSRF-protected,
+      rate-limited, audited. HTTP invite endpoint BUILT: `/team` page + `/team/invite` and
+      `/team/disable` (admin+ gated, audited, invited users land in the forced-change flow)
+- [x] `M` login flow + session layer: salted scrypt (node:crypto, no new dep), httpOnly
+      SameSite cookies (`Secure` behind TLS via `secureCookies`), rolling 12h expiry, logout,
+      revoke-all, per-(tenant,ip,email) lockout after 5 failures, fail-closed auth on every
+      route incl. the approval API
+- [x] `M` users/sessions/tenants/attempts/resets tables via `AUTH_MIGRATIONS` through the named
+      journal with tested down SQL; password reset flow with single-use expiring hashed tokens;
+      audit rows for signup/login/logout/lockout/reset/approve/decline
+- [x] `M` roles/permissions: owner/admin/member rank + `requireRole` (invites gate on it), and
+      role checks ARE wired onto the console: `/team/*` requires admin+, approvals take an
+      `--approver-role` floor (default `member`, the room-agent model; raise per tenant),
+      disable refuses owner-target/self-disable. Tested over HTTP
+- [~] `M` wire named human owners end-to-end: approvals now name the authenticated identity
+      (`usr_xxx (email)`) in the response and `audit_log`; Ledger claim `owner` fields are
+      still free strings — resolving them against `users` is the remaining step
+- [x] `M` tenant isolation checks: login is tenant-scoped (another tenant's credentials fail),
+      sessions carry their tenant and re-check per request, the served tenant is fixed at boot,
+      and the store-level two-tenant probe test passes. (Storage/index-level separation and
+      cross-tenant cache isolation remain open — see SECURITY.md "not yet built")
+- [ ] `S` API keys / service tokens for headless callers (Buzz relay, jcode sibling, CI) with
+      scope grants, reusing `src/substrate/identity.ts` HMAC tokens so there is one token
+      mechanism, not two (the mechanism exists; the console API doesn't accept it yet)
+- [x] `S` data erasure path per tenant (GDPR Art. 17): `src/core/erasure.ts` — export-first
+      (`exportLedger` runs INSIDE the erasure transaction; both commit or roll back together),
+      complete by introspection (every tenant-scoped table is wiped; a future table that skips
+      erasure fails the suite), child-before-parent ordering, live sessions die with their users,
+      tenant-scoped (a second tenant loses nothing), survives as an `erased:<slug>` receipt row
+      naming the operator + row counts, refuses unknown/double erasure. CLI: `vital erase
+      --tenant <slug> --actor <who> [--export-to dir] --yes` (refuses without `--yes`). Tests:
+      test/erasure.test.ts (7); live-verified via CLI (refusal, erasure, export file, receipt,
+      zero remaining users/tenants)
+- [x] [G] an outsider can boot the console, claim its tenant at `/signup`, log in, and approve a
+      real request as a named user — and cannot see any second tenant's data (tested over HTTP in
+      `test/auth.test.ts`; live-verified via `vital serve` → curl through signup-claim, console,
+      closed-signup check, health endpoint, and CSRF refusals; site-serving smoke via
+      `vital serve --site site` → `/` renders the site, `/console` stays session-gated)
+
 ### V2.2 Watch it before it carries weight (repo-doable now)
 - [x] `S` surface cost-per-signal in the console + `cli status` (done 2026-09-17: report card in the health grid (modelShare %, arrivals, within/OVER GATE), `GET /api/cost-per-signal`, and a `costPerSignal` block in `cli status` — all from `router.costPerSignal`, the passive read-model over `routing_decisions`; test asserts the reflex-handled arrival passes the gate end-to-end through report → HTML → API)
 - [ ] `M` nightly: full instance boot + verify against a real model (needs the deployed topology + one model credential)
@@ -586,6 +648,11 @@ absorbed here — backup drill, nightly boot, on-call runbook, upgrade path.)
 - [ ] `M` name the wedge buyer; sign 5 design partners; baseline instrumented before pilots
 - [ ] `M` pricing (platform fee + outcome-metered, never per-seat) + pilot→production conversion plan
 - [ ] `M` Grok Bot diligence trial (the five unknowns stay "not documented" until checked)
+- [ ] `L` **zero-code proxy on-ramp (idea.md §29.3, priority 1 — was only on the risk register, never
+      on this backlog):** a thin proxy-shaped Vital that observes tool/model calls, emits claims, and
+      enforces budgets, so first integration is "point your base URL at us" — vs TDAM's one env var.
+      Fallback if too big: `npx vital init` that reads a changelog and emits an evidence-backed summary
+      with nothing wired. This is packaging, not a feature, and it is the distribution answer
 - [ ] `M` competitive read + YC batch scan
 - [ ] `M` 12-slide deck + 7-slide Demo Day cut + teaser + appendix pack + pre-flight claim audit (dogfood slide: test count = latest green run only)
 - [ ] `L` SOC 2 Type I path; Article 14 evidence pack (overseer registry needs HR data + legal review); DPA + residency

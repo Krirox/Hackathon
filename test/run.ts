@@ -29,6 +29,7 @@ import './models.test.ts';
 import './jcode.test.ts';
 import './vendor.test.ts';
 import './talk.test.ts';
+import './auth.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

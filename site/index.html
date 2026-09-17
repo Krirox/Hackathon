@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VITAL — The Autonomous Enterprise</title>
+<meta name="description" content="Vital is the grounding and reflex layer for the sovereign agent stack. Grounded, budgeted, attributable, safely executable AI."/>
+<!-- Point these at the Vital console (defaults assume the console on the same origin or localhost:3100) -->
+<meta name="vital-console-url" content="http://127.0.0.1:3100"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css"/>
+<!-- Three.js 3D Engine (served locally from assets/three.min.js) -->
+<script src="assets/three.min.js"></script>
+</head>
+<body>
+<!-- Matrix Background Canvas -->
+<canvas id="bg-canvas"></canvas>
+<div class="bg-vignette" aria-hidden="true"></div>
+
+<!-- Initial Loader Screen -->
+<div id="loader">
+  <div class="loader-logo">VITAL<sup>®</sup></div>
+  <div class="loader-line"><span></span></div>
+  <div class="loader-sub">GROUNDING · BUDGETING · ATTESTING</div>
+</div>
+
+<!-- Header Navigation Bar -->
+<header id="site-header">
+  <a class="pill" href="#top">‹ HOME ›</a>
+  <button class="brand" id="menu-btn" aria-label="menu">
+    <span>vital ›</span>
+    <span class="burger"><i></i><i></i></span>
+  </button>
+  <nav class="header-nav">
+    <a data-console data-console-path="/login" href="/login" class="nav-signin">Sign in</a>
+    <a class="cta-contact" data-console data-console-path="/signup" href="/signup">
+      <span>Contact Us</span>
+      <span class="cta-accent-icon">›</span>
+    </a>
+  </nav>
+</header>
+
+<!-- Fullscreen Menu Overlay -->
+<nav id="overlay" aria-hidden="true">
+  <button id="overlay-close" aria-label="Close menu">CLOSE ×</button>
+  <div class="overlay-links">
+    <a href="#top">Home</a>
+    <a href="#statement">Thesis</a>
+    <a href="#platform">Platform</a>
+    <a href="#systems">Subsystems</a>
+    <a href="#wedge">The Wedge</a>
+    <a data-console data-console-path="/login" href="/login">Console</a>
+  </div>
+  <div class="overlay-foot">VITAL — THE LIVING COMPANY · 212/212 TESTS GREEN · MIT CORE</div>
+</nav>
+
+<main id="top">
+<!-- HERO SECTION -->
+<section class="hero-section">
+  <div class="hero-content">
+    <div class="badge-wrap">
+      <div class="eyebrow-badge">
+        <span class="badge-pulse-dot"></span>
+        <span>VITAL / REIMAGINE THE ENTERPRISE</span>
+      </div>
+    </div>
+    
+    <h1 class="hero-title">The Autonomous Enterprise</h1>
+    <p class="hero-subtitle">AI-first by design. Faster sharper decisions, real execution, built for what comes next.</p>
+  </div>
+
+  <!-- 3D Gyroscopic Rings Stage -->
+  <div class="stage-3d-wrapper" id="stage-3d-wrapper">
+    <div id="canvas-3d-container"></div>
+    
+    <!-- Floating 3D Tooltip (Image 3 style) -->
+    <div id="floating-layer-card" class="floating-layer-card">
+      <div class="card-status-line">
+        <span class="card-pulse-dot"></span>
+        <span class="card-tag" id="card-tag">The Enterprise</span>
+      </div>
+      <p class="card-description" id="card-description">Reinvents and runs the sovereign corporation.</p>
+    </div>
+  </div>
+
+  <!-- Scroll Down Indicator -->
+  <div class="scroll-wrap">
+    <a class="scroll-hint" href="#statement">
+      <span>Keep Scrolling</span>
+      <svg class="chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path d="M6 9l6 6 6-6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </a>
+  </div>
+
+  <div class="hero-meta">
+    <span>LEDGER OF CLAIMS</span>
+    <span class="meta-dot">·</span>
+    <span>SCHEDULER OF ATTENTION</span>
+    <span class="meta-dot">·</span>
+    <span>COMPILER OF PROCEDURES</span>
+  </div>
+</section>
+
+<!-- 01 — THESIS -->
+<section class="dark statement" id="statement">
+  <div class="section-container">
+    <p class="section-label">01 — THESIS</p>
+    <h2 class="reveal">A new generation of intelligent systems.<br/><strong>Build. Automate. Understand.</strong></h2>
+    <p class="lede reveal">Companies have information systems, not an intelligence-and-action system. Vital closes the loop on specific changes — <em>grounded, budgeted, attributable, safely executable</em> — and proves it with a number: <span class="num">intelligence cost per good decision.</span></p>
+    <div class="stats-grid">
+      <div class="stat-box reveal">
+        <b class="stat-num">95%</b>
+        <span>of GenAI pilots show no P&amp;L return — MIT</span>
+      </div>
+      <div class="stat-box reveal">
+        <b class="stat-num">40%</b>
+        <span>of agentic projects face cancellation — Gartner</span>
+      </div>
+      <div class="stat-box reveal">
+        <b class="stat-num lime">212/212</b>
+        <span>core tests green · real sockets · real sqlite</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MEDIA SHOWCASE -->
+<section class="dark media-sec">
+  <div class="media reveal-scale">
+    <img src="https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?q=80&w=1800&auto=format&fit=crop" alt="City infrastructure at night" loading="lazy"/>
+    <div class="media-cap">
+      <span>SHIP-TO-RESULT · LIVE RUNTIME LOOP</span>
+      <span class="live">● REC</span>
+    </div>
+  </div>
+</section>
+
+<!-- 02 — PLATFORM: THREE LAYERS (Interactive Image 3 Showcase) -->
+<section class="dark platform" id="platform">
+  <div class="section-container">
+    <p class="section-label">02 — PLATFORM</p>
+    
+    <div class="platform-layout">
+      <!-- Left: Narrative & Layer Selectors -->
+      <div class="platform-text">
+        <h2 class="reveal">One intelligence,<br/>three layers<span class="dot">.</span></h2>
+        <p class="platform-sub reveal">
+          An AI core that orchestrates execution, reinvents the enterprise around it, and protects human sovereignty as it accelerates into the future.
+        </p>
+
+        <div class="interactive-prompt">
+          <span>Click Each Layer to Find Out More</span>
+          <span class="prompt-arrow">›</span>
+        </div>
+
+        <div class="layer-selector-tabs" id="layer-tabs">
+          <button class="layer-tab active" data-layer="1">
+            <span class="layer-num">01</span>
+            <div class="layer-info">
+              <h4>CLAIM · Reality Ledger</h4>
+              <p>Append-only typed claims. No model may create FACT. Contradiction is an event, never silence.</p>
+            </div>
+            <span class="tab-indicator">◈</span>
+          </button>
+
+          <button class="layer-tab" data-layer="2">
+            <span class="layer-num">02</span>
+            <div class="layer-info">
+              <h4>COMPUTE · Router &amp; Compiler</h4>
+              <p>REFLEX → WORKFLOW → MODEL → HUMAN. Procedures graduate quarantine → shadow → pilot → promoted.</p>
+            </div>
+            <span class="tab-indicator">◈</span>
+          </button>
+
+          <button class="layer-tab" data-layer="3">
+            <span class="layer-num">03</span>
+            <div class="layer-info">
+              <h4>TALK · Coordination Surface</h4>
+              <p>Typed QUERY / REQUEST / NOTICE. Budgeted, refusable, replayable. Chat is a projection — never the store.</p>
+            </div>
+            <span class="tab-indicator">◈</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Right: Interactive Cards Grid -->
+      <div class="platform-side-cards">
+        <div class="layer-detail-card" id="active-layer-detail">
+          <div class="detail-header">
+            <span class="detail-badge" id="detail-badge">LAYER 01 · REALITY LEDGER</span>
+            <span class="detail-status">ACTIVE STACK</span>
+          </div>
+          <h3 id="detail-title">Append-Only Ground Truth</h3>
+          <p id="detail-desc">Every claim has cryptographic provenance. Decisions freeze full Context Bundles so outcomes are audited with zero archaeological digging.</p>
+          <div class="detail-metrics">
+            <div class="mini-metric">
+              <span>Gross Margin Impact</span>
+              <b>+6.2%</b>
+            </div>
+            <div class="mini-metric">
+              <span>Stale-Fact Rate</span>
+              <b>&lt; 0.2%</b>
+            </div>
+          </div>
+        </div>
+
+        <div class="tech-wire-box">
+          <div class="wire-header">
+            <span>SOVEREIGN RUNTIME SPEC</span>
+            <span class="live-blink">STABLE</span>
+          </div>
+          <div class="wire-content">
+            <code>&gt; REALITY_LEDGER.assert(claim_id, provenance_tier=1)</code>
+            <code>&gt; SCHEDULER.allocate_budget(hops=3, cap=0.04c)</code>
+            <code>&gt; SHIP_GATE.verify_integrity(R/A/I_matrix=PASSED)</code>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Triple Highlights Grid -->
+    <div class="grid3">
+      <div class="grid-card reveal">
+        <h4>Increase Performance. Operate in Real Time.</h4>
+        <p>Deterministic reflexes carry the bulk of traffic. Frontier models see only what passes the materiality gate — under 1% of arrivals.</p>
+      </div>
+      <div class="grid-card reveal">
+        <h4>From AI Experiments to AI-Run Operations.</h4>
+        <p>Every decision freezes a Context Bundle. Replay why it was made, what it cost, and what happened — queryable, not archaeology.</p>
+      </div>
+      <div class="grid-card reveal">
+        <h4>Built Around Outcomes, Not Use Cases.</h4>
+        <p>No OUTCOME without a comparison basis. Holdouts, pre-registration, and cost roll-up per decision.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 03 — SUBSYSTEMS -->
+<section class="dark systems" id="systems">
+  <div class="section-container">
+    <p class="section-label">03 — SUBSYSTEMS</p>
+    <h2 class="reveal">Grounded. Budgeted.<br/><strong>Attributable.</strong></h2>
+    <div class="sys-list">
+      <div class="sys reveal">
+        <span class="sys-index">04</span>
+        <div>
+          <h3>Reality Ledger</h3>
+          <p>FACT · MEASUREMENT · BELIEF · DECISION · ACTION · OUTCOME. Provenance tiers, expiry sweeps, dispute tickets.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">05</span>
+        <div>
+          <h3>World Sense</h3>
+          <p>Genome → Watch Contract. L0 collect, L1 triage, L2 reason. Corroboration ≥ 2 before escalation.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">06</span>
+        <div>
+          <h3>Governance</h3>
+          <p>R/A/I matrix per action × scope. Honeytasks, sampling, kill switches drilled quarterly. Art. 14 ready.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">07</span>
+        <div>
+          <h3>Economics</h3>
+          <p>Cost per good decision, tier mix, human minutes reclaimed vs. consumed — reported monthly, honestly.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+    </div>
+    <div class="progress"><span id="progress-bar"></span></div>
+  </div>
+</section>
+
+<!-- 04 — THE WEDGE -->
+<section class="dark wedge" id="wedge">
+  <div class="section-container">
+    <p class="section-label">04 — THE WEDGE</p>
+    <h2 class="reveal">Ship-to-Result.<br/><strong>One loop. One number.</strong></h2>
+    <p class="lede reveal">A product change is detected → verified summary → affected segments → drafted assets → human approval in-room → execution → measured outcome → ledger. −50% ship-to-launch time. −40% human hours. Claim error &lt;1%.</p>
+    <ol class="steps-list reveal">
+      <li class="active"><span class="step-num">01</span> Detect</li>
+      <li><span class="step-num">02</span> Verify</li>
+      <li><span class="step-num">03</span> Approve</li>
+      <li><span class="step-num">04</span> Execute</li>
+      <li><span class="step-num">05</span> Measure</li>
+    </ol>
+  </div>
+</section>
+
+<!-- CONTACT & RUN LOOP CTA -->
+<section class="dark contact" id="contact">
+  <div class="section-container">
+    <div class="cta-box reveal">
+      <h2>Run one loop.<br/>Prove it with a number.</h2>
+      <div class="cta-actions">
+        <a class="cta-btn big" data-console data-console-path="/signup" href="/signup">
+          <span>Create your organization</span>
+          <span class="arrow">→</span>
+        </a>
+        <a class="secondary-btn" data-console data-console-path="/login" href="/login">
+          Sign in to the console
+        </a>
+      </div>
+      <p id="console-status" role="status">● console status unknown</p>
+      <p class="contact-mono">prefer a walkthrough? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. that is a finding, not a failure.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="dark-footer">
+  <div class="foot-grid">
+    <div class="f-brand">
+      VITAL<sup>®</sup>
+      <p>The grounding and reflex layer for the sovereign agent stack.</p>
+    </div>
+    <div class="foot-nav">
+      <a href="#top">Top</a>
+      <a href="#statement">Thesis</a>
+      <a href="#platform">Platform</a>
+      <a href="#systems">Subsystems</a>
+      <a href="#wedge">Wedge</a>
+    </div>
+    <div class="foot-meta mono">
+      LEDGER · ROUTER · COMPILER<br/>
+      BUZZ · JCODE · QM-ABSORB<br/>
+      © 2026 VITAL — ALL RIGHTS RESERVED
+    </div>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
