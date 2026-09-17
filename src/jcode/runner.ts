@@ -124,11 +124,24 @@ export class JcodeRunner extends EventEmitter {
   ): Promise<RunResult> {
     const req = await this.coord.get(tenant, requestId);
     if (!req) throw new Error(`[jcode] unknown request ${requestId}`);
-    if (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT') {
-      throw new Error(`[jcode] request ${requestId} is ${req.state}, not admitted`);
+    // F03: the same executable set every worker uses — a human-approved
+    // (ACCEPTED) request is claimable, so approval cannot strand work in a
+    // state no executor reads.
+    if (req.state !== 'ADMITTED' && req.state !== 'ACCEPTED' && req.state !== 'IN_FLIGHT') {
+      throw new Error(`[jcode] request ${requestId} is ${req.state}, not executable`);
     }
     if (task.claimRefs.length === 0) {
       throw new Error('[jcode] a coding task must cite the claims it is grounded in');
+    }
+
+    // Exclusive ownership BEFORE the harness: exactly one worker may run the
+    // paid work. A lost claim throws CLAIM_LOST here — before connect() and
+    // before createSession() — so the loser never touches the harness and
+    // never fails the winner's request in the catch below.
+    try {
+      await this.coord.claimExecution(tenant, requestId, task.onBehalfOf, new Date().toISOString());
+    } catch (e) {
+      throw new Error(`[jcode:CLAIM_LOST] ${(e as Error).message}`, { cause: e });
     }
 
     const client = new JcodeClient(clientOpts);
@@ -138,6 +151,15 @@ export class JcodeRunner extends EventEmitter {
     const usage = { input: 0, output: 0 };
     const claimIds: string[] = [];
     let budgetBroken = false;
+    // Transcript is model-controlled text: cap it so a runaway stream cannot
+    // exhaust task memory. Oldest chunks drop first; the claim discloses the
+    // cut (a silent slice would misrepresent the evidence).
+    let transcriptChars = 0;
+    let transcriptTruncated = false;
+    const MAX_TRANSCRIPT_CHARS = 64_000;
+    /** Tool calls persisted per claim: the value lists the first N with the
+     *  true total beside it — same disclosure rule as the transcript. */
+    const MAX_CLAIM_TOOL_CALLS = 200;
     // Progress sink (live watch): every tool completion and token batch flows
     // spend into the coordinator mid-run (reportUsage touches tokens/dollars
     // only — never rounds, so unlike charge() it cannot self-terminate the
@@ -211,7 +233,13 @@ export class JcodeRunner extends EventEmitter {
     };
 
     const onText = (f: ServerFrame) => {
-      if (typeof f.text === 'string') transcript.push(f.text);
+      if (typeof f.text !== 'string' || f.text.length === 0) return;
+      transcript.push(f.text);
+      transcriptChars += f.text.length;
+      while (transcriptChars > MAX_TRANSCRIPT_CHARS && transcript.length > 1) {
+        transcriptChars -= (transcript.shift() ?? '').length;
+        transcriptTruncated = true;
+      }
     };
     const onToolDone = (f: ServerFrame) => {
       // Tool calls are activity, not rounds: a round is one agent turn.
@@ -280,6 +308,12 @@ export class JcodeRunner extends EventEmitter {
       await this.coord.accept(tenant, requestId);
 
       client.on('frame:error', onRunError);
+      // A daemon-side disconnect is a turn failure, not a 60s wait: the
+      // poll in waitForTurn sees turnError within 50ms and fails fast.
+      // (Set after 'done' already resolved, this assignment is harmless.)
+      client.once('close', () => {
+        if (turnError === null) turnError = 'harness disconnected';
+      });
       await client.send(sessionId, task.command);
       const turn = await this.waitForTurn(
         client,
@@ -313,8 +347,15 @@ export class JcodeRunner extends EventEmitter {
         tenant,
         subject: `jcode:${req.targetScope}`,
         kind: 'OBSERVATION',
-        statement: `harness run: ${toolCalls.length} tool calls, ${usage.input + usage.output} tokens`,
-        value: { toolCalls, usage, permissions },
+        statement: `harness run: ${toolCalls.length} tool calls, ${usage.input + usage.output} tokens${transcriptTruncated ? ' (transcript truncated)' : ''}`,
+        value: {
+          toolCalls: toolCalls.slice(0, MAX_CLAIM_TOOL_CALLS),
+          totalToolCalls: toolCalls.length,
+          toolCallsTruncated: toolCalls.length > MAX_CLAIM_TOOL_CALLS,
+          transcriptTruncated,
+          usage,
+          permissions,
+        },
         confidence: 1,
         owner: task.onBehalfOf,
         scope: req.targetScope,

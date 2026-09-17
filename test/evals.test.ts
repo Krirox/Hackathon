@@ -341,6 +341,36 @@ T('promotion advances one gated stage at a time, with rollback', async () => {
   eq((await rollbackStage(db, TEN, 'model-x', 'drill rollback', NOW)).stage, 'offline');
 });
 
+T('concurrent gate advances: the loser sees STATE_CONFLICT, never an overwrite', async () => {
+  // Two gates race the same stage with the same evidence. Both run the suite
+  // honestly; the stage itself moves exactly once, and the loser throws
+  // instead of writing a second, divergent promotion over the winner.
+  const { db } = await fresh();
+  await addCase(db, {
+    tenant: TEN,
+    capability: 'm',
+    suite: 'gate-race',
+    input: { a: 1 },
+    expect: { ok: true },
+    kind: 'unit',
+  });
+  const pass = () => ({ pass: true });
+  const gate = { stage: 'offline' as const, suite: 'gate-race', minPassRate: 1 };
+  const [a, b] = await Promise.allSettled([
+    advanceStage(db, TEN, 'model-race', gate, 't', pass, NOW),
+    advanceStage(db, TEN, 'model-race', gate, 't', pass, NOW),
+  ]);
+  eq([a.status, b.status].filter((s) => s === 'fulfilled').length, 1, 'one advancer wins:');
+  eq([a.status, b.status].filter((s) => s === 'rejected').length, 1, 'the other loses:');
+  const loss = [a, b].find((r) => r.status === 'rejected') as PromiseRejectedResult;
+  eq(
+    String(loss.reason?.message ?? loss.reason).includes('STATE_CONFLICT'),
+    true,
+    'to a conflict, not a silent overwrite:',
+  );
+  eq((await currentStage(db, TEN, 'model-race')).stage, 'shadow', 'the stage moved exactly once:');
+});
+
 T('held-out suites stay out of the default path, visibly when used', async () => {
   const { db } = await fresh();
   await addCase(db, {

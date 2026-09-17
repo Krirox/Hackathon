@@ -187,8 +187,10 @@ export async function codeApprovedFeature(
     );
   }
   const req = await coord.get(tenant, input.requestId);
-  if (!req || (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT')) {
-    throw new WedgeError('UNADMITTED_CODE', `request ${input.requestId} is not admitted — coding refused`);
+  // F03: same executable set as every worker — ACCEPTED (human-approved) is
+  // claimable, so an approved coding plan can actually run.
+  if (!req || (req.state !== 'ADMITTED' && req.state !== 'ACCEPTED' && req.state !== 'IN_FLIGHT')) {
+    throw new WedgeError('UNADMITTED_CODE', `request ${input.requestId} is not executable — coding refused`);
   }
   const outcome = await adapter.run(tenant, input.requestId, {
     command: input.command,

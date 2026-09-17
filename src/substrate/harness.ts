@@ -89,8 +89,10 @@ export class LocalEchoAdapter implements HarnessAdapter {
   async run(tenant: string, requestId: string, task: HarnessTask): Promise<HarnessOutcome> {
     const req = await this.coord.get(tenant, requestId);
     if (!req) throw new HarnessError('UNKNOWN_REQUEST', `unknown request ${requestId}`);
-    if (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT') {
-      throw new HarnessError('NOT_ADMITTED', `request ${requestId} is ${req.state}, not admitted`);
+    // F03: same executable set as every worker — ACCEPTED (human-approved)
+    // is claimable.
+    if (req.state !== 'ADMITTED' && req.state !== 'ACCEPTED' && req.state !== 'IN_FLIGHT') {
+      throw new HarnessError('NOT_ADMITTED', `request ${requestId} is ${req.state}, not executable`);
     }
     if (task.claimRefs.length === 0) {
       throw new HarnessError('UNGROUNDED_TASK', 'a harness task must cite the claims it is grounded in');

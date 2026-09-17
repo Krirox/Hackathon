@@ -150,6 +150,26 @@ export const TERMINAL_REQUEST_STATES: readonly RequestState[] = [
   'TERMINATED_BUDGET',
 ];
 
+/**
+ * F03: where a settled request lands when a WORKER'S COMPLETION report
+ * arrives late. A request DECLINED by its human and executed anyway must
+ * not read COMPLETED — the refusal stands, and the row settles FAILED with
+ * the worker's objection preserved behind the `REFUSAL|` prefix
+ * ("REFUSAL|<why the worker disagrees>"). The same applies to work that
+ * reports completion after EXPIRED/TERMINATED_BUDGET.
+ *
+ * Deliberately ABSENT: COMPLETED (a late failure report cannot un-finish
+ * delivered work — that is a new incident, not this request's history) and
+ * FAILED (redelivery recovery FAILED→COMPLETED is handled explicitly in
+ * the coordinator, and is REFUSED when the FAILED row was a preserved
+ * refusal — a refusal is never resurrected).
+ */
+export const LATE_COMPLETION_SETTLEMENT: ReadonlyMap<RequestState, RequestState> = new Map([
+  ['DECLINED', 'FAILED'],
+  ['EXPIRED', 'FAILED'],
+  ['TERMINATED_BUDGET', 'FAILED'],
+] as const);
+
 export interface CostBid {
   /** Inference budget, USD. */
   dollars: number;
@@ -195,4 +215,8 @@ export interface CoordinationRequest {
   parentRequestId?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** F05: who holds the exclusive execution claim (null when unclaimed). */
+  execOwner?: string | null;
+  /** F05: monotonic per-request claim counter — fencing token for stale workers. */
+  execAttempt?: number;
 }

@@ -112,6 +112,24 @@ export interface FanOutResult {
 }
 
 /**
+ * Dedupe-hit legs are COMPLETED-with-result, never refusal (why this helper
+ * exists: the coordinator answers an identical re-submission with
+ * `admitted:false + dedupedTo`, and the old fan-out threw FANOUT_REFUSED on
+ * exactly that path — so a retried release died on work that already
+ * existed). A dedupe hit reuses the existing leg's id; only genuine denials
+ * (budget, capacity, escalation cap — no `dedupedTo`) still refuse.
+ */
+export function reuseDedupedOrThrow(
+  r: { admitted: boolean; state: string; reason: string; request: { id: string }; dedupedTo?: string },
+  originScope: string,
+  targetScope: string,
+): string {
+  if (r.admitted) return r.request.id;
+  if (r.dedupedTo) return r.dedupedTo;
+  throw new WedgeError('FANOUT_REFUSED', `${originScope}→${targetScope} ${r.state}: ${r.reason}`);
+}
+
+/**
  * Fan-out (2.2): one release → five typed coordination objects, ALL through
  * the scheduler. No direct channel posts exist as a code path.
  */
@@ -146,10 +164,9 @@ export async function fanOut(
       onBehalfOf: input.onBehalfOf,
       now: input.now,
     });
-    if (!r.admitted) {
-      throw new WedgeError('FANOUT_REFUSED', `${originScope}→${targetScope} ${r.state}: ${r.reason}`);
-    }
-    return r.request.id;
+    // A retry re-submits identical legs: the coordinator dedupes them onto
+    // the live thread, and that hit is reuse, not refusal (see above).
+    return reuseDedupedOrThrow(r, originScope, targetScope);
   };
   const brief = `${input.release}: ${input.summary}`;
   return {

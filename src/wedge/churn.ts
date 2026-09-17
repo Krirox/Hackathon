@@ -1,6 +1,6 @@
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import { WedgeError } from './ship.ts';
+import { reuseDedupedOrThrow, WedgeError } from './ship.ts';
 
 /**
  * Second workflow (TODO §8, earliest slice): churn-response.
@@ -69,8 +69,8 @@ export async function churnRespond(
       onBehalfOf: input.onBehalfOf,
       now: input.now,
     });
-    if (!r.admitted) throw new WedgeError('FANOUT_REFUSED', `${originScope}→${targetScope} ${r.state}: ${r.reason}`);
-    return r.request.id;
+    // Same retry rule as ship fan-out: a dedupe hit reuses the existing leg.
+    return reuseDedupedOrThrow(r, originScope, targetScope);
   };
   const brief = `churn risk in ${input.segment}`;
   const productQueryId = await leg(

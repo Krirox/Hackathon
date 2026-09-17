@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -64,8 +65,11 @@ function wrapSqlite(raw: DatabaseSync): AsyncDb {
   // Async fn bodies cross await points where other tasks can interleave, so
   // a multi-statement transaction must hold a lock for its whole body —
   // otherwise two concurrent transactions interleave statements on one
-  // connection. Single statements stay lock-free: the driver runs them
-  // synchronously, which is atomic on one thread.
+  // connection. Single statements go through the same queue: the driver runs
+  // them synchronously (atomic on one thread), but without the lock a
+  // standalone nextSeq upsert could land mid-transaction and a concurrent
+  // top-level transaction would be misread as nested. Statements stay
+  // non-transactional — they just wait their turn.
   let tail: Promise<void> = Promise.resolve();
   const acquire = async (): Promise<() => void> => {
     let release!: () => void;
@@ -76,50 +80,74 @@ function wrapSqlite(raw: DatabaseSync): AsyncDb {
     await prev;
     return release;
   };
-  let depth = 0;
+  // Transaction depth rides the async chain (like pg.ts's tx storage), never
+  // shared mutable state: two concurrent top-level transactions each see
+  // "no store" and serialize on the mutex, while a genuinely-nested call on
+  // the same chain sees its parent's depth and becomes a SAVEPOINT. A
+  // closure `depth` variable cannot express this — the second concurrent
+  // transaction would take the savepoint path inside the first one's BEGIN
+  // and read its uncommitted writes.
+  const txDepth = new AsyncLocalStorage<{ depth: number }>();
+  const locked = async <T>(fn: () => T | Promise<T>): Promise<T> => {
+    const release = await acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
   return {
     engine: 'sqlite',
     prepare(sql: string): AsyncStatement {
       const s = prep(sql);
+      // Inside a transaction the caller already holds the lock: run direct.
+      // Outside one, queue behind (and ahead of) running transactions.
+      const runLocked = async <T>(fn: () => T): Promise<T> => {
+        if (txDepth.getStore()) return fn();
+        return locked(fn);
+      };
       return {
-        all: async (...p) => s.all(...args(p)) as Row[],
-        get: async (...p) => s.get(...args(p)) as Row | undefined,
-        run: async (...p) => {
-          const out = s.run(...args(p)) as { changes: number };
-          return { changes: out.changes };
-        },
+        all: async (...p) => runLocked(() => s.all(...args(p)) as Row[]),
+        get: async (...p) => runLocked(() => s.get(...args(p)) as Row | undefined),
+        run: async (...p) =>
+          runLocked(() => {
+            const out = s.run(...args(p)) as { changes: number };
+            return { changes: out.changes };
+          }),
       };
     },
     exec: async (sql) => {
-      raw.exec(sql);
+      if (txDepth.getStore()) {
+        raw.exec(sql);
+        return;
+      }
+      await locked(() => raw.exec(sql));
     },
     async transaction<T>(fn: () => Promise<T> | T): Promise<T> {
+      const parent = txDepth.getStore();
       // Nested transactions become SAVEPOINTs so the ledger can wrap a
       // multi-statement atomic append without deadlocking itself.
-      if (depth > 0) {
-        raw.exec(`SAVEPOINT sp${depth}`);
-        depth += 1;
+      if (parent && parent.depth > 0) {
+        raw.exec(`SAVEPOINT sp${parent.depth}`);
+        parent.depth += 1;
         try {
           const out = await fn();
-          depth -= 1;
-          raw.exec(`RELEASE sp${depth}`);
+          parent.depth -= 1;
+          raw.exec(`RELEASE sp${parent.depth}`);
           return out;
         } catch (err) {
-          depth -= 1;
-          raw.exec(`ROLLBACK TO sp${depth}`);
+          parent.depth -= 1;
+          raw.exec(`ROLLBACK TO sp${parent.depth}`);
           throw err;
         }
       }
       const release = await acquire();
       raw.exec('BEGIN IMMEDIATE');
-      depth = 1;
       try {
-        const out = await fn();
-        depth = 0;
+        const out = await txDepth.run({ depth: 1 }, fn);
         raw.exec('COMMIT');
         return out;
       } catch (err) {
-        depth = 0;
         try {
           raw.exec('ROLLBACK');
         } catch {
@@ -169,7 +197,14 @@ export function dayOf(engine: AsyncDb['engine'], col: string): string {
 
 // ------------------------------------------------------------- migrations ----
 
-/** Additive, idempotent statements applied after the base schema on both engines. */
+/**
+ * Additive statements applied after the base schema on both engines. Since
+ * the F07 consolidation these are NOT fire-and-forget text: `migrate()` runs
+ * every statement inside ONE tracked transaction recorded as named rows in
+ * `schema_migrations`, so a failure fails startup instead of being swallowed
+ * as "already migrated". Idempotent re-application is explicit (IF NOT
+ * EXISTS DDL, column-existence checks for ALTERs), never implicit try/catch.
+ */
 export const ADDITIVE_MIGRATIONS: string[] = [
   "ALTER TABLE skill_cards ADD COLUMN trust_tier TEXT NOT NULL DEFAULT 'internal'",
   `CREATE TABLE IF NOT EXISTS routing_calibration (
@@ -186,6 +221,50 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     created_at   TEXT NOT NULL,
     UNIQUE (tenant, key))`,
   `CREATE INDEX IF NOT EXISTS ix_subjects_tenant ON subjects(tenant, kind)`,
+  `CREATE INDEX IF NOT EXISTS ix_traces_request ON traces(tenant, request_id)`,
+  `CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(tenant, action, at)`,
+  // F01: per-request budget reservation (bid held at admission, released on
+  // terminal states) so concurrent admits account outstanding bids, not just
+  // spent. F02: exclusive execution ownership (owner/attempt/lease on the
+  // request row). Additive columns only — base SCHEMA untouched.
+  `ALTER TABLE requests ADD COLUMN reserved_json TEXT NOT NULL DEFAULT '{"dollars":0,"tokens":0}'`,
+  `ALTER TABLE requests ADD COLUMN exec_owner TEXT`,
+  `ALTER TABLE requests ADD COLUMN exec_attempt INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE requests ADD COLUMN claimed_at TEXT`,
+  `ALTER TABLE requests ADD COLUMN lease_ms INTEGER NOT NULL DEFAULT 0`,
+  // F03: durable ingest inbox — collectors stage fetched events here BEFORE
+  // advancing cursors, so a crash between fetch and cursor leaves the event
+  // in the inbox (no loss) and a retry dedupes on the UNIQUE key (no dup).
+  // Portable DDL: TEXT primary key + IF NOT EXISTS, no engine-only syntax.
+  `CREATE TABLE IF NOT EXISTS ingest_inbox (
+    id TEXT PRIMARY KEY, tenant TEXT NOT NULL, collector TEXT NOT NULL,
+    source_event_id TEXT NOT NULL, revision TEXT NOT NULL, payload_json TEXT NOT NULL,
+    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+    UNIQUE (tenant, collector, source_event_id, revision))`,
+  `CREATE INDEX IF NOT EXISTS ix_inbox_claim ON ingest_inbox(tenant, collector, status, created_at)`,
+  // F15: generic durable outbox — producers enqueue inside their own
+  // transaction where feasible; a relay sends to SQS only AFTER commit
+  // (dispatch-after-commit), so a crash never sends what was not stored.
+  `CREATE TABLE IF NOT EXISTS outbox (
+    id TEXT PRIMARY KEY, tenant TEXT NOT NULL, kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL, status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ix_outbox_claim ON outbox(status, next_at)`,
+  // F18: normalized alias lookup. The subjects.aliases_json LIKE scan is a
+  // leading-wildcard search over JSON text; this table gives exact-match
+  // resolution first (UNIQUE per tenant keeps one alias on one subject).
+  // Portable DDL: TEXT + IF NOT EXISTS + UNIQUE, no engine-only syntax.
+  `CREATE TABLE IF NOT EXISTS subject_aliases (
+    tenant      TEXT NOT NULL,
+    subject_id  TEXT NOT NULL,
+    alias_norm  TEXT NOT NULL,
+    UNIQUE (tenant, alias_norm))`,
+  `CREATE INDEX IF NOT EXISTS ix_subject_aliases_lookup ON subject_aliases(tenant, alias_norm)`,
+  // Native spent mirrors: REAL columns tracking spent_json dollars/tokens so
+  // the admission SUM reads plain columns instead of casting JSON per row
+  // per submit. ALTERs are portable; the backfill below is engine-specific.
+  `ALTER TABLE requests ADD COLUMN spent_tokens REAL NOT NULL DEFAULT 0`,
+  `ALTER TABLE requests ADD COLUMN spent_dollars REAL NOT NULL DEFAULT 0`,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */
@@ -194,6 +273,47 @@ export async function stampVersion(db: AsyncDb, version: string): Promise<void> 
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run('schema_version', version);
 }
+
+/**
+ * F07: does this table have the column already? The portable existence
+ * probe for the ALTER TABLE entries above — re-running `migrate()` on an
+ * up-to-date database must be a clean no-op, and "did the ALTER fail
+ * because the column exists" must be a fact we READ, not an error we
+ * swallow (SQLite's duplicate-column error message is not a contract).
+ * Postgres: information_schema. SQLite: pragma_table_info (no
+ * information_schema there — the first live run caught that).
+ */
+export async function columnExists(db: AsyncDb, table: string, column: string): Promise<boolean> {
+  const rows =
+    db.engine === 'postgres'
+      ? ((await db
+          .prepare(
+            `SELECT column_name FROM information_schema.columns
+             WHERE lower(table_name) = lower(?) AND lower(column_name) = lower(?)`,
+          )
+          .all(table, column)) as { column_name: string }[])
+      : ((await db
+          .prepare('SELECT name FROM pragma_table_info(?) WHERE lower(name) = lower(?)')
+          .all(table, column)) as { name: string }[]);
+  return rows.length > 0;
+}
+
+/**
+ * F07: apply one additive migration with explicit idempotency. DDL guards
+ * itself (CREATE ... IF NOT EXISTS); ALTER TABLE entries are probed with
+ * `columnExists` first. Any OTHER failure rethrows — never swallowed.
+ */
+async function applyAdditiveStatement(db: AsyncDb, sql: string): Promise<void> {
+  const alter = /ALTER TABLE\s+([\w"]+)\s+ADD COLUMN\s+([\w"]+)/i.exec(sql);
+  if (alter) {
+    if (await columnExists(db, alter[1]!, alter[2]!)) return;
+  }
+  await db.exec(sql);
+}
+
+const MIGRATION_JOURNAL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+)`;
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -235,7 +355,16 @@ CREATE TABLE IF NOT EXISTS claim_links (
   from_id TEXT NOT NULL,
   to_id   TEXT NOT NULL,
   link    TEXT NOT NULL,
-  PRIMARY KEY (from_id, to_id, link)
+  PRIMARY KEY (from_id, to_id, link),
+  -- Enforced on BOTH engines: node:sqlite enables PRAGMA foreign_keys=ON by
+  -- default on every connection (verified: fresh DatabaseSync reports
+  -- foreign_keys=1, no PRAGMA management needed), and Postgres enforces the
+  -- derived keys. The ledger guards the same invariant in code (link()
+  -- throws MISSING_CLAIM before writing) so violations surface as ledger
+  -- errors, never bare FK failures; verifyIntegrity() below REPORTS any
+  -- orphans that slipped in around the ledger (pragma-off restores, copies).
+  FOREIGN KEY (from_id) REFERENCES claims(id),
+  FOREIGN KEY (to_id) REFERENCES claims(id)
 );
 CREATE INDEX IF NOT EXISTS ix_links_to ON claim_links(to_id, link);
 
@@ -264,7 +393,11 @@ CREATE TABLE IF NOT EXISTS outcomes (
   basis       TEXT NOT NULL,
   holdout_ref TEXT,
   resolved_at TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- Same posture as claim_links above: enforced on both engines, guarded in
+  -- code (recordOutcome throws MISSING_DECISION), reported by
+  -- verifyIntegrity().
+  FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
 CREATE INDEX IF NOT EXISTS ix_outcomes_decision ON outcomes(tenant, decision_id);
 
@@ -285,6 +418,12 @@ CREATE TABLE IF NOT EXISTS requests (
   stop_condition   TEXT NOT NULL,
   state            TEXT NOT NULL,
   spent_json       TEXT NOT NULL,
+  /** Native mirrors of spent_json dollars/tokens: the admission SUM reads
+   *  these instead of casting JSON per row per submit. spent_json stays the
+   *  source of truth (full shape); mirrors move only inside the single
+   *  atomic UPDATE in spentAddAtomic, so they cannot drift. */
+  spent_tokens     REAL NOT NULL DEFAULT 0,
+  spent_dollars    REAL NOT NULL DEFAULT 0,
   refusal_reason   TEXT,
   parent_request   TEXT,
   created_at       TEXT NOT NULL,
@@ -329,6 +468,7 @@ CREATE TABLE IF NOT EXISTS traces (
 );
 CREATE INDEX IF NOT EXISTS ix_traces_intent ON traces(tenant, intent, created_at);
 CREATE INDEX IF NOT EXISTS ix_traces_type   ON traces(tenant, task_type, outcome);
+CREATE INDEX IF NOT EXISTS ix_traces_request ON traces(tenant, request_id);
 
 CREATE TABLE IF NOT EXISTS routing_decisions (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,6 +569,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail     TEXT,
   at         TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(tenant, action, at);
 
 CREATE TABLE IF NOT EXISTS ledger_seq (tenant TEXT PRIMARY KEY, "next" INTEGER NOT NULL);
 
@@ -442,18 +583,84 @@ CREATE TABLE IF NOT EXISTS routing_calibration (
 /** The one schema, translated for Postgres (AUTOINCREMENT → BIGSERIAL). Zero drift by construction. */
 export const PG_SCHEMA: string = SCHEMA.split('INTEGER PRIMARY KEY AUTOINCREMENT').join('BIGSERIAL PRIMARY KEY');
 
+/**
+ * The ONE migration authority (F07 consolidation).
+ *
+ * Order of operations, both engines:
+ *   1. base schema (CREATE IF NOT EXISTS — self-idempotent)
+ *   2. the additive list, applied as ONE named journal entry
+ *      (`additive-list-v6`) in `schema_migrations`
+ *   3. one-shot spent-mirror backfill (data migration, meta-flagged)
+ *   4. version stamp
+ *
+ * What changed vs the old runner: a failure inside the additive list used
+ * to be swallowed as "already migrated" while the version was stamped 6
+ * anyway — a half-migrated database reported current. Now the additive
+ * application runs in a transaction with the journal row, so an error
+ * rolls back BOTH the DDL and the record and the failure propagates to
+ * the caller (startup fails loudly on incomplete upgrades). Journal rows
+ * are stamped FIRST for already-applied work, so a database created by the
+ * older runner (schema present, journal empty) upgrades in place without
+ * re-running anything.
+ *
+ * Idempotency is explicit, not catch-all: IF NOT EXISTS DDL, a
+ * column-existence probe for each ALTER, and the meta-flagged backfill.
+ * Concurrent boots may race the journal INSERT; the ON CONFLICT keeps the
+ * first stamp and both write identical schema, so either outcome is sound.
+ */
 export async function migrate(db: AsyncDb): Promise<void> {
   await db.exec(db.engine === 'postgres' ? PG_SCHEMA : SCHEMA);
-  // Minimal migration runner: additive statements only, idempotent via
-  // try/catch (SQLite and Postgres both error on duplicate ADD COLUMN).
-  for (const sql of ADDITIVE_MIGRATIONS) {
-    try {
-      await db.exec(sql);
-    } catch {
-      /* already migrated */
-    }
+  await db.exec(MIGRATION_JOURNAL);
+  const additiveName = 'additive-list-v6';
+  const stamped = (await db.prepare('SELECT name FROM schema_migrations WHERE name = ?').get(additiveName)) as
+    { name: string } | undefined;
+  if (stamped) {
+    await runBackfill(db);
+    await stampVersion(db, '6');
+    return;
   }
-  await stampVersion(db, '4');
+  await db.transaction(async () => {
+    // Stamp BEFORE the DDL: this transaction is the unit. If the DDL fails,
+    // the stamp rolls back with it; if we crash mid-DDL, same. A journal
+    // row WITHOUT its schema can only exist if someone deleted DDL rows
+    // outside migrate() — not a state this runner can create.
+    await db
+      .prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING')
+      .run(additiveName, new Date().toISOString());
+    for (const sql of ADDITIVE_MIGRATIONS) {
+      await applyAdditiveStatement(db, sql);
+    }
+  });
+  await runBackfill(db);
+  await stampVersion(db, '6');
+}
+
+/**
+ * Spent-mirror backfill: recomputed from spent_json, so re-running is a
+ * no-op by construction (same source, same values). One-shot via a meta
+ * flag — every boot re-scanning the table to rewrite identical values
+ * would make migration cost history-sized. Engine-specific cast syntax —
+ * this is the one place migrations branch on dialect. Concurrent boots
+ * may both backfill; both write identical values.
+ */
+async function runBackfill(db: AsyncDb): Promise<void> {
+  const backfilled = (await db.prepare('SELECT value FROM meta WHERE key = ?').get('spent_mirrors_backfilled')) as
+    { value: string } | undefined;
+  if (backfilled) return;
+  if (db.engine === 'postgres') {
+    await db.exec(
+      `UPDATE requests SET spent_tokens = COALESCE((spent_json::jsonb ->> 'tokens')::float,0),
+        spent_dollars = COALESCE((spent_json::jsonb ->> 'dollars')::float,0)`,
+    );
+  } else {
+    await db.exec(
+      `UPDATE requests SET spent_tokens = COALESCE(json_extract(spent_json,'$.tokens'),0),
+        spent_dollars = COALESCE(json_extract(spent_json,'$.dollars'),0)`,
+    );
+  }
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run('spent_mirrors_backfilled', '6');
 }
 
 /**
@@ -469,6 +676,15 @@ export async function migrate(db: AsyncDb): Promise<void> {
  *
  * `"next"` is quoted because NEXT is a reserved word in Postgres. It is not
  * reserved in SQLite, and a double-quoted identifier is portable to both.
+ *
+ * Seq semantics (read before streaming on this): allocation is NOT
+ * commit-visibility order. `nextSeq` runs BEFORE the claim INSERT transaction
+ * (see ledger append), so a crashed or rolled-back append leaves a gap, and
+ * two concurrent appends can commit in the opposite order of their seqs.
+ * Consumers must therefore never treat "seq > watermark" as "visible":
+ * stream from a commit watermark (e.g. the outbox pattern — rows marked
+ * delivered inside the same transaction that made them visible), never from
+ * the raw seq counter.
  */
 export async function nextSeq(db: AsyncDb, tenant: string): Promise<number> {
   const row = (await db
@@ -480,4 +696,56 @@ export async function nextSeq(db: AsyncDb, tenant: string): Promise<number> {
     .get(tenant)) as { next: number } | undefined;
   if (!row) throw new Error('[db:SEQ] ledger_seq upsert returned no row');
   return Number(row.next);
+}
+
+/**
+ * Read-only integrity checker for the foreign keys above.
+ *
+ * Reports orphans without deleting or failing anything: dangling claim_links
+ * (an endpoint claim id with no claims row) and outcomes citing an unknown
+ * decision. The ledger already refuses to CREATE these (MISSING_CLAIM /
+ * MISSING_DECISION) and both engines enforce the keys, so a non-empty report
+ * means rows were written around the ledger (pragma-off restore, a copy) —
+ * investigate, never auto-delete. Links carry no tenant column, so the link
+ * leg is scoped to links touching this tenant's claims plus fully-dangling
+ * links (both endpoints gone, unattributable to any tenant).
+ */
+export interface IntegrityReport {
+  ok: boolean;
+  orphanOutcomes: { id: string; decisionId: string }[];
+  danglingLinks: { fromId: string; toId: string; link: string; missing: 'from' | 'to' | 'both' }[];
+}
+
+export async function verifyIntegrity(db: AsyncDb, tenant: string): Promise<IntegrityReport> {
+  const orphanOutcomes = (await db
+    .prepare(
+      `SELECT o.id AS id, o.decision_id AS decisionId FROM outcomes o
+       LEFT JOIN decisions d ON d.id = o.decision_id
+       WHERE o.tenant = ? AND d.id IS NULL`,
+    )
+    .all(tenant)) as { id: string; decisionId: string }[];
+  const dangling = (await db
+    .prepare(
+      `SELECT l.from_id AS fromId, l.to_id AS toId, l.link AS link,
+              cf.id AS hasFrom, ct.id AS hasTo
+       FROM claim_links l
+       LEFT JOIN claims cf ON cf.id = l.from_id
+       LEFT JOIN claims ct ON ct.id = l.to_id
+       WHERE (cf.id IS NULL OR ct.id IS NULL)
+         AND (cf.tenant = ? OR ct.tenant = ? OR (cf.id IS NULL AND ct.id IS NULL))`,
+    )
+    .all(tenant, tenant)) as {
+    fromId: string;
+    toId: string;
+    link: string;
+    hasFrom: string | null;
+    hasTo: string | null;
+  }[];
+  const danglingLinks = dangling.map((l) => {
+    let missing: 'from' | 'to' | 'both' = 'to';
+    if (l.hasFrom == null) missing = l.hasTo == null ? 'both' : 'from';
+    return { fromId: String(l.fromId), toId: String(l.toId), link: String(l.link), missing };
+  });
+  const cleanOutcomes = orphanOutcomes.map((o) => ({ id: String(o.id), decisionId: String(o.decisionId) }));
+  return { ok: cleanOutcomes.length === 0 && danglingLinks.length === 0, orphanOutcomes: cleanOutcomes, danglingLinks };
 }

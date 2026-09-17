@@ -1,3 +1,4 @@
+import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { ModelProfile } from '../substrate/models.ts';
 import { WedgeError } from './ship.ts';
@@ -126,6 +127,68 @@ export interface ResearchBudgets {
 }
 
 /**
+ * Durable stage checkpoints: plan/approval/steps-done live in `meta` (plus
+ * an audit trail row), not just in the in-memory run object — so a resumed
+ * run after a crash skips completed steps instead of re-spending searches.
+ * Pure constructors (`createResearchRun`/`approveResearchPlan`) stay pure;
+ * callers persist the result with `saveResearchCheckpoint`, and
+ * `executeResearchRun` merges the stored checkpoint when `opts.db` is set.
+ */
+export interface ResearchCheckpoint {
+  question: string;
+  subquestions: string[];
+  status: ResearchStatus;
+  approvedBy: string | null;
+  completedSteps: string[];
+  findingIds: string[];
+  seenUris: string[];
+}
+
+const checkpointKeyOf = (tenant: string, id: string): string => `research:run:${tenant}:${id}`;
+
+export async function saveResearchCheckpoint(db: AsyncDb, run: ResearchRun, at: string): Promise<void> {
+  const checkpoint: ResearchCheckpoint = {
+    question: run.question,
+    subquestions: run.subquestions,
+    status: run.status,
+    approvedBy: run.approvedBy,
+    completedSteps: run.completedSteps,
+    findingIds: run.findingIds,
+    seenUris: run.seenUris,
+  };
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(checkpointKeyOf(run.tenant, run.id), JSON.stringify(checkpoint));
+  await db
+    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+    .run(
+      run.tenant,
+      'deep-research',
+      'RESEARCH_CHECKPOINT',
+      run.id,
+      JSON.stringify({ status: run.status, stepsDone: run.completedSteps.length }),
+      at,
+    );
+}
+
+export async function loadResearchCheckpoint(
+  db: AsyncDb,
+  tenant: string,
+  id: string,
+): Promise<ResearchCheckpoint | null> {
+  try {
+    const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(checkpointKeyOf(tenant, id))) as
+      { value: string } | undefined;
+    if (!r) return null;
+    const c = JSON.parse(String(r.value)) as ResearchCheckpoint;
+    if (!Array.isArray(c.completedSteps)) return null;
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Stage 1 — run. Each subquestion searches, filters allow/block lists,
  * dedupes URIs across the run (cross-referencing starts here: the second
  * sighting of a URI corroborates instead of duplicating), and banks
@@ -136,18 +199,49 @@ export async function executeResearchRun(
   ledger: Ledger,
   run: ResearchRun,
   search: SearchFn,
-  opts: { by: string; scope: string; now: string; budgets?: Partial<ResearchBudgets>; cancelled?: () => boolean },
+  opts: {
+    by: string;
+    scope: string;
+    now: string;
+    budgets?: Partial<ResearchBudgets>;
+    cancelled?: () => boolean;
+    /**
+     * Durable resume: when set, the stored checkpoint (if any) merges into
+     * the run before the first search, and every completed step re-saves —
+     * so a crash/resume spends zero new searches on done steps.
+     */
+    db?: AsyncDb;
+  },
 ): Promise<ResearchRun> {
   if (run.status !== 'APPROVED' && run.status !== 'RUNNING') {
     throw new WedgeError('UNAPPROVED_RESEARCH', `run is ${run.status} — approve the plan before it executes`);
   }
   const budgets: ResearchBudgets = { maxSearches: 20, maxResultsPerQuestion: 8, ...opts.budgets };
   let next: ResearchRun = { ...run, status: 'RUNNING' };
+  if (opts.db) {
+    const stored = await loadResearchCheckpoint(opts.db, run.tenant, run.id);
+    if (stored) {
+      // Resume keeps the furthest progress of either copy: union, run order
+      // preserved, so completed steps are skipped and findings never re-bank.
+      const union = (a: string[], b: string[]): string[] => [...a, ...b.filter((s) => !a.includes(s))];
+      next = {
+        ...next,
+        approvedBy: next.approvedBy ?? stored.approvedBy,
+        completedSteps: union(stored.completedSteps, next.completedSteps),
+        findingIds: union(stored.findingIds, next.findingIds),
+        seenUris: union(stored.seenUris, next.seenUris),
+      };
+    }
+    await saveResearchCheckpoint(opts.db, next, opts.now);
+  }
   const subject = `research:${slugOf(run.question)}`;
   let searches = 0;
   for (const sub of run.subquestions) {
     if (next.completedSteps.includes(sub)) continue;
-    if (opts.cancelled?.() === true) return { ...next, status: 'CANCELLED' };
+    if (opts.cancelled?.() === true) {
+      if (opts.db) await saveResearchCheckpoint(opts.db, { ...next, status: 'CANCELLED' }, opts.now);
+      return { ...next, status: 'CANCELLED' };
+    }
     if (searches >= budgets.maxSearches) break;
     searches += 1;
     const hits = await search(sub);
@@ -187,8 +281,13 @@ export async function executeResearchRun(
       taken += 1;
     }
     next = { ...next, completedSteps: [...next.completedSteps, sub] };
+    // Checkpoint per step (why: a crash mid-run resumes after this step
+    // instead of re-searching it — the budget pays once per sub-question).
+    if (opts.db) await saveResearchCheckpoint(opts.db, next, opts.now);
   }
-  return { ...next, status: 'COMPLETED' };
+  const done: ResearchRun = { ...next, status: 'COMPLETED' };
+  if (opts.db) await saveResearchCheckpoint(opts.db, done, opts.now);
+  return done;
 }
 
 export interface ReportVerification {

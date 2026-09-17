@@ -133,12 +133,22 @@ if (cmd === 'status') {
   const approverRole = flag('--approver-role') as 'member' | 'admin' | 'owner' | undefined;
   if (approverRole && !['member', 'admin', 'owner'].includes(approverRole))
     throw new Error('--approver-role must be member | admin | owner');
+  // Preserve PEM blocks when keys are supplied through single-line environment files.
+  const parseOperatorKeys = (raw: string | undefined): string[] | undefined => {
+    if (!raw || raw.trim().length === 0) return undefined;
+    const text = raw.replace(/\\n/g, '\n');
+    const blocks = text.match(/-----BEGIN [^-]*PUBLIC KEY-----[\s\S]*?-----END [^-]*PUBLIC KEY-----/g);
+    const keys = (blocks ?? [text]).map((s) => s.trim()).filter((s) => s.length > 0);
+    return keys.length > 0 ? keys : undefined;
+  };
   const server = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
     port,
     host,
     tenant,
     siteDir: site,
     approverRole,
+    operatorSecret: process.env.VITAL_OPERATOR_SECRET,
+    operatorKeys: parseOperatorKeys(process.env.VITAL_OPERATOR_KEYS),
   });
   console.log(
     `vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl}, tenant ${tenant}, auth on${site ? ', site ./site' : ''})`,

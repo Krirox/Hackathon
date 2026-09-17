@@ -274,7 +274,7 @@ T('an unadmitted request cannot reach the harness at all', async () => {
     } catch (e) {
       threw = (e as Error).message;
     }
-    eq(threw.includes('not admitted'), true);
+    eq(threw.includes('not executable') || threw.includes('not admitted'), true);
     eq(h.requestsOf('send_message').length, 0, 'harness never saw the work:');
   });
 });
@@ -472,6 +472,159 @@ T('a bare harness error fails the turn fast with its message', async () => {
     eq(out.refusalReason, 'legacy backend vanished', 'the bare error message lands, not a timeout:');
     eq(Date.now() - started < 10_000, true, 'fast fail, nowhere near the ceiling:');
     eq((await coord.get(TEN, request.id))!.state, 'FAILED');
+  } finally {
+    server.close();
+  }
+});
+
+T('a remote disconnect settles inflight legs instead of hanging them', async () => {
+  // Explicit close() already settles; the daemon dying mid-turn must too.
+  const name = `vital-died-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const path = process.platform === 'win32' ? `\\\\.\\pipe\\${name}` : `${name}.sock`;
+  const server = createServer((sock) => {
+    let buf = '';
+    sock.on('data', (ch: Buffer) => {
+      buf += ch.toString('utf8');
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const f = JSON.parse(line) as { id?: number; req?: string };
+        if (f.req === 'hello') {
+          sock.write(`${JSON.stringify({ v: 1, reply_to: f.id, ev: 'hello_ok' })}\n`);
+          // Answer hello, then die with a request inflight.
+          setTimeout(() => sock.destroy(), 20);
+        }
+      }
+    });
+  });
+  await new Promise<void>((res) => server.listen(path, res));
+  const c = new JcodeClient({ socketPath: path });
+  try {
+    await c.connect();
+    const started = Date.now();
+    await rejects(async () => await c.request('list_sessions'), 'CLOSED');
+    eq(Date.now() - started < 5_000, true, 'disconnect surfaces fast:');
+  } finally {
+    c.close();
+    server.close();
+  }
+});
+
+T('exclusive ownership: the second claim loses with CLAIM_LOST', async () => {
+  // Two workers, one admitted request: the atomic ADMITTED→IN_FLIGHT move
+  // has exactly one winner. No harness involved — this is the claim alone.
+  const { coord } = await fresh();
+  const { request } = await coord.submit(base({ id: 'cl1' }));
+  await coord.claimExecution(TEN, request.id, 'worker:a', NOW);
+  eq((await coord.get(TEN, request.id))!.state, 'IN_FLIGHT');
+  await rejects(async () => await coord.claimExecution(TEN, request.id, 'worker:b', NOW), 'CLAIM_LOST');
+});
+
+T('expired leases release back to ADMITTED; live ones stay pinned', async () => {
+  const { coord } = await fresh();
+  const { request } = await coord.submit(base({ id: 'cl2' }));
+  await coord.claimExecution(TEN, request.id, 'worker:a', NOW, 1000);
+  eq(await coord.reclaimStale(TEN, Date.parse(NOW) + 500), [], 'lease still live:');
+  eq((await coord.get(TEN, request.id))!.state, 'IN_FLIGHT', 'unexpired claims are untouched:');
+  eq(await coord.reclaimStale(TEN, Date.parse(NOW) + 2000), [request.id], 'lease expired:');
+  eq((await coord.get(TEN, request.id))!.state, 'ADMITTED', 'dead work becomes runnable again:');
+  await coord.claimExecution(TEN, request.id, 'worker:b', NOW);
+  eq((await coord.get(TEN, request.id))!.state, 'IN_FLIGHT', 'released work re-claims:');
+});
+
+T('a runner that loses the claim never touches the harness', async () => {
+  await withHarness(async (h) => {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'r',
+      kind: 'OBSERVATION',
+      statement: 'x',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    const { request } = await coord.submit(base({ id: 'cl3', claimRefs: [clm.id] }));
+    await coord.claimExecution(TEN, request.id, 'worker:other', NOW);
+    const r = new JcodeRunner(db, ledger, coord);
+    await rejects(
+      async () =>
+        await r.run(
+          TEN,
+          request.id,
+          { command: 'x', claimRefs: [clm.id], onBehalfOf: 'worker:loser', maxDollars: 1, maxTokens: 100 },
+          { socketPath: h.path },
+        ),
+      'CLAIM_LOST',
+    );
+    eq(h.requestsOf('create_session').length, 0, 'the loser never opened a session:');
+    eq(h.requestsOf('send_message').length, 0, 'the loser never sent work:');
+  });
+});
+
+T('a runaway transcript is capped and the cut is disclosed', async () => {
+  const name = `vital-flood-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const path = process.platform === 'win32' ? `\\\\.\\pipe\\${name}` : `${name}.sock`;
+  const server = createServer((sock) => {
+    let buf = '';
+    const send = (ev: Record<string, unknown>) => {
+      if (!sock.destroyed) sock.write(`${JSON.stringify({ v: 1, ...ev })}\n`);
+    };
+    sock.on('data', (ch: Buffer) => {
+      buf += ch.toString('utf8');
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const f = JSON.parse(line) as { id?: number; req?: string };
+        if (f.req === 'hello') send({ reply_to: f.id, ev: 'hello_ok' });
+        else if (f.req === 'create_session') send({ reply_to: f.id, ev: 'attached', session: { session_id: 's1' } });
+        else if (f.req === 'attach_session') send({ reply_to: f.id, ev: 'attached', session: { session_id: 's1' } });
+        else if (f.req === 'send_message') {
+          send({ ev: 'text_delta', session_id: 's1', text: 'x'.repeat(40_000) });
+          send({ ev: 'text_delta', session_id: 's1', text: 'y'.repeat(40_000) });
+          send({ ev: 'token_usage', session_id: 's1', input: 10, output: 10 });
+          send({ ev: 'turn_done', session_id: 's1' });
+        }
+      }
+    });
+  });
+  await new Promise<void>((res) => server.listen(path, res));
+  try {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'r',
+      kind: 'OBSERVATION',
+      statement: 'x',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 's',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    const { request } = await coord.submit(base({ id: 'jflood', claimRefs: [clm.id] }));
+    const r = new JcodeRunner(db, ledger, coord);
+    const out = await r.run(
+      TEN,
+      request.id,
+      { command: 'x', claimRefs: [clm.id], onBehalfOf: 'h', maxDollars: 1, maxTokens: 10_000_000 },
+      { socketPath: path },
+    );
+    eq(out.status, 'COMPLETED');
+    eq(out.transcript.length <= 64_000, true, `transcript capped in memory (got ${out.transcript.length}):`);
+    const claims = await ledger.bySubject(TEN, 'jcode:engineering');
+    const run = claims.find((c) => c.statement.includes('harness run'));
+    eq(!!run && run.statement.includes('(transcript truncated)'), true, 'the cut is disclosed on the claim:');
   } finally {
     server.close();
   }

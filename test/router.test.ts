@@ -21,6 +21,43 @@ T('reflex registry handles deterministic work at zero cost', async () => {
   eq(d.tier, 'REFLEX');
 });
 
+T("learned history never crosses tenants: another tenant's outcomes route nothing here", async () => {
+  // Control mode: shadow executes the policy baseline by design, so the
+  // learned proposal is only observable when control is granted.
+  const { db, router } = await fresh(undefined, { controlRate: 1 });
+  const ins = (tenant: string, i: number, outcome: string) =>
+    db
+      .prepare(
+        `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        `tr_${tenant}_${i}`,
+        tenant,
+        null,
+        'marketing',
+        'engineering.implement',
+        'x',
+        '[]',
+        'MODEL',
+        outcome,
+        '{}',
+        null,
+        0.9,
+        NOW,
+      );
+  for (let i = 0; i < 50; i++) {
+    await ins(TEN, i, 'SUCCESS');
+    await ins('other', i, 'FAILURE');
+  }
+  // engineering.implement has no policy opinion (no reflex rule, no model
+  // floor), so the learned history decides — the only path that reads it.
+  const a = await router.route(rIn({ taskType: 'engineering.implement', importance: 0.1 }));
+  eq(a.tier, 'REFLEX', 'own history earns REFLEX:');
+  const b = await router.route(rIn({ tenant: 'other', taskType: 'engineering.implement', importance: 0.1 }));
+  eq(b.tier, 'MODEL', 'a tenant with only failures stays on MODEL:');
+});
+
 T('coupling guard: a card validated for another scope cannot run here', async () => {
   const { router } = await fresh();
   const d = await router.route(

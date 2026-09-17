@@ -128,7 +128,11 @@ function walk(dir: string, base = ''): string[] {
 }
 
 /** Verify a live scope dir against its manifest. Never trust, always check. */
-export function verifySandbox(root: string, manifest: Manifest): VerifyResult {
+export function verifySandbox(
+  root: string,
+  manifest: Manifest,
+  opts: { maxBytes?: number } = {},
+): VerifyResult & { overBudget?: boolean } {
   const dir = scopeDir(root, manifest.scope);
   const tampered: string[] = [];
   const missing: string[] = [];
@@ -157,6 +161,12 @@ export function verifySandbox(root: string, manifest: Manifest): VerifyResult {
       continue;
     }
     bytesOnDisk += size;
+    // Byte guard first: hashing an unbounded tree to prove it is
+    // unauthorized is how a full disk becomes an OOM. Refuse loudly once
+    // past maxBytes instead of reading further.
+    if (opts.maxBytes !== undefined && bytesOnDisk > opts.maxBytes) {
+      return { ok: false, tampered, missing, extra, bytesOnDisk, overBudget: true };
+    }
     if (!manifested.has(rel)) extra.push(rel);
   }
   extra.sort();

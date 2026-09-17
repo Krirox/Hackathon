@@ -181,21 +181,27 @@ export class CognitiveRouter {
     }
     if (input.touchesExternalUnverified) return 'MODEL';
     if ((input.confidence ?? 1) < 0.6 || input.importance > 0.7) return 'MODEL';
-    const hist = await this.historicalSuccess(input.taskType);
+    const hist = await this.historicalSuccess(input.tenant, input.taskType);
     if (hist && hist.successRate >= 0.95 && hist.samples >= 50 && input.importance < 0.5) {
       return 'REFLEX';
     }
     return 'MODEL';
   }
 
-  private async historicalSuccess(taskType: string): Promise<{ successRate: number; samples: number } | null> {
+  private async historicalSuccess(
+    tenant: string,
+    taskType: string,
+  ): Promise<{ successRate: number; samples: number } | null> {
+    // Tenant-scoped by construction: another tenant's outcomes must never
+    // route this tenant's work (isolation), and the predicate matches the
+    // (tenant, task_type) access shape instead of scanning shared history.
     const row = (await this.db
       .prepare(
         `SELECT COUNT(*) AS n,
                 SUM(CASE WHEN outcome = 'SUCCESS' THEN 1 ELSE 0 END) AS s
-           FROM traces WHERE task_type = ?`,
+           FROM traces WHERE tenant = ? AND task_type = ?`,
       )
-      .get(taskType)) as { n: number; s: number } | undefined;
+      .get(tenant, taskType)) as { n: number; s: number } | undefined;
     if (!row || Number(row.n) === 0) return null;
     return { samples: Number(row.n), successRate: Number(row.s) / Number(row.n) };
   }

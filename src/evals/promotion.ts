@@ -91,7 +91,28 @@ export async function advanceStage(
     };
   }
   const advanceTo: PromoStage = STAGE_ORDER[STAGE_ORDER.indexOf(cur.stage) + 1]!;
-  await writeStage(db, tenant, { target, stage: advanceTo, runId: run.id, at });
+  // Expected-state CAS: the stage moves only if it still holds the value
+  // this call validated the gate against. A concurrent advancer wins, this
+  // call sees zero changed rows and throws instead of overwriting — two
+  // gates can never both "advance" the same stage. The ensure-INSERT covers
+  // the first-ever advance (no row yet); it is idempotent, so racers share it.
+  const key = `promo:${tenant}:${target}`;
+  const next: StageRecord = { target, stage: advanceTo, runId: run.id, at };
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING')
+    .run(key, JSON.stringify(cur));
+  const out = await db
+    .prepare('UPDATE meta SET value = ? WHERE key = ? AND value = ?')
+    .run(JSON.stringify(next), key, JSON.stringify(cur));
+  if (out.changes === 0) {
+    throw new PromotionError(
+      'STATE_CONFLICT',
+      `stage for ${target} moved under this advance (was ${cur.stage}) — re-read and gate again`,
+    );
+  }
+  await db
+    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+    .run(tenant, 'promotion', `STAGE_${advanceTo.toUpperCase()}`, target, run.id, at);
   return { advanced: true, run, reasons: [] };
 }
 

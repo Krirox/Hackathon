@@ -39,7 +39,7 @@ pgT('migrate derives the schema and stamps the version (postgres)', async () => 
     const version = (await db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')) as {
       value: string;
     };
-    eq(version.value, '4');
+    eq(version.value, '6');
     // Derived from the one SCHEMA — if this ever drops, the translation
     // silently lost a table and the Ledger is not the only store.
     const tables = (await db

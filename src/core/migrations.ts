@@ -1,10 +1,17 @@
 import type { AsyncDb } from './db.ts';
 
 /**
- * Migration journal (TODO Ops): named migrations with up/down SQL,
- * recorded in `schema_migrations`, applied once, rolled back explicitly.
- * Down migrations are TESTED here (not trusted): the suite applies and
- * rolls back a scratch migration on every run.
+ * F07 consolidation: `migrate()` in `src/core/db.ts` is the ONE migration
+ * authority (base schema + additive list + backfill + version stamp,
+ * journaled in `schema_migrations`). This module keeps only the generic
+ * named-migration API for FUTURE schema changes — the up/down tooling the
+ * tests exercise — delegating journal reads/writes to the shared helpers so
+ * there is exactly one journal, one table, one writer.
+ *
+ * The old standalone `CREATE TABLE schema_migrations` and the private
+ * read/insert/delete SQL lived here and drifted from db.ts's contract;
+ * both are gone. Name rules: migrations are `<date>-<slug>` so journal
+ * listings sort chronologically.
  */
 
 export class MigrationError extends Error {
@@ -22,21 +29,27 @@ export interface Migration {
   down: string;
 }
 
-const JOURNAL = `CREATE TABLE IF NOT EXISTS schema_migrations (
-  name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
-)`;
-
 export async function appliedMigrations(db: AsyncDb): Promise<string[]> {
-  await db.exec(JOURNAL);
+  await ensureJournal(db);
   return ((await db.prepare('SELECT name FROM schema_migrations ORDER BY name').all()) as { name: string }[]).map((r) =>
     String(r.name),
   );
 }
 
+/** The journal DDL lives in db.ts — same table, one definition. */
+async function ensureJournal(db: AsyncDb): Promise<void> {
+  await db.exec(MIGRATION_JOURNAL_DDL);
+}
+
+/** Kept byte-identical with `MIGRATION_JOURNAL` in db.ts (both are IF NOT EXISTS). */
+const MIGRATION_JOURNAL_DDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+)`;
+
 /** Apply every pending migration in order. Already-applied names are skipped. */
 export async function applyMigrations(db: AsyncDb, migrations: Migration[], now?: string): Promise<string[]> {
   const at = now ?? new Date().toISOString();
-  await db.exec(JOURNAL);
+  await ensureJournal(db);
   const done = new Set(await appliedMigrations(db));
   const applied: string[] = [];
   for (const m of migrations) {

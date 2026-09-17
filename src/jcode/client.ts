@@ -44,6 +44,9 @@ export class JcodeError extends Error {
   }
 }
 
+/** Cap on the NDJSON reassembly buffer: garbage without newlines dies here. */
+const MAX_FRAME_BUFFER = 8 * 1024 * 1024;
+
 export class JcodeClient extends EventEmitter {
   private sock: Socket | null = null;
   private buf = '';
@@ -84,6 +87,10 @@ export class JcodeClient extends EventEmitter {
     this.sock.on('data', (chunk: string) => this.onData(chunk));
     this.sock.on('close', () => {
       this.sock = null;
+      // Remote disconnect settles inflight legs the same as close(): a dead
+      // sibling must surface as rejections, never silent hangs. (Explicit
+      // close() shares this path via settleClosed below.)
+      this.settleClosed();
       this.emit('close');
     });
 
@@ -114,6 +121,15 @@ export class JcodeClient extends EventEmitter {
 
   private onData(chunk: string): void {
     this.buf += chunk;
+    // A peer streaming garbage without newlines would grow the buffer
+    // without bound (the bridge itself closes on oversized frames). Cap it:
+    // fail the connection loudly rather than exhausting task memory.
+    if (this.buf.length > MAX_FRAME_BUFFER) {
+      this.buf = '';
+      this.settleClosed(new JcodeError('FRAME_OVERFLOW', `frame buffer exceeded ${MAX_FRAME_BUFFER} bytes`));
+      this.sock?.destroy();
+      return;
+    }
     let nl: number;
     while ((nl = this.buf.indexOf('\n')) >= 0) {
       const line = this.buf.slice(0, nl).trim();
@@ -258,12 +274,18 @@ export class JcodeClient extends EventEmitter {
     // A destroyed socket never answers: settle every inflight request so a
     // harness disconnect surfaces as a rejection, never a silent hang.
     // (runner.ts relies on this — waitForTurn must see disconnects.)
+    this.settleClosed();
+    this.sock?.destroy();
+    this.sock = null;
+  }
+
+  /** Reject every inflight leg: connection gone, locally or remotely. */
+  private settleClosed(err?: JcodeError): void {
     if (this.pending.size > 0) {
       const pendings = [...this.pending.values()];
       this.pending.clear();
-      for (const w of pendings) w.reject(new JcodeError('CLOSED', 'connection closed with request inflight'));
+      const e = err ?? new JcodeError('CLOSED', 'connection closed with request inflight');
+      for (const w of pendings) w.reject(e);
     }
-    this.sock?.destroy();
-    this.sock = null;
   }
 }

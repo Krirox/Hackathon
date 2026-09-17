@@ -30,7 +30,11 @@ import './jcode.test.ts';
 import './vendor.test.ts';
 import './talk.test.ts';
 import './auth.test.ts';
+import './operator.test.ts';
 import './erasure.test.ts';
+import './aws.test.ts';
+import './s3store.test.ts';
+import './artifact.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

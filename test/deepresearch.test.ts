@@ -161,3 +161,39 @@ T('the planner assist drafts sub-questions; humans still approve them', async ()
   }
   eq(code2.includes('PROPOSAL_FAILED'), true);
 });
+
+T('resume after a crash skips done steps without new searches', async () => {
+  const { db, ledger } = await fresh();
+  const question = 'How do others do magic-link login?';
+  const subs = ['magic link expiry', 'magic link device check'];
+  let calls = 0;
+  const counting = async (q: string) => {
+    calls++;
+    return search(q);
+  };
+  // First attempt "crashes" after one search (budget cap): one step done,
+  // checkpoint persisted stage-by-stage to the DB.
+  const attempt = approveResearchPlan(
+    createResearchRun(TEN, question, subs, { now: NOW, id: 'rsr_resume_1' }),
+    'human:priya',
+  );
+  const partial = await executeResearchRun(ledger, attempt, counting, {
+    by: 'a',
+    scope: 'e',
+    now: NOW,
+    budgets: { maxSearches: 1, maxResultsPerQuestion: 8 },
+    db,
+  });
+  eq(partial.completedSteps.length, 1);
+  eq(calls, 1);
+  // Resume with a FRESH run object (in-memory progress lost) but the same
+  // id: the stored checkpoint carries the done step, so only the remaining
+  // sub-question spends a search.
+  const resumed = approveResearchPlan(createResearchRun(TEN, question, subs, { now: NOW, id: 'rsr_resume_1' }), 'h2');
+  const done = await executeResearchRun(ledger, resumed, counting, { by: 'a', scope: 'e', now: NOW, db });
+  eq(done.completedSteps.length, 2);
+  eq(calls, 2, 'only the remaining step searched:');
+  // 2 hits banked before the crash + 1 new (the corroborated URI skips) —
+  // the done step was never re-banked as duplicate claims.
+  eq(done.findingIds.length, 3);
+});
