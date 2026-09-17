@@ -88,8 +88,13 @@ Why this shape, per Vital's own rules:
   quarterly restore drill remain the backup strategy (unchanged rule above).
 
 Deploy: `deploy-aws` workflow (manual dispatch — infra is never a side
-effect of a test push). It typechecks + tests, builds both images,
-pushes to ECR (immutable tags, scan-on-push, keep-last-20), runs
-`terraform apply` with the fresh image URIs, then smoke-checks
-`http://<alb>/api/approval-latency`. First-time bootstrap: `terraform apply`
-once with empty image vars to create the ECR repos, then run the workflow.
+effect of a test push). It typechecks + tests, ensures ECR repos exist, builds
+both images, pushes to ECR (immutable tags, scan-on-push, keep-last-20), runs
+`terraform apply` with sensitive `TF_VAR_*` secrets mapped and fresh image URIs,
+then executes semantic smoke checks (ECS stability wait, `/healthz` probing, and
+non-billable executor dry-run invocation).
+
+First-time bootstrap:
+1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
+2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`).
+3. Run the `deploy-aws` workflow or run `terraform apply` directly (safe local image fallbacks allow initial infrastructure bootstrap without chicken-and-egg failure).

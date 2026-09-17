@@ -36,12 +36,14 @@ jobs:
         run: echo "tag=${{ inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
       - name: Build and push vital-core
         run: |
+          aws ecr describe-repositories --repository-names vital-core 2>/dev/null || aws ecr create-repository --repository-name vital-core --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true
           CORE_REPO=$(aws ecr describe-repositories --repository-names vital-core --query 'repositories[0].repositoryUri' --output text)
           docker build -f deploy/aws/Dockerfile.vital-core -t "$CORE_REPO:${{ steps.tag.outputs.tag }}" .
           docker push "$CORE_REPO:${{ steps.tag.outputs.tag }}"
           echo "CORE_IMAGE=$CORE_REPO:${{ steps.tag.outputs.tag }}" >> "$GITHUB_ENV"
       - name: Build and push executor
         run: |
+          aws ecr describe-repositories --repository-names vital-executor 2>/dev/null || aws ecr create-repository --repository-name vital-executor --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true
           EXEC_REPO=$(aws ecr describe-repositories --repository-names vital-executor --query 'repositories[0].repositoryUri' --output text)
           docker build -f deploy/aws/Dockerfile.executor -t "$EXEC_REPO:${{ steps.tag.outputs.tag }}" .
           docker push "$EXEC_REPO:${{ steps.tag.outputs.tag }}"
@@ -49,13 +51,38 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
       - name: Terraform apply
         working-directory: deploy/aws
+        env:
+          TF_VAR_tenant_hmac_secret: ${{ secrets.TF_VAR_TENANT_HMAC_SECRET }}
+          TF_VAR_vital_core_secret: ${{ secrets.TF_VAR_VITAL_CORE_SECRET }}
+          TF_VAR_webhook_secret: ${{ secrets.TF_VAR_WEBHOOK_SECRET }}
+          TF_VAR_serper_api_key: ${{ secrets.TF_VAR_SERPER_API_KEY }}
+          TF_VAR_gemini_api_key: ${{ secrets.TF_VAR_GEMINI_API_KEY }}
+          TF_VAR_novita_api_key: ${{ secrets.TF_VAR_NOVITA_API_KEY }}
+          TF_VAR_operator_secret: ${{ secrets.TF_VAR_OPERATOR_SECRET }}
         run: |
-          terraform init -input=false
+          if [ -n "${{ secrets.TF_BACKEND_BUCKET }}" ]; then
+            terraform init -input=false \
+              -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
+              -backend-config="key=${{ vars.TF_BACKEND_KEY || 'vital/terraform.tfstate' }}" \
+              -backend-config="region=$AWS_REGION" \
+              -backend-config="dynamodb_table=${{ vars.TF_BACKEND_DYNAMODB_TABLE || 'vital-tfstate-locks' }}" \
+              -backend-config="encrypt=true"
+          else
+            terraform init -input=false
+          fi
           terraform apply -input=false -auto-approve \
             -var "region=$AWS_REGION" \
             -var "core_image=$CORE_IMAGE" \
             -var "executor_image=$EXECUTOR_IMAGE"
       - name: Smoke check
         run: |
+          echo "Waiting for ECS service stability..."
+          aws ecs wait services-stable --cluster vital --services vital-core
           ALB=$(terraform -chdir=deploy/aws output -raw alb_dns)
-          curl -fsS "http://$ALB/api/approval-latency" | head -c 500
+          echo "Checking healthz endpoint..."
+          HEALTH=$(curl -fsSL --retry 5 --retry-delay 3 "http://$ALB/healthz")
+          echo "$HEALTH" | grep '"ok":true'
+          echo "Verifying non-billable executor dry-run invocation..."
+          aws lambda invoke --function-name vital-executor \
+            --payload '{"dryRun":true}' \
+            --cli-binary-format raw-in-base64-out /dev/null

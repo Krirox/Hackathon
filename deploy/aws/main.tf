@@ -57,8 +57,10 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name = var.project
-  azs  = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+  name           = var.project
+  azs            = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+  core_image     = var.core_image != "" ? var.core_image : "public.ecr.aws/docker/library/busybox:latest"
+  executor_image = var.executor_image != "" ? var.executor_image : "public.ecr.aws/docker/library/busybox:latest"
 }
 
 # ------------------------------------------------------------- networking ----
@@ -462,6 +464,35 @@ resource "aws_iam_role_policy_attachment" "ecs_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# ECS task definition secrets (e.g. DATABASE_URL, TENANT_HMAC_SECRET) are fetched
+# by the ECS container agent using the EXECUTION role at container launch time.
+resource "aws_iam_policy" "ecs_execution_secrets" {
+  name = "${local.name}-ecs-execution-secrets"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = concat([
+          aws_secretsmanager_secret.db_url.arn,
+          aws_secretsmanager_secret.tenant_hmac.arn,
+          aws_secretsmanager_secret.core_secret.arn,
+          aws_secretsmanager_secret.webhook.arn,
+          aws_secretsmanager_secret.serper.arn,
+          aws_secretsmanager_secret.gemini.arn,
+          aws_secretsmanager_secret.novita.arn
+        ], aws_secretsmanager_secret.operator[*].arn)
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_secrets" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = aws_iam_policy.ecs_execution_secrets.arn
+}
+
 resource "aws_iam_role" "ecs_task" {
   name = "${local.name}-ecs-task"
   assume_role_policy = jsonencode({
@@ -476,6 +507,7 @@ resource "aws_iam_policy" "ecs_task" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([
+        aws_secretsmanager_secret.db_url.arn,
         aws_secretsmanager_secret.tenant_hmac.arn, aws_secretsmanager_secret.core_secret.arn,
         aws_secretsmanager_secret.webhook.arn, aws_secretsmanager_secret.serper.arn,
         aws_secretsmanager_secret.gemini.arn, aws_secretsmanager_secret.novita.arn
@@ -634,7 +666,7 @@ resource "aws_ecs_task_definition" "core" {
   container_definitions = jsonencode([
     {
       name         = "vital-core"
-      image        = var.core_image
+      image        = local.core_image
       essential    = true
       portMappings = [{ containerPort = 3100, protocol = "tcp" }]
       mountPoints = [
@@ -833,7 +865,7 @@ resource "aws_lambda_function" "executor" {
   function_name = "${local.name}-executor"
   role          = aws_iam_role.lambda.arn
   package_type  = "Image"
-  image_uri     = var.executor_image
+  image_uri     = local.executor_image
   timeout       = 900
   memory_size   = var.lambda_memory_mb
   # Memory stays at 2048: Lambda CPU scales with memory and this is
