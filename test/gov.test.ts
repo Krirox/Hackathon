@@ -16,7 +16,7 @@ import {
   setKill,
   trustFor,
 } from '../src/gov/trust.ts';
-import { actReversible } from '../src/gov/act.ts';
+import { actReversible, compensateReversible } from '../src/gov/act.ts';
 import { checkBatch, checkRateLimit, sampleForReview, selectReviewSample } from '../src/gov/review.ts';
 
 console.log('\n\x1b[1mGovernance — the R/A/I matrix\x1b[0m');
@@ -393,4 +393,88 @@ T('parallel rate-limit checks admit exactly the cap', async () => {
     value: string;
   };
   eq(Number(row.value), 5, 'the counter holds every grant:');
+});
+
+T('AUDIT F06: actReversible performs real execution, records concrete receipts, and compensates', async () => {
+  const { ledger } = await fresh();
+  const basis = await ledger.append({
+    tenant: TEN,
+    subject: 'flag:dark_mode',
+    kind: 'FACT',
+    statement: 'feature flag config initialized',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'system',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: {
+      sourceUri: 'config:flags',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'config-loader',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+
+  let flagState = 'off';
+  const out = await actReversible(ledger, 'autonomous', ['trust grants it'], {
+    tenant: TEN,
+    scope: 'engineering',
+    kind: 'flag',
+    detail: 'enable dark_mode',
+    by: 'agent:eng',
+    claimIds: [basis.id],
+    now: NOW,
+    execute: async () => {
+      flagState = 'on';
+      return {
+        executed: true,
+        receiptId: 'rcpt_flag_123',
+        output: { previous: 'off', current: 'on' },
+        compensation: {
+          kind: 'flag',
+          detail: 'revert dark_mode to off',
+          compensate: () => {
+            flagState = 'off';
+          },
+        },
+      };
+    },
+  });
+
+  eq(flagState, 'on', 'execution handler ran:');
+  eq(out.receipt?.executed, true);
+  eq(out.receipt?.receiptId, 'rcpt_flag_123');
+  const claim = await ledger.get(TEN, out.claimId);
+  eq(claim?.kind, 'ACTION');
+  eq(claim?.statement.includes('[receipt:rcpt_flag_123]'), true);
+
+  // Compensate
+  const comp = await compensateReversible(ledger, TEN, out.claimId, out.receipt!.compensation!, 'human:operator', NOW);
+  eq(comp.compensated, true);
+  eq(flagState, 'off', 'compensation handler ran:');
+  const compClaim = await ledger.get(TEN, comp.claimId);
+  eq(compClaim?.kind, 'ACTION');
+  eq(compClaim?.statement.includes('COMPENSATION for [claim:'), true);
+
+  // Execution failure throws and leaves no phantom success
+  const shouldFail = true;
+  await rejects(
+    async () =>
+      await actReversible(ledger, 'autonomous', ['trust grants it'], {
+        tenant: TEN,
+        scope: 'engineering',
+        kind: 'ticket',
+        detail: 'file bug',
+        by: 'agent:eng',
+        claimIds: [basis.id],
+        now: NOW,
+        execute: async () => {
+          if (shouldFail) throw new Error('API_UNAVAILABLE');
+          return { executed: true, receiptId: 'rcpt_ticket_1' };
+        },
+      }),
+    'EXECUTION_FAILED',
+  );
 });

@@ -1,8 +1,11 @@
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import { JcodeRunner } from '../jcode/runner.ts';
+import { JcodeRunner, type PermissionPolicy } from '../jcode/runner.ts';
 import type { JcodeClientOptions } from '../jcode/client.ts';
+import { checkKill } from '../gov/trust.ts';
+import { verifyScopeToken } from './identity.ts';
+import { verifySandbox, type Manifest } from './sandbox.ts';
 
 /**
  * Substrate, part 6 (TODO §0.5): harness adapters. Engineering is not
@@ -29,6 +32,9 @@ export interface HarnessTask {
   onBehalfOf: string;
   maxDollars: number;
   maxTokens: number;
+  scopeToken?: string;
+  coreSecret?: string;
+  sandboxManifest?: Manifest;
 }
 
 export interface HarnessOutcome {
@@ -54,10 +60,11 @@ export class JcodeAdapter implements HarnessAdapter {
     private readonly ledger: Ledger,
     private readonly coord: Coordinator,
     private readonly clientOpts: JcodeClientOptions = {},
+    private readonly policy?: PermissionPolicy,
   ) {}
 
   async run(tenant: string, requestId: string, task: HarnessTask): Promise<HarnessOutcome> {
-    const runner = new JcodeRunner(this.db, this.ledger, this.coord);
+    const runner = new JcodeRunner(this.db, this.ledger, this.coord, this.policy);
     const out = await runner.run(tenant, requestId, task, this.clientOpts);
     return {
       adapter: this.name,
@@ -97,6 +104,45 @@ export class LocalEchoAdapter implements HarnessAdapter {
     if (task.claimRefs.length === 0) {
       throw new HarnessError('UNGROUNDED_TASK', 'a harness task must cite the claims it is grounded in');
     }
+
+    // Pre-flight kill switch check
+    if ((await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'))) {
+      await this.coord.fail(tenant, requestId, `kill switch engaged for scope "${req.targetScope}"`);
+      return {
+        adapter: this.name,
+        requestId,
+        status: 'DENIED',
+        transcript: '',
+        tools: [],
+        usage: { input: 0, output: 0 },
+        permissions: [{ tool: 'execute', decision: 'deny' }],
+      };
+    }
+
+    const now = new Date().toISOString();
+
+    if (task.scopeToken) {
+      const secret = task.coreSecret ?? process.env.VITAL_CORE_SECRET;
+      if (!secret) {
+        throw new HarnessError('NO_SECRET', 'scope token supplied but no VITAL_CORE_SECRET available');
+      }
+      const grant = verifyScopeToken(secret, task.scopeToken, now);
+      if (grant.scope !== req.targetScope) {
+        throw new HarnessError(
+          'SCOPE_MISMATCH',
+          `scope token scope "${grant.scope}" does not match "${req.targetScope}"`,
+        );
+      }
+    }
+
+    if (task.sandboxManifest) {
+      const dir = task.workingDir ?? process.cwd();
+      const v = verifySandbox(dir, task.sandboxManifest);
+      if (!v.ok) {
+        throw new HarnessError('SANDBOX_FAILED', 'sandbox manifest verification failed');
+      }
+    }
+
     if (task.command.length > task.maxTokens) {
       await this.coord.fail(tenant, requestId, 'token ceiling reached');
       return {
@@ -109,7 +155,6 @@ export class LocalEchoAdapter implements HarnessAdapter {
         permissions: [],
       };
     }
-    const now = new Date().toISOString();
     const transcript = `echo(${req.targetScope}): ${task.command}`;
     const claim = await this.ledger.append({
       tenant,

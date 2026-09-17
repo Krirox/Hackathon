@@ -23,7 +23,20 @@ export class ActError extends Error {
 
 export type ReversibleKind = 'flag' | 'ticket' | 'schedule';
 
-export interface ActInput {
+export interface CompensationAction {
+  kind: string;
+  detail: string;
+  compensate: () => Promise<void> | void;
+}
+
+export interface ActReceipt<T = unknown> {
+  executed: boolean;
+  receiptId: string;
+  output?: T;
+  compensation?: CompensationAction;
+}
+
+export interface ActInput<T = unknown> {
   tenant: string;
   scope: string;
   kind: ReversibleKind;
@@ -31,14 +44,16 @@ export interface ActInput {
   by: string;
   claimIds: string[];
   now?: string;
+  /** Optional concrete execution handler to perform the real external reversible action. */
+  execute?: () => Promise<ActReceipt<T>> | ActReceipt<T>;
 }
 
-export async function actReversible(
+export async function actReversible<T = unknown>(
   ledger: Ledger,
   verdict: AutonomyVerdict,
   reasons: string[],
-  input: ActInput,
-): Promise<{ claimId: string; kind: ReversibleKind }> {
+  input: ActInput<T>,
+): Promise<{ claimId: string; kind: ReversibleKind; receipt?: ActReceipt<T> }> {
   if (verdict === 'denied') throw new ActError('DENIED_ACTION', `refused: ${reasons.join('; ')}`);
   if (verdict === 'human-command') {
     throw new ActError('HUMAN_COMMAND', 'this action class is human-command — no autonomous execution path exists');
@@ -47,12 +62,30 @@ export async function actReversible(
     throw new ActError('NEEDS_APPROVAL', `a human approves first: ${reasons.join('; ')}`);
   }
   if (input.claimIds.length === 0) throw new ActError('UNGROUNDED_ACTION', 'execution without cited basis is refused');
+
+  let receipt: ActReceipt<T> | undefined;
+  if (input.execute) {
+    try {
+      receipt = await input.execute();
+      if (!receipt || receipt.executed !== true) {
+        throw new ActError('EXECUTION_FAILED', 'action execution handler reported non-success');
+      }
+    } catch (err) {
+      if (err instanceof ActError) throw err;
+      throw new ActError('EXECUTION_FAILED', `action execution threw: ${(err as Error).message}`);
+    }
+  }
+
   const now = input.now ?? new Date().toISOString();
+  const statement = receipt
+    ? `${input.kind}: ${input.detail} [receipt:${receipt.receiptId}] [${reasons.join('; ')}]`
+    : `${input.kind}: ${input.detail} [${reasons.join('; ')}]`;
+
   const claim = await ledger.append({
     tenant: input.tenant,
     subject: `act:${input.scope}`,
     kind: 'ACTION',
-    statement: `${input.kind}: ${input.detail} [${reasons.join('; ')}]`,
+    statement,
     confidence: 1,
     owner: input.by,
     scope: input.scope,
@@ -64,9 +97,54 @@ export async function actReversible(
       sourceUri: `gov:act:${input.kind}`,
       sourceTier: 'MEASURED',
       extractor: 'act-reversible',
-      extractorVersion: '1.0.0',
+      extractorVersion: '1.1.0',
       retrievedAt: now,
     },
   });
-  return { claimId: claim.id, kind: input.kind };
+  return { claimId: claim.id, kind: input.kind, receipt };
+}
+
+/** Execute a recorded compensation action for a reversible operation and record its compensation claim. */
+export async function compensateReversible(
+  ledger: Ledger,
+  tenant: string,
+  actionClaimId: string,
+  compensation: CompensationAction,
+  by: string,
+  now?: string,
+): Promise<{ claimId: string; compensated: boolean }> {
+  const ts = now ?? new Date().toISOString();
+  const prior = await ledger.get(tenant, actionClaimId);
+  if (!prior) {
+    throw new ActError('UNKNOWN_ACTION', `action claim "${actionClaimId}" not found for compensation`);
+  }
+  try {
+    await compensation.compensate();
+  } catch (err) {
+    if (err instanceof ActError) throw err;
+    throw new ActError('COMPENSATION_FAILED', `compensation execution threw: ${(err as Error).message}`);
+  }
+
+  const compClaim = await ledger.append({
+    tenant,
+    subject: prior.subject,
+    kind: 'ACTION',
+    statement: `COMPENSATION for [claim:${actionClaimId}]: ${compensation.kind}: ${compensation.detail}`,
+    confidence: 1,
+    owner: by,
+    scope: prior.scope,
+    authorType: 'agent',
+    observedAt: ts,
+    validFrom: ts,
+    now: ts,
+    provenance: {
+      sourceUri: `gov:compensation:${compensation.kind}`,
+      sourceTier: 'MEASURED',
+      extractor: 'act-reversible-compensation',
+      extractorVersion: '1.0.0',
+      retrievedAt: ts,
+    },
+  });
+
+  return { claimId: compClaim.id, compensated: true };
 }

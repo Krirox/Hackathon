@@ -17,6 +17,7 @@ import { createContentScreen, denylistBackend } from '../src/substrate/screen.ts
 import { mintScopeToken, verifyScopeToken } from '../src/substrate/identity.ts';
 import { JcodeAdapter, LocalEchoAdapter, selectAdapter } from '../src/substrate/harness.ts';
 import { startEgressProxy, type EgressAudit } from '../src/substrate/egress-proxy.ts';
+import { setKill } from '../src/gov/trust.ts';
 import { createServer, request as httpRequest } from 'node:http';
 import { connect as netConnect } from 'node:net';
 
@@ -520,4 +521,81 @@ T('F10: inbox claims are owner-fenced with lease recovery, same as the outbox', 
   );
   eq((await claimInbox(db, TEN, 'col', 10, { owner: 'consumer-b', leaseMs: 60_000, now: at61 })).length, 0);
   void ledger;
+});
+
+T('AUDIT F06: LocalEchoAdapter honors emergency kill switch and scoped controls', async () => {
+  const { db, ledger, coord } = await fresh();
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'r',
+    kind: 'OBSERVATION',
+    statement: 'evidence',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+
+  // 1. Kill switch on engineering halts local echo with DENIED
+  await setKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'human:commander', NOW);
+  const { request: r1 } = await coord.submit(base({ id: 'echo-kill', goal: 'echo kill test', claimRefs: [clm.id] }));
+  const out1 = await adapter.run(TEN, r1.id, {
+    command: 'hello',
+    claimRefs: [clm.id],
+    onBehalfOf: 'agent:runner',
+    maxDollars: 1,
+    maxTokens: 1000,
+  });
+  eq(out1.status, 'DENIED');
+  eq(out1.permissions[0]!.decision, 'deny');
+
+  // 2. Clear kill, test scope token mismatch
+  const { clearKill } = await import('../src/gov/trust.ts');
+  await clearKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'human:commander', NOW);
+
+  const secret = 'core_secret_vital_test_1234567890123456';
+  const badToken = mintScopeToken(secret, {
+    scope: 'finance',
+    grants: ['read'],
+    issuedAt: NOW,
+    expiresAt: '2099-01-01T00:00:00Z',
+  });
+  const { request: r2 } = await coord.submit(base({ id: 'echo-tok', goal: 'echo token test', claimRefs: [clm.id] }));
+  await rejects(
+    async () =>
+      await adapter.run(TEN, r2.id, {
+        command: 'hello',
+        claimRefs: [clm.id],
+        onBehalfOf: 'agent:runner',
+        maxDollars: 1,
+        maxTokens: 1000,
+        scopeToken: badToken,
+        coreSecret: secret,
+      }),
+    'SCOPE_MISMATCH',
+  );
+
+  // 3. Valid run completes cleanly
+  const goodToken = mintScopeToken(secret, {
+    scope: 'engineering',
+    grants: ['read'],
+    issuedAt: NOW,
+    expiresAt: '2099-01-01T00:00:00Z',
+  });
+  const { request: r3 } = await coord.submit(base({ id: 'echo-ok', goal: 'echo ok test', claimRefs: [clm.id] }));
+  const out3 = await adapter.run(TEN, r3.id, {
+    command: 'hello',
+    claimRefs: [clm.id],
+    onBehalfOf: 'agent:runner',
+    maxDollars: 1,
+    maxTokens: 1000,
+    scopeToken: goodToken,
+    coreSecret: secret,
+  });
+  eq(out3.status, 'COMPLETED');
 });

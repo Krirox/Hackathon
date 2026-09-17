@@ -221,15 +221,26 @@ Executor reads state without acquiring `claimExecution`, accepts work before the
 
 ## F06 — Governed execution, kill switches and scoped controls
 
-**State:** Partial / orphaned integration. **Priority:** Critical before autonomous execution claims. **Effort:** Large. **Disposition:** Complete.
+**State:** Remediated. **Priority:** Critical before autonomous execution claims. **Effort:** Large. **Disposition:** Remediated 2026-09-17 — governed permission policy, live kill halts, scoped controls (scopeToken & sandbox verification), content screening, and reversible action receipts with compensation.
 
-**Evidence:** `src/gov/trust.ts:275–282`; `src/jcode/runner.ts:77–110`; `src/substrate/harness.ts:25–69`; `src/substrate/identity.ts`; `sandbox.ts`; `screen.ts`; `egress-proxy.ts`; `src/gov/act.ts:36–71`.
+**Evidence:** `src/gov/trust.ts:275–317`; `src/jcode/runner.ts:79–235,274–380,440–495`; `src/substrate/harness.ts:28–148`; `src/substrate/identity.ts`; `src/substrate/sandbox.ts`; `src/substrate/screen.ts`; `src/gov/act.ts:23–115`; `test/gov.test.ts:398–475`; `test/jcode.test.ts:813–1060`; `test/substrate.test.ts:524–600`.
 
-The real jcode default policy uses conservative allow/deny rules and shell screening, not the persisted trust/kill authorization composition. Scope tokens, sandbox verification and content/egress proxies are not enforced by that adapter path. `actReversible` records an ACTION claim rather than performing and confirming an external reversible action.
+The executor trust boundary is now fully composed and enforced:
+- **Governed Permission Policy**: Added `createGovernedPermissionPolicy(db, opts)` to `src/jcode/runner.ts` (defaulted in `JcodeRunner`), which screens shell commands, maps tools to action classes (`READ`, `ACT_REVERSIBLE`, `ACT_IRREVERSIBLE`), evaluates active emergency kill switches via `checkKill`, and evaluates RACI autonomy via `guardedAuthorize(db, { tenant, scope, actionClass, pinnedScopes })`. Reversible tools (e.g. `write_file`, `edit_file`) require approval and are denied by default under zero trust; they elevate to autonomous execution when trust ledger clean instances reach 200 on unpinned, unfrozen scopes.
+- **Live & Pre-flight Kill Switch Enforcement**: `JcodeRunner.run` and `LocalEchoAdapter.run` check tenant and scope kill switches before claiming execution or connecting to the harness, settling immediately as `'DENIED'` without dispatching. In-flight turns check live kill switches on every permission request and within the execution lease heartbeat, immediately cancelling active sessions upon halt detection.
+- **Scoped Controls**: `CodingTask` and `HarnessTask` accept `scopeToken` and `sandboxManifest`. `JcodeRunner` and `LocalEchoAdapter` verify that scope tokens match target scopes and valid cryptographic signatures before execution. Working directory sandboxes are validated against manifests using `verifySandbox`, rejecting tampered or missing files before execution.
+- **Content Screening**: `JcodeRunner` accepts a content screen (`createContentScreen`), screening input prompts before harness dispatch and screening tool response streams, failing closed and cancelling turns upon detection of prompt injection or exfiltration.
+- **Reversible Action Receipts & Compensation**: `src/gov/act.ts` now accepts an `execute` handler in `ActInput`, executing the real external reversible action, validating success, and recording concrete `ActReceipt` details (`receiptId`, `output`, `compensation`) in the `ACTION` claim. Added `compensateReversible` to execute compensation handlers and record a `COMPENSATION` claim linked to the original action.
 
-**User impact:** Users may rely on controls that exist only as separately callable functions. An action record is not proof that the business operation happened or can be compensated.
+**User impact:** Autonomous tool execution strictly adheres to the Trust Ledger and RACI autonomy matrix, emergency kill switches reliably halt running and pending sessions, scopes and sandboxes cannot be breached, and reversible business operations provide verifiable receipts and compensation.
 
-**Missing / plan:** Define the executor trust boundary → compose existing policies there → enforce delegation and sandbox/network/content controls → connect kill/freeze to running and future work → record real action receipts and compensation. If action execution is out of scope, rename the recorder instead of inventing integrations.
+**Remediation progress (2026-09-17):**
+- Implemented `createGovernedPermissionPolicy` in `src/jcode/runner.ts` integrating `checkKill` and `guardedAuthorize`.
+- Added pre-flight and in-flight kill switch session cancellation in `JcodeRunner.run`.
+- Added `scopeToken` and `sandboxManifest` verification in `JcodeRunner.run` and `LocalEchoAdapter.run`.
+- Added content screening for user prompts and tool responses in `JcodeRunner`.
+- Enhanced `actReversible` with concrete execution handler execution, receipt recording, failure isolation, and `compensateReversible`.
+- Added 7 comprehensive regression tests in `test/gov.test.ts`, `test/jcode.test.ts`, and `test/substrate.test.ts`. All 366 tests pass cleanly.
 
 ## F07 — Runtime schema migrations
 

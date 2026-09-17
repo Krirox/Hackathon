@@ -1,5 +1,16 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  opendirSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -199,6 +210,9 @@ export async function claimInbox(
   batch: number,
   opts: { owner?: string; now?: string; leaseMs?: number; maxAttempts?: number } = {},
 ): Promise<InboxReceipt[]> {
+  if (!Number.isInteger(batch) || batch < 0 || batch > 500) throw new RangeError('[inbox:BAD_BATCH] expected 0–500');
+  if (opts.maxAttempts !== undefined && (!Number.isInteger(opts.maxAttempts) || opts.maxAttempts < 1))
+    throw new RangeError('[inbox:BAD_ATTEMPTS] expected a positive integer');
   await ensureInboxTable(db);
   const owner = opts.owner ?? 'inbox-worker';
   const nowMs = Date.parse(opts.now ?? new Date().toISOString());
@@ -207,18 +221,25 @@ export async function claimInbox(
   const now = new Date(nowMs).toISOString();
   const leaseCutoff = new Date(nowMs - leaseMs).toISOString();
   return db.transaction(async () => {
-    // No LIMIT placeholder: slice in JS so sqlite and postgres share the SQL.
+    // Exhausted crashed attempts remain inspectable, but cannot be reclaimed forever.
+    await db
+      .prepare(
+        `UPDATE ingest_inbox SET status = 'FAILED'
+      WHERE tenant = ? AND collector = ? AND status = 'CLAIMED'
+        AND attempts >= ? AND claimed_at <= ?`,
+      )
+      .run(tenant, collector, maxAttempts, leaseCutoff);
     const rows = (await db
       .prepare(
         `SELECT * FROM ingest_inbox WHERE tenant = ? AND collector = ?
-           AND (status = 'PENDING'
-                OR (status = 'FAILED' AND attempts < ?)
+           AND attempts < ?
+           AND (status = 'PENDING' OR status = 'FAILED'
                 OR (status = 'CLAIMED' AND claimed_at IS NOT NULL AND claimed_at <= ?))
-         ORDER BY created_at`,
+         ORDER BY created_at, id LIMIT ?`,
       )
-      .all(tenant, collector, maxAttempts, leaseCutoff)) as Record<string, unknown>[];
+      .all(tenant, collector, maxAttempts, leaseCutoff, batch)) as Record<string, unknown>[];
     const out: InboxReceipt[] = [];
-    for (const r of rows.slice(0, Math.max(0, batch))) {
+    for (const r of rows) {
       // Ownership CAS: only the PENDING/FAILED/lease-expired state the SELECT
       // observed converts. A concurrent relay that already claimed this row
       // (status now CLAIMED with a fresh claimed_at) matches zero rows here.
@@ -226,9 +247,8 @@ export async function claimInbox(
         .prepare(
           `UPDATE ingest_inbox SET status = 'CLAIMED', attempts = attempts + 1,
              owner = ?, claimed_at = ?
-           WHERE id = ?
-             AND (status = 'PENDING'
-                  OR (status = 'FAILED' AND attempts < ?)
+           WHERE id = ? AND attempts < ?
+             AND (status = 'PENDING' OR status = 'FAILED'
                   OR (status = 'CLAIMED' AND claimed_at IS NOT NULL AND claimed_at <= ?))`,
         )
         .run(owner, now, String(r['id']), maxAttempts, leaseCutoff);
@@ -315,25 +335,40 @@ export async function ingestInboxBatch(
   }
   let claimIds: string[];
   try {
-    claimIds = await ingestEvents(
-      db,
-      ledger,
-      tenant,
-      collector,
-      receipts.map((r) => r.event),
-      {
-        owner: opts.owner ?? 'inbox-worker',
-        scope: opts.scope ?? 'engineering',
-        now: opts.now ?? new Date().toISOString(),
-        artifactDir: opts.artifactDir,
-      },
-    );
-    await settleInbox(
-      db,
-      receipts.map((r) => r.id),
-      'DONE',
-      { owner: opts.owner },
-    );
+    claimIds = await db.transaction(async () => {
+      // The conditional write locks each receipt through persistence and settlement.
+      // A reclaimed owner cannot append evidence for the replacement attempt.
+      for (const receipt of receipts) {
+        const fence = await db
+          .prepare(
+            `UPDATE ingest_inbox SET owner = owner
+          WHERE id = ? AND tenant = ? AND collector = ? AND status = 'CLAIMED'
+            AND owner = ? AND attempts = ?`,
+          )
+          .run(receipt.id, tenant, collector.name, opts.owner ?? 'inbox-worker', receipt.attempts);
+        if (fence.changes !== 1) throw new Error('[inbox:NOT_OWNER] ingestion attempt was replaced');
+      }
+      const ids = await ingestEvents(
+        db,
+        ledger,
+        tenant,
+        collector,
+        receipts.map((r) => r.event),
+        {
+          owner: opts.owner ?? 'inbox-worker',
+          scope: opts.scope ?? 'engineering',
+          now: opts.now ?? new Date().toISOString(),
+          artifactDir: opts.artifactDir,
+        },
+      );
+      await settleInbox(
+        db,
+        receipts.map((r) => r.id),
+        'DONE',
+        { owner: opts.owner },
+      );
+      return ids;
+    });
   } catch (err) {
     try {
       await settleInbox(
@@ -598,8 +633,60 @@ export async function ingestEvents(
   return ids;
 }
 
+export interface FilePollLimits {
+  maxEntries: number;
+  maxFileBytes: number;
+  maxTotalBytes: number;
+}
+
+/** Read bounded, flat operator-controlled directories; symlinks are not inputs. */
+function boundedFiles(dir: string, limits: FilePollLimits): { name: string; body: string }[] {
+  for (const value of Object.values(limits)) {
+    if (!Number.isSafeInteger(value) || value < 1)
+      throw new RangeError('[ingest:BAD_LIMIT] positive integers required');
+  }
+  const directory = opendirSync(dir);
+  const files: { name: string; body: string }[] = [];
+  let entries = 0;
+  let total = 0;
+  try {
+    for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+      if (++entries > limits.maxEntries) throw new Error('[ingest:ENTRY_LIMIT] directory exceeds entry cap');
+      if (entry.isSymbolicLink()) throw new Error('[ingest:SYMLINK] source symlinks are not supported');
+      if (!entry.isFile()) continue;
+      const fd = openSync(join(dir, entry.name), 'r');
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size > limits.maxFileBytes || total + stat.size > limits.maxTotalBytes)
+          throw new Error('[ingest:BYTE_LIMIT] source exceeds byte cap');
+        const cap = Math.min(limits.maxFileBytes, limits.maxTotalBytes - total);
+        const buffer = Buffer.alloc(cap + 1);
+        let size = 0;
+        while (size < buffer.length) {
+          const read = readSync(fd, buffer, size, buffer.length - size, null);
+          if (read === 0) break;
+          size += read;
+        }
+        if (size > cap) throw new Error('[ingest:BYTE_LIMIT] source grew beyond byte cap');
+        total += size;
+        files.push({ name: entry.name, body: buffer.subarray(0, size).toString('utf8') });
+      } finally {
+        closeSync(fd);
+      }
+    }
+  } finally {
+    directory.closeSync();
+  }
+  return files.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** Watches files for new/changed content. Checkpoint: path → hash in `meta`. */
-export function fileDiffCollector(name: string, dir: string, sourceTier: SourceTier = 'SINGLE_SOURCE'): Collector {
+export function fileDiffCollector(
+  name: string,
+  dir: string,
+  sourceTier: SourceTier = 'SINGLE_SOURCE',
+  limits?: FilePollLimits,
+): Collector {
   return {
     name,
     sourceTier,
@@ -614,10 +701,13 @@ export function fileDiffCollector(name: string, dir: string, sourceTier: SourceT
       }
       const next: Record<string, string> = {};
       const out: RawEvent[] = [];
-      for (const f of readdirSync(dir)) {
+      const files = limits
+        ? boundedFiles(dir, limits)
+        : readdirSync(dir)
+            .filter((f) => statSync(join(dir, f)).isFile())
+            .map((f) => ({ name: f, body: readFileSync(join(dir, f), 'utf8') }));
+      for (const { name: f, body } of files) {
         const p = join(dir, f);
-        if (!statSync(p).isFile()) continue;
-        const body = readFileSync(p, 'utf8');
         const fp = fingerprintOf(body);
         next[p] = fp;
         if (prev[p] !== fp) {

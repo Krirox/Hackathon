@@ -8,6 +8,10 @@ import type { PermissionDecision, ServerFrame } from './protocol.ts';
 import { isShellTool, screenShellCommand } from '../gov/shell.ts';
 import { getRates } from '../attrib/attribution.ts';
 import { FilesystemArtifactStore } from '../ingest/collectors.ts';
+import { checkKill, guardedAuthorize } from '../gov/trust.ts';
+import { verifyScopeToken } from '../substrate/identity.ts';
+import { verifySandbox, type Manifest } from '../substrate/sandbox.ts';
+import type { ScreenResult } from '../substrate/screen.ts';
 
 /**
  * The jcode connection.
@@ -38,13 +42,29 @@ export interface CodingTask {
   /** Bound on one agent turn. Real coding turns take minutes; the 60s
    *  default only fits the scripted harness — raise for live siblings. */
   turnTimeoutMs?: number;
+  /** Optional scope token credential for scoped authorization. */
+  scopeToken?: string;
+  /** Optional secret used to verify scopeToken (defaults to process.env.VITAL_CORE_SECRET). */
+  coreSecret?: string;
+  /** Optional sandbox manifest to verify workingDir contents against before running. */
+  sandboxManifest?: Manifest;
 }
 
-export type PermissionPolicy = (ctx: { toolName: string; description: string; task: CodingTask }) => {
+export interface PermissionRequest {
+  toolName: string;
+  description: string;
+  task: CodingTask;
+  tenant?: string;
+  scope?: string;
+}
+
+export interface PermissionVerdict {
   decision: PermissionDecision;
   reason: string;
   actionClass: string;
-};
+}
+
+export type PermissionPolicy = (ctx: PermissionRequest) => PermissionVerdict | Promise<PermissionVerdict>;
 
 export interface RunResult {
   requestId: string;
@@ -76,10 +96,110 @@ export interface ProgressUpdate {
   usage: { input: number; output: number };
 }
 
-/** Default policy: read-only tools run, writes need approval, unknowns deny. */
+export interface GovernedPolicyOptions {
+  allow?: Set<string>;
+  reversibleTools?: Set<string>;
+  irreversibleTools?: Set<string>;
+  pinnedScopes?: readonly string[];
+}
+
+/**
+ * Governed policy: composes shell screening, trust scores, RACI matrix,
+ * and live emergency kill switches into the executor permission boundary.
+ */
+export const createGovernedPermissionPolicy =
+  (db: AsyncDb, opts: GovernedPolicyOptions = {}): PermissionPolicy =>
+  async ({ toolName, description, task, tenant, scope }) => {
+    // 1. Shell screening
+    if (isShellTool(toolName)) {
+      const screen = screenShellCommand(description || task.command);
+      if (screen.decision === 'deny') {
+        return { decision: 'deny', reason: screen.reason, actionClass: screen.actionClass };
+      }
+    }
+
+    const allow = opts.allow ?? new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think']);
+    const reversible = opts.reversibleTools ?? new Set(['write_file', 'edit_file', 'delete_file', 'apply_patch']);
+    const irreversible = opts.irreversibleTools ?? new Set(['bash']);
+
+    let actionClass: string;
+    if (allow.has(toolName)) {
+      actionClass = 'READ';
+    } else if (reversible.has(toolName)) {
+      actionClass = 'ACT_REVERSIBLE';
+    } else if (irreversible.has(toolName)) {
+      actionClass = 'ACT_IRREVERSIBLE';
+    } else {
+      actionClass = 'UNKNOWN';
+    }
+
+    // 2. Kill switch check
+    if (tenant && scope) {
+      if (
+        (await checkKill(db, tenant, scope, actionClass)) ||
+        (await checkKill(db, tenant, '*', '*')) ||
+        (await checkKill(db, tenant, scope, '*'))
+      ) {
+        return {
+          decision: 'deny',
+          reason: `kill switch engaged for ${scope}/${actionClass} — execution halted`,
+          actionClass,
+        };
+      }
+    }
+
+    // 3. RACI Matrix authorization
+    if (actionClass === 'READ') {
+      return { decision: 'allow', reason: 'allowlisted read-only tool', actionClass: 'READ' };
+    }
+
+    if (actionClass === 'ACT_REVERSIBLE') {
+      if (tenant && scope) {
+        const auth = await guardedAuthorize(db, {
+          tenant,
+          scope,
+          actionClass: 'ACT_REVERSIBLE',
+          pinnedScopes: opts.pinnedScopes,
+        });
+        if (auth.verdict === 'autonomous') {
+          return {
+            decision: 'allow',
+            reason: `governed autonomous execution: ${auth.reasons.join('; ')}`,
+            actionClass: 'ACT_REVERSIBLE',
+          };
+        }
+        return {
+          decision: 'deny',
+          reason: `tool "${toolName}" requires human approval: ${auth.reasons.join('; ')}`,
+          actionClass: 'ACT_REVERSIBLE',
+        };
+      }
+      return {
+        decision: 'deny',
+        reason: `tool "${toolName}" requires human approval; agents may not self-approve`,
+        actionClass: 'ACT_REVERSIBLE',
+      };
+    }
+
+    if (actionClass === 'ACT_IRREVERSIBLE') {
+      return {
+        decision: 'deny',
+        reason: `tool "${toolName}" requires human command; agents may not self-approve`,
+        actionClass: 'ACT_IRREVERSIBLE',
+      };
+    }
+
+    return {
+      decision: 'deny',
+      reason: `unrecognised tool "${toolName}" is denied by default`,
+      actionClass: 'UNKNOWN',
+    };
+  };
+
+/** Default static policy: read-only tools run, writes need approval, unknowns deny. */
 export const defaultPermissionPolicy =
-  (allow: Set<string>, needsApproval: Set<string>): PermissionPolicy =>
-  ({ toolName, description, task }) => {
+  (allow: Set<string>, needsApproval: Set<string>): ((ctx: PermissionRequest) => PermissionVerdict) =>
+  ({ toolName, description, task }): PermissionVerdict => {
     // Shell text runs through the vendored hard-deny list first: an agent
     // asking bash to `rm -rf` is denied for the matched rule, not the tool name.
     if (isShellTool(toolName)) {
@@ -101,21 +221,31 @@ export const defaultPermissionPolicy =
     return { decision: 'deny', reason: `unrecognised tool "${toolName}" is denied by default`, actionClass: 'UNKNOWN' };
   };
 
+export interface JcodeRunnerOptions {
+  contentScreen?: {
+    check: (hook: 'user_input' | 'tool_response', text: string) => ScreenResult;
+  };
+}
+
 export class JcodeRunner extends EventEmitter {
   private readonly artifactStore: FilesystemArtifactStore;
+  private readonly contentScreen?: {
+    check: (hook: 'user_input' | 'tool_response', text: string) => ScreenResult;
+  };
+  private readonly policy: PermissionPolicy;
 
   constructor(
     private readonly db: AsyncDb,
     private readonly ledger: Ledger,
     private readonly coord: Coordinator,
-    private readonly policy: PermissionPolicy = defaultPermissionPolicy(
-      new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think']),
-      new Set(['write_file', 'edit_file', 'bash', 'delete_file', 'apply_patch']),
-    ),
+    policy?: PermissionPolicy,
     artifactStore?: FilesystemArtifactStore,
+    opts: JcodeRunnerOptions = {},
   ) {
     super();
+    this.policy = policy ?? createGovernedPermissionPolicy(db);
     this.artifactStore = artifactStore ?? new FilesystemArtifactStore();
+    this.contentScreen = opts.contentScreen;
   }
 
   /**
@@ -140,6 +270,54 @@ export class JcodeRunner extends EventEmitter {
       throw new Error('[jcode] a coding task must cite the claims it is grounded in');
     }
 
+    // Pre-flight kill switch check: halt before claiming execution or touching harness
+    if ((await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'))) {
+      const reason = `[jcode:HALTED] kill switch engaged for scope "${req.targetScope}"`;
+      await this.audit(tenant, 'jcode', 'KILL_SWITCH_HALTED', requestId, reason);
+      try {
+        await this.coord.fail(tenant, requestId, reason);
+      } catch {
+        /* already terminal */
+      }
+      return {
+        requestId,
+        sessionId: '',
+        status: 'DENIED',
+        transcript: '',
+        toolCalls: [],
+        permissions: [],
+        usage: { input: 0, output: 0 },
+        claimIds: [],
+        refusalReason: reason,
+      };
+    }
+
+    // Scoped control: verify scope token credential when provided
+    if (task.scopeToken) {
+      const secret = task.coreSecret ?? process.env.VITAL_CORE_SECRET;
+      if (!secret) {
+        throw new Error('[jcode:IDENTITY] scope token supplied but no VITAL_CORE_SECRET available for verification');
+      }
+      const grant = verifyScopeToken(secret, task.scopeToken, new Date().toISOString());
+      if (grant.scope !== req.targetScope) {
+        throw new Error(
+          `[jcode:IDENTITY] scope token scope "${grant.scope}" does not match target scope "${req.targetScope}"`,
+        );
+      }
+    }
+
+    // Scoped control: verify sandbox manifest before execution if requested
+    if (task.sandboxManifest) {
+      const dir = task.workingDir ?? process.cwd();
+      const v = verifySandbox(dir, task.sandboxManifest);
+      if (!v.ok) {
+        const faults: string[] = [];
+        if (v.tampered.length > 0) faults.push(`tampered: ${v.tampered.join(', ')}`);
+        if (v.missing.length > 0) faults.push(`missing: ${v.missing.join(', ')}`);
+        throw new Error(`[jcode:SANDBOX] sandbox verification failed (${faults.join('; ')})`);
+      }
+    }
+
     // Exclusive ownership BEFORE the harness: exactly one worker may run the
     // paid work. A lost claim throws CLAIM_LOST here — before connect() and
     // before createSession() — so the loser never touches the harness and
@@ -156,6 +334,31 @@ export class JcodeRunner extends EventEmitter {
     if (contextClaims.length > 0) {
       const contextLines = contextClaims.map((c) => `- [${c.kind}] (${c.subject}): ${c.statement}`).join('\n');
       prompt = `[Grounded Context]\n${contextLines}\n\n[Instruction]\n${task.command}`;
+    }
+
+    // Content screening on input prompt
+    if (this.contentScreen) {
+      const screen = this.contentScreen.check('user_input', prompt);
+      if (screen.verdict === 'deny') {
+        const reason = `[jcode:DENIED] content screen denied input: ${screen.flags.join(', ') || 'unsafe content'}`;
+        await this.audit(tenant, 'jcode', 'CONTENT_SCREEN_DENIED', requestId, reason);
+        try {
+          await this.coord.fail(tenant, requestId, reason);
+        } catch {
+          /* already terminal */
+        }
+        return {
+          requestId,
+          sessionId: '',
+          status: 'DENIED',
+          transcript: '',
+          toolCalls: [],
+          permissions: [],
+          usage: { input: 0, output: 0 },
+          claimIds: [],
+          refusalReason: reason,
+        };
+      }
     }
 
     const client = new JcodeClient(clientOpts);
@@ -207,10 +410,39 @@ export class JcodeRunner extends EventEmitter {
       );
     };
 
+    let turnError: string | null = null;
+
     const onPermission = async (frame: ServerFrame) => {
       const toolName = String(frame.tool_name ?? '');
       const description = String(frame.description ?? '');
-      const verdict = this.policy({ toolName, description, task });
+      const sid = String(frame.session_id ?? '');
+      const rid = String(frame.request_id ?? '');
+
+      // Check live kill switch before deciding
+      const killed =
+        (await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'));
+      if (killed) {
+        const reason = `kill switch engaged for scope "${req.targetScope}" — mid-turn execution halted`;
+        permissions.push({
+          toolName,
+          decision: 'deny',
+          reason,
+          actionClass: 'UNKNOWN',
+        });
+        await this.audit(tenant, 'jcode', 'PERMISSION_DENIED_KILL', requestId, toolName);
+        await client.respondPermission(sid, rid, 'deny');
+        void client.cancel(sessionId).catch(() => {});
+        turnError = reason;
+        return;
+      }
+
+      const verdict = await this.policy({
+        toolName,
+        description,
+        task,
+        tenant,
+        scope: req.targetScope,
+      });
       permissions.push({
         toolName,
         decision: verdict.decision,
@@ -231,7 +463,7 @@ export class JcodeRunner extends EventEmitter {
         observedAt: new Date().toISOString(),
         validFrom: new Date().toISOString(),
         provenance: {
-          sourceUri: `jcode:session:${String(frame.session_id ?? '')}`,
+          sourceUri: `jcode:session:${sid}`,
           sourceTier: 'MEASURED',
           extractor: 'jcode-harness-api',
           extractorVersion: 'v1',
@@ -240,11 +472,21 @@ export class JcodeRunner extends EventEmitter {
       });
       claimIds.push(c.id);
       await this.audit(tenant, 'jcode', `PERMISSION_${verdict.decision.toUpperCase()}`, requestId, toolName);
-      await client.respondPermission(String(frame.session_id ?? ''), String(frame.request_id ?? ''), verdict.decision);
+      await client.respondPermission(sid, rid, verdict.decision);
     };
 
     const onText = (f: ServerFrame) => {
       if (typeof f.text !== 'string' || f.text.length === 0) return;
+      if (this.contentScreen) {
+        const screen = this.contentScreen.check('tool_response', f.text);
+        if (screen.verdict === 'deny') {
+          budgetBroken = true;
+          if (turnError === null) {
+            turnError = `content screen denied output: ${screen.flags.join(', ') || 'unsafe content'}`;
+          }
+          void client.cancel(sessionId).catch(() => {});
+        }
+      }
       transcript.push(f.text);
       transcriptChars += f.text.length;
       while (transcriptChars > MAX_TRANSCRIPT_CHARS && transcript.length > 1) {
@@ -307,7 +549,6 @@ export class JcodeRunner extends EventEmitter {
     // channel: legacy errors for a normal message arrive as events, never as
     // correlated replies. Correlated errors already reject their own request
     // (client.onData), so only unattributed ones fail the turn here.
-    let turnError: string | null = null;
     const onRunError = (f: ServerFrame): void => {
       if (typeof f.reply_to === 'number') return;
       if (turnError === null) turnError = String(f.message ?? f.code ?? 'harness error');
@@ -316,7 +557,15 @@ export class JcodeRunner extends EventEmitter {
     // Execution lease heartbeat: actively renew our claim so long-running turns
     // don't get reclaimed as stale.
     const leaseHeartbeat = setInterval(() => {
-      void this.coord.renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString()).catch((e) => {
+      void (async () => {
+        const killed =
+          (await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'));
+        if (killed && turnError === null) {
+          turnError = `kill switch engaged for scope "${req.targetScope}" — mid-turn execution halted`;
+          void client.cancel(sessionId).catch(() => {});
+        }
+        await this.coord.renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString());
+      })().catch((e) => {
         if (turnError === null) {
           turnError = `execution lease lost: ${(e as Error).message}`;
         }
@@ -360,8 +609,9 @@ export class JcodeRunner extends EventEmitter {
         status = 'FAILED';
         refusalReason = 'harness turn did not complete';
       } else if (turn === 'error') {
-        status = 'FAILED';
-        refusalReason = turnError ?? 'harness reported an error';
+        const err = turnError as string | null;
+        status = err?.includes('kill switch') || err?.includes('content screen') ? 'DENIED' : 'FAILED';
+        refusalReason = err ?? 'harness reported an error';
       }
 
       // Deliverable artifact persistence: store raw transcript via FilesystemArtifactStore
@@ -447,8 +697,9 @@ export class JcodeRunner extends EventEmitter {
         refusalReason,
       };
     } catch (e) {
-      status = 'FAILED';
-      refusalReason = (e as Error).message;
+      const msg = (e as Error).message;
+      status = msg.includes('[jcode:HALTED]') || msg.includes('[jcode:DENIED]') ? 'DENIED' : 'FAILED';
+      refusalReason = msg;
       try {
         await this.coord.fail(tenant, requestId, refusalReason);
       } catch {

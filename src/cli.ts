@@ -9,7 +9,10 @@ import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
 import { installAuthSchema, signupTenant, changePassword } from './core/auth.ts';
 import { eraseTenant, ERASURE_DONE_ACTION } from './core/erasure.ts';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { isAbsolute, relative, resolve } from 'node:path';
+import { fileDiffCollector } from './ingest/collectors.ts';
+import { runIngestionWorker } from './ingest/worker.ts';
 
 /**
  * Minimal dev CLI + instance verifier (TODO §§0.4, V2.1).
@@ -18,6 +21,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
  *   tsx src/cli.ts report [--db path] [--out report.html] [--tenant acme]
  *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme]
  *                       [--site site] [--approver-role member|admin|owner]
+ *   tsx src/cli.ts ingest-files --tenant acme --scope engineering --source dir --artifacts dir --db path
  *   tsx src/cli.ts signup --tenant acme --email o@a.test --password '...'
  *   tsx src/cli.ts passwd --tenant acme --email o@a.test --password '...'
  *   tsx src/cli.ts erase --tenant acme --actor op@a.test [--export-to dir] [--yes]
@@ -153,6 +157,56 @@ if (cmd === 'status') {
   console.log(
     `vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl}, tenant ${tenant}, auth on${site ? ', site ./site' : ''})`,
   );
+} else if (cmd === 'ingest-files') {
+  // Explicit finite invocation: console startup must never grant worker authority.
+  const tenant = flag('--tenant');
+  const scope = flag('--scope');
+  const source = flag('--source');
+  const artifactPath = flag('--artifacts') ?? process.env.ARTIFACT_DIR;
+  const dbUrl = flag('--db') ?? process.env.DATABASE_URL;
+  const maxReceipts = Number(flag('--max-receipts') ?? '50');
+  if (!tenant?.trim() || !scope?.trim() || !source || !artifactPath || !dbUrl || dbUrl === ':memory:')
+    throw new Error(
+      'usage: vital ingest-files --tenant <slug> --scope <scope> --source <dir> --artifacts <dir> --db <persistent path or URL> [--max-receipts 1–500]',
+    );
+  if (!Number.isInteger(maxReceipts) || maxReceipts < 1 || maxReceipts > 500)
+    throw new Error('--max-receipts must be an integer from 1 to 500');
+  const sourceDir = realpathSync(source);
+  mkdirSync(artifactPath, { recursive: true });
+  const artifactDir = realpathSync(artifactPath);
+  const insideSource = (path: string): boolean => {
+    const rel = relative(sourceDir, path);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  };
+  const usePostgres = dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://');
+  if (insideSource(artifactDir) || (!usePostgres && insideSource(resolve(dbUrl))))
+    throw new Error('database and artifacts must be outside the source directory');
+  const db = usePostgres ? openPostgres(dbUrl) : openDb(dbUrl);
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    if (usePostgres) await migratePostgres(db);
+    else await migrate(db);
+    const result = await runIngestionWorker(
+      db,
+      createLedger(db),
+      fileDiffCollector(`files:${sourceDir}`, sourceDir, 'SINGLE_SOURCE', {
+        maxEntries: 500,
+        maxFileBytes: 1_000_000,
+        maxTotalBytes: 10_000_000,
+      }),
+      { tenant, scope, artifactDir, maxReceipts, signal: controller.signal },
+    );
+    console.log(JSON.stringify(result));
+    if (result.errors.length > 0) process.exitCode = 1;
+    else if (result.stopped) process.exitCode = 130;
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    await db.close();
+  }
 } else if (cmd === 'signup') {
   // Creates the tenant, its first owner, and the auth tables. The owner's
   // password is not forced to change (the founder chose it interactively);
@@ -225,6 +279,6 @@ if (cmd === 'status') {
   console.log(`rows deleted: ${rows || 'none'}`);
   await db.close();
 } else {
-  console.error(`unknown command "${cmd}" (try: status | report | serve | signup | passwd | erase)`);
+  console.error(`unknown command "${cmd}" (try: status | report | serve | ingest-files | signup | passwd | erase)`);
   process.exit(1);
 }
