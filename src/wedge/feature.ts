@@ -1,6 +1,7 @@
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import type { HarnessAdapter } from '../substrate/harness.ts';
+import type { HarnessAdapter, HarnessOutcome } from '../substrate/harness.ts';
+import type { Manifest } from '../substrate/sandbox.ts';
 import type { SourceTier } from '../core/types.ts';
 import { WedgeError } from './ship.ts';
 
@@ -88,6 +89,14 @@ export interface FeaturePlan {
 
 const UNUSABLE = ['STALE', 'DISPUTED', 'SUPERSEDED', 'RETIRED'] as const;
 
+export function computePlanFingerprint(
+  feature: string,
+  items: { improvement: string; researchIds: string[] }[],
+): string {
+  const itemSigs = items.map((i) => `${i.improvement}#${[...i.researchIds].sort().join(',')}`);
+  return `feature:${feature}:${itemSigs.join('|')}`;
+}
+
 /** Stage 2 — plan the improved version. Every improvement cites live research. */
 export async function planFeature(
   ledger: Ledger,
@@ -118,7 +127,7 @@ export async function planFeature(
   return {
     feature: input.feature,
     items,
-    fingerprint: `feature:${input.feature}:${items.map((i) => i.improvement).join('|')}`,
+    fingerprint: computePlanFingerprint(input.feature, items),
   };
 }
 
@@ -139,10 +148,22 @@ export async function approveFeaturePlan(
   if (!input.approvedBy) {
     throw new WedgeError('NEEDS_APPROVAL', 'a feature plan without a named human approver never reaches coding');
   }
+
+  // Immutable binding check: all research citations in the plan must be included in the decision evidence
+  const planResearch = new Set(input.plan.items.flatMap((i) => i.researchIds));
+  const providedResearch = new Set(input.researchIds);
+  const missingResearch = [...planResearch].filter((id) => !providedResearch.has(id));
+  if (missingResearch.length > 0) {
+    throw new WedgeError(
+      'UNGROUNDED_PLAN',
+      `approval research does not ground all plan citations: missing ${missingResearch.join(', ')}`,
+    );
+  }
+
   const dec = await ledger.recordDecision({
     tenant,
     goal: `build ${input.plan.feature}`,
-    action: input.plan.items.map((i) => i.improvement).join('; '),
+    action: `[plan:${input.plan.fingerprint}] ${input.plan.items.map((i) => i.improvement).join('; ')}`,
     actionClass: 'ACT_REVERSIBLE',
     claimIds: input.researchIds,
     decidedBy: input.decidedBy,
@@ -157,7 +178,9 @@ export async function approveFeaturePlan(
 
 export interface CodedFeature {
   decisionId: string;
-  outcome: Awaited<ReturnType<HarnessAdapter['run']>>;
+  outcome: HarnessOutcome;
+  verificationStatus: 'VERIFIED' | 'FAILED';
+  verificationReason?: string;
 }
 
 /** Stage 4 — code runs ONLY against a verified, human-approved decision. */
@@ -174,8 +197,15 @@ export async function codeApprovedFeature(
     onBehalfOf: string;
     maxDollars: number;
     maxTokens: number;
+    plan?: FeaturePlan;
+    now?: string;
+    workingDir?: string;
+    scopeToken?: string;
+    coreSecret?: string;
+    sandboxManifest?: Manifest;
   },
 ): Promise<CodedFeature> {
+  const now = input.now ?? new Date().toISOString();
   const replay = await ledger.replayDecision(tenant, input.decisionId);
   if (!replay.record.approvedBy) {
     throw new WedgeError('UNAPPROVED_CODE', `decision ${input.decisionId} has no human approver — coding refused`);
@@ -186,18 +216,86 @@ export async function codeApprovedFeature(
       `decision ${input.decisionId} autonomy is ${replay.record.autonomy} — coding refused`,
     );
   }
+
+  // Request binding: decision approved for a specific request must not be used on another
+  if (replay.record.requestId && replay.record.requestId !== input.requestId) {
+    throw new WedgeError(
+      'REQUEST_MISMATCH',
+      `decision ${input.decisionId} is bound to request ${replay.record.requestId}, not ${input.requestId}`,
+    );
+  }
+
+  // Plan binding: plan fingerprint must match approved action
+  if (input.plan && !replay.record.action.includes(input.plan.fingerprint)) {
+    throw new WedgeError(
+      'PLAN_MISMATCH',
+      `plan fingerprint "${input.plan.fingerprint}" does not match approved action in decision ${input.decisionId}`,
+    );
+  }
+
+  // Drift and reapproval check: any mutation/superseding/staleness in the evidence bundle rejects execution
+  const drifted = replay.drift.filter((d) => d.drifted);
+  if (drifted.length > 0) {
+    const details = drifted.map((d) => `${d.id}:${d.frozenStatus}->${d.currentStatus}`).join(', ');
+    throw new WedgeError(
+      'DRIFTED_DECISION',
+      `decision evidence has drifted since approval (${details}) — reapproval required`,
+    );
+  }
+
+  // Check cited claims for unusable status or expiry
+  for (const entry of replay.record.bundle.claims) {
+    const live = await ledger.get(tenant, entry.id);
+    if (!live || (UNUSABLE as readonly string[]).includes(live.status)) {
+      throw new WedgeError(
+        'DRIFTED_DECISION',
+        `decision cites claim ${entry.id} which is now ${live ? live.status : 'missing'} — reapproval required`,
+      );
+    }
+    if (live.validUntil && live.validUntil <= now) {
+      throw new WedgeError(
+        'DRIFTED_DECISION',
+        `decision cites claim ${entry.id} which expired at ${live.validUntil} — reapproval required`,
+      );
+    }
+  }
+
   const req = await coord.get(tenant, input.requestId);
   // F03: same executable set as every worker — ACCEPTED (human-approved) is
   // claimable, so an approved coding plan can actually run.
   if (!req || (req.state !== 'ADMITTED' && req.state !== 'ACCEPTED' && req.state !== 'IN_FLIGHT')) {
     throw new WedgeError('UNADMITTED_CODE', `request ${input.requestId} is not executable — coding refused`);
   }
+
   const outcome = await adapter.run(tenant, input.requestId, {
     command: input.command,
+    workingDir: input.workingDir,
     claimRefs: input.claimIds,
     onBehalfOf: input.onBehalfOf,
     maxDollars: input.maxDollars,
     maxTokens: input.maxTokens,
+    scopeToken: input.scopeToken,
+    coreSecret: input.coreSecret,
+    sandboxManifest: input.sandboxManifest,
+    approvedDecisionId: input.decisionId,
+    approvedBy: replay.record.approvedBy,
   });
-  return { decisionId: input.decisionId, outcome };
+
+  const deniedPermissions = outcome.permissions.filter((p) => p.decision === 'deny');
+  const isCompleted = outcome.status === 'COMPLETED';
+  const verificationStatus: 'VERIFIED' | 'FAILED' =
+    isCompleted && deniedPermissions.length === 0 ? 'VERIFIED' : 'FAILED';
+  let verificationReason: string | undefined;
+  if (deniedPermissions.length > 0) {
+    verificationReason = `execution had denied permissions: ${deniedPermissions.map((p) => p.tool).join(', ')}`;
+  } else if (!isCompleted) {
+    verificationReason = `harness execution status was ${outcome.status}`;
+  }
+
+  return {
+    decisionId: input.decisionId,
+    outcome,
+    verificationStatus,
+    verificationReason,
+  };
 }

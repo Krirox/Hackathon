@@ -35,6 +35,9 @@ export interface HarnessTask {
   scopeToken?: string;
   coreSecret?: string;
   sandboxManifest?: Manifest;
+  /** Optional human approval metadata binding this execution to an approved decision. */
+  approvedDecisionId?: string;
+  approvedBy?: string;
 }
 
 export interface HarnessOutcome {
@@ -87,6 +90,9 @@ export class JcodeAdapter implements HarnessAdapter {
  */
 export class LocalEchoAdapter implements HarnessAdapter {
   readonly name = 'local-echo';
+  readonly category = 'test-baseline' as const;
+  readonly isTestBaseline = true;
+
   constructor(
     private readonly db: AsyncDb,
     private readonly ledger: Ledger,

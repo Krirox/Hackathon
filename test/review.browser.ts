@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, expect } from '@playwright/test';
 import { openDb, migrate } from '../src/core/db.ts';
+import type { Claim } from '../src/core/types.ts';
 import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
 import { createCoordinator } from '../src/coord/coordinator.ts';
@@ -17,7 +18,7 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
   const ledger = createLedger(db);
   const coord = createCoordinator(db);
   await installAuthSchema(db, now);
-  await signupTenant(
+  const { owner } = await signupTenant(
     db,
     {
       slug: tenant,
@@ -28,7 +29,7 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
     },
     now,
   );
-  const claims = [];
+  const claims: Claim[] = [];
   for (let i = 0; i < 23; i++) {
     claims.push(
       await ledger.append({
@@ -153,6 +154,53 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
       await decision.getByRole('button').click();
       await expect(card.getByRole('status')).toContainText(action === 'approve' ? 'Approved' : 'Declined');
       assert.equal((await coord.get(tenant, id))!.state, action === 'approve' ? 'ACCEPTED' : 'DECLINED');
+      if (action === 'approve') {
+        await expect(card.getByRole('status')).toContainText(
+          'Approved to BEGIN work — not final-deliverable authorization or evidence of execution or measurement.',
+        );
+        const receipt = await ledger.getDecisionByRequest(tenant, id);
+        assert.ok(receipt);
+        const receiptUrl = `${origin}/console/decisions/${encodeURIComponent(receipt.id)}`;
+        await card.getByRole('link', { name: 'View approval receipt', exact: true }).click();
+        await expect(page).toHaveURL(receiptUrl);
+        await expect(page.getByRole('heading', { name: 'Approval receipt', exact: true })).toBeVisible();
+        const field = (name: string) =>
+          page.locator('dt').filter({ hasText: name }).locator('xpath=following-sibling::dd[1]');
+        await expect(field('Decision id')).toHaveText(receipt.id);
+        const actor = `${owner.id} (${owner.email})`;
+        await expect(field('Actor (decided by)')).toHaveText(actor);
+        await expect(field('Approved by')).toHaveText(actor);
+        await expect(page.getByText(`Signed in as ${actor}`, { exact: true })).toBeVisible();
+        await expect(
+          page.getByText(
+            'This records approval to BEGIN work. It is not final-deliverable authorization and does not establish that execution or measurement has occurred.',
+            { exact: true },
+          ),
+        ).toBeVisible();
+        const frozen = page.getByRole('heading', { name: 'Frozen context bundle', exact: true });
+        await expect(frozen).toBeVisible();
+        const bundle = frozen.locator('xpath=following-sibling::pre[1]');
+        await expect(bundle).toBeVisible();
+        assert.deepEqual(JSON.parse(await bundle.innerText()), receipt.bundle);
+        assert.deepEqual(receipt.bundle.claims.map((claim) => claim.id).sort(), claims.map((claim) => claim.id).sort());
+        // FLOW-002: correction does not yet rebind the request's original evidence reference.
+        const superseded = receipt.bundle.claims.find((claim) => claim.id === claims[22]!.id);
+        assert.ok(superseded);
+        assert.equal(superseded.status, 'SUPERSEDED');
+        assert.equal(superseded.statement, 'Metric 22: 10 ms');
+        assert.equal(JSON.parse(receipt.action).approvalStage, 'begin-work');
+        await page.getByRole('link', { name: id, exact: true }).click();
+        await expect(page).toHaveURL(`${origin}/console/requests/${id}`);
+        await page.reload();
+        await expect(page.getByRole('heading', { name: 'Request evidence', exact: true })).toBeVisible();
+        const persistedLink = page.getByRole('link', { name: 'View approval receipt', exact: true });
+        await expect(persistedLink).toBeVisible();
+        await expect(persistedLink).toHaveAttribute('href', `/console/decisions/${encodeURIComponent(receipt.id)}`);
+        await expect(persistedLink.locator('..')).toContainText(
+          'approval to begin work, not final-deliverable authorization or evidence of execution or measurement.',
+        );
+        await page.getByRole('link', { name: 'Back to console', exact: true }).click();
+      }
     }
     await page.reload();
     await expect(page.locator('[data-review-request]')).toHaveCount(0);

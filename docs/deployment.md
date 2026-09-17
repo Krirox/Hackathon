@@ -89,6 +89,7 @@ exit gate — not yet timed; time it before claiming it).
 ## Worker and Dispatch Architecture
 
 Vital provides an authoritative background worker and dispatch subsystem (`src/substrate/worker.ts`):
+
 - **`vital worker`**: Standalone background daemon executing recovery sweeps (`readmitDeferred`, `reclaimStale`, `expireStale`), relaying durable outbox batches (`claimOutbox`/`settleOutbox`), and dispatching runnable requests (`ADMITTED` and `ACCEPTED`) to execution runtimes (`jcode`, `LocalEchoAdapter`, or model executors).
 - **`vital serve --with-worker`**: Runs the HTTP console and the background worker within the same process, suitable for single-node deployments and Docker Compose (`deploy/compose.yml`).
 
@@ -116,7 +117,7 @@ internet → ALB ──→ ECS Fargate vital-core (HOST=0.0.0.0, PORT=3100)
 Why this shape, per Vital's own rules:
 
 - **Lambda = microVMs, honestly.** Lambda already runs each invocation in a
-  Firecracker microVM — that *is* the "coding agent lambda microvm" idea,
+  Firecracker microVM — that _is_ the "coding agent lambda microvm" idea,
   without operating Firecracker on bare metal. `src/aws/executor.ts` is the
   handler: SQS job → accept admitted REQUEST → approved-model check
   (`assertApproved`) → code-level egress gate (`decideEgress`) → model call
@@ -144,6 +145,7 @@ then executes semantic smoke checks (ECS stability wait, `/healthz` probing, and
 non-billable executor dry-run invocation).
 
 First-time bootstrap:
+
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
 2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`).
 3. Run the `deploy-aws` workflow or run `terraform apply` directly (safe local image fallbacks allow initial infrastructure bootstrap without chicken-and-egg failure).

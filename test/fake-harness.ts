@@ -21,6 +21,8 @@ export class FakeHarness {
   overspendTokens = 0;
   /** Emit no turn_done, to exercise the timeout path. */
   hang = false;
+  /** When true, tool execution strictly honors the permission decision (denies on deny). */
+  strictPermissions = false;
 
   constructor(label = 'fake') {
     // Node supports Unix sockets on Windows only as named pipes; a filesystem
@@ -100,33 +102,56 @@ export class FakeHarness {
           send({ ev: 'text_delta', session_id: sid, text: 'Examining the repo. ' });
           send({ ev: 'tool_start', session_id: sid, call_id: 'c1', name: 'read_file' });
           send({ ev: 'tool_done', session_id: sid, call_id: 'c1', name: 'read_file', output: 'ok', error: null });
-          // the permission round-trip we actually care about
-          send({
-            ev: 'permission_request',
-            session_id: sid,
-            request_id: 'perm_1',
-            tool_name: this.permissionTool,
-            description: 'write src/index.ts',
-          });
-          send({ ev: 'tool_start', session_id: sid, call_id: 'c2', name: this.permissionTool });
-          send({
-            ev: 'tool_done',
-            session_id: sid,
-            call_id: 'c2',
-            name: this.permissionTool,
-            output: 'done',
-            error: null,
-          });
+          if (this.permissionTool && this.permissionTool !== 'none') {
+            send({
+              ev: 'permission_request',
+              session_id: sid,
+              request_id: 'perm_1',
+              tool_name: this.permissionTool,
+              description: 'write src/index.ts',
+            });
+          } else {
+            if (this.overspendTokens)
+              send({ ev: 'token_usage', session_id: sid, input: this.overspendTokens, output: 0 });
+            else send({ ev: 'token_usage', session_id: sid, input: 1200, output: 300 });
+            send({ ev: 'text_delta', session_id: sid, text: 'Done: patch applied.' });
+            if (!this.hang) send({ ev: 'turn_done', session_id: sid });
+          }
+        }, 10);
+        break;
+      case 'permission_response': {
+        send({ ...base, ev: 'ok' });
+        const allowed = f.decision === 'allow' || !this.strictPermissions;
+        setTimeout(() => {
+          if (allowed) {
+            send({ ev: 'tool_start', session_id: sid, call_id: 'c2', name: this.permissionTool });
+            send({
+              ev: 'tool_done',
+              session_id: sid,
+              call_id: 'c2',
+              name: this.permissionTool,
+              output: 'done',
+              error: null,
+            });
+            send({ ev: 'text_delta', session_id: sid, text: 'Done: patch applied.' });
+          } else {
+            send({
+              ev: 'tool_done',
+              session_id: sid,
+              call_id: 'c2',
+              name: this.permissionTool,
+              output: null,
+              error: 'permission denied',
+            });
+            send({ ev: 'text_delta', session_id: sid, text: 'Tool execution denied by policy.' });
+          }
           if (this.overspendTokens)
             send({ ev: 'token_usage', session_id: sid, input: this.overspendTokens, output: 0 });
           else send({ ev: 'token_usage', session_id: sid, input: 1200, output: 300 });
-          send({ ev: 'text_delta', session_id: sid, text: 'Done: patch applied.' });
           if (!this.hang) send({ ev: 'turn_done', session_id: sid });
         }, 10);
         break;
-      case 'permission_response':
-        send({ ...base, ev: 'ok' });
-        break;
+      }
       case 'cancel':
         send({ ...base, ev: 'ok' });
         break;

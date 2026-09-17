@@ -1018,38 +1018,34 @@ export function startConsoleServer(
               const decisionId = `dec_console_${createHash('sha256')
                 .update(JSON.stringify([tenant, id]))
                 .digest('hex')}`;
-              if (action === 'approve') {
-                const existing =
-                  (await ledger.getDecision(tenant, decisionId)) ?? (await ledger.getDecisionByRequest(tenant, id));
-                if (existing)
-                  return {
-                    state: request.state,
-                    by: existing.approvedBy,
-                    decisionId: existing.id,
-                    decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
-                    latencySeconds: null,
-                    repeated: true,
-                  };
-                if (request.state === 'ACCEPTED') {
-                  return {
-                    state: request.state,
-                    by: who,
-                    latencySeconds: null,
-                    repeated: true,
-                  };
-                }
+              // Strict FLOW-001 contract: an approval either lands a decision
+              // grounded in the request's cited evidence or nothing happens —
+              // a refused recordDecision throws inside this transaction and
+              // rolls the accept back with it. Duplicate submissions replay
+              // the original receipt without rewriting approver or evidence.
+              const existing =
+                action === 'approve'
+                  ? ((await ledger.getDecision(tenant, decisionId)) ?? (await ledger.getDecisionByRequest(tenant, id)))
+                  : null;
+              if (existing && request.state !== 'ADMITTED') {
+                return {
+                  state: request.state,
+                  by: existing.approvedBy,
+                  decisionId: existing.id,
+                  decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
+                  latencySeconds: null,
+                  repeated: true,
+                };
               }
               if (request.state !== 'ADMITTED')
                 throw new Error(`Request is ${request.state}, not awaiting review. Refresh to see its current status.`);
-              const validClaimIds = (
-                await Promise.all(request.claimRefs.map(async (cid) => ((await ledger.get(tenant, cid)) ? cid : null)))
-              ).filter((cid): cid is string => cid !== null);
-              if (action === 'approve' && validClaimIds.length === 0)
+              if (action === 'approve' && !existing && request.claimRefs.length === 0) {
                 throw new Error(
                   'Request has no valid evidence in the ledger. Review cannot proceed without grounded evidence.',
                 );
+              }
               const decision =
-                action === 'approve'
+                action === 'approve' && !existing
                   ? await ledger.recordDecision({
                       id: decisionId,
                       tenant,
@@ -1067,7 +1063,7 @@ export function startConsoleServer(
                         stopCondition: request.stopCondition,
                       }),
                       actionClass: 'RECOMMEND',
-                      claimIds: validClaimIds,
+                      claimIds: request.claimRefs,
                       decidedBy: who,
                       approvedBy: who,
                       scope: request.targetScope,
@@ -1090,13 +1086,14 @@ export function startConsoleServer(
               } catch {
                 latencySeconds = null;
               }
+              const receipt = decision ?? existing;
               return {
                 state: next.state,
                 by: who,
                 latencySeconds,
                 repeated: false,
-                ...(decision
-                  ? { decisionId: decision.id, decisionUrl: `/console/decisions/${encodeURIComponent(decision.id)}` }
+                ...(receipt
+                  ? { decisionId: receipt.id, decisionUrl: `/console/decisions/${encodeURIComponent(receipt.id)}` }
                   : {}),
               };
             });

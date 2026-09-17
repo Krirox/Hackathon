@@ -48,6 +48,9 @@ export interface CodingTask {
   coreSecret?: string;
   /** Optional sandbox manifest to verify workingDir contents against before running. */
   sandboxManifest?: Manifest;
+  /** Optional human approval metadata binding this execution to an approved decision. */
+  approvedDecisionId?: string;
+  approvedBy?: string;
 }
 
 export interface PermissionRequest {
@@ -154,6 +157,33 @@ export const createGovernedPermissionPolicy =
     }
 
     if (actionClass === 'ACT_REVERSIBLE') {
+      // Check for verified human approval bound to this task
+      if (task.approvedDecisionId && tenant) {
+        const dec = (await db
+          .prepare('SELECT * FROM decisions WHERE tenant = ? AND id = ?')
+          .get(tenant, task.approvedDecisionId)) as
+          | {
+              id: string;
+              approved_by: string | null;
+              autonomy: string;
+              scope: string;
+              action_class: string;
+            }
+          | undefined;
+        if (
+          dec &&
+          dec.approved_by &&
+          (dec.autonomy === 'approval' || dec.autonomy === 'human-command') &&
+          (!scope || dec.scope === scope)
+        ) {
+          return {
+            decision: 'allow',
+            reason: `human approval by ${dec.approved_by} on decision ${task.approvedDecisionId}`,
+            actionClass: 'ACT_REVERSIBLE',
+          };
+        }
+      }
+
       if (tenant && scope) {
         const auth = await guardedAuthorize(db, {
           tenant,

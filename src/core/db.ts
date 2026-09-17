@@ -32,11 +32,18 @@ export interface AsyncStatement {
  * takes this instead: sqlite wraps its synchronous driver behind resolved
  * promises, Postgres implements it natively (`src/core/pg.ts`). One path.
  */
+/** Snapshot reads include this transaction's own writes. Nesting must inherit an
+ * adequate snapshot or reject before invoking the callback; it cannot upgrade
+ * an already active PostgreSQL READ COMMITTED transaction. */
+export interface TransactionOptions {
+  snapshot?: boolean;
+}
+
 export interface AsyncDb {
   readonly engine: 'sqlite' | 'postgres';
   prepare(sql: string): AsyncStatement;
   exec(sql: string): Promise<void>;
-  transaction<T>(fn: () => Promise<T> | T): Promise<T>;
+  transaction<T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -123,7 +130,7 @@ function wrapSqlite(raw: DatabaseSync): AsyncDb {
       }
       await locked(() => raw.exec(sql));
     },
-    async transaction<T>(fn: () => Promise<T> | T): Promise<T> {
+    async transaction<T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T> {
       const parent = txDepth.getStore();
       // Nested transactions become SAVEPOINTs so the ledger can wrap a
       // multi-statement atomic append without deadlocking itself.
@@ -138,12 +145,15 @@ function wrapSqlite(raw: DatabaseSync): AsyncDb {
         } catch (err) {
           parent.depth -= 1;
           raw.exec(`ROLLBACK TO sp${parent.depth}`);
+          raw.exec(`RELEASE sp${parent.depth}`);
           throw err;
         }
       }
       const release = await acquire();
-      raw.exec('BEGIN IMMEDIATE');
       try {
+        // Deferred readers allow concurrent writers in WAL mode. Ordinary
+        // write transactions retain their existing BEGIN IMMEDIATE semantics.
+        raw.exec(options?.snapshot ? 'BEGIN' : 'BEGIN IMMEDIATE');
         const out = await txDepth.run({ depth: 1 }, fn);
         raw.exec('COMMIT');
         return out;
