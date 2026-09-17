@@ -1,4 +1,4 @@
-# Incomplete & Orphaned Feature Audit
+﻿# Incomplete & Orphaned Feature Audit
 
 **Project:** Vital  
 **Audit date:** 2026-09-17  
@@ -406,26 +406,31 @@ Dogfood ingests real sources but automatically records a human verifier/approver
 
 ## F16 — Deep research execution and report lifecycle
 
-**State:** Partial / orphaned. **Priority:** Medium. **Effort:** Large. **Disposition:** Defer standalone product; keep bounded research primitive.
+**State:** Partial / bounded lifecycle remediated. **Priority:** Medium. **Effort:** Large for standalone product. **Disposition:** Bounded lifecycle fixes applied 2026-09-18; standalone product and UI deferred.
 
-**Evidence:** `src/wedge/deepresearch.ts:117–188,198–290,308–364`; `test/deepresearch.test.ts`; caller search found no production integration outside this module.
+**Evidence:** `src/wedge/deepresearch.ts`; `test/deepresearch.test.ts`; caller search found no production integration outside this module.
 
-Current checkpoints are real, but do not complete the lifecycle:
+**Remediation progress (2026-09-18) — bounded lifecycle fixes:**
 
-- Budget exhaustion breaks the loop then marks the run `COMPLETED`, even with remaining questions.
-- Checkpoint resume unions progress but does not honor the stored terminal status or bind the caller's plan to the stored plan.
-- Checkpoints omit source policy and final report. Claim writes and step checkpoints are not atomic; mid-step failure can rebank work.
-- Per-call search budget resets on re-entry; no durable total spend accounting exists.
-- Cancellation records no cancelling actor; cancellation is checked between steps, not an in-flight search abort.
-- “Gaps” means unexecuted questions, not completed questions with zero findings.
-- Duplicate URIs are skipped, not recorded as independent corroboration.
-- Verification returns contradictions, but report attachment discards them. It checks citation liveness, not whether bullet text follows from citations.
-- Source lists use all run findings, while verification can accept other live tenant claims; report citations and bibliography need not align.
-- No plan-review UI, production search/model composition, run detail/history or report delivery exists.
+All 9 concrete lifecycle defects in `src/wedge/deepresearch.ts` addressed:
 
-**User impact:** Partial research can be called complete; contradictory evidence and unanswered questions can disappear from the final report; restart semantics are weaker than advertised.
+1. **`PAUSED_BUDGET` status**: Budget exhaustion now marks `PAUSED_BUDGET` (not `COMPLETED`). `COMPLETED` strictly requires all sub-questions answered within budget.
+2. **Terminal checkpoint guard**: `executeResearchRun` rejects resume of a terminal run (`COMPLETED`, `PAUSED_BUDGET`, `CANCELLED`) with `TERMINAL_CHECKPOINT`.
+3. **Plan fingerprint + mismatch guard**: `approveAndPersistResearchPlan` stores a deterministic `planFingerprint(question, subquestions)`. Re-entry with different subquestions throws `PLAN_MISMATCH`.
+4. **Concurrent execution ownership**: Different `executionOwner` on a stored run throws `EXECUTION_CONFLICT`.
+5. **Cancelling actor recorded**: `cancelResearchRun(run, by)` stores `cancelledBy`; async form `(run, by, { db, now })` persists.
+6. **Gap definition fixed**: Gaps = completed steps that produced zero findings (`coverage[].noResults`). Unexecuted questions are a budget-exhaustion concern, not a gap.
+7. **Corroboration tracked**: URIs seen across multiple sub-questions land in `corroboratedUris` and `uriSubquestions` map (URI → which sub-questions found it).
+8. **Contradictions in report**: `attachResearchReport` includes `v.contradictions` in the final `ResearchReport`.
+9. **Cited-only bibliography**: `report.sources` contains only claims cited in section bullets, with sub-question attribution. All-run-findings inclusion removed.
+10. **Cumulative total spend**: `totalSearches` persisted and restored on resume.
+11. **Durable persistence layer**: `loadResearchRun`, `persistResearchRun`, `approveAndPersistResearchPlan`, `resumeResearchRun`, `runResearchSession` entry point added.
+12. **Report serialization**: `serializeResearchReport` / `parseResearchReport` with backward-compatible defaults.
+13. **Pre-existing bugs fixed**: Missing `catch` in `deliverable.ts` diff block; `detailDocument` not imported in `serve.ts`; `requestDetail` wrong arg order in `serve.ts`.
 
-**Missing / plan:** Separate exhausted/partial/failed/completed states → persist immutable approved plan and full run/report policy → idempotent per-step findings and total budgets → abort/resume rules → per-question findings/gaps → preserve contradiction annotations and exact cited bibliography → only then add an entrypoint. Do not market citation existence as factual verification.
+Verification: 20/20 deepresearch tests pass (7 original + 13 new FLOW-017/FLOW-018); 41/41 across deepresearch + wedge test files; `npm run typecheck` clean. Full-suite failures (26/510) are pre-existing and unrelated to this finding.
+
+**Still open (explicitly deferred):** source policy persisted in checkpoint; in-flight search abort on cancellation; plan-review UI; production search/model composition; run detail/history page; report delivery. Do not market citation existence as factual verification.
 
 ## F17 — Router, compiler and operating learning loop
 

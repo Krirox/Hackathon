@@ -35,6 +35,7 @@ export class LedgerError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly detail?: unknown,
   ) {
     super(`[ledger:${code}] ${message}`);
   }
@@ -109,6 +110,28 @@ export interface CorrectionPatch {
   validUntil?: string | null;
 }
 
+/** FLOW-003: optimistic concurrency + typed patch for a human correction. */
+export interface CorrectionInput {
+  patch?: CorrectionPatch;
+  /** Required for conflict-safe supersede; must match the loaded claim's seq. */
+  expectedSeq?: number;
+}
+
+export interface CorrectionResult {
+  claim: Claim;
+  supersededId: string;
+}
+
+/** Actionable conflict payload when a correction loses the version race. */
+export interface CorrectionConflict {
+  expectedSeq?: number;
+  currentSeq: number;
+  current: Claim;
+  winner?: Claim;
+  diff?: { before: string; after: string };
+  preservedDraft?: { statement: string; by: string; at: string };
+}
+
 export interface Ledger {
   append(input: NewClaimInput): Promise<Claim>;
   get(tenant: string, id: string): Promise<Claim | null>;
@@ -145,15 +168,19 @@ export interface Ledger {
   disputedPairs(tenant: string): Promise<{ a: Claim; b: Claim }[]>;
   /** Expiry prompts: VERIFIED FACTs whose TTL lapses within `horizonMs`. */
   dueVerifications(tenant: string, now: string, horizonMs: number): Promise<Claim[]>;
-  /** Human correction: old claim SUPERSEDED, new claim appended, counted. Optional typed patch. */
+  /** Human correction: old claim SUPERSEDED, new claim appended, counted. */
   correctClaim(
     tenant: string,
     id: string,
     statement: string,
     by: string,
     now: string,
-    patch?: CorrectionPatch,
-  ): Promise<Claim>;
+    input?: CorrectionInput,
+  ): Promise<CorrectionResult>;
+  /** Direct superseding claim for a historical row, if any. */
+  supersedingClaim(tenant: string, claimId: string): Promise<Claim | null>;
+  /** Walk forward through supersedes links to the live replacement. */
+  currentReplacement(tenant: string, claimId: string): Promise<Claim | null>;
   /** Resolve an open prediction to an outcome fact claim, retiring the prediction. */
   resolvePrediction(
     tenant: string,
@@ -945,18 +972,116 @@ export function createLedger(db: AsyncDb): Ledger {
     ).map((r) => rowToClaim(r as ClaimRow));
   }
 
+  const correctionDraftKey = (tenant: string, claimId: string, actor: string) =>
+    `correction_draft:${tenant}:${claimId}:${actor}`;
+
+  async function preserveCorrectionDraft(
+    tenant: string,
+    claimId: string,
+    by: string,
+    draft: { statement: string; expectedSeq?: number; at: string },
+  ): Promise<void> {
+    await db
+      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(correctionDraftKey(tenant, claimId, by), JSON.stringify(draft));
+  }
+
+  async function getCorrectionDraft(
+    tenant: string,
+    claimId: string,
+    by: string,
+  ): Promise<{ statement: string; expectedSeq?: number; at: string } | null> {
+    const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(correctionDraftKey(tenant, claimId, by))) as
+      | { value: string }
+      | undefined;
+    if (!row) return null;
+    try {
+      return JSON.parse(String(row.value)) as { statement: string; expectedSeq?: number; at: string };
+    } catch {
+      return null;
+    }
+  }
+
+  async function supersedingClaim(tenant: string, claimId: string): Promise<Claim | null> {
+    const row = (await db
+      .prepare("SELECT from_id AS id FROM claim_links WHERE to_id = ? AND link = 'supersedes' LIMIT 1")
+      .get(claimId)) as { id: string } | undefined;
+    return row ? await get(tenant, String(row.id)) : null;
+  }
+
+  async function currentReplacement(tenant: string, claimId: string): Promise<Claim | null> {
+    const { current } = await supersedeChain(tenant, claimId);
+    return current;
+  }
+
+  async function conflictFor(
+    tenant: string,
+    old: Claim,
+    by: string,
+    statement: string,
+    expectedSeq?: number,
+    now?: string,
+  ): Promise<CorrectionConflict> {
+    const winner = (await supersedingClaim(tenant, old.id)) ?? (await currentReplacement(tenant, old.id));
+    const at = now ?? new Date().toISOString();
+    await preserveCorrectionDraft(tenant, old.id, by, { statement, expectedSeq, at });
+    const preserved = await getCorrectionDraft(tenant, old.id, by);
+    return {
+      expectedSeq,
+      currentSeq: old.seq,
+      current: old,
+      winner: winner && winner.id !== old.id ? winner : undefined,
+      diff: winner && winner.id !== old.id ? { before: old.statement, after: winner.statement } : undefined,
+      preservedDraft: preserved ? { statement: preserved.statement, by, at: preserved.at } : undefined,
+    };
+  }
+
   async function correctClaim(
     tenant: string,
     id: string,
     statement: string,
     by: string,
     now: string,
-    patch?: CorrectionPatch,
-  ): Promise<Claim> {
-    const old = await get(tenant, id);
-    if (!old) throw new LedgerError('MISSING_CLAIM', `unknown claim ${id}`);
+    input?: CorrectionInput,
+  ): Promise<CorrectionResult> {
     if (!statement) throw new LedgerError('EMPTY_CORRECTION', 'a correction with no statement corrects nothing');
+    const patch = input?.patch;
+    const expectedSeq = input?.expectedSeq;
     return db.transaction(async () => {
+      const old = await get(tenant, id);
+      if (!old) throw new LedgerError('MISSING_CLAIM', `unknown claim ${id}`);
+      if (['SUPERSEDED', 'RETIRED'].includes(old.status)) {
+        const detail = await conflictFor(tenant, old, by, statement, expectedSeq, now);
+        throw new LedgerError(
+          'VERSION_CONFLICT',
+          `claim ${id} is ${old.status} — refresh and correct its current replacement`,
+          detail,
+        );
+      }
+      if (expectedSeq !== undefined && expectedSeq !== old.seq) {
+        const detail = await conflictFor(tenant, old, by, statement, expectedSeq, now);
+        throw new LedgerError(
+          'VERSION_CONFLICT',
+          `expected claim version seq ${expectedSeq}, current is ${old.seq}`,
+          detail,
+        );
+      }
+      // FLOW-003: one replacement per version — atomic CAS on (id, seq, status).
+      const marked = await db
+        .prepare(
+          `UPDATE claims SET status = 'SUPERSEDED'
+             WHERE id = ? AND tenant = ? AND seq = ? AND status NOT IN ('SUPERSEDED','RETIRED')`,
+        )
+        .run(id, tenant, old.seq);
+      if (marked.changes === 0) {
+        const current = (await get(tenant, id))!;
+        const detail = await conflictFor(tenant, current, by, statement, expectedSeq, now);
+        throw new LedgerError(
+          'VERSION_CONFLICT',
+          `claim ${id} was corrected by another editor — refresh and reconcile`,
+          detail,
+        );
+      }
       // F22: Typed correction contract. If the human edits prose without explicitly
       // supplying a new typed value, invalidate the old structured value/unit rather
       // than silently retaining stale numbers for machine readers.
@@ -997,9 +1122,13 @@ export function createLedger(db: AsyncDb): Ledger {
           retrievedAt: now,
         },
       });
-      await link(tenant, neu.id, old.id, 'supersedes');
+      await db
+        .prepare(
+          'INSERT INTO claim_links (from_id, to_id, link) VALUES (?,?,?) ON CONFLICT(from_id, to_id, link) DO NOTHING',
+        )
+        .run(neu.id, old.id, 'supersedes');
       await audit(tenant, by, 'CLAIM_CORRECTED', `${old.id}->${neu.id}`, old.statement);
-      return neu;
+      return { claim: neu, supersededId: old.id };
     });
   }
 
@@ -1281,6 +1410,8 @@ export function createLedger(db: AsyncDb): Ledger {
     resolveDispute,
     dueVerifications,
     correctClaim,
+    supersedingClaim,
+    currentReplacement,
     verifyClaim,
     correctionCount,
     upsertSubject,

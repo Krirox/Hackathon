@@ -2,16 +2,20 @@ import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base, rejects } from './helpers
 import {
   checkDraft,
   fanOut,
+  fanOutWorkflow,
+  getFanOutWorkflow,
   getReleaseStage,
   isKnownRelease,
   joinReleaseDeliverables,
   markReleaseKnown,
   produceReleaseAsset,
   recordReleaseStage,
+  resumeFanOutWorkflow,
   summarizeRelease,
   type CustomerSegment,
 } from '../src/wedge/ship.ts';
-import { churnRespond, executeChurnPlay } from '../src/wedge/churn.ts';
+import { churnRespond, churnRespondWorkflow, executeChurnPlay } from '../src/wedge/churn.ts';
+import { stableFanOutRunId } from '../src/wedge/fanout-workflow.ts';
 import { LocalEchoAdapter } from '../src/substrate/harness.ts';
 import type { Collector } from '../src/ingest/collectors.ts';
 
@@ -453,6 +457,136 @@ T('F15: a blocked draft aborts the run before any evidence is minted', async () 
   eq(await count('SELECT COUNT(*) AS n FROM traces'), 0, 'no trace minted:');
   eq(await count('SELECT COUNT(*) AS n FROM skill_cards'), 0, 'no card minted:');
   eq(await marks(bad.db), 0, 'failed run leaves the release unmarked:');
+});
+
+console.log('\n\x1b[1mWedge — durable partial fan-out (FLOW-013)\x1b[0m');
+
+T('FLOW-013: parent run id exists before legs; fourth human leg hits default escalation cap', async () => {
+  const { db, ledger, coord } = await fresh();
+  const a = await relClaim(ledger, 'release:v2.15', 'APAC billing ships');
+  const runId = stableFanOutRunId(TEN, 'ship', 'v2.15', [a.id]);
+  const before = await getFanOutWorkflow(db, TEN, runId);
+  eq(before, null, 'no run before fan-out:');
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'v2.15',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'APAC billing',
+  });
+  eq(run.id, runId, 'stable parent run id:');
+  eq(run.legs[0]!.status, 'ADMITTED');
+  eq(run.legs[4]!.key, 'finance');
+  eq(run.legs[4]!.status, 'DENIED', 'fourth human-minute leg refused at default cap:');
+  eq(run.status, 'PARTIAL');
+  const escalations = await coord.dailyEscalations(TEN, NOW.slice(0, 10));
+  eq(escalations, 3, 'default cap spends exactly three human escalations:');
+});
+
+T('FLOW-013: partial fan-out persists progress and returns created request ids', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 0,
+  });
+  const a = await relClaim(ledger, 'release:partial', 'partial rollout');
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'partial',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'partial',
+  });
+  eq(run.status, 'BLOCKED');
+  eq(run.legs[0]!.status, 'DENIED');
+  eq(run.legs[0]!.requestId !== null, true, 'refused leg still has a request id:');
+  const reloaded = await getFanOutWorkflow(db, TEN, run.id);
+  eq(reloaded?.legs[0]!.requestId, run.legs[0]!.requestId, 'partial progress survives reload:');
+});
+
+T('FLOW-013: retry skips completed/deduped legs and retains terminal refusals', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 0,
+  });
+  const a = await relClaim(ledger, 'release:retry', 'retry rollout');
+  const first = await fanOutWorkflow(db, coord, TEN, {
+    release: 'retry',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'retry',
+  });
+  const deniedId = first.legs[0]!.requestId!;
+  const count = async () =>
+    ((await db.prepare('SELECT COUNT(*) AS n FROM requests WHERE tenant = ?').get(TEN)) as { n: number }).n;
+  eq(await count(), 1);
+  const second = await resumeFanOutWorkflow(db, coord, TEN, first.id);
+  eq(second.legs[0]!.status, 'DENIED');
+  eq(second.legs[0]!.requestId, deniedId, 'denied leg is not re-submitted:');
+  eq(await count(), 1, 'retry does not mint duplicate requests for refused legs:');
+});
+
+T('FLOW-013: churn retry reuses run and keeps one recommendation decision', async () => {
+  const limits = {
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 100,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 20,
+  };
+  const { db, ledger, coord } = await fresh(limits);
+  const risk = await ledger.append({
+    tenant: TEN,
+    subject: 'churn:emea',
+    kind: 'BELIEF',
+    statement: 'EMEA trial churn rising',
+    confidence: 0.6,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:cs',
+    scope: 'customer',
+    authorType: 'agent',
+    provenance: { ...sor(), sourceTier: 'CORROBORATED' },
+  });
+  const input = { segment: 'EMEA trials', riskClaimIds: [risk.id], onBehalfOf: 'human:priya', now: NOW };
+  const r1 = await churnRespondWorkflow(db, coord, ledger, TEN, input);
+  eq(r1.status, 'COMPLETE');
+  const r2 = await churnRespondWorkflow(db, coord, ledger, TEN, input);
+  eq(r2.id, r1.id, 'churn retry reuses the same workflow run:');
+  eq(r2.decisionId, r1.decisionId, 'churn retry does not mint a second recommendation decision:');
+  eq(r2.legs.every((l) => l.status === 'ADMITTED' || l.status === 'DEDUPED'), true);
+  const decisions = ((await db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE tenant = ?').get(TEN)) as { n: number })
+    .n;
+  eq(decisions, 1, 'only one churn recommendation decision exists:');
+});
+
+T('FLOW-013: deduped legs are success, not refusal', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 10,
+  });
+  const a = await relClaim(ledger, 'release:dedupe', 'dedupe rollout');
+  const input = {
+    release: 'dedupe',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'dedupe',
+  };
+  const first = await fanOutWorkflow(db, coord, TEN, input);
+  eq(first.status, 'COMPLETE');
+  const second = await fanOutWorkflow(db, coord, TEN, input);
+  eq(second.status, 'COMPLETE');
+  eq(
+    second.legs.filter((l) => l.status === 'DEDUPED').length,
+    5,
+    'identical re-run marks every leg deduped, not refused:',
+  );
 });
 
 console.log('\n\x1b[1mWedge — Ship-to-Result closed-loop and churn execution (F14)\x1b[0m');

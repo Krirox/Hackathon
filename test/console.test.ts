@@ -3,13 +3,25 @@ import { request as httpRequest } from 'node:http';
 import { buildReport, COST_CURVE_BUDGET, MAX_ROOMS, ROOM_REQUESTS } from '../src/console/report.ts';
 import { lineChart, renderHtml, tierStack } from '../src/console/render.ts';
 import { composeDigest } from '../src/console/digest.ts';
-import { startConsoleServer } from '../src/console/serve.ts';
+import { DEFAULT_BIND_HOST, isLoopbackBindHost, startConsoleServer } from '../src/console/serve.ts';
+import {
+  buildActivationState,
+  loadActivationConfig,
+  SAMPLE_REQUEST_PREFIX,
+  SAMPLE_SCOPE,
+} from '../src/console/activation.ts';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { listCases } from '../src/evals/runner.ts';
 import { rIn } from './helpers.ts';
 import { installAuthSchema, signupTenant, listUsers } from '../src/core/auth.ts';
 import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
 import { seedTrace, cardInput } from './helpers.ts';
 import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
+import { buildWorkspaceView, loadWorkspaceOverlay } from '../src/console/release-workspace.ts';
+import { fanOutWorkflow } from '../src/wedge/ship.ts';
+import { persistDeliverableVersion } from '../src/wedge/deliverable-artifact.ts';
 import { runInNewContext } from 'node:vm';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
@@ -289,7 +301,8 @@ T('F02: review client treats successful declines as success and restores control
     }
     let submit: ((event: unknown) => Promise<void>) | undefined;
     const root = {
-      querySelectorAll: () => [button],
+      querySelectorAll: (sel?: string) =>
+        !sel || sel === 'button[type="submit"]' ? [button] : sel === 'form[data-review-action]' ? [] : [],
       querySelector: () => ({ addEventListener() {} }),
       addEventListener: (_event: string, listener: typeof submit) => {
         submit = listener;
@@ -593,7 +606,7 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
       await fetch(`${base_}/api/claims/${claim.id}/correct`, {
         method: 'POST',
         headers: { ...authed.headers, 'content-type': 'application/json' },
-        body: JSON.stringify({ statement: 'the launch plan is $149/mo' }),
+        body: JSON.stringify({ statement: 'the launch plan is $149/mo', expectedSeq: claim.seq }),
       })
     ).json()) as {
       ok: boolean;
@@ -619,7 +632,12 @@ T('override capture: correcting a claim stores the diff and feeds the eval spine
       await fetch(`${base_}/api/claims/${r.supersededBy}/correct`, {
         method: 'POST',
         headers: { ...authed.headers, 'content-type': 'application/json' },
-        body: JSON.stringify({ statement: 'the launch plan is $179/mo', value: 179, unit: 'USD/mo' }),
+        body: JSON.stringify({
+          statement: 'the launch plan is $179/mo',
+          expectedSeq: (await ledger.get(TEN, r.supersededBy))!.seq,
+          value: 179,
+          unit: 'USD/mo',
+        }),
       })
     ).json()) as { ok: boolean; supersededBy: string };
     eq(typedRes.ok, true);
@@ -1237,5 +1255,459 @@ T('cost-per-signal is surfaced: report card, /api/cost-per-signal, cli status fi
     eq(body.withinGate, true);
   } finally {
     await server.close();
+  }
+});
+
+T('FLOW-006: loopback is the default bind and the server reports its actual address', async () => {
+  eq(isLoopbackBindHost(DEFAULT_BIND_HOST), true);
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: 'bind-default', now: () => NOW });
+  try {
+    eq(server.host, '127.0.0.1');
+    eq(server.address, `127.0.0.1:${server.port}`);
+    const health = (await fetch(`http://127.0.0.1:${server.port}/healthz`).then((r) => r.json())) as {
+      ok: boolean;
+      listen: string;
+    };
+    eq(health.ok, true);
+    eq(health.listen, server.address);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-006: configured HOST=0.0.0.0 is honored and reachable through loopback', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: 'bind-public',
+    host: '0.0.0.0',
+    now: () => NOW,
+  });
+  try {
+    eq(server.host, '0.0.0.0');
+    eq(server.address, `0.0.0.0:${server.port}`);
+    eq((await fetch(`http://127.0.0.1:${server.port}/healthz`)).status, 200);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-006: public bind blocks remote signup until bootstrap credentials are configured', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: 'bind-remote',
+    host: '0.0.0.0',
+    now: () => NOW,
+  });
+  try {
+    eq((await fetch(`http://127.0.0.1:${server.port}/signup`)).status, 503);
+    const blocked = await fetch(`http://127.0.0.1:${server.port}/signup`, {
+      method: 'POST',
+      body: 'orgname=Remote&ownerName=Q&email=q%40remote.test&password=long-enough-password',
+    });
+    eq(blocked.status, 403);
+    const body = (await blocked.json()) as { error: string };
+    eq(body.error.includes('remote signup is disabled'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-012: empty org sees activation checklist before health charts', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/`, { headers: session.headers })).text();
+    eq(html.includes('id="activation-setup"'), true);
+    eq(html.includes('Organization setup'), true);
+    eq(html.includes('next useful action'), true);
+    const healthPos = html.indexOf('<h1>Reality health</h1>');
+    const activationPos = html.indexOf('id="activation-setup"');
+    eq(activationPos > 0 && activationPos < healthPos, true, 'activation precedes health charts:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-012: setup page saves config, ingests first source, and starts release workflow', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const owner = await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const sourceDir = join(tmpdir(), `vital-flow012-${Date.now()}`);
+  const artifactDir = join(tmpdir(), `vital-flow012-art-${Date.now()}`);
+  mkdirSync(sourceDir, { recursive: true });
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(join(sourceDir, 'release.md'), '# v0.1\nFirst public release notes');
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const save = await fetch(`${base_}/setup`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        accountableOwnerId: owner.owner.id,
+        scope: 'engineering',
+        sourcePath: sourceDir,
+        artifactDir,
+        approverRole: 'member',
+        dailyBudgetDollars: '100',
+        humanMinutesBudget: '60',
+      }),
+    });
+    eq(save.status, 200);
+    const config = await loadActivationConfig(db, TEN);
+    eq(config?.scope, 'engineering');
+    eq(config?.sourcePath, sourceDir);
+
+    const ingest = await fetch(`${base_}/setup/ingest`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf }),
+    });
+    eq(ingest.status, 200);
+    const stateAfterIngest = await buildActivationState(db, ledger, coord, TEN, NOW, [owner.owner]);
+    eq(stateAfterIngest.sourceState, 'ready');
+    eq(stateAfterIngest.firstReceipt !== null, true);
+
+    const workflow = await fetch(`${base_}/setup/start-release`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf }),
+      redirect: 'manual',
+    });
+    eq(workflow.status, 303);
+    const complete = await buildActivationState(db, ledger, coord, TEN, NOW, [owner.owner]);
+    eq(complete.releaseWorkflowId !== null, true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-015: release workspace links fan-out, prereg, outcome, and replay', async () => {
+  const { db, ledger, coord, comp } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 100,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 20,
+  });
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const claim = await ledger.append({
+    tenant: TEN,
+    subject: 'release:flow015',
+    kind: 'OBSERVATION',
+    statement: 'Adds export receipts',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'owner',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'flow015',
+    claimIds: [claim.id],
+    onBehalfOf: 'human:owner',
+    now: NOW,
+    summary: 'FLOW-015 workspace test',
+  });
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const list = await (await fetch(`${base_}/console/workflows`, { headers: session.headers })).text();
+    eq(list.includes(run.id), true, 'workflow list includes run:');
+    eq(list.includes('FLOW-015 workspace test'), true, 'workflow list shows summary:');
+
+    const detail = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    eq(detail.includes('Source evidence'), true);
+    eq(detail.includes(claim.id), true);
+    eq(detail.includes('Fan-out legs'), true);
+    eq(detail.includes('marketing'), true);
+    eq(detail.includes('Pre-register metrics'), true);
+
+    const prereg = await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}/preregister`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        metric: 'ship_to_launch_hours',
+        threshold: '24',
+        baseline: '48h pre-pilot average',
+        comparisonBasis: 'holdout segment',
+        windowStart: '2026-09-01',
+        windowEnd: '2026-10-01',
+      }),
+      redirect: 'manual',
+    });
+    eq(prereg.status, 303);
+    const overlay = await loadWorkspaceOverlay(db, TEN, run.id);
+    eq(overlay?.preregId !== undefined, true, 'prereg persisted:');
+
+    const view = await buildWorkspaceView(db, ledger, coord, comp, TEN, run.id);
+    eq(view?.canCaptureOutcome, true, 'outcome capture enabled after prereg:');
+    eq(view?.measurementState, 'unknown');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-015: workflow cancel and retry are exposed without re-executing replay', async () => {
+  const { db, ledger, coord, comp } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 0,
+  });
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const claim = await ledger.append({
+    tenant: TEN,
+    subject: 'release:blocked',
+    kind: 'OBSERVATION',
+    statement: 'Blocked rollout',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'owner',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'blocked',
+    claimIds: [claim.id],
+    onBehalfOf: 'human:owner',
+    now: NOW,
+    summary: 'blocked fan-out',
+  });
+  eq(run.status, 'BLOCKED');
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const before = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    eq(before.includes('BLOCKED'), true);
+    eq(before.includes('Retry eligible legs'), true);
+
+    const cancel = await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}/cancel`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf, reason: 'pilot paused' }),
+      redirect: 'manual',
+    });
+    eq(cancel.status, 303);
+    const after = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    eq(after.includes('CANCELLED'), true);
+    eq(after.includes('pilot paused'), true);
+    eq(after.includes('Replay (frozen vs current)'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: expired session API returns sign-in-to-continue with return path', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  await coord.submit(base({ id: 'flow010-expired', goal: 'session expiry review', claimRefs: [rel.id] }));
+  let at = NOW;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => at });
+  try {
+    const session = await ownerSession(server.port);
+    at = new Date(Date.parse(NOW) + 13 * 60 * 60 * 1000).toISOString();
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/requests/flow010-expired/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    eq(res.status, 401);
+    const body = (await res.json()) as { code: string; loginUrl: string; error: string };
+    eq(body.code, 'SESSION_EXPIRED');
+    eq(body.error.includes('Sign in to continue'), true);
+    eq(body.loginUrl.includes('reason=expired'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: expired page visit redirects to login with next and expiry notice', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  let at = NOW;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => at });
+  try {
+    const session = await ownerSession(server.port);
+    at = new Date(Date.parse(NOW) + 13 * 60 * 60 * 1000).toISOString();
+    const res = await fetch(`http://127.0.0.1:${server.port}/console/claims/test-claim`, {
+      headers: { cookie: session.cookie },
+      redirect: 'manual',
+    });
+    eq(res.status, 303);
+    const loc = res.headers.get('location') ?? '';
+    eq(loc.includes('/login'), true);
+    eq(loc.includes('reason=expired'), true);
+    eq(loc.includes('next='), true);
+    const login = await fetch(`http://127.0.0.1:${server.port}${loc}`);
+    const html = await login.text();
+    eq(html.includes('Sign in to continue'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: login CSRF mismatch preserves email on HTML recovery', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const pre = await fetch(`http://127.0.0.1:${server.port}/login`);
+    const preCsrf = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const staleToken = 'deadbeef'.repeat(8);
+    const res = await fetch(`http://127.0.0.1:${server.port}/login`, {
+      method: 'POST',
+      headers: { cookie: preCsrf, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${staleToken}&email=owner%40acme.test&password=ignored`,
+    });
+    eq(res.status, 200);
+    const html = await res.text();
+    eq(html.includes('form expired'), true);
+    eq(html.includes('value="owner@acme.test"'), true);
+    eq((res.headers.getSetCookie?.() ?? []).some((c) => c.startsWith('vital_csrf=')), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: voluntary password change lives under account, forced activation under change-password', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const account = await (await fetch(`http://127.0.0.1:${server.port}/account`, { headers: session.headers })).text();
+    eq(account.includes('Account and security'), true);
+    eq(account.includes('/account/password'), true);
+    const forced = await fetch(`http://127.0.0.1:${server.port}/change-password`, {
+      headers: session.headers,
+      redirect: 'manual',
+    });
+    eq(forced.status, 303);
+    eq((forced.headers.get('location') ?? '').includes('/account'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-012: sample walkthrough is labeled and separate from customer evidence', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const owner = await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const sample = await fetch(`${base_}/setup/sample`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf }),
+      redirect: 'manual',
+    });
+    eq(sample.status, 303);
+    const html = await (await fetch(`${base_}/#pending-review`, { headers: session.headers })).text();
+    eq(html.includes('SAMPLE WALKTHROUGH'), true);
+    eq(html.includes(SAMPLE_SCOPE), true);
+    const claim = (await db
+      .prepare('SELECT scope FROM claims WHERE tenant = ? ORDER BY created_at DESC LIMIT 1')
+      .get(TEN)) as { scope: string };
+    eq(claim.scope, SAMPLE_SCOPE);
+    const request = (await db.prepare('SELECT id FROM requests WHERE tenant = ? ORDER BY created_at DESC LIMIT 1').get(TEN)) as {
+      id: string;
+    };
+    eq(request.id.startsWith(SAMPLE_REQUEST_PREFIX), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-014: request detail shows deliverable preview and final approval binds to version', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  const artDir = join(tmpdir(), `vital-flow014-${Date.now()}`);
+  mkdirSync(artDir, { recursive: true });
+  process.env.ARTIFACT_DIR = artDir;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const version = await persistDeliverableVersion(db, ledger, {
+      tenant: TEN,
+      requestId: 'r1',
+      deliverableSchema: 'launch-pack.v1',
+      content: `- Launch copy cites release [claim:${rel.id}]`,
+      claimIds: [rel.id],
+      createdBy: 'agent:marketing',
+      now: NOW,
+      artifactDir: artDir,
+    });
+    const session = await ownerSession(server.port);
+    const detail = await (await fetch(`http://127.0.0.1:${server.port}/console/requests/r1`, { headers: session.headers })).text();
+    eq(detail.includes('Deliverable preview'), true);
+    eq(detail.includes('Launch copy cites release'), true);
+    eq(detail.includes('Finding'), true);
+    eq(detail.includes('Approve deliverable'), true);
+    const approved = await fetch(`http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ fingerprint: version.fingerprint }),
+    });
+    eq(approved.status, 200);
+    const body = (await approved.json()) as { decisionId: string };
+    const receipt = await (await fetch(`http://127.0.0.1:${server.port}/console/decisions/${encodeURIComponent(body.decisionId)}`, {
+      headers: session.headers,
+    })).text();
+    eq(receipt.includes('final-deliverable'), true);
+    const download = await fetch(`http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/artifact`, {
+      headers: session.headers,
+    });
+    eq(download.status, 200);
+    eq((await download.text()).includes('Launch copy cites release'), true);
+  } finally {
+    delete process.env.ARTIFACT_DIR;
+    await server.close();
+    await db.close();
   }
 });

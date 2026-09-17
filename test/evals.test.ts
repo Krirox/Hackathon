@@ -135,7 +135,7 @@ T('a human correction becomes a regression eval that stays green', async () => {
     authorType: 'system',
     provenance: sor(),
   });
-  const neu = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', NOW);
+  const { claim: neu } = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', NOW);
   const seq = (
     (await db
       .prepare("SELECT max(seq) AS m FROM audit_log WHERE tenant = ? AND action = 'CLAIM_CORRECTED'")
@@ -204,7 +204,7 @@ T('a captured override catches the stale reader it exists for (red→green)', as
     const res = await fetch(`${base_}/api/claims/${claim.id}/correct`, {
       method: 'POST',
       headers: { cookie, 'x-vital-csrf': csrf, 'content-type': 'application/json' },
-      body: JSON.stringify({ statement: 'the launch plan is $149/mo' }),
+      body: JSON.stringify({ statement: 'the launch plan is $149/mo', expectedSeq: claim.seq }),
     });
     correction = (await res.json()) as {
       supersedes: string;

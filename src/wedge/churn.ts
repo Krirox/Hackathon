@@ -1,7 +1,19 @@
+import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { HarnessAdapter, HarnessOutcome } from '../substrate/harness.ts';
 import { checkDraft, reuseDedupedOrThrow, WedgeError, type DraftCheck } from './ship.ts';
+import {
+  advanceFanOutWorkflow,
+  churnLegIds,
+  churnLegTemplates,
+  createFanOutWorkflowRun,
+  loadFanOutRun,
+  requireCompleteFanOut,
+  saveFanOutRun,
+  stableFanOutRunId,
+  type FanOutWorkflowRun,
+} from './fanout-workflow.ts';
 
 /**
  * Second workflow (TODO §8, earliest slice): churn-response.
@@ -20,35 +32,101 @@ export interface ChurnResponse {
   offerRequestId: string;
 }
 
-export async function churnRespond(
-  coord: Coordinator,
+async function validateChurnRiskClaims(
   ledger: Ledger,
   tenant: string,
-  input: { segment: string; riskClaimIds: string[]; onBehalfOf: string; now: string },
-): Promise<ChurnResponse> {
-  if (input.riskClaimIds.length === 0) {
+  riskClaimIds: string[],
+  now: string,
+): Promise<void> {
+  if (riskClaimIds.length === 0) {
     throw new WedgeError('UNGROUNDED_LOOP', 'a churn loop with no cited risk pattern is refused');
   }
-  // Risk signals are BELIEFs by design (CANDIDATE, never VERIFIED on
-  // arrival), so the bar here is LIVE, not verified: the claim must exist,
-  // unretired, undisputed, unexpired. The loop investigates and recommends;
-  // autonomy stays `approval`, so no action fires on a hunch.
   const UNUSABLE = ['STALE', 'DISPUTED', 'SUPERSEDED', 'RETIRED'] as const;
   const bad: string[] = [];
-  for (const id of input.riskClaimIds) {
+  for (const id of riskClaimIds) {
     const c = await ledger.get(tenant, id);
     if (!c) {
       bad.push(id);
       continue;
     }
     if ((UNUSABLE as readonly string[]).includes(c.status)) bad.push(id);
-    else if (c.validUntil && c.validUntil <= input.now) bad.push(id);
+    else if (c.validUntil && c.validUntil <= now) bad.push(id);
   }
   if (bad.length > 0) {
     throw new WedgeError(
       'UNVERIFIABLE_CITATION',
       `churn risk cites ${bad.join(', ')} — stale, disputed, superseded, or unknown`,
     );
+  }
+}
+
+async function ensureChurnDecision(
+  db: AsyncDb,
+  ledger: Ledger,
+  run: FanOutWorkflowRun,
+): Promise<FanOutWorkflowRun> {
+  if (run.decisionId) return run;
+  if (run.status !== 'COMPLETE') return run;
+  const decision = await ledger.recordDecision({
+    tenant: run.tenant,
+    goal: `respond to churn risk in ${run.subject}`,
+    action: 'churn-response loop',
+    actionClass: 'RECOMMEND',
+    claimIds: run.claimIds,
+    decidedBy: run.onBehalfOf,
+    scope: 'customer',
+    autonomy: 'approval',
+    now: run.now,
+  });
+  const updated = { ...run, decisionId: decision.id, updatedAt: new Date().toISOString() };
+  await saveFanOutRun(db, updated);
+  return updated;
+}
+
+/**
+ * FLOW-013: durable churn fan-out with stable run + decision identity.
+ */
+export async function churnRespondWorkflow(
+  db: AsyncDb,
+  coord: Coordinator,
+  ledger: Ledger,
+  tenant: string,
+  input: { segment: string; riskClaimIds: string[]; onBehalfOf: string; now: string; runId?: string },
+): Promise<FanOutWorkflowRun> {
+  await validateChurnRiskClaims(ledger, tenant, input.riskClaimIds, input.now);
+  const runId = input.runId ?? stableFanOutRunId(tenant, 'churn', input.segment, input.riskClaimIds);
+  let run = await loadFanOutRun(db, tenant, runId);
+  if (!run) {
+    run = createFanOutWorkflowRun({
+      tenant,
+      kind: 'churn',
+      subject: input.segment,
+      claimIds: input.riskClaimIds,
+      onBehalfOf: input.onBehalfOf,
+      now: input.now,
+      legs: churnLegTemplates(input.segment),
+      runId,
+    });
+    await saveFanOutRun(db, run);
+  }
+  run = await advanceFanOutWorkflow(db, coord, run, { readmitDeferred: true, retryBlocked: true });
+  return ensureChurnDecision(db, ledger, run);
+}
+
+export async function churnRespond(
+  coord: Coordinator,
+  ledger: Ledger,
+  tenant: string,
+  input: { segment: string; riskClaimIds: string[]; onBehalfOf: string; now: string },
+  db?: AsyncDb,
+): Promise<ChurnResponse> {
+  await validateChurnRiskClaims(ledger, tenant, input.riskClaimIds, input.now);
+  if (db) {
+    const run = await churnRespondWorkflow(db, coord, ledger, tenant, input);
+    requireCompleteFanOut(run);
+    if (!run.decisionId) throw new WedgeError('INCOMPLETE_FANOUT', 'churn workflow completed without a decision');
+    const legs = churnLegIds(run);
+    return { decisionId: run.decisionId, ...legs };
   }
   const leg = async (
     originScope: string,
@@ -70,7 +148,6 @@ export async function churnRespond(
       onBehalfOf: input.onBehalfOf,
       now: input.now,
     });
-    // Same retry rule as ship fan-out: a dedupe hit reuses the existing leg.
     return reuseDedupedOrThrow(r, originScope, targetScope);
   };
   const brief = `churn risk in ${input.segment}`;
@@ -82,8 +159,6 @@ export async function churnRespond(
     'pain-link.v1',
     0,
   );
-  // No self-delegation: the customer scope acts on a REQUEST from product,
-  // never on work it sends itself.
   const outreachRequestId = await leg(
     'product',
     'customer',

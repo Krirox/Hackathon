@@ -78,13 +78,15 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-003 — Make corrections conflict-safe and connect downstream recovery
 
-- [ ] Atomically require the expected current claim version before superseding it.
-- [ ] Allow one replacement for a given current version; return an actionable conflict to competing editors.
-- [ ] Preserve the losing editor's draft and display the winning replacement/diff.
-- [ ] List pending requests/proposals affected by a correction.
-- [ ] Provide an explicit evidence-refresh and re-review action for pending work.
-- [ ] Keep historical decisions and their frozen evidence immutable.
-- [ ] Clearly distinguish a current claim from historical or competing state during investigation.
+**Remediated (2026-09-18):** Optimistic concurrency on corrections, conflict payloads with preserved drafts, pending-request surfacing, and evidence refresh API. Verified: `test/ledger.test.ts` (FLOW-003 ×3), `test/coord.test.ts` (FLOW-003), console correction/refresh paths in `serve.ts`/`detail.ts`/`review.ts`.
+
+- [x] Atomically require the expected current claim version before superseding it.
+- [x] Allow one replacement for a given current version; return an actionable conflict to competing editors.
+- [x] Preserve the losing editor's draft and display the winning replacement/diff.
+- [x] List pending requests/proposals affected by a correction.
+- [x] Provide an explicit evidence-refresh and re-review action for pending work.
+- [x] Keep historical decisions and their frozen evidence immutable.
+- [x] Clearly distinguish a current claim from historical or competing state during investigation.
 
 **Acceptance:** Two simultaneous corrections cannot both become independent current replacements. Correcting a claim exposes the pending work that must be reconsidered.
 
@@ -98,16 +100,18 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-004 — Make erasure and export guarantees accurate
 
+**Partial (2026-09-18):** Export-first rollback, tenant meta/artifact inventory, shared-artifact retention, slug reuse block, and exclusive artifact cleanup verified in `test/erasure.test.ts` (FLOW-004 ×6). Receipt UX, full retention-policy documentation, and every acceptance bullet still need operator/browser verification.
+
 - [ ] Decide and document whether retaining an export is optional or mandatory for each supported erasure flow.
-- [ ] If required/requested, durably save and verify the export before destructive completion.
-- [ ] Handle export creation, permission, storage, and verification failures without falsely reporting a preserved record.
+- [x] If required/requested, durably save and verify the export before destructive completion.
+- [x] Handle export creation, permission, storage, and verification failures without falsely reporting a preserved record.
 - [ ] Make the destructive target, scope, consequences, and export-retention choice explicit before confirmation.
-- [ ] Inventory tenant-owned tables, tenant-keyed `meta` entries, raw artifacts, and any configured external storage.
-- [ ] Implement ownership/reference-aware artifact cleanup where content is shared.
+- [x] Inventory tenant-owned tables, tenant-keyed `meta` entries, raw artifacts, and any configured external storage.
+- [x] Implement ownership/reference-aware artifact cleanup where content is shared.
 - [ ] Apply explicit retention rules to audit evidence, backups, and retained export files; do not promise deletion beyond verified scope.
-- [ ] Remove stale kill, cursor, dedupe, and identity metadata when in scope.
+- [x] Remove stale kill, cursor, dedupe, and identity metadata when in scope.
 - [ ] Issue a receipt listing deleted, retained, failed, and deferred categories.
-- [ ] Ensure tenant-slug reuse cannot inherit prior operational state.
+- [x] Ensure tenant-slug reuse cannot inherit prior operational state.
 - [ ] Correct documentation that implies an in-memory export and a later file write are one atomic transaction.
 
 **Acceptance:** A completed erasure receipt accurately describes all retained and deleted data. Required export-file failure cannot occur only after irreversible deletion has already been reported as safely export-first.
@@ -118,14 +122,16 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-005 — Use consistent database targeting for operational commands
 
-- [ ] Share database resolution across serve, signup, password recovery, erasure, ingestion, report, and status where supported.
-- [ ] Honor explicit flags and deployment environment consistently, including PostgreSQL URLs.
-- [ ] Display the resolved engine and tenant without exposing connection secrets.
-- [ ] Confirm the intended tenant exists before sensitive operations.
-- [ ] Remove silent empty/in-memory or default-tenant behavior from commands meant to inspect a deployed organization.
-- [ ] Separate schema migration from read-only status inspection.
-- [ ] Make engine-specific command limitations explicit and provide a supported alternative.
-- [ ] Verify the instance-check script performs the functional checks it claims, rather than treating schema presence as end-to-end success.
+**Remediated (2026-09-18):** Shared CLI target resolution via `src/core/cli-target.ts`; verified in `test/cli-target.test.ts` (FLOW-005 ×11) and `scripts/verify-instance.mjs` updates.
+
+- [x] Share database resolution across serve, signup, password recovery, erasure, ingestion, report, and status where supported.
+- [x] Honor explicit flags and deployment environment consistently, including PostgreSQL URLs.
+- [x] Display the resolved engine and tenant without exposing connection secrets.
+- [x] Confirm the intended tenant exists before sensitive operations.
+- [x] Remove silent empty/in-memory or default-tenant behavior from commands meant to inspect a deployed organization.
+- [x] Separate schema migration from read-only status inspection.
+- [x] Make engine-specific command limitations explicit and provide a supported alternative.
+- [x] Verify the instance-check script performs the functional checks it claims, rather than treating schema presence as end-to-end success.
 
 **Acceptance:** Operators can recover or erase the actual production tenant without custom code or accidentally acting on a local SQLite file. Status describes the selected tenant and does not silently migrate it.
 
@@ -135,10 +141,12 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-006 — Honor deployment listener configuration
 
-- [ ] Honor the explicitly configured bind host while keeping loopback as the local default.
-- [ ] Report the actual listening address.
+**Remediated (2026-09-18):** Bind host honored, actual address reported, remote bootstrap gated. Verified: `test/console.test.ts` (FLOW-006 ×3).
+
+- [x] Honor the explicitly configured bind host while keeping loopback as the local default.
+- [x] Report the actual listening address.
 - [ ] Validate the documented load-balancer-to-task path, not only a loopback health probe.
-- [ ] Keep remote bootstrap protections in place before exposing an unclaimed console.
+- [x] Keep remote bootstrap protections in place before exposing an unclaimed console.
 
 **Acceptance:** A deployment configured for its task interface can be reached through the documented entry point; local-only behavior remains intentional and clear.
 
@@ -152,11 +160,13 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-007 — Enforce privileged-account boundaries consistently [P0]
 
-- [ ] Define role-grant rules explicitly; restrict ownership grants/transfers to authorized owners.
-- [ ] Apply the same grant policy in forms and core authorization.
-- [ ] Centralize account-state authorization so mandatory password change restricts relevant mutations as well as pages.
-- [ ] Allow only the required activation/recovery/logout operations before activation is complete.
-- [ ] Protect remotely reachable first-owner claiming with deliberate setup authorization.
+**Partial (2026-09-18):** Role-grant matrix, activation gate, remote signup authorization, and HTTP enforcement verified in `test/auth.test.ts` (FLOW-007 ×6). MFA strategy and email-verification lifecycle remain open.
+
+- [x] Define role-grant rules explicitly; restrict ownership grants/transfers to authorized owners.
+- [x] Apply the same grant policy in forms and core authorization.
+- [x] Centralize account-state authorization so mandatory password change restricts relevant mutations as well as pages.
+- [x] Allow only the required activation/recovery/logout operations before activation is complete.
+- [x] Protect remotely reachable first-owner claiming with deliberate setup authorization.
 - [ ] Verify email before relying on it as a recovery channel.
 - [ ] Choose a supported MFA-capable identity strategy, including enforcement, recovery, and recent-authentication policy for sensitive operations.
 
@@ -168,13 +178,15 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-008 — Complete password and organization-access recovery [P1]
 
-- [ ] Add “Forgot password?” or an explicit operator-assisted recovery entry point.
-- [ ] Implement verified delivery and reset acceptance, or clearly document the supported manual process and contact.
-- [ ] Distinguish missing tenant, account-less tenant, active tenant, and recovery-required tenant.
-- [ ] Fix the account-less-tenant signup dead end without reopening established organizations to anonymous claims.
-- [ ] Base provisioning readiness on a usable authorized owner, not just the existence of any user row.
-- [ ] Make temporary operator-set credentials require appropriate recipient replacement.
-- [ ] Explain session revocation and return users to their intended task after recovery.
+**Remediated (2026-09-18):** Forgot/reset HTTP flow, tenant access states, account-less signup path, operator-assisted recovery, and disabled-owner messaging verified in `test/auth.test.ts` (FLOW-008 ×6).
+
+- [x] Add “Forgot password?” or an explicit operator-assisted recovery entry point.
+- [x] Implement verified delivery and reset acceptance, or clearly document the supported manual process and contact.
+- [x] Distinguish missing tenant, account-less tenant, active tenant, and recovery-required tenant.
+- [x] Fix the account-less-tenant signup dead end without reopening established organizations to anonymous claims.
+- [x] Base provisioning readiness on a usable authorized owner, not just the existence of any user row.
+- [x] Make temporary operator-set credentials require appropriate recipient replacement.
+- [x] Explain session revocation and return users to their intended task after recovery.
 - [ ] Align reset documentation with actual CLI/API/browser entry points.
 
 **Acceptance:** An owner can discover and complete a supported recovery path without reading implementation code. Disabled or missing owners do not produce an unexplained login/signup loop.

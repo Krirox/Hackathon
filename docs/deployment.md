@@ -82,7 +82,9 @@ alerting and restore/redrive drills remain unverified production gates.
 ## Boot check
 
 `npm run typecheck && npm test && npm run lint` green, then
-`tsx src/cli.ts status --db var/vital.db`. A stranger boots the dev
+`tsx src/cli.ts verify --db var/vital.db` (migrate + smoke probe) and
+`tsx src/cli.ts status --db var/vital.db` (read-only; add `--tenant <slug>`
+for tenant stats). A stranger boots the dev
 topology from this file plus `README.md` in under 30 minutes (Phase 0
 exit gate — not yet timed; time it before claiming it).
 

@@ -5,8 +5,18 @@ import {
   uninstallAuthSchema,
   signupTenant,
   getTenant,
+  acceptInvitation,
+  changeUserRole,
+  countOutstandingWork,
+  createInvitation,
   inviteUser,
+  listInvitations,
   listUsers,
+  membershipStatus,
+  reactivateUser,
+  resendInvitation,
+  revokeInvitation,
+  transferOwnership,
   login,
   sessionUser,
   verifySession,
@@ -15,19 +25,30 @@ import {
   disableUser,
   sweepSessions,
   changePassword,
+  claimTenantOwner,
   requestPasswordReset,
   confirmPasswordReset,
+  tryPasswordReset,
+  tenantAccessState,
+  operatorSetPassword,
   hashPassword,
   verifyPassword,
   atLeast,
   requireRole,
+  canGrantRole,
+  grantableRoles,
+  assertGrantRole,
+  assertAccountActivated,
+  isLoopbackAddress,
+  signupRequiresSetupSecret,
+  setupSecretOk,
   csrfOk,
   sessionCookie,
   LOCKOUT_THRESHOLD,
   MIN_PASSWORD_LENGTH,
   type Role,
 } from '../src/core/auth.ts';
-import { startConsoleServer, LOGIN_RATE, type ConsoleServer } from '../src/console/serve.ts';
+import { startConsoleServer, LOGIN_RATE, prepareCoHostedSiteHtml, type ConsoleServer } from '../src/console/serve.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
 import { createCoordinator } from '../src/coord/coordinator.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
@@ -233,6 +254,15 @@ T('sessions verify, roll their expiry, and die at expiry', async () => {
   await rejects(() => verifySession(db, 'no-such-token', NOW), 'NO_SESSION');
 });
 
+T('FLOW-010: absolute session cap expires even when idle window would extend', async () => {
+  const { db } = await authed();
+  const { token, session } = await loginCookie(db, 'owner@acme.test', SIGNUP.password);
+  const touched = new Date(Date.parse(NOW) + 60 * 60 * 1000).toISOString();
+  await verifySession(db, token, touched);
+  const beyondAbsolute = new Date(Date.parse(session.createdAt) + 7 * 24 * 60 * 60 * 1000 + 1000).toISOString();
+  await rejects(() => verifySession(db, token, beyondAbsolute), 'EXPIRED_SESSION');
+});
+
 T('logout revokes exactly once; revoked sessions are NO_SESSION', async () => {
   const { db } = await authed();
   const { token } = await loginCookie(db, 'owner@acme.test', SIGNUP.password);
@@ -254,19 +284,34 @@ T('disableUser and revokeUserSessions kill every live session', async () => {
     rows.every((r) => (r as { revoked_at: string }).revoked_at !== null),
     true,
   );
-  // disable revokes too, and the user cannot log back in
-  await disableUser(db, TEN, owner.id, NOW);
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'dev@acme.test', name: 'Dev', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const { token: memberToken } = await loginCookie(db, 'dev@acme.test', 'a-long-member-password');
+  await disableUser(db, TEN, member.id, NOW);
   await rejects(
-    () => login(db, { tenant: TEN, email: 'owner@acme.test', password: SIGNUP.password }, NOW),
+    () => login(db, { tenant: TEN, email: 'dev@acme.test', password: 'a-long-member-password' }, NOW),
     'BAD_CREDENTIALS',
   );
+  await rejects(() => sessionUser(db, memberToken, NOW), 'NO_SESSION');
 });
 
 T('disabled users lose their sessions mid-flight', async () => {
   const { db, owner } = await authed();
-  const { token } = await loginCookie(db, 'owner@acme.test', SIGNUP.password);
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'dev@acme.test', name: 'Dev', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const { token } = await loginCookie(db, 'dev@acme.test', 'a-long-member-password');
   await sessionUser(db, token, NOW); // live
-  await disableUser(db, TEN, owner.id, NOW);
+  await disableUser(db, TEN, member.id, NOW);
   await rejects(() => sessionUser(db, token, NOW), 'NO_SESSION');
 });
 
@@ -344,6 +389,61 @@ T('roles rank, gate, and fail closed', async () => {
   await rejects(() => requireRole('member', 'admin'), 'FORBIDDEN');
   // An unrecognized role fails closed (cannot rank above anything).
   await rejects(() => requireRole('unknown' as Role, 'member'), 'FORBIDDEN');
+});
+
+T('FLOW-007: role-grant matrix is enforced in core authorization', async () => {
+  eq(canGrantRole('owner', 'owner'), true);
+  eq(canGrantRole('owner', 'admin'), true);
+  eq(canGrantRole('owner', 'member'), true);
+  eq(canGrantRole('admin', 'admin'), true);
+  eq(canGrantRole('admin', 'member'), true);
+  eq(canGrantRole('admin', 'owner'), false);
+  eq(canGrantRole('member', 'member'), false);
+  eq(grantableRoles('owner').join(','), 'member,admin,owner');
+  eq(grantableRoles('admin').join(','), 'member,admin');
+  eq(grantableRoles('member').length, 0);
+  await rejects(() => assertGrantRole('admin', 'owner'), 'FORBIDDEN');
+});
+
+T('FLOW-007: only owners may invite another owner', async () => {
+  const { db, owner } = await authed();
+  const admin = await inviteUser(
+    db,
+    TEN,
+    { email: 'admin@acme.test', name: 'An Admin', role: 'admin', password: 'a-long-admin-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await rejects(
+    () =>
+      inviteUser(
+        db,
+        TEN,
+        { email: 'other-owner@acme.test', name: 'Other Owner', role: 'owner', password: 'another-long-password' },
+        { userId: admin.id, role: admin.role },
+        NOW,
+      ),
+    'FORBIDDEN',
+  );
+});
+
+T('FLOW-007: activation gate blocks mutations until password change completes', async () => {
+  const { db, owner } = await authed();
+  const pending = { ...owner, mustChangePassword: true };
+  await rejects(() => assertAccountActivated(pending), 'ACTIVATION_REQUIRED');
+  assertAccountActivated({ ...owner, mustChangePassword: false });
+  void db;
+});
+
+T('FLOW-007: remote signup requires deliberate setup authorization', () => {
+  eq(isLoopbackAddress('127.0.0.1'), true);
+  eq(isLoopbackAddress('::1'), true);
+  eq(isLoopbackAddress('203.0.113.4'), false);
+  eq(signupRequiresSetupSecret('127.0.0.1', null), false);
+  eq(signupRequiresSetupSecret('203.0.113.4', null), true);
+  eq(signupRequiresSetupSecret('127.0.0.1', 'secret'), true);
+  eq(setupSecretOk('secret', 'secret'), true);
+  eq(setupSecretOk('wrong', 'secret'), false);
 });
 
 // -------------------------------------------------------------------- csrf ----
@@ -619,7 +719,8 @@ T('login → force change → login → console, the full first-boot flow over H
       cookie,
       body: 'password=a-brave-new-password',
     });
-    eq(noCsrf.status, 403);
+    eq(noCsrf.status, 400, 'missing CSRF returns an HTML recovery page:');
+    eq(noCsrf.body.includes('form expired'), true);
     const csrf = cp.body.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
     const weak = await call(port, '/change-password', {
       method: 'POST',
@@ -758,7 +859,83 @@ T('login and signup refuse posts without the pre-session CSRF token', async () =
       method: 'POST',
       body: 'email=owner%40acme.test&password=whatever-long',
     });
-    eq(noCsrf.status, 403, 'login without csrf is refused:');
+    eq(noCsrf.status, 200, 'login without csrf returns HTML recovery:');
+    eq(noCsrf.body.includes('form expired'), true);
+    eq(noCsrf.body.includes('owner@acme.test'), true);
+    const jsonCsrf = await call(port, '/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'owner@acme.test', password: 'whatever-long' }),
+    });
+    eq(jsonCsrf.status, 403, 'JSON login without csrf is still refused:');
+  } finally {
+    await s.close();
+  }
+});
+
+T('FLOW-007: signup with configured setup secret requires authorization', async () => {
+  const ctx = await fresh();
+  await installAuthSchema(ctx.db, NOW);
+  const s = await startConsoleServer(
+    ctx.db,
+    createLedger(ctx.db),
+    createCoordinator(ctx.db),
+    new OrganizationalCompiler(ctx.db),
+    { tenant: 'initech', now: () => NOW, setupSecret: 'claim-me-now' },
+  );
+  try {
+    const pre = await preCsrf(s.port, '/signup');
+    const blocked = await call(s.port, '/signup', {
+      method: 'POST',
+      headers: { cookie: pre.cookie },
+      body: `csrf=${pre.csrf}&orgname=Initech&ownerName=P&email=p%40initech.test&password=a-long-enough-pass`,
+    });
+    eq(blocked.status, 403);
+    eq(blocked.body.includes('setup authorization required'), true);
+    const ok = await call(s.port, '/signup', {
+      method: 'POST',
+      headers: { cookie: pre.cookie, 'x-vital-setup': 'claim-me-now' },
+      body: `csrf=${pre.csrf}&orgname=Initech&ownerName=P&email=p%40initech.test&password=a-long-enough-pass`,
+    });
+    eq(ok.status, 303, 'authorized claim succeeds:');
+  } finally {
+    await s.close();
+  }
+});
+
+T('FLOW-007: pending activation cannot approve over HTTP', async () => {
+  const { s, port, coord, db, ledger } = await served();
+  try {
+    const rel = await ledger.append({
+      tenant: TEN,
+      subject: 'release:gate',
+      kind: 'FACT',
+      statement: 'ships',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'sync:gh',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    await coord.submit(base({ id: 'gate-r1', claimRefs: [rel.id], bid: { dollars: 1, humanMinutes: 1 } }));
+    await db.prepare('UPDATE users SET must_change_password = 1 WHERE tenant = ?').run(TEN);
+    const loginRes = await loginViaHttp(port, 'owner@acme.test', SIGNUP.password);
+    eq(loginRes.status, 303);
+    const home = await call(port, '/change-password', { cookie: loginRes.cookie });
+    const csrf = home.body.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const refused = await call(port, '/api/requests/gate-r1/approve', {
+      method: 'POST',
+      cookie: loginRes.cookie,
+      headers: { 'x-vital-csrf': csrf, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    eq(refused.status, 403);
+    const out = JSON.parse(refused.body) as { ok: boolean; code: string };
+    eq(out.ok, false);
+    eq(out.code, 'ACTIVATION_REQUIRED');
+    eq((await coord.get(TEN, 'gate-r1'))!.state, 'ADMITTED', 'approval stayed blocked:');
   } finally {
     await s.close();
   }
@@ -893,58 +1070,66 @@ T('role enforcement: a member can approve by default, but approverRole raises th
 });
 
 T('the team page and invite/disable flows are role-gated and audited', async () => {
+  const prev = process.env.VITAL_EXPOSE_INVITE_LINK;
+  process.env.VITAL_EXPOSE_INVITE_LINK = '1';
   const { s, port, db } = await served();
   try {
-    // Sign in as the owner, invite an admin.
     const owner = await loginViaHttp(port, 'owner@acme.test', SIGNUP.password);
     const ownerHome = await call(port, '/', { cookie: owner.cookie });
     const ownerCsrf = ownerHome.body.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
     const invited = await call(port, '/team/invite', {
       method: 'POST',
       cookie: owner.cookie,
-      body: `csrf=${ownerCsrf}&email=newbie%40acme.test&name=New Bie&role=member&password=a-fresh-member-password`,
+      body: `csrf=${ownerCsrf}&email=newbie%40acme.test&name=New%20Bie&role=member`,
     });
-    eq(invited.status, 200, 'invite succeeds for the owner:');
-    eq(invited.body.includes('newbie@acme.test'), true);
-    eq(invited.body.includes('must change the password at first login'), true);
-    // The invited member can log in, is gated by must-change, and lands as member.
-    const member = await loginViaHttp(port, 'newbie@acme.test', 'a-fresh-member-password');
-    eq(member.status, 303);
-    const gated = await call(port, '/', { cookie: member.cookie });
-    eq(gated.status, 303, 'must-change gates the new member:');
-    // The invited member's team view stays gated by the pending password change.
-    const memberTeam = await call(port, '/team', { cookie: member.cookie });
-    eq(memberTeam.status, 303, 'must-change still gates /team:');
-    // Disable flow: owner disables the member; their session dies.
-    const users = await listUsers(db, TEN);
-    const memberRow = users.find((u) => u.email === 'newbie@acme.test')!;
+    eq(invited.status, 200, 'create account succeeds for the owner:');
+    eq(invited.body.includes('Create account'), true);
+    eq(invited.body.includes('out of band'), true);
+    eq(invited.body.includes('/accept-invite?token='), true);
+    eq((await listUsers(db, TEN)).some((u) => u.email === 'newbie@acme.test'), false, 'no user row until acceptance:');
+    const pending = (await listInvitations(db, TEN, NOW)).find((i) => i.email === 'newbie@acme.test')!;
+    const { token } = await resendInvitation(
+      db,
+      TEN,
+      pending.id,
+      { userId: (await listUsers(db, TEN)).find((u) => u.role === 'owner')!.id, role: 'owner' },
+      NOW,
+    );
+    const acceptGet = await call(port, `/accept-invite?token=${encodeURIComponent(token)}`);
+    eq(acceptGet.status, 200);
+    eq(acceptGet.body.includes('Create my account'), true);
+    const acceptCsrf = acceptGet.body.match(/name="csrf" value="([^"]+)"/)![1]!;
+    const acceptCookie = acceptGet.setCookie[0]?.split(';')[0] ?? '';
+    const accepted = await call(port, '/accept-invite', {
+      method: 'POST',
+      cookie: acceptCookie,
+      body: `csrf=${acceptCsrf}&token=${encodeURIComponent(token)}&password=their-chosen-password`,
+    });
+    eq(accepted.status, 303, 'acceptance signs the member in:');
+    const memberRow = (await listUsers(db, TEN)).find((u) => u.email === 'newbie@acme.test')!;
+    eq(membershipStatus(memberRow!), 'active');
+    const member = await loginViaHttp(port, 'newbie@acme.test', 'their-chosen-password');
+    const memberHome = await call(port, '/', { cookie: member.cookie });
+    eq(memberHome.status, 200, 'accepted member reaches the console:');
     const disabled = await call(port, '/team/disable', {
       method: 'POST',
       cookie: owner.cookie,
-      body: `csrf=${ownerCsrf}&userId=${memberRow.id}`,
+      body: `csrf=${ownerCsrf}&userId=${memberRow!.id}&confirmEmail=newbie%40acme.test`,
     });
     eq(disabled.status, 200, 'owner disables the member:');
-    eq(disabled.body.includes('disabled — their sessions were revoked'), true);
+    eq(disabled.body.includes('every live session was revoked'), true);
     await rejects(
       () => sessionUser(db, member.cookie.split('=')[1]!, NOW),
       'NO_SESSION',
       'the disabled member\u2019s session died:',
     );
-    // Audited.
     const audits = (await db
       .prepare("SELECT action, actor FROM audit_log WHERE action LIKE 'team.%' ORDER BY seq")
       .all()) as { action: string; actor: string }[];
-    eq(
-      audits.some((a) => a.action === 'team.invite'),
-      true,
-      'invite audited:',
-    );
-    eq(
-      audits.some((a) => a.action === 'team.disable'),
-      true,
-      'disable audited:',
-    );
+    eq(audits.some((a) => a.action === 'team.invite'), true, 'invite audited:');
+    eq(audits.some((a) => a.action === 'team.disable'), true, 'disable audited:');
   } finally {
+    process.env.VITAL_EXPOSE_INVITE_LINK = prev;
     await s.close();
   }
 });
@@ -960,14 +1145,17 @@ T('with siteDir, `/` serves the site, the console lives at /console, and console
     // The marketing page owns `/` — anonymous, no redirect.
     const root = await call(s.port, '/');
     eq(root.status, 200);
-    eq(root.body.includes('The Autonomous Enterprise'), true, 'index.html is served:');
+    eq(root.body.includes('Governed release workflow'), true, 'index.html is served:');
+    eq(root.body.includes('127.0.0.1'), false, 'co-hosted site strips localhost console URL:');
+    eq(root.body.includes('Request a pilot walkthrough'), true, 'pilot CTA is present:');
+    eq(root.body.includes('Create your organization'), false, 'no misleading org-creation CTA:');
     const css = await call(s.port, '/styles.css');
     eq(css.status, 200);
     eq(css.body.includes('header-nav'), true, 'assets are served with the right content:');
     // The console app moved to /console and still requires auth.
     const consoleHome = await call(s.port, '/console');
     eq(consoleHome.status, 303);
-    eq(consoleHome.location, '/login', 'the console is still session-gated:');
+    eq(consoleHome.location?.startsWith('/login'), true, 'the console is still session-gated:');
     // Console routes take precedence over any same-named site file.
     eq((await call(s.port, '/login')).status, 200, 'the login page still renders:');
     eq((await call(s.port, '/api/health')).status, 200, 'health still answers:');
@@ -978,6 +1166,31 @@ T('with siteDir, `/` serves the site, the console lives at /console, and console
     const opened = await call(s.port, '/console', { cookie });
     eq(opened.status, 200);
     eq(opened.body.includes('Reality health'), true);
+  } finally {
+    await s.close();
+  }
+});
+
+T('FLOW-011: prepareCoHostedSiteHtml clears configured console URL meta', () => {
+  const html = Buffer.from(
+    '<meta name="vital-console-url" content="http://127.0.0.1:3100"/><title>test</title>',
+    'utf8',
+  );
+  const out = prepareCoHostedSiteHtml(html).toString('utf8');
+  eq(out.includes('content="http://127.0.0.1:3100"'), false);
+  eq(out.includes('name="vital-console-url" content=""'), true);
+});
+
+T('FLOW-011: provisioned login names the tenant and hides org creation', async () => {
+  const { s, port } = await served();
+  try {
+    const login = await call(port, '/login');
+    eq(login.status, 200);
+    eq(login.body.includes('Sign in to Acme Inc'), true);
+    eq(login.body.includes(`<code>${TEN}</code>`), true);
+    eq(login.body.includes('invite-only'), true);
+    eq(login.body.includes('Create one'), false);
+    eq(login.body.includes('Create your organization'), false);
   } finally {
     await s.close();
   }
@@ -995,4 +1208,316 @@ T('unknown routes still 404, and JSON APIs fail closed', async () => {
   } finally {
     await s.close();
   }
+});
+
+// ----------------------------------------------------------- FLOW-008 recovery ----
+
+T('FLOW-008: tenantAccessState distinguishes unclaimed, ready, and recovery', async () => {
+  const { db, owner } = await authed();
+  eq(await tenantAccessState(db, TEN), 'ready');
+  const blank = await fresh();
+  await installAuthSchema(blank.db, NOW);
+  await blank.db.prepare('INSERT INTO tenants (slug, name, created_at) VALUES (?, ?, ?)').run('blank', 'Blank', NOW);
+  eq(await tenantAccessState(blank.db, 'blank'), 'unclaimed');
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'ghost@acme.test', name: 'Ghost', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await db.prepare('UPDATE users SET disabled = 1 WHERE id = ?').run(owner.id);
+  eq(await tenantAccessState(db, TEN), 'recovery');
+});
+
+T('FLOW-008: claimTenantOwner claims an account-less tenant without reopening recovery tenants', async () => {
+  const { db } = await fresh();
+  await installAuthSchema(db, NOW);
+  await db.prepare('INSERT INTO tenants (slug, name, created_at) VALUES (?, ?, ?)').run('initech', 'Initech', NOW);
+  const { owner } = await claimTenantOwner(
+    db,
+    {
+      slug: 'initech',
+      email: 'peter@initech.test',
+      password: 'flair-is-mandatory',
+      ownerName: 'Peter',
+    },
+    NOW,
+  );
+  eq(owner.role, 'owner');
+  eq(await tenantAccessState(db, 'initech'), 'ready');
+  await rejects(
+    () =>
+      claimTenantOwner(
+        db,
+        { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' },
+        NOW,
+      ),
+    'TENANT_CLAIMED',
+  );
+  await db.prepare('UPDATE users SET disabled = 1 WHERE id = ?').run(owner.id);
+  await rejects(
+    () =>
+      claimTenantOwner(
+        db,
+        { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' },
+        NOW,
+      ),
+    'RECOVERY_REQUIRED',
+  );
+});
+
+T('FLOW-008: tryPasswordReset and operatorSetPassword support operator-assisted recovery', async () => {
+  const { db, owner } = await authed();
+  eq(await tryPasswordReset(db, TEN, 'ghost@acme.test', NOW), null);
+  const token = await tryPasswordReset(db, TEN, 'owner@acme.test', NOW);
+  eq(token !== null, true);
+  await operatorSetPassword(db, TEN, owner.id, 'operator-temp-password', NOW);
+  const row = (await db.prepare('SELECT must_change_password FROM users WHERE id = ?').get(owner.id)) as {
+    must_change_password: number;
+  };
+  eq(row.must_change_password, 1);
+  const { user } = await login(db, { tenant: TEN, email: 'owner@acme.test', password: 'operator-temp-password' }, NOW);
+  eq(user.mustChangePassword, true);
+});
+
+T('FLOW-008: forgot/reset password over HTTP revokes sessions and avoids enumeration', async () => {
+  process.env.VITAL_EXPOSE_RESET_TOKEN = '1';
+  const { s, port, db } = await served();
+  try {
+    const loginRes = await loginViaHttp(port, 'owner@acme.test', SIGNUP.password);
+    const forgotPage = await call(port, '/forgot-password');
+    eq(forgotPage.status, 200);
+    eq(forgotPage.body.includes('Forgot password'), false);
+    eq(forgotPage.body.includes('reset-link'), true);
+    const pre = await preCsrf(port, '/forgot-password');
+    const ghost = await call(port, '/forgot-password', {
+      method: 'POST',
+      headers: { cookie: pre.cookie },
+      body: `csrf=${pre.csrf}&email=ghost%40acme.test`,
+    });
+    eq(ghost.status, 200);
+    eq(ghost.body.includes('If an account exists'), true);
+    const real = await call(port, '/forgot-password', {
+      method: 'POST',
+      headers: { cookie: pre.cookie },
+      body: `csrf=${pre.csrf}&email=owner%40acme.test`,
+    });
+    eq(real.status, 200);
+    const m = real.body.match(/Reset link \(development only\): (\/reset-password\?token=[^\s<]+)/);
+    if (!m) throw new Error('no reset link in response');
+    const resetGet = await call(port, m[1]!);
+    eq(resetGet.status, 200);
+    const formToken = resetGet.body.match(/name="token" value="([^"]+)"/)![1]!;
+    const resetCsrf = resetGet.body.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const resetCookie = cookieOf(resetGet.setCookie);
+    const ok = await call(port, '/reset-password', {
+      method: 'POST',
+      headers: { cookie: resetCookie },
+      body: `csrf=${resetCsrf}&token=${encodeURIComponent(formToken)}&password=brand-new-password-here`,
+    });
+    eq(ok.status, 303);
+    eq(ok.location?.includes('reset=ok'), true);
+    await rejects(() => sessionUser(db, loginRes.cookie.split('=')[1]!, NOW), 'NO_SESSION');
+    const second = await loginViaHttp(port, 'owner@acme.test', 'brand-new-password-here');
+    eq(second.status, 303);
+    await rejects(
+      () => confirmPasswordReset(db, formToken, 'another-reset-password', NOW),
+      'BAD_RESET_TOKEN',
+      'single use:',
+    );
+  } finally {
+    delete process.env.VITAL_EXPOSE_RESET_TOKEN;
+    await s.close();
+  }
+});
+
+T('FLOW-008: account-less tenant claims through /signup instead of TENANT_EXISTS dead end', async () => {
+  const ctx = await fresh();
+  await installAuthSchema(ctx.db, NOW);
+  await ctx.db.prepare('INSERT INTO tenants (slug, name, created_at) VALUES (?, ?, ?)').run('initech', 'Initech', NOW);
+  const s = await startConsoleServer(
+    ctx.db,
+    createLedger(ctx.db),
+    createCoordinator(ctx.db),
+    new OrganizationalCompiler(ctx.db),
+    { tenant: 'initech', now: () => NOW },
+  );
+  try {
+    const pre = await preCsrf(s.port, '/signup');
+    const ok = await call(s.port, '/signup', {
+      method: 'POST',
+      headers: { cookie: pre.cookie },
+      body: `csrf=${pre.csrf}&orgname=Initech&ownerName=Peter&email=peter%40initech.test&password=flair-is-mandatory`,
+    });
+    eq(ok.status, 303);
+    eq((await listUsers(ctx.db, 'initech')).length, 1);
+    eq((await tenantAccessState(ctx.db, 'initech')), 'ready');
+  } finally {
+    await s.close();
+  }
+});
+
+T('FLOW-008: disabled owner surfaces recovery instead of a login/signup loop', async () => {
+  const { s, port, db, owner } = await served();
+  try {
+    await db.prepare('UPDATE users SET disabled = 1 WHERE id = ?').run(owner.id);
+    eq(await tenantAccessState(db, TEN), 'recovery');
+    const signup = await call(port, '/signup');
+    eq(signup.status, 200);
+    eq(signup.body.includes('Owner recovery required'), true);
+    const login = await call(port, '/login');
+    eq(login.status, 200);
+    eq(login.body.includes('no usable owner'), true);
+  } finally {
+    await s.close();
+  }
+});
+
+// ----------------------------------------------------------- FLOW-009 lifecycle ----
+
+T('FLOW-009: invitation lifecycle — create, accept, duplicate, revoke, resend, reactivate', async () => {
+  const { db, owner } = await authed();
+  const { invitation, token } = await createInvitation(
+    db,
+    TEN,
+    { email: 'new@acme.test', name: 'New Hire', role: 'member' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  eq(invitation.status, 'pending');
+  eq((await listInvitations(db, TEN, NOW)).length, 1);
+  await rejects(
+    () =>
+      createInvitation(
+        db,
+        TEN,
+        { email: 'new@acme.test', name: 'Dup', role: 'member' },
+        { userId: owner.id, role: owner.role },
+        NOW,
+      ),
+    'INVITATION_PENDING',
+  );
+  const { user } = await acceptInvitation(db, token, 'brand-new-password-12', NOW);
+  eq(user.email, 'new@acme.test');
+  eq(user.mustChangePassword, false);
+  await rejects(() => acceptInvitation(db, token, 'brand-new-password-12', NOW), 'BAD_INVITATION');
+  const disabled = await inviteUser(
+    db,
+    TEN,
+    { email: 'gone@acme.test', name: 'Gone', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await disableUser(db, TEN, disabled.id, NOW);
+  await rejects(
+    () =>
+      createInvitation(
+        db,
+        TEN,
+        { email: 'gone@acme.test', name: 'Gone', role: 'member' },
+        { userId: owner.id, role: owner.role },
+        NOW,
+      ),
+    'DISABLED_USER_EXISTS',
+  );
+  await reactivateUser(db, TEN, disabled.id, { userId: owner.id, role: owner.role }, NOW);
+  eq(
+    membershipStatus((await listUsers(db, TEN)).find((u) => u.id === disabled.id)!),
+    'pending_activation',
+    'reactivated operator-created accounts still owe a password change:',
+  );
+  const { invitation: revokedInvite } = await createInvitation(
+    db,
+    TEN,
+    { email: 'later@acme.test', name: 'Later', role: 'admin' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await revokeInvitation(db, TEN, revokedInvite.id, { userId: owner.id, role: owner.role }, NOW);
+  await rejects(
+    () => resendInvitation(db, TEN, revokedInvite.id, { userId: owner.id, role: owner.role }, NOW),
+    'INVITATION_REVOKED',
+  );
+  const { invitation: expiredInvite } = await createInvitation(
+    db,
+    TEN,
+    { email: 'expired@acme.test', name: 'Expired', role: 'member' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await db
+    .prepare("UPDATE invitations SET status = 'expired', expires_at = ? WHERE id = ?")
+    .run(new Date(Date.parse(NOW) - 1000).toISOString(), expiredInvite.id);
+  const { token: resent } = await resendInvitation(
+    db,
+    TEN,
+    expiredInvite.id,
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  eq(resent.length > 10, true);
+});
+
+T('FLOW-009: role change, ownership transfer, and last-owner protection', async () => {
+  const { db, owner } = await authed();
+  const admin = await inviteUser(
+    db,
+    TEN,
+    { email: 'admin@acme.test', name: 'Admin', role: 'admin', password: 'a-long-admin-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await changeUserRole(db, TEN, admin.id, 'member', { userId: owner.id, role: owner.role }, NOW);
+  eq((await listUsers(db, TEN)).find((u) => u.id === admin.id)!.role, 'member');
+  await changeUserRole(db, TEN, admin.id, 'admin', { userId: owner.id, role: owner.role }, NOW);
+  const { to } = await transferOwnership(db, TEN, admin.id, { userId: owner.id, role: owner.role }, NOW);
+  eq(to.role, 'owner');
+  eq((await listUsers(db, TEN)).find((u) => u.id === owner.id)!.role, 'admin');
+  await rejects(() => disableUser(db, TEN, to.id, NOW), 'LAST_OWNER');
+});
+
+T('FLOW-009: disable requires handoff for outstanding claims and requests', async () => {
+  const ctx = await fresh();
+  await installAuthSchema(ctx.db, NOW);
+  const { owner } = await signupTenant(ctx.db, SIGNUP, NOW);
+  const member = await inviteUser(
+    ctx.db,
+    TEN,
+    { email: 'owner-work@acme.test', name: 'Owner Work', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const claim = await ctx.ledger.append({
+    tenant: TEN,
+    subject: member.email,
+    kind: 'BELIEF',
+    statement: 'needs a human owner',
+    confidence: 0.8,
+    provenance: sor('https://example.test/note'),
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: member.email,
+    scope: 'product',
+    authorType: 'human',
+  });
+  await ctx.coord.submit(
+    base({
+      id: 'req_handoff',
+      originScope: 'product',
+      claimRefs: [claim.id],
+      onBehalfOf: member.email,
+      goal: 'ship it',
+    }),
+  );
+  eq((await countOutstandingWork(ctx.db, TEN, member)).claimCount, 1);
+  eq((await countOutstandingWork(ctx.db, TEN, member)).requestCount, 1);
+  await rejects(() => disableUser(ctx.db, TEN, member.id, NOW), 'HANDOFF_REQUIRED');
+  const { reassigned } = await disableUser(ctx.db, TEN, member.id, NOW, { handoffToUserId: owner.id });
+  eq(reassigned.claims, 1);
+  eq(reassigned.requests, 1);
+  const reassignedClaim = (await ctx.db.prepare('SELECT owner FROM claims WHERE id = ?').get(claim.id)) as {
+    owner: string;
+  };
+  eq(reassignedClaim.owner, owner.email);
 });

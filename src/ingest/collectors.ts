@@ -926,7 +926,7 @@ export function serperSearchCollector(
     sourceTier: opts.sourceTier ?? 'SINGLE_SOURCE',
     extractor: 'serper-search',
     extractorVersion: '1.0.0',
-    async poll(_db: AsyncDb, now: string): Promise<RawEvent[]> {
+    async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
       if (!opts.apiKey)
         throw new Error('[ingest:SERPER_KEY] Serper API key missing — set SERPER_API_KEY, never hardcode it');
       const res = await opts.fetchFn('https://google.serper.dev/search', {
@@ -936,14 +936,19 @@ export function serperSearchCollector(
       });
       if (!res.ok) throw new Error(`[ingest:SERPER_FETCH] "${query}" → ${res.status}`);
       const body = (await res.json()) as { organic?: SerperResult[] };
-      return (body.organic ?? []).map((r) => ({
+      const out = (body.organic ?? []).map((r) => ({
         source: name,
         uri: r.link,
         fingerprint: fingerprintOf(`${r.link}:${r.title}`),
-        occurredAt: now,
+        eventId: r.link,
+        revision: fingerprintOf(`${r.title}:${r.snippet ?? ''}`),
+        occurredAt: r.date ?? now,
         summary: `${r.title} — ${(r.snippet ?? '').slice(0, 300)}`,
         payload: { title: r.title, snippet: r.snippet ?? '', date: r.date ?? null, query },
       }));
+      await stageToInbox(db, tenant, name, out, now);
+      await cursorSet(db, tenant, name, now);
+      return out;
     },
   };
 }

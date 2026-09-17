@@ -17,6 +17,16 @@ import {
   settleInbox,
   stageToInbox,
 } from '../src/ingest/collectors.ts';
+import {
+  deriveIntegrationState,
+  getIntegrationHealth,
+  ingestErrorCode,
+  isCollectorDisabled,
+  pollCollectorWithHealth,
+  setCollectorDisabled,
+  testFileDirectory,
+} from '../src/ingest/health.ts';
+import { runIngestionWorker } from '../src/ingest/worker.ts';
 import { createHmacSurface, statementHashOf, verifyClaimEnvelope } from '../src/talk/surface.ts';
 
 console.log('\n\x1b[1mIngestion — read-only collectors\x1b[0m');
@@ -190,7 +200,7 @@ T('human correction supersedes, links, and counts', async () => {
     authorType: 'system',
     provenance: sor(),
   });
-  const neu = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', DAY_LATER);
+  const { claim: neu } = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', DAY_LATER);
   eq(neu.statement, '$79');
   eq((await ledger.get(TEN, old.id))!.status, 'SUPERSEDED');
   eq(await ledger.correctionCount(TEN), 1);
@@ -619,4 +629,145 @@ T('F09: ingestInboxBatch claims, persists claims and settles inbox rows to DONE'
   const second = await ingestInboxBatch(db, ledger, TEN, c);
   eq(second.receipts.length, 0);
   eq(second.claimIds.length, 0);
+});
+
+console.log('\n\x1b[1mIngestion — standardized health (FLOW-016)\x1b[0m');
+
+T('FLOW-016: serper collector stages to inbox and advances checkpoint like file/github', async () => {
+  const { db } = await fresh();
+  const fetchFn = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      organic: [{ title: 'A', link: 'https://a.test', snippet: 'one' }],
+    }),
+  });
+  const c = serperSearchCollector('probe', { apiKey: 'k', fetchFn });
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 1);
+  const inbox = (await db.prepare('SELECT COUNT(*) AS n FROM ingest_inbox WHERE tenant = ?').get(TEN)) as { n: number };
+  eq(inbox.n, 1, 'staged before return:');
+  eq((await cursorGet(db, TEN, c.name)) !== null, true, 'checkpoint advanced:');
+  eq((await c.poll(db, NOW, TEN)).length, 1, 're-fetch same result:');
+  const inbox2 = (await db.prepare('SELECT COUNT(*) AS n FROM ingest_inbox WHERE tenant = ?').get(TEN)) as { n: number };
+  eq(inbox2.n, 1, 'duplicate delivery collapses:');
+});
+
+T('FLOW-016: serper runs through the same worker as file collectors', async () => {
+  const { db, ledger } = await fresh();
+  const art = join(tmpdir(), `vital-flow016-${process.pid}`);
+  const fetchFn = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      organic: [{ title: 'Worker path', link: 'https://worker.test', snippet: 'via worker' }],
+    }),
+  });
+  const c = serperSearchCollector('worker probe', { apiKey: 'k', fetchFn });
+  const result = await runIngestionWorker(db, ledger, c, {
+    tenant: TEN,
+    scope: 'market',
+    artifactDir: art,
+    maxReceipts: 5,
+  });
+  eq([result.processed, result.failed, result.polled], [1, 0, true]);
+  eq((await ledger.get(TEN, result.claimIds[0]!))!.kind, 'OBSERVATION');
+});
+
+T('FLOW-016: empty serper result is an explicit empty receipt, not a silent success masquerade', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('empty', {
+    apiKey: 'k',
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ organic: [] }) }),
+  });
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 0);
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.inbox.total, 0);
+  const derived = deriveIntegrationState({
+    configured: true,
+    disabled: false,
+    stats: health.inbox,
+    lastPoll: { at: NOW, ok: true, eventsFetched: 0, staged: 0, errorCode: null },
+    lastSuccessAt: NOW,
+    nowMs: Date.parse(NOW),
+    delayMs: 86_400_000,
+  });
+  eq(derived.state, 'empty');
+});
+
+T('FLOW-016: invalid serper credentials classify as unconfigured', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('no-key', { apiKey: '', fetchFn: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  let code = '';
+  try {
+    await pollCollectorWithHealth(db, TEN, c, NOW);
+  } catch (e) {
+    code = ingestErrorCode(e);
+  }
+  eq(code, 'UNCONFIGURED');
+});
+
+T('FLOW-016: provider rate limit surfaces rate_limited state', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('rate', {
+    apiKey: 'k',
+    fetchFn: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+  });
+  try {
+    await pollCollectorWithHealth(db, TEN, c, NOW);
+  } catch {
+    /* expected */
+  }
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.state, 'rate_limited');
+});
+
+T('FLOW-016: disabled collector refuses before staging', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-dis-'));
+  writeFileSync(join(dir, 'a.md'), 'x');
+  const c = fileDiffCollector('disabled', dir);
+  await setCollectorDisabled(db, TEN, c.name, true);
+  eq(await isCollectorDisabled(db, TEN, c.name), true);
+  await rejects(() => pollCollectorWithHealth(db, TEN, c, NOW), 'DISABLED');
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.state, 'disabled');
+});
+
+T('FLOW-016: connection test previews readable files without staging', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-test-'));
+  writeFileSync(join(dir, 'notes.md'), 'hello');
+  const test = testFileDirectory(dir);
+  eq(test.ok, true);
+  eq(test.preview?.count, 1);
+  eq(test.preview?.samples[0]!.name, 'notes.md');
+});
+
+T('FLOW-016: duplicate delivery through worker remains idempotent', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-dup-'));
+  const art = join(tmpdir(), `vital-flow016-art-${process.pid}`);
+  writeFileSync(join(dir, 'once.md'), 'once');
+  const c = fileDiffCollector('dup', dir);
+  const first = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'x', artifactDir: art });
+  const second = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'x', artifactDir: art });
+  eq(first.processed, 1);
+  eq([second.processed, second.claimIds.length], [0, 0]);
+  eq(((await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number }).n, 1);
+});
+
+T('FLOW-016: ground-tier collector refusal is explicit rejected evidence', async () => {
+  const { db, ledger } = await fresh();
+  const c = fileDiffCollector('evil-tier', tmpdir(), 'SYSTEM_OF_RECORD');
+  await rejects(
+    async () =>
+      await ingestEvents(db, ledger, TEN, c, [], {
+        owner: 's',
+        scope: 'x',
+        now: NOW,
+      }),
+    'INGEST_TIER',
+  );
+  eq(ingestErrorCode(new Error('[ingest:INGEST_TIER] bad')), 'TIER_REJECTED');
 });

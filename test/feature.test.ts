@@ -347,7 +347,7 @@ T(
     });
 
     // Modify / supersede one of the cited claims to trigger drift
-    await ledger.correctClaim(TEN, ids[0]!, 'Updated competitor insight: tokens expired', 'human:priya', NOW);
+    await ledger.correctClaim(TEN, ids[0]!, 'Updated competitor insight: tokens expired', 'human:priya', NOW, {});
 
     const echo = new LocalEchoAdapter(db, ledger, coord);
     await rejects(

@@ -1016,7 +1016,7 @@ T('F22: prose correction invalidates retained values, while typed patch updates 
     provenance: sor(),
   });
   // 1. Prose-only correction changing the statement invalidates the old numeric value.
-  const proseCorrected = await ledger.correctClaim(
+  const { claim: proseCorrected } = await ledger.correctClaim(
     TEN,
     c.id,
     'p99 latency is 120ms after hotfix',
@@ -1029,17 +1029,107 @@ T('F22: prose correction invalidates retained values, while typed patch updates 
   eq((await ledger.get(TEN, c.id))!.status, 'SUPERSEDED');
 
   // 2. Typed patch updates statement AND machine value together.
-  const typedCorrected = await ledger.correctClaim(
+  const { claim: typedCorrected } = await ledger.correctClaim(
     TEN,
     proseCorrected.id,
     'p99 latency is 120ms confirmed',
     'human:operator',
     NOW,
-    { value: 120, unit: 'ms', confidence: 0.99 },
+    { patch: { value: 120, unit: 'ms', confidence: 0.99 } },
   );
   eq(typedCorrected.value, 120, 'typed value stored for machine readers:');
   eq(typedCorrected.unit, 'ms');
   eq(typedCorrected.confidence, 0.99);
+});
+
+T('FLOW-003: stale expectedSeq refuses with preserved draft and winner diff', async () => {
+  const { ledger } = await fresh();
+  const old = await ledger.append({
+    tenant: TEN,
+    subject: 'pricing',
+    kind: 'FACT',
+    statement: '$99',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:priya',
+    scope: 'marketing',
+    authorType: 'human',
+    provenance: sor(),
+  });
+  const { claim: winner } = await ledger.correctClaim(TEN, old.id, '$79', 'human:a', NOW, {
+    expectedSeq: old.seq,
+  });
+  try {
+    await ledger.correctClaim(TEN, old.id, '$59', 'human:b', DAY_LATER, {
+      expectedSeq: old.seq,
+      patch: undefined,
+    });
+    throw new Error('expected VERSION_CONFLICT');
+  } catch (e) {
+    eq((e as Error).message.includes('VERSION_CONFLICT'), true);
+    const detail = (e as { detail?: { winner?: { id: string }; preservedDraft?: { statement: string } } }).detail;
+    eq(detail?.winner?.id, winner.id);
+    eq(detail?.preservedDraft?.statement, '$59');
+  }
+  eq((await ledger.get(TEN, old.id))!.status, 'SUPERSEDED');
+});
+
+T('FLOW-003: only one replacement wins for the same claim version', async () => {
+  const { ledger } = await fresh();
+  const old = await ledger.append({
+    tenant: TEN,
+    subject: 'seat',
+    kind: 'FACT',
+    statement: '10 seats',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sales',
+    scope: 'sales',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const first = await ledger.correctClaim(TEN, old.id, '12 seats', 'human:a', NOW);
+  await rejects(
+    async () => await ledger.correctClaim(TEN, old.id, '15 seats', 'human:b', DAY_LATER),
+    'VERSION_CONFLICT',
+  );
+  eq(first.claim.statement, '12 seats');
+  const chain = await ledger.supersedeChain(TEN, old.id);
+  eq(chain.current?.id, first.claim.id);
+});
+
+T('FLOW-003: historical decision replay stays intact after correction', async () => {
+  const { ledger } = await fresh();
+  const c = await ledger.append({
+    tenant: TEN,
+    subject: 'metric',
+    kind: 'FACT',
+    statement: '10 ms',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'eng',
+    scope: 'engineering',
+    authorType: 'human',
+    provenance: sor(),
+  });
+  const decision = await ledger.recordDecision({
+    tenant: TEN,
+    goal: 'ship it',
+    action: 'approve',
+    actionClass: 'RECOMMEND',
+    claimIds: [c.id],
+    decidedBy: 'human:ada',
+    scope: 'engineering',
+    autonomy: 'approval',
+    now: NOW,
+  });
+  await ledger.correctClaim(TEN, c.id, '12 ms', 'human:ada', DAY_LATER);
+  const replay = await ledger.replayDecision(TEN, decision.id);
+  eq(replay.record.bundle.claims[0]!.statement, '10 ms', 'frozen bundle unchanged:');
+  eq(replay.drift[0]!.drifted, true, 'drift surfaces the correction without rewriting history:');
 });
 
 T('F22: dispute resolution marks the winner verified, supersedes the loser, and closes the dispute', async () => {

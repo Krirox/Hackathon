@@ -3,6 +3,18 @@ import type { Ledger, OutcomeRecord } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { HarnessAdapter, HarnessOutcome } from '../substrate/harness.ts';
 import { actReversible, type ActReceipt } from '../gov/act.ts';
+import {
+  advanceFanOutWorkflow,
+  createFanOutWorkflowRun,
+  loadFanOutRun,
+  requireCompleteFanOut,
+  saveFanOutRun,
+  shipLegIds,
+  shipLegTemplates,
+  stableFanOutRunId,
+  type FanOutWorkflowRun,
+} from './fanout-workflow.ts';
+import { persistDeliverableVersion } from './deliverable-artifact.ts';
 
 /**
  * Wedge: Ship-to-Result, phases 2.1–2.3 plus the closed execution loop.
@@ -211,8 +223,72 @@ export function reuseDedupedOrThrow(
 }
 
 /**
+ * FLOW-013: durable partial fan-out — parent run id exists before any leg
+ * is submitted; each leg is checkpointed; partial progress survives refusal.
+ */
+export async function fanOutWorkflow(
+  db: AsyncDb,
+  coord: Coordinator,
+  tenant: string,
+  input: {
+    release: string;
+    claimIds: string[];
+    onBehalfOf: string;
+    now: string;
+    summary: string;
+    runId?: string;
+    resume?: boolean;
+  },
+): Promise<FanOutWorkflowRun> {
+  const runId = input.runId ?? stableFanOutRunId(tenant, 'ship', input.release, input.claimIds);
+  let run = await loadFanOutRun(db, tenant, runId);
+  if (!run) {
+    run = createFanOutWorkflowRun({
+      tenant,
+      kind: 'ship',
+      subject: input.release,
+      claimIds: input.claimIds,
+      onBehalfOf: input.onBehalfOf,
+      now: input.now,
+      summary: input.summary,
+      legs: shipLegTemplates(input.release, input.summary),
+      runId,
+    });
+    await saveFanOutRun(db, run);
+  }
+  return advanceFanOutWorkflow(db, coord, run, { readmitDeferred: true, retryBlocked: true });
+}
+
+export async function resumeFanOutWorkflow(
+  db: AsyncDb,
+  coord: Coordinator,
+  tenant: string,
+  runId: string,
+  opts: { retryBlocked?: boolean } = {},
+): Promise<FanOutWorkflowRun> {
+  const run = await loadFanOutRun(db, tenant, runId);
+  if (!run) throw new WedgeError('UNKNOWN_FANOUT_RUN', `no fan-out workflow ${runId}`);
+  return advanceFanOutWorkflow(db, coord, run, {
+    readmitDeferred: true,
+    retryBlocked: opts.retryBlocked ?? false,
+  });
+}
+
+export async function getFanOutWorkflow(
+  db: AsyncDb,
+  tenant: string,
+  runId: string,
+): Promise<FanOutWorkflowRun | null> {
+  return loadFanOutRun(db, tenant, runId);
+}
+
+/**
  * Fan-out (2.2): one release → five typed coordination objects, ALL through
  * the scheduler. No direct channel posts exist as a code path.
+ *
+ * When `db` is provided, runs the durable FLOW-013 workflow and throws only
+ * if a leg is terminally refused (legacy all-or-nothing callers). Without
+ * `db`, submits inline and throws on the first refusal — tests only.
  */
 export async function fanOut(
   coord: Coordinator,
@@ -224,7 +300,13 @@ export async function fanOut(
     now: string;
     summary: string;
   },
+  db?: AsyncDb,
 ): Promise<FanOutResult> {
+  if (db) {
+    const run = await fanOutWorkflow(db, coord, tenant, input);
+    requireCompleteFanOut(run);
+    return shipLegIds(run);
+  }
   const req = async (
     originScope: string,
     targetScope: string,
@@ -245,8 +327,6 @@ export async function fanOut(
       onBehalfOf: input.onBehalfOf,
       now: input.now,
     });
-    // A retry re-submits identical legs: the coordinator dedupes them onto
-    // the live thread, and that hit is reuse, not refusal (see above).
     return reuseDedupedOrThrow(r, originScope, targetScope);
   };
   const brief = `${input.release}: ${input.summary}`;
@@ -416,23 +496,49 @@ export async function produceReleaseAsset(
     });
   }
 
-  // 3. Draft check
+  // 3. Draft check + versioned artifact persistence (FLOW-014)
   const draftText = input.draftText ?? (outcome.transcript.length > 0 ? outcome.transcript : input.command);
   const verdict = await checkDraft(ledger, tenant, { text: draftText, claimIds: input.claimIds }, now);
+  let deliverableVersionId: string | null = null;
+  let deliverableFingerprint: string | null = null;
+  if (db) {
+    const stored = await persistDeliverableVersion(db, ledger, {
+      tenant,
+      requestId,
+      deliverableSchema: input.deliverableSchema,
+      content: draftText,
+      claimIds: input.claimIds,
+      createdBy: input.onBehalfOf,
+      now,
+    });
+    deliverableVersionId = stored.id;
+    deliverableFingerprint = stored.fingerprint;
+  }
   if (!verdict.ok) {
     const reasons = [...verdict.unverified, ...verdict.deniedPhrases].join(', ');
     throw new WedgeError('DRAFT_BLOCKED', `draft failed the claims checker: ${reasons}`);
   }
 
   if (db) {
-    await recordReleaseStage(db, tenant, input.releaseId, 'VERIFIED', now, { requestId });
+    await recordReleaseStage(db, tenant, input.releaseId, 'VERIFIED', now, {
+      requestId,
+      deliverableVersionId,
+      deliverableFingerprint,
+    });
   }
 
-  // 4. Human approval decision
+  // 4. Human approval decision — includes reviewed asset fingerprint when persisted
   const decision = await ledger.recordDecision({
     tenant,
     goal: input.goal,
-    action: `publish release asset for ${input.releaseId} [scope:${input.scope}]`,
+    action: JSON.stringify({
+      approvalStage: 'final-deliverable',
+      releaseId: input.releaseId,
+      scope: input.scope,
+      deliverableVersionId,
+      fingerprint: deliverableFingerprint,
+      artifactAction: `publish release asset for ${input.releaseId} [scope:${input.scope}]`,
+    }),
     actionClass: 'ACT_REVERSIBLE',
     claimIds: input.claimIds,
     decidedBy: input.onBehalfOf,

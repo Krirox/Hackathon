@@ -1,5 +1,5 @@
 /* ==========================================================================
-   VITAL — THE AUTONOMOUS ENTERPRISE DESIGN SYSTEM
+   VITAL — GOVERNED SHIP-TO-RESULT DESIGN SYSTEM
    High-end Dark Glassmorphism, Cybernetic Dot-Matrix, Dynamic 3D Gyroscope
    ========================================================================== */
 
@@ -842,6 +842,63 @@ h2 .dot {
 
 .live {
   color: var(--accent-lime);
+}
+
+.demo-label {
+  color: #f59e0b;
+  letter-spacing: 0.14em;
+}
+
+.proof-legend {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 20px 0 8px;
+  line-height: 1.7;
+}
+
+.proof-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.proof-tag.shipped {
+  color: var(--accent-lime);
+  border: 1px solid rgba(217, 255, 168, 0.35);
+}
+
+.proof-tag.demo {
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.proof-tag.pilot {
+  color: #60a5fa;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+}
+
+.proof-tag.roadmap {
+  color: var(--text-dim);
+  border: 1px solid var(--border-subtle);
+}
+
+.proof-note {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.pilot-targets {
+  margin-top: 12px;
+  font-size: 15px;
+  color: var(--text-dim);
 }
 
 /* ==========================================================================

@@ -14,10 +14,11 @@ import {
   summarizeRelease,
   isKnownRelease,
   markReleaseKnown,
-  fanOut,
+  fanOutWorkflow,
   checkDraft,
   WedgeError,
 } from '../src/wedge/ship.ts';
+import { requireCompleteFanOut } from '../src/wedge/fanout-workflow.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
 
 /**
@@ -114,7 +115,9 @@ export interface ShipPipelineResult {
    */
   simulated: boolean;
   summary: Awaited<ReturnType<typeof summarizeRelease>>;
-  legs: Awaited<ReturnType<typeof fanOut>> | null;
+  legs: Record<'marketing' | 'customer' | 'sales' | 'product' | 'finance', string> | null;
+  fanOutRunId: string | null;
+  fanOutStatus: string | null;
   verdict: Awaited<ReturnType<typeof checkDraft>> | null;
   decisionId: string | null;
   /** null unless this run measured a real outcome — simulated runs never do. */
@@ -194,6 +197,8 @@ export async function runShipPipeline(deps: {
       simulated: true,
       summary,
       legs: null,
+      fanOutRunId: null,
+      fanOutStatus: null,
       verdict: null,
       decisionId: null,
       outcomeBasis: null,
@@ -204,13 +209,21 @@ export async function runShipPipeline(deps: {
   }
 
   // ---- fan out through the scheduler, not through chat -------------------
-  const legs = await fanOut(coord, tenant, {
+  const fanOutRun = await fanOutWorkflow(db, coord, tenant, {
     release,
     claimIds,
     onBehalfOf: 'human:founder',
     now,
     summary: summary.whyItMatters,
   });
+  requireCompleteFanOut(fanOutRun);
+  const legs = {
+    marketing: fanOutRun.legs.find((l) => l.key === 'marketing')!.requestId!,
+    customer: fanOutRun.legs.find((l) => l.key === 'customer')!.requestId!,
+    sales: fanOutRun.legs.find((l) => l.key === 'sales')!.requestId!,
+    product: fanOutRun.legs.find((l) => l.key === 'product')!.requestId!,
+    finance: fanOutRun.legs.find((l) => l.key === 'finance')!.requestId!,
+  };
 
   // ---- a draft ships evidence or it does not ship ------------------------
   // F15: a failing check previously logged and continued — the run went on
@@ -308,6 +321,8 @@ export async function runShipPipeline(deps: {
     simulated: true,
     summary,
     legs,
+    fanOutRunId: fanOutRun.id,
+    fanOutStatus: fanOutRun.status,
     verdict,
     decisionId: decision.id,
     outcomeBasis: null,

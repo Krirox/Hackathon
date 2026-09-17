@@ -9,7 +9,7 @@ import { addCase, runSuite } from '../src/evals/runner.ts';
 /**
  * Demo seed: builds var/demo.db with a lived-in tenant (claims, disputes,
  * decisions + outcomes, requests, 12 weeks of traces, cards, evals) so
- * `tsx src/cli.ts report --db var/demo.db` renders a console with real
+ * `tsx src/cli.ts report --db var/demo.db --tenant acme` renders a console with real
  * numbers instead of an empty tenant.
  */
 const TEN = 'acme';

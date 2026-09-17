@@ -1,24 +1,39 @@
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { AsyncDb } from './db.ts';
 import { exportLedger, type LedgerExport } from '../ledger/export.ts';
 
 /**
- * Per-tenant data erasure (TODO V2.1.1): GDPR Article 17 "right to erasure"
- * against the one shared store. Export is not optional — `exportLedger` runs
- * INSIDE the erasure transaction and the export document is returned by the
- * same call, so no code path can delete a tenant's history without producing
- * the portable record first (lock-in by value, not hostage-taking; see
- * `export.ts`).
+ * Per-tenant data erasure (FLOW-004 / GDPR Article 17): export-first deletion
+ * against the one shared store.
  *
- * Completeness is enforced by TEST against introspection, not by a hand-list
- * rotting in a comment (see test/erasure.test.ts): every user-data table the
- * store knows about must be either tenant-scoped (deleted by the loop below)
- * or in ORPHAN_TABLES with an explicit child-delete here. A future
- * `CREATE TABLE` with a `tenant` column that skips erasure fails the suite.
+ * Export policy (two supported flows):
+ *  - **API / in-memory** (`eraseTenant` without `exportTo`): `exportLedger` runs
+ *    inside the erasure transaction and the portable record is returned by the
+ *    same call. Deletion commits only after the in-memory export is complete.
+ *  - **CLI durable file** (`exportTo` option): the JSON export is written and
+ *    verified on disk **before** any destructive step commits. A write or
+ *    verification failure rolls the whole transaction back — deletion is never
+ *    reported when a requested export file was not durably preserved.
  *
- * The receipt that survives: the tenant's own audit_log is erased with the
- * tenant (that is the point), so the final receipt row is written under a
- * synthetic `erased:<slug>` tenant an operator can always query to answer
- * "was this tenant erased, when, by whom".
+ * The CLI's `--export-to` path is optional; when omitted the operator receives
+ * the in-memory export only (no implied on-disk backup). When provided, durable
+ * export is mandatory for that run.
+ *
+ * Completeness is enforced by TEST against introspection: every user-data table
+ * the store knows about must be tenant-scoped (deleted by the loop below) or
+ * in ORPHAN_TABLES with an explicit child-delete. Tenant-scoped `meta` keys,
+ * raw artifacts (reference-aware), and operational residue (cursors, kill
+ * switches, dedupe markers) are inventoried and cleared where verified.
+ *
+ * Retained by design (listed on the receipt, not promised deleted):
+ *  - the `erased:<slug>` audit receipt row;
+ *  - raw artifacts still referenced by another tenant's claims;
+ *  - operator backups and external object stores outside this command's scope.
+ *
+ * Slug reuse is blocked while an erasure receipt exists (`signupTenant` checks).
  */
 
 /** Erasure marker action, written in the tenant's own trail before deletion. */
@@ -30,56 +45,122 @@ export const erasedTenantOf = (slug: string): string => `erased:${slug}`;
 
 /**
  * Tables that carry no `tenant` column. Each one is either deleted here as
- * an explicit child of a tenant-scoped parent, or holds no user data:
- *  - claim_links            child of claims (deleted via both endpoint ids)
- *  - skill_transfer_tests   child of skill_cards (deleted via card ids)
- *  - ledger_seq             per-tenant sequence bookkeeping (explicit delete)
- *  - schema_migrations/meta infrastructure, never user data
+ * an explicit child of a tenant-scoped parent, or holds no user data.
  */
 const ORPHAN_TABLES = new Set(['schema_migrations', 'meta', 'claim_links', 'skill_transfer_tests', 'ledger_seq']);
 
-export interface ErasureResult {
-  /** The full portable record taken before deletion. */
-  export: LedgerExport;
-  /** Rows deleted per table, for the operator's receipt. */
+export interface ErasureRetention {
+  category: string;
+  reason: string;
+  items: string[];
+}
+
+export interface ErasureReceipt {
+  /** Rows deleted per table. */
   deleted: Record<string, number>;
-  /** Timestamp of the erasure (also stamped on the export and the receipt). */
+  /** Tenant-scoped meta keys removed. */
+  metaKeysDeleted: string[];
+  /** Content-addressed artifact refs removed from disk. */
+  artifactsDeleted: string[];
+  /** Data deliberately kept (shared artifacts, receipt row, out-of-scope stores). */
+  retained: ErasureRetention[];
+  /** Work outside verified scope (backups, external storage). */
+  deferred: ErasureRetention[];
+  /** Steps that failed without blocking verified deletion where applicable. */
+  failed: ErasureRetention[];
+  exportPolicy: 'in-memory' | 'durable-file';
+  exportFile?: string;
+  exportedAt: string;
+}
+
+export interface ErasureResult {
+  export: LedgerExport;
+  receipt: ErasureReceipt;
+  /** @deprecated use receipt.deleted */
+  deleted: Record<string, number>;
   erasedAt: string;
+}
+
+export interface EraseTenantOptions {
+  /** When set, write and verify the export JSON here before deletion commits. */
+  exportTo?: string;
+  /** Raw artifact directory (default `data/artifacts`). */
+  artifactDir?: string;
 }
 
 /**
  * Erase one tenant completely. Export and deletion run in ONE transaction:
- * both happen or neither does. Order inside the transaction matters —
- * children before parents (claim_links needs claims' ids to find itself;
- * password_resets and auth_sessions need users' ids), auth tables before
- * business tables, the tenants row last, the receipt after everything.
+ * both happen or neither does.
  */
-export async function eraseTenant(db: AsyncDb, tenant: string, actor: string, now?: string): Promise<ErasureResult> {
+export async function eraseTenant(
+  db: AsyncDb,
+  tenant: string,
+  actor: string,
+  now?: string,
+  opts: EraseTenantOptions = {},
+): Promise<ErasureResult> {
   const at = now ?? new Date().toISOString();
-
-  // The tenant must exist; erasing a typo must not "succeed".
-  const exists = (await db.prepare('SELECT slug FROM tenants WHERE slug = ?').get(tenant)) as
-    { slug: string } | undefined;
-  if (!exists) throw new Error(`[erasure:UNKNOWN_TENANT] no tenant "${tenant}"`);
+  const artifactDir = resolve(opts.artifactDir ?? process.env.ARTIFACT_DIR ?? join('data', 'artifacts'));
 
   return db.transaction(async (): Promise<ErasureResult> => {
-    // 1. The tenant's own audit trail records WHO ordered this — written
-    //    BEFORE the export so the portable record itself carries the proof
-    //    that erasure was ordered.
+  const tables = await tenantScopedTables(db);
+  if (db.engine === 'postgres') {
+    const locked = [...new Set([...tables, 'tenants', 'meta', 'claim_links', 'skill_transfer_tests', 'ledger_seq'])];
+    await db.exec(`LOCK TABLE ${locked.map(quoteIdentifier).join(', ')} IN SHARE ROW EXCLUSIVE MODE`);
+  }
+  const exists = (await db.prepare('SELECT slug FROM tenants WHERE slug = ?').get(tenant)) as
+    | { slug: string }
+    | undefined;
+  if (!exists) throw new Error(`[erasure:UNKNOWN_TENANT] no tenant "${tenant}"`);
+
+  const artifactRefs = await tenantArtifactRefs(db, tenant);
+  const sharedArtifacts = await sharedArtifactRefs(db, tenant, artifactRefs);
+  const metaKeys = await tenantMetaKeys(db, tenant);
+
+  const deferred: ErasureRetention[] = [
+    {
+      category: 'backups',
+      reason: 'operator-managed backups and external replicas are outside this command',
+      items: [],
+    },
+    {
+      category: 'external-storage',
+      reason: 'configured object stores (e.g. S3) are not purged by tenant erasure',
+      items: [],
+    },
+  ];
+
+  const retained: ErasureRetention[] = [
+    {
+      category: 'erasure-receipt',
+      reason: 'audit evidence that erasure occurred',
+      items: [erasedTenantOf(tenant)],
+    },
+  ];
+  if (sharedArtifacts.length > 0) {
+    retained.push({
+      category: 'shared-artifacts',
+      reason: 'content-addressed blob still referenced by another tenant',
+      items: sharedArtifacts,
+    });
+  }
+
     await db
       .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(tenant, actor, ERASURE_ACTION, `tenant:${tenant}`, 'per-tenant erasure with prior export', at);
 
-    // 2. Export second — inside the transaction, so export and delete are
-    //    atomic and the export includes the erasure marker.
     const exported = await exportLedger(db, tenant, at);
+
+    let exportFile: string | undefined;
+    const exportPolicy = opts.exportTo ? 'durable-file' : 'in-memory';
+    if (opts.exportTo) {
+      exportFile = writeErasureExport(opts.exportTo, tenant, at, exported);
+    }
 
     const deleted: Record<string, number> = {};
     const del = async (sql: string, ...args: unknown[]): Promise<number> =>
       (await db.prepare(sql).run(...args)).changes;
 
-    // 3. Auth tables. Sessions die here — deletion IS revocation; no orphaned
-    //    login survives. Children first (resets/sessions reference users).
     deleted['password_resets'] = await del(
       'DELETE FROM password_resets WHERE user_id IN (SELECT id FROM users WHERE tenant = ?)',
       tenant,
@@ -88,12 +169,9 @@ export async function eraseTenant(db: AsyncDb, tenant: string, actor: string, no
       'DELETE FROM auth_sessions WHERE user_id IN (SELECT id FROM users WHERE tenant = ?)',
       tenant,
     );
-    // Lockout counters are keyed "tenant|ip|email" — a prefix match.
     deleted['login_attempts'] = await del('DELETE FROM login_attempts WHERE key LIKE ?', `${tenant}|%`);
     deleted['users'] = await del('DELETE FROM users WHERE tenant = ?', tenant);
 
-    // 4. Orphan-keyed children of business tables, while the parent ids are
-    //    still queryable.
     deleted['claim_links'] = await del(
       `DELETE FROM claim_links WHERE from_id IN (SELECT id FROM claims WHERE tenant = ?)
         OR to_id IN (SELECT id FROM claims WHERE tenant = ?)`,
@@ -107,42 +185,131 @@ export async function eraseTenant(db: AsyncDb, tenant: string, actor: string, no
     deleted['ledger_seq'] = await del('DELETE FROM ledger_seq WHERE tenant = ?', tenant);
     deleted['outcomes'] = await del('DELETE FROM outcomes WHERE tenant = ?', tenant);
 
-    // 5. Every tenant-scoped table — the loop is the source of truth (the
-    //    test asserts it covers all of them). audit_log lands here too; the
-    //    receipt in step 7 is deliberately written after this deletes it.
-    //    Tables already handled in step 3 (users, auth_sessions) are empty by
-    //    now — keep their REAL counts instead of overwriting with 0.
     for (const t of await tenantScopedTables(db)) {
       if (t in deleted) continue;
       deleted[t] = await del(`DELETE FROM ${t} WHERE tenant = ?`, tenant);
     }
 
-    // 6. The tenant row itself, last of the tenant's data.
+    const metaKeysDeleted: string[] = [];
+    for (const key of metaKeys) {
+      await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+      metaKeysDeleted.push(key);
+    }
+    deleted['meta'] = metaKeysDeleted.length;
+
     deleted['tenants'] = await del('DELETE FROM tenants WHERE slug = ?', tenant);
 
-    // 7. The surviving receipt, under a synthetic tenant the operator can
-    //    query after the real one is gone.
+    const deletableArtifacts = artifactRefs.filter((ref) => !sharedArtifacts.includes(ref));
+    const artifactsDeleted: string[] = [];
+    const failed: ErasureRetention[] = [];
+    for (const ref of deletableArtifacts) {
+      try {
+        unlinkSync(join(artifactDir, ref));
+        artifactsDeleted.push(ref);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const bucket = failed.find((f) => f.category === 'artifacts');
+        if (bucket) bucket.items.push(ref);
+        else failed.push({ category: 'artifacts', reason: msg, items: [ref] });
+      }
+    }
+
+    const receipt: ErasureReceipt = {
+      deleted,
+      metaKeysDeleted,
+      artifactsDeleted,
+      retained,
+      deferred,
+      failed,
+      exportPolicy,
+      exportFile,
+      exportedAt: exported.exportedAt,
+    };
+
     await db
       .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(
-        erasedTenantOf(tenant),
-        actor,
-        ERASURE_DONE_ACTION,
-        `tenant:${tenant}`,
-        JSON.stringify({ deleted: deleted, exportedAt: exported.exportedAt }),
-        at,
-      );
+      .run(erasedTenantOf(tenant), actor, ERASURE_DONE_ACTION, `tenant:${tenant}`, JSON.stringify(receipt), at);
 
-    return { export: exported, deleted: deleted, erasedAt: at };
+    return { export: exported, receipt, deleted, erasedAt: at };
   });
 }
 
-/**
- * Tables with a `tenant` column — the erasure loop's source of truth.
- * Introspection is dialect-branched like the rest of the store (information_schema
- * on Postgres, sqlite_master + PRAGMA on SQLite), so erasure carries to the
- * live-Postgres path with the same completeness guarantee.
- */
+/** True when an erasure receipt blocks slug reuse for a new organization. */
+export async function isErasedSlugReserved(db: AsyncDb, slug: string): Promise<boolean> {
+  const row = (await db
+    .prepare('SELECT 1 AS n FROM audit_log WHERE tenant = ? AND action = ? LIMIT 1')
+    .get(erasedTenantOf(slug), ERASURE_DONE_ACTION)) as { n: number } | undefined;
+  return row !== undefined;
+}
+
+/** Write and verify a durable export file; throws on failure (rolls back caller's transaction). */
+export function writeErasureExport(dir: string, tenant: string, erasedAt: string, exported: LedgerExport): string {
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${tenant}-erasure-export-${erasedAt.replace(/[:.]/g, '-')}.json`);
+  const body = JSON.stringify(exported, null, 2);
+  writeFileSync(file, body, 'utf8');
+  verifyErasureExportFile(file, exported);
+  return file;
+}
+
+/** Round-trip check: parsed export matches the in-transaction document. */
+export function verifyErasureExportFile(file: string, expected: LedgerExport): void {
+  let parsed: LedgerExport;
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8')) as LedgerExport;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`[erasure:EXPORT_VERIFY] could not read export file "${file}": ${msg}`);
+  }
+  if (parsed.version !== expected.version || parsed.tenant !== expected.tenant || parsed.exportedAt !== expected.exportedAt) {
+    throw new Error(`[erasure:EXPORT_VERIFY] export file "${file}" does not match the in-transaction export`);
+  }
+  if (parsed.claims.length !== expected.claims.length || parsed.audit.length !== expected.audit.length) {
+    throw new Error(`[erasure:EXPORT_VERIFY] export file "${file}" is missing records from the in-transaction export`);
+  }
+}
+
+function isTenantMetaKey(key: string, tenant: string): boolean {
+  if (key === `rates:${tenant}` || key === `operatorkeys:${tenant}`) return true;
+  const prefixes = [
+    `ingest:cursor:${tenant}:`,
+    `ingest:seen:${tenant}:`,
+    `ingest:health:${tenant}:`,
+    `ingest:disabled:${tenant}:`,
+    `kill:${tenant}:`,
+    `promo:${tenant}:`,
+    `admitlock:${tenant}:`,
+    `wedge:summary:${tenant}:`,
+    `wedge:stage:${tenant}:`,
+    `research:run:${tenant}:`,
+    `ratelimit:${tenant}:`,
+  ];
+  return prefixes.some((p) => key.startsWith(p));
+}
+
+async function tenantMetaKeys(db: AsyncDb, tenant: string): Promise<string[]> {
+  const rows = (await db.prepare('SELECT key FROM meta').all()) as { key: string }[];
+  return rows.map((r) => String(r.key)).filter((key) => isTenantMetaKey(key, tenant)).sort();
+}
+
+async function tenantArtifactRefs(db: AsyncDb, tenant: string): Promise<string[]> {
+  const rows = (await db
+    .prepare('SELECT DISTINCT raw_ref AS ref FROM claims WHERE tenant = ? AND raw_ref IS NOT NULL')
+    .all(tenant)) as { ref: string }[];
+  return rows.map((r) => String(r.ref)).sort();
+}
+
+async function sharedArtifactRefs(db: AsyncDb, tenant: string, refs: string[]): Promise<string[]> {
+  const shared: string[] = [];
+  for (const ref of refs) {
+    const row = (await db
+      .prepare('SELECT COUNT(*) AS n FROM claims WHERE raw_ref = ? AND tenant != ?')
+      .get(ref, tenant)) as { n: number };
+    if (Number(row.n) > 0) shared.push(ref);
+  }
+  return shared;
+}
+
 async function tenantScopedTables(db: AsyncDb): Promise<string[]> {
   const names: string[] = [];
   if (db.engine === 'postgres') {

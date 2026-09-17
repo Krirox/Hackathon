@@ -1,5 +1,16 @@
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { T, eq, rejects, fresh, TEN, NOW } from './helpers.ts';
-import { eraseTenant, ERASURE_ACTION, ERASURE_DONE_ACTION, erasedTenantOf } from '../src/core/erasure.ts';
+import {
+  eraseTenant,
+  ERASURE_ACTION,
+  ERASURE_DONE_ACTION,
+  erasedTenantOf,
+  type ErasureReceipt,
+} from '../src/core/erasure.ts';
+import { storeArtifact, type RawEvent } from '../src/ingest/collectors.ts';
+import { setKill } from '../src/gov/trust.ts';
 import { installAuthSchema, signupTenant, inviteUser, login, sessionUser } from '../src/core/auth.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
@@ -179,9 +190,12 @@ T('erasure leaves a surviving receipt: the deleted tenant is answerable for havi
   eq(receipt!.actor, 'op', 'it names the operator:');
   eq(receipt!.target, `tenant:${TEN}`);
   eq(receipt!.at, r.erasedAt);
-  const detail = JSON.parse(receipt!.detail) as { deleted: Record<string, number>; exportedAt: string };
+  const detail = JSON.parse(receipt!.detail) as ErasureReceipt;
   eq(detail.exportedAt, NOW);
   eq((detail.deleted['claims'] ?? 0) >= 1, true, 'it carries row counts:');
+  eq(detail.retained.some((r) => r.category === 'erasure-receipt'), true, 'it lists retained categories:');
+  eq(detail.deferred.some((r) => r.category === 'backups'), true, 'it lists deferred categories:');
+  eq(r.receipt.exportedAt, NOW, 'the API receipt matches the audit row:');
   // The tenant's own audit rows (including the pre-delete marker) are gone;
   // only the receipt's tenant remains.
   eq(
@@ -233,4 +247,112 @@ T('erasure is atomic: a failure inside the transaction restores the tenant and i
     1,
     'the tenant row itself came back:',
   );
+});
+
+// ----------------------------------------------------------- FLOW-004 gaps ----
+
+T('FLOW-004: durable export failure rolls back before deletion is reported', async () => {
+  const { db } = await world();
+  const exportDir = mkdtempSync(join(tmpdir(), 'vital-erasure-'));
+  const blocker = join(exportDir, 'blocked');
+  writeFileSync(blocker, 'not a directory');
+  await rejects(
+    () => eraseTenant(db, TEN, 'op', NOW, { exportTo: blocker }),
+    'EEXIST',
+    'unwritable export location aborts erasure:',
+  );
+  eq(
+    ((await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number }).n,
+    1,
+    'claims survived the failed export:',
+  );
+  eq(
+    ((await db.prepare('SELECT COUNT(*) AS n FROM tenants WHERE slug = ?').get(TEN)) as { n: number }).n,
+    1,
+    'tenant survived the failed export:',
+  );
+});
+
+T('FLOW-004: durable export is written and verified before deletion commits', async () => {
+  const { db } = await world();
+  const exportDir = mkdtempSync(join(tmpdir(), 'vital-erasure-'));
+  const r = await eraseTenant(db, TEN, 'op', NOW, { exportTo: exportDir });
+  eq(r.receipt.exportPolicy, 'durable-file');
+  eq(r.receipt.exportFile !== undefined, true, 'export file path is recorded:');
+  eq(((await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number }).n, 0);
+});
+
+T('FLOW-004: tenant-scoped meta keys (cursor, kill switch) are inventoried and removed', async () => {
+  const { db } = await world();
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+    .run(`ingest:cursor:${TEN}:github`, 'sha-old');
+  await setKill(db, TEN, { scope: 'eng', actionClass: 'READ' }, 'op', NOW);
+  await eraseTenant(db, TEN, 'op', NOW);
+  eq(
+    ((await db.prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?").get(`ingest:cursor:${TEN}:%`)) as {
+      n: number;
+    }).n,
+    0,
+    'ingest cursors are gone:',
+  );
+  eq(
+    ((await db.prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?").get(`kill:${TEN}:%`)) as { n: number }).n,
+    0,
+    'kill switches are gone:',
+  );
+});
+
+T('FLOW-004: unshared raw artifacts are deleted; shared artifacts are retained', async () => {
+  const { db } = await world();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
+  const event: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/blob',
+    summary: 'payload',
+    fingerprint: 'fp-shared-artifact',
+    occurredAt: NOW,
+    payload: { v: 1 },
+  };
+  const ref = storeArtifact(db, event, artifactDir);
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_e1');
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_z1');
+  const r = await eraseTenant(db, TEN, 'op', NOW, { artifactDir });
+  eq(
+    r.receipt.retained.some((x) => x.category === 'shared-artifacts' && x.items.includes(ref)),
+    true,
+    'shared artifact listed as retained:',
+  );
+  eq(r.receipt.artifactsDeleted.includes(ref), false, 'shared artifact was not deleted:');
+  try {
+    const { statSync } = await import('node:fs');
+    statSync(join(artifactDir, ref));
+  } catch {
+    throw new Error('shared artifact file should still exist on disk');
+  }
+});
+
+T('FLOW-004: erased slug cannot be reused for a new organization', async () => {
+  const { db } = await world();
+  await eraseTenant(db, TEN, 'op', NOW);
+  await rejects(() => signupTenant(db, SIGNUP, NOW), 'SLUG_RESERVED', 'erased slug reuse is refused:');
+});
+
+T('FLOW-004: exclusive artifact refs are deleted with the tenant', async () => {
+  const { db } = await world();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
+  mkdirSync(artifactDir, { recursive: true });
+  const event: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/only-acme',
+    summary: 'exclusive',
+    fingerprint: 'fp-exclusive-artifact',
+    occurredAt: NOW,
+    payload: { only: TEN },
+  };
+  const ref = storeArtifact(db, event, artifactDir);
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_e1');
+  const r = await eraseTenant(db, TEN, 'op', NOW, { artifactDir });
+  eq(r.receipt.artifactsDeleted.includes(ref), true, 'exclusive artifact deleted:');
+  eq(existsSync(join(artifactDir, ref)), false, 'artifact file is gone:');
 });

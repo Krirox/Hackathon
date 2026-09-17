@@ -1,5 +1,5 @@
 /**
- * VITAL — The Autonomous Enterprise
+ * VITAL — Governed Ship-to-Result
  * Animated Cybernetic Dot-Matrix Background (WebGL FBM Shader) +
  * 3D Gyroscopic Rings Engine (Three.js) + Console Wiring
  *
@@ -717,13 +717,31 @@ function initMatrixCanvas2D(canvas) {
 // 4. Console Wiring (Preserved 100% — SECURITY.md / Auth Endpoints)
 // =============================================================================
 (function initConsoleWiring() {
-  const consoleBase = (document.querySelector('meta[name="vital-console-url"]')?.content || '').replace(/\/$/, '');
-  const consolePath = (p) => (consoleBase ? p.replace(/^\//, consoleBase + '/') : p);
+  const configured = (document.querySelector('meta[name="vital-console-url"]')?.content || '').trim().replace(/\/$/, '');
+  // Empty meta = same-origin console routes when co-hosted via `vital serve --site`.
+  const consoleBase = configured && configured !== '.' && configured !== '/' ? configured : '';
+  const consolePath = (p) => (consoleBase ? `${consoleBase}${p}` : p);
+  const externalConsole =
+    consoleBase &&
+    (() => {
+      try {
+        return new URL(consoleBase).origin !== window.location.origin;
+      } catch {
+        return true;
+      }
+    })();
 
   document.querySelectorAll('[data-console]').forEach((a) => {
     a.href = consolePath(a.dataset.consolePath || '/');
-    a.target = '_blank';
-    a.rel = 'noopener';
+    if (externalConsole) {
+      a.target = '_blank';
+      a.rel = 'noopener';
+      const label = a.getAttribute('aria-label') || a.textContent?.trim();
+      if (label && !a.title) a.title = `Opens the Vital console in a new tab (${consoleBase})`;
+    } else {
+      a.removeAttribute('target');
+      a.removeAttribute('rel');
+    }
   });
 
   const status = document.getElementById('console-status');
