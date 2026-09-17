@@ -9,10 +9,11 @@ import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
 import { installAuthSchema, signupTenant, changePassword } from './core/auth.ts';
 import { eraseTenant, ERASURE_DONE_ACTION } from './core/erasure.ts';
-import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { writeFileSync, mkdirSync, realpathSync, existsSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileDiffCollector } from './ingest/collectors.ts';
 import { runIngestionWorker } from './ingest/worker.ts';
+import { runApplicationWorker } from './substrate/worker.ts';
 
 /**
  * Minimal dev CLI + instance verifier (TODO §§0.4, V2.1).
@@ -157,6 +158,20 @@ if (cmd === 'status') {
   console.log(
     `vital console on http://${host}:${server.port} (db ${usePostgres ? 'postgres' : dbUrl}, tenant ${tenant}, auth on${site ? ', site ./site' : ''})`,
   );
+  const withWorker = args.includes('--with-worker') || process.env.VITAL_WITH_WORKER === '1';
+  if (withWorker) {
+    const workerController = new AbortController();
+    const stopWorker = () => workerController.abort();
+    process.once('SIGINT', stopWorker);
+    process.once('SIGTERM', stopWorker);
+    const workerPromise = runApplicationWorker(db, createLedger(db), createCoordinator(db), {
+      tenant,
+      jcodeSocketPath: process.env.JCODE_API_SOCKET,
+      signal: workerController.signal,
+    });
+    workerPromise.catch((err) => console.error('[worker-error]', err));
+    console.log(`vital worker active in-process for tenant "${tenant}"`);
+  }
 } else if (cmd === 'ingest-files') {
   // Explicit finite invocation: console startup must never grant worker authority.
   const tenant = flag('--tenant');
@@ -176,10 +191,12 @@ if (cmd === 'status') {
   const artifactDir = realpathSync(artifactPath);
   const insideSource = (path: string): boolean => {
     const rel = relative(sourceDir, path);
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
   };
   const usePostgres = dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://');
-  if (insideSource(artifactDir) || (!usePostgres && insideSource(resolve(dbUrl))))
+  const canonicalLocation = (path: string): string =>
+    existsSync(path) ? realpathSync(path) : join(canonicalLocation(dirname(path)), basename(path));
+  if (insideSource(artifactDir) || (!usePostgres && insideSource(canonicalLocation(resolve(dbUrl)))))
     throw new Error('database and artifacts must be outside the source directory');
   const db = usePostgres ? openPostgres(dbUrl) : openDb(dbUrl);
   const controller = new AbortController();
@@ -202,6 +219,37 @@ if (cmd === 'status') {
     console.log(JSON.stringify(result));
     if (result.errors.length > 0) process.exitCode = 1;
     else if (result.stopped) process.exitCode = 130;
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    await db.close();
+  }
+} else if (cmd === 'worker') {
+  const tenant = flag('--tenant') ?? process.env.VITAL_TENANT ?? 'acme';
+  const dbUrl = flag('--db') ?? process.env.DATABASE_URL ?? 'var/vital.db';
+  const jcodeSocket = flag('--jcode-socket') ?? process.env.JCODE_API_SOCKET;
+  const pollIntervalMs = Number(flag('--interval-ms') ?? '1000');
+  const usePostgres = dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://');
+  const db = usePostgres ? openPostgres(dbUrl) : openDb(dbUrl);
+  if (usePostgres) await migratePostgres(db);
+  else await migrate(db);
+
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  console.log(`vital worker started for tenant "${tenant}" (db: ${usePostgres ? 'postgres' : dbUrl})`);
+  try {
+    const result = await runApplicationWorker(db, createLedger(db), createCoordinator(db), {
+      tenant,
+      jcodeSocketPath: jcodeSocket,
+      pollIntervalMs,
+      signal: controller.signal,
+    });
+    console.log(JSON.stringify(result));
+    if (result.errors.length > 0) process.exitCode = 1;
+    else if (result.stopped) process.exitCode = 0;
   } finally {
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
@@ -279,6 +327,8 @@ if (cmd === 'status') {
   console.log(`rows deleted: ${rows || 'none'}`);
   await db.close();
 } else {
-  console.error(`unknown command "${cmd}" (try: status | report | serve | ingest-files | signup | passwd | erase)`);
+  console.error(
+    `unknown command "${cmd}" (try: status | report | serve | worker | ingest-files | signup | passwd | erase)`,
+  );
   process.exit(1);
 }

@@ -6,6 +6,49 @@ supported production path). Legacy VPS shape it replaces: VPS-1 Buzz · VPS-2
 Vital core + Postgres · VPS-3 jcode (sibling process over the harness API).
 Dev approximation: `deploy/compose.yml` (Buzz + core + Postgres on one box).
 
+## Finite file ingestion (F04a)
+
+An explicit `ingest-files` command now composes one bounded observation path;
+this is not automatic REQUEST dispatch or a deployed scheduler. Existing topology
+descriptions below are not evidence that all producers and workers are connected.
+
+```sh
+node dist/cli.js ingest-files --tenant acme --scope engineering --source data/incoming --artifacts var/ingest-artifacts --db var/vital.db --max-receipts 50
+```
+
+Build first with `npm run build`. The source directory must already exist and
+contain only operator-approved evidence. Use a persistent SQLite file or a
+Postgres URL (`DATABASE_URL` is the fallback); `ARTIFACT_DIR` can replace
+`--artifacts`. Database access is this administrative command's authority: it
+does not authenticate through the browser or provision users. Mount durable
+storage for artifacts and keep the database/artifacts outside the input directory.
+A bucket environment variable alone does not provide artifact persistence.
+
+- Drain existing inbox → poll once → drain new receipts → JSON summary → close DB.
+- Default 50 total receipt attempts per invocation; configurable 1–500. Each
+  receipt has a unique run owner, a 60-second claim lease and three attempts.
+  A crashed expired receipt is recoverable; exhausted attempts remain FAILED
+  for inspection. There is no automatic redrive UI or retry backoff in this slice.
+- Claim append, deduplication receipt and DONE settlement share a transaction
+  after checking attempt ownership. Artifact bytes are outside the DB transaction;
+  rollback may leave an unreferenced content-addressed file.
+- Poll caps: 500 directory entries, 1,000,000 bytes per file, 10,000,000 bytes
+  total. Oversized polls fail before staging or cursor advancement. Flat regular
+  files only; source symlinks are refused. The source must remain operator-controlled:
+  this is not a sandbox against concurrent hostile filesystem mutation.
+- Exit 0 means the bounded invocation succeeded, **not** that the entire inbox
+  is empty. Errors return sanitized codes and exit 1; cancellation exits 130.
+  SIGINT/SIGTERM stops new work between receipts; active work finishes. This is
+  cooperative cancellation, not a hard wall-clock deadline or query timeout.
+- Run again using the same canonical source path to recover pending work. Schedule
+  this finite command explicitly only after reviewing its storage/tenant settings.
+  No model credentials, jcode socket, source execution, automatic FACT promotion,
+  SQS relay or autonomous request recovery are enabled by this command.
+
+SQLite restart/rollback/ownership and real child-process CLI tests are automated
+in `test/ingest-worker.test.ts`. Live two-connection Postgres concurrency, deployment,
+alerting and restore/redrive drills remain unverified production gates.
+
 ## Rules
 
 - One supported topology. Custom-config sales asks are how a product
@@ -42,6 +85,12 @@ Dev approximation: `deploy/compose.yml` (Buzz + core + Postgres on one box).
 `tsx src/cli.ts status --db var/vital.db`. A stranger boots the dev
 topology from this file plus `README.md` in under 30 minutes (Phase 0
 exit gate — not yet timed; time it before claiming it).
+
+## Worker and Dispatch Architecture
+
+Vital provides an authoritative background worker and dispatch subsystem (`src/substrate/worker.ts`):
+- **`vital worker`**: Standalone background daemon executing recovery sweeps (`readmitDeferred`, `reclaimStale`, `expireStale`), relaying durable outbox batches (`claimOutbox`/`settleOutbox`), and dispatching runnable requests (`ADMITTED` and `ACCEPTED`) to execution runtimes (`jcode`, `LocalEchoAdapter`, or model executors).
+- **`vital serve --with-worker`**: Runs the HTTP console and the background worker within the same process, suitable for single-node deployments and Docker Compose (`deploy/compose.yml`).
 
 ## AWS (production)
 

@@ -2,7 +2,7 @@
 
 **The grounding and reflex layer for the sovereign agent stack.**
 
-Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->366/366 tests passing<!-- /vital:testcount -->**
+Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->397/397 tests passing<!-- /vital:testcount -->**
 (real sockets, real sqlite; lint/format/provenance/audit gates green).
 Supersedes: "Final Idea: The Living Company.md" (v1), the v2 assessment rewrite, and the v3 sovereign-stack revision. This is the single source of truth.
 
@@ -563,7 +563,7 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 | **7 Act** | ongoing | `ACT_REVERSIBLE` autonomy via Trust Ledger | honeytask detection ≥ threshold; kill-switch drills pass; legal review |
 | **8 Runtime** | 12mo+ | expand beyond launches; sell to COO/CFO | `cost_per_good_decision` falling **3 consecutive quarters** — the only proof the thesis is true |
 
-**v2 progress (2026-09-09, <!-- vital:testcount -->366/366 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
+**v2 progress (2026-09-09, <!-- vital:testcount -->397/397 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
 as tested code (scheduler, sandbox, egress core, screen, identity, two
 harness adapters) — deployment, not design, is what's left. Ledger v0 is
 built past its gate shape (decisions, bundles, replay, outcomes, curation
@@ -666,7 +666,7 @@ and rooms, not substrate.
 
 ## 24. Verified build state (v2, 2026-09-09)
 
-**Typecheck: 0 errors. Tests: <!-- vital:testcount -->366/366 green<!-- /vital:testcount -->** (real sockets, real sqlite;
+**Typecheck: 0 errors. Tests: <!-- vital:testcount -->397/397 green<!-- /vital:testcount -->** (real sockets, real sqlite;
 eslint, prettier, provenance-guard, and audit gates green; 20 commits on
 main). Every behaviour below is proven by a named test — `[x]` in TODO.md
 means verified by a passing test or run, never "written".
@@ -787,7 +787,7 @@ ledger metaphor is dead. Arbitrary categories use teal tints plus grey. No dark
 deck except an optional inverted closing slide; no gradients, shadows, or thin
 rules; test on a projector, not a 6K display.
 
-**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->366 tests green<!-- /vital:testcount -->
+**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->397 tests green<!-- /vital:testcount -->
 (reproducible: `npm run typecheck && npm test`), `HYPOTHESIS` PM/Growth
 will pay (untested), `PREDICTION` precision ≥ 0.90 by month 9
 (dated, checkable). One slide, four lines. It proves the product by using it and it

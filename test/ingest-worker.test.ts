@@ -628,6 +628,8 @@ T('F04a: CLI invalid configuration exits nonzero before opening a database', asy
       [{ '--max-receipts': '501' }, '--max-receipts must be'],
       [{ '--tenant': '' }, 'usage: vital ingest-files'],
       [{ '--artifacts': join(dirs.source, 'nested-artifacts') }, 'must be outside the source directory'],
+      [{ '--artifacts': join(dirs.source, '..artifacts') }, 'must be outside the source directory'],
+      [{ '--db': join(dirs.source, '..database', 'worker.sqlite') }, 'must be outside the source directory'],
     ] as const) {
       const result = runFilesCli(dirs, overrides);
       eq(result.status, 1);

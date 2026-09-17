@@ -284,7 +284,11 @@ export async function settleInbox(
   opts: { owner?: string } = {},
 ): Promise<void> {
   await ensureInboxTable(db);
-  const owner = opts.owner ?? 'inbox-worker';
+  await settleInboxRows(db, ids, outcome, opts.owner ?? 'inbox-worker');
+}
+
+// Schema initialization belongs before transactions acquire receipt locks.
+async function settleInboxRows(db: AsyncDb, ids: string[], outcome: 'DONE' | 'FAILED', owner: string): Promise<void> {
   for (const id of ids) {
     const out = await db
       .prepare(`UPDATE ingest_inbox SET status = ? WHERE id = ? AND owner = ? AND status = 'CLAIMED'`)
@@ -361,21 +365,21 @@ export async function ingestInboxBatch(
           artifactDir: opts.artifactDir,
         },
       );
-      await settleInbox(
+      await settleInboxRows(
         db,
         receipts.map((r) => r.id),
         'DONE',
-        { owner: opts.owner },
+        opts.owner ?? 'inbox-worker',
       );
       return ids;
     });
   } catch (err) {
     try {
-      await settleInbox(
+      await settleInboxRows(
         db,
         receipts.map((r) => r.id),
         'FAILED',
-        { owner: opts.owner },
+        opts.owner ?? 'inbox-worker',
       );
     } catch {
       /* preserve primary err */

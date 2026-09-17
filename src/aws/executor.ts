@@ -33,6 +33,20 @@ import { getRates } from '../attrib/attribution.ts';
  * with a basis, on core.
  */
 
+import { enqueueOutbox } from '../substrate/scheduler.ts';
+
+/**
+ * Enqueue an ExecutorJob into the durable outbox for subsequent relay to SQS or worker dispatch.
+ */
+export async function enqueueExecutorJob(
+  db: AsyncDb,
+  tenant: string,
+  job: ExecutorJob,
+  opts: { id?: string; now?: string; nextAt?: string } = {},
+): Promise<string> {
+  return enqueueOutbox(db, tenant, 'executor-job', job, opts);
+}
+
 export interface ExecutorJob {
   tenant: string;
   requestId: string;

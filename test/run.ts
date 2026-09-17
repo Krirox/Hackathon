@@ -15,6 +15,7 @@ import './router.test.ts';
 import './compiler.test.ts';
 import './gov.test.ts';
 import './ingest.test.ts';
+import './ingest-worker.test.ts';
 import './wedge.test.ts';
 import './feature.test.ts';
 import './deepresearch.test.ts';
@@ -35,6 +36,7 @@ import './erasure.test.ts';
 import './aws.test.ts';
 import './s3store.test.ts';
 import './artifact.test.ts';
+import './worker.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

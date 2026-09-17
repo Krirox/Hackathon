@@ -34,7 +34,7 @@ Requires Node 22.
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit, must be 0 errors
-npm test            # tsx test/run.ts — <!-- vital:testcount -->366 tests, real sockets, real sqlite<!-- /vital:testcount -->
+npm test            # tsx test/run.ts — <!-- vital:testcount -->397 tests, real sockets, real sqlite<!-- /vital:testcount -->
 
 # The console is authenticated. Boot it, then claim the tenant in the browser:
 tsx src/cli.ts serve --db var/vital.db --tenant acme --port 3100
@@ -70,6 +70,21 @@ This runs a local in-memory console through login, paginated evidence review,
 claim correction/history, approval, decline, and queue refresh. No external
 services or customer data are used; browser installation requires a download.
 
+## Finite observation ingestion
+
+`serve` does not automatically run ingestion. To ingest an operator-controlled,
+flat directory into the same persistent database:
+
+```sh
+npm run dev -- ingest-files --tenant acme --scope engineering --source data/incoming --artifacts var/ingest-artifacts --db var/vital.db --max-receipts 50
+```
+
+Create `data/incoming` and place only intended evidence there. Database and artifact
+paths must be outside that source directory. This command drains staged receipts,
+polls once, and exits with a JSON summary. It makes no model calls, executes no
+source content, and writes OBSERVATIONs, never verified facts. Repeat the command
+to recover pending work; see [deployment limits and operation](docs/deployment.md#finite-file-ingestion-f04a).
+
 ## Layout
 
 ```
@@ -89,8 +104,8 @@ docs/adr/     architecture decisions (0001–0005)
 
 ## Current state (2026-09-17)
 
-Typecheck clean, suite <!-- vital:testcount -->366/366 green<!-- /vital:testcount -->.
-Typecheck clean, suite <!-- vital:testcount -->366/366 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->397/397 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->397/397 green<!-- /vital:testcount -->.
 Built: ledger (+decisions/outcomes), coordination (+escalation gate),
 router, compiler, gov matrix (trust, honeytasks, kills), eval spine,
 attribution, ingest, sensing (Watch Contracts + Integrity Gate), the wedge

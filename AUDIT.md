@@ -197,27 +197,29 @@ Still open: crash/retry drills on live Postgres (the PG CI lane exercises the sa
 
 ## F04 — Deployed application composition and dispatch
 
-**State:** Orphaned integration. **Priority:** High. **Effort:** Large. **Disposition:** Complete one path, remove excess deployment claims meanwhile.
+**State:** Remediated. **Priority:** High. **Effort:** Large. **Disposition:** Remediated 2026-09-17 — owned worker daemon, durable outbox relay, coordinator recovery sweeps, and governed request dispatch.
 
-**Evidence:** `src/cli.ts:115–130`; `src/substrate/scheduler.ts`; `src/substrate/harness.ts`; `src/talk/buzz.ts`; `src/aws/executor.ts`; `docs/deployment.md:52–79`.
+**Evidence:** `src/cli.ts:155–175,225–255,325–335`; `src/substrate/worker.ts`; `src/substrate/scheduler.ts:125–225`; `src/aws/executor.ts:35–45`; `test/worker.test.ts`.
 
-`serve` starts only the console. No application scheduler startup, SQS producer/outbox relay, Buzz intake, jcode dispatch or sensing worker was found. Environment configuration and infrastructure do not supply those connections.
-
-**User impact:** Deploying Vital does not make the advertised agent organization start processing work.
-
-**Missing / plan:** Choose one owned worker entrypoint → durable intake/dispatch → governed execution/result storage → shutdown/readiness/recovery → isolated end-to-end test. Document console-only mode honestly until that passes.
+The deployed application composition now includes an owned, robust background worker daemon and dispatch loop:
+- **Owned Worker Daemon (`ApplicationWorker` / `vital worker`)**: Added `ApplicationWorker` and `runApplicationWorker` in `src/substrate/worker.ts`, exposed via CLI `vital worker` and `--with-worker` on `vital serve`. Operates with graceful shutdown via `AbortSignal`, detailed health/status reporting (`worker.status()`), and failure isolation without crash.
+- **Durable Outbox Relay**: Integrates `claimOutbox` and `settleOutbox` to claim pending outbox batches, dispatch them (relaying `executor-job` to SQS or local fallback, or custom handlers), and settle rows to `DONE` on success or `FAILED` with exponential backoff on error. Added `enqueueExecutorJob` in `src/aws/executor.ts` for atomic dispatch-after-commit enqueueing.
+- **Recovery Sweeps**: Background sweep interval automatically runs `coord.readmitDeferred` (moving deferred requests back to `ADMITTED` once scope concurrency permits), `coord.reclaimStale` (reclaiming expired execution leases back to `ADMITTED`), and `coord.expireStale` (transitioning timed-out requests to `EXPIRED`).
+- **Governed Request Dispatch**: Polls runnable requests (`ADMITTED` and `ACCEPTED`), claims exclusive execution ownership via `coord.claimExecution`, dispatches through configured harness adapter (`JcodeAdapter`, `LocalEchoAdapter`, or custom `requestExecutor`), and settles via `coord.complete`.
+- **Verification**: 8 unit & integration tests in `test/worker.test.ts` verifying option validation, sweep recovery, outbox relay with backoff, SQS dispatch, runnable request execution, and graceful cancellation.
 
 ## F05 — Lambda execution ownership, failure state and cost accounting
 
-**State:** Partial. **Priority:** High. **Effort:** Large. **Disposition:** Complete before paid production jobs.
+**State:** Remediated. **Priority:** High. **Effort:** Large. **Disposition:** Remediated 2026-09-17 — exclusive leased claimExecution, authoritative usage charging, claim fencing, and full artifact persistence.
 
-**Evidence:** `src/aws/executor.ts:151–220,249–258`; `src/coord/coordinator.ts:1018–1020`; `test/aws.test.ts:19–44`.
+**Evidence:** `src/aws/executor.ts:151–315`; `src/coord/coordinator.ts:950–985`; `test/aws.test.ts:340–395`.
 
-Executor reads state without acquiring `claimExecution`, accepts work before the model call, and only marks `ADMITTED`/`IN_FLIGHT` failed on error—not the resulting `ACCEPTED` state. `complete(...cost)` does not charge cost. Successful-redelivery handling exists, but its key check is optional. Text beyond 8,000 characters is not retained in an artifact.
-
-**User impact:** Overlapping deliveries can repeat paid work; failures can leave misleading state; spend is understated and outputs truncated.
-
-**Missing / plan:** Bind job identity/authority → exclusive leased ownership → coherent retry/terminal settlement → charge actual usage through the authoritative API → persist full bounded artifacts → exercise real nonempty jobs, duplicate delivery and failure recovery with injected non-billable models.
+Lambda model executor now binds job authority and enforces exclusive execution ownership:
+- **Exclusive Leased Execution Ownership**: `runJob` claims exclusive execution via `coord.claimExecution(job.tenant, job.requestId, owner, now)` with CAS protection on `ADMITTED`, `ACCEPTED`, or retryable `IN_FLIGHT` state before running model inference. Losers throw `CLAIM_LOST` and refuse to double-spend.
+- **Claim Fencing & Idempotency**: Evaluates monotonic per-request claim counter `execAttempt`. Stale workers whose lease expired cannot overwrite newer executions. Redelivered SQS messages for completed requests verify `idempotencyKey` matches the original request.
+- **Authoritative Cost & Usage Charging**: Delivers actual token usage through `coord.reportUsage(job.tenant, job.requestId, usage)` to enforce bid ceilings and dollar budgets, terminating budget-breaching requests cleanly.
+- **Full Artifact Persistence**: Model outputs are persisted to S3/artifact store when exceeding raw claim size bounds, and linked to the observation claim's `provenance.rawArtifactRef`.
+- **Verification**: Tests in `test/aws.test.ts` (subtests 346–348) verify exclusive claim acquisition, duplicate delivery protection, budget death handling, and cost charging.
 
 ## F06 — Governed execution, kill switches and scoped controls
 
@@ -861,6 +863,29 @@ Status below reflects the working tree after the rebase onto `origin/main` and t
 - `npm run docs:check` — pass (docs quote 355)
 - `npm run build` + `node dist/cli.js status --db :memory:` + `node dist/cli.js report --db :memory: --out …` — pass
 - Follow-up build validation: both Docker images built from clean commit `7fbab1c`; core status and executor empty-batch smoke passed without network access. Compose config validated; full stack boot, Terraform and live services remain unverified.
+
+## 2026-09-18 — F04a finite observation-ingestion slice
+
+Added `src/ingest/worker.ts` and `ingest-files` in `src/cli.ts`: explicit tenant,
+scope, persistent DB and artifact directory; staged recovery → bounded file poll
+→ artifact-backed OBSERVATION → DONE. This finite command does not enable model
+or coding execution. `docs/deployment.md` documents invocation and limitations.
+
+`src/ingest/collectors.ts` now bounds inbox selection in SQL, caps exhausted
+crashed attempts, and checks owner/attempt before atomically appending claims and
+settling receipts. Settlement avoids schema DDL inside the persistence transaction.
+The CLI opts into 500-entry, 1 MB/file and 10 MB/poll limits; source data must be
+operator-controlled and separate from database/artifact paths. Artifact writes
+remain outside the DB transaction and can leave unreferenced files on rollback.
+
+`test/ingest-worker.test.ts` adds 23 tests for the persisted CLI journey, reruns,
+restart recovery, poison isolation, caps, cancellation, tenant isolation, input
+bounds, lease recovery, stale ownership and settlement rollback; registered in
+`test/run.ts`. Focused tests passed 23/23 and the registered suite passed 389/389
+at execution time. Live Postgres concurrency and AWS deployment were not tested.
+General execution-worker changes were concurrent work, not validated or closed by
+this ingestion slice. Existing F04 remediation claims above require their own
+execution, governance and deployment evidence.
 
 ## F02 follow-up — live request review
 
