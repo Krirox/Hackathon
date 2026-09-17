@@ -1,0 +1,26 @@
+PROPRIETARY SOFTWARE LICENSE AND INTELLECTUAL PROPERTY ASSIGNMENT AGREEMENT
+
+Copyright (c) 2026 Kulratan Thapar. All Rights Reserved.
+
+1. PROPRIETARY NATURE AND SOLE OWNERSHIP
+This software and all associated documentation, code, architecture, designs, data structures, algorithms, and related materials (collectively, the "Software" or "Product") are the sole and exclusive proprietary property of Kulratan Thapar. 
+
+Kulratan Thapar retains 100% full, exclusive, and unencumbered legal and beneficial title, ownership, and all intellectual property rights (including, but not limited to, copyright, patent, trademark, trade secret, moral rights, and all other proprietary rights) in and to this Product worldwide in perpetuity. No other person, contributor, developer, entity, contractor, or collaborator holds or may claim any ownership interest or rights in this Product.
+
+2. CONTRIBUTIONS AND INTELLECTUAL PROPERTY ASSIGNMENT
+Any code, contribution, modification, enhancement, bug fix, feature, patch, design, or documentation written, submitted, committed, or otherwise provided to this repository or project by anyone—regardless of whether written by an employee, contractor, open contributor, AI, or third party—shall immediately upon creation become the sole and exclusive property of Kulratan Thapar.
+
+By contributing, submitting, or writing any code or materials for this project, any and all contributors irrevocably and unconditionally:
+  (a) Assign and transfer all rights, title, and interest in and to their contributions (including all copyrights, patents, and intellectual property rights) exclusively to Kulratan Thapar;
+  (b) Waive any moral rights, author rights, attribution claims, or claims of co-ownership or separate ownership;
+  (c) Agree that Kulratan Thapar possesses the sole and unrestricted right to use, license, relicence, monetize, sub-license, commercialize, modify, sell, or disclose such contributions without notice, credit, compensation, or accounting to any contributor or third party.
+
+3. RESTRICTIONS ON USE
+Except with the prior, express, and written authorization signed personally by Kulratan Thapar:
+  - You may NOT copy, modify, merge, publish, distribute, sublicense, sell, rent, lease, or transfer copies of this Software.
+  - You may NOT reverse engineer, decompile, disassemble, or derive source code or underlying ideas from any part of the Product.
+  - You may NOT use this Product or any portion thereof for commercial purposes, training of external machine models, or deployment without explicit written permission.
+  - No license or authorization is granted by implication, estoppel, or otherwise.
+
+4. DISCLAIMER OF WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. IN NO EVENT SHALL KULRATAN THAPAR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

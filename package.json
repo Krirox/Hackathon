@@ -20,8 +20,8 @@
     "dev": "tsx src/cli.ts"
   },
   "keywords": [],
-  "author": "",
-  "license": "MIT",
+  "author": "Kulratan Thapar",
+  "license": "UNLICENSED",
   "engines": {
     "node": "22.x"
   },
