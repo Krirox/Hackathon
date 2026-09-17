@@ -236,6 +236,21 @@ export interface Coordinator {
   /** Refusal-rate health metric: 0% refusal across all agents means sycophancy. */
   refusalStats(tenant: string): Promise<{ total: number; refused: number; rate: number }>;
   openEscalations(tenant: string, day: string): Promise<number>;
+  /** Approval latency (TODO 2.3): submission → human decision, one audit row per decision. */
+  recordApprovalLatency(
+    tenant: string,
+    requestId: string,
+    action: 'approve' | 'decline',
+    human: string,
+    decidedAt: string,
+  ): Promise<{ seconds: number }>;
+  /** Latency distribution over recorded approvals — the curation-cost kill-metric's clock. */
+  approvalLatencyStats(tenant: string): Promise<{
+    n: number;
+    medianSeconds: number | null;
+    p90Seconds: number | null;
+    maxSeconds: number | null;
+  }>;
 }
 
 export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT_LIMITS): Coordinator {
@@ -629,6 +644,47 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     ).n;
   }
 
+  async function recordApprovalLatency(
+    tenant: string,
+    requestId: string,
+    action: 'approve' | 'decline',
+    human: string,
+    decidedAt: string,
+  ): Promise<{ seconds: number }> {
+    const r = await load(tenant, requestId);
+    if (!r) throw new CoordinationError('UNKNOWN_REQUEST', `unknown request ${requestId}`, { requestId });
+    const ms = Date.parse(decidedAt) - Date.parse(r.createdAt);
+    if (Number.isNaN(ms)) {
+      throw new CoordinationError('BAD_TIMESTAMP', `decidedAt ${decidedAt} does not parse`, { decidedAt });
+    }
+    // Clamp negatives: clocks drift, tests freeze time; a −40ms round-trip is
+    // still a 0-second approval, not a thrown-away measurement.
+    const seconds = Math.max(0, ms / 1000);
+    await audit('console:' + human, 'APPROVAL_LATENCY', requestId, tenant, JSON.stringify({ action, seconds, human }));
+    return { seconds };
+  }
+
+  async function approvalLatencyStats(tenant: string) {
+    const rows = (
+      (await db
+        .prepare("SELECT detail FROM audit_log WHERE tenant = ? AND action = 'APPROVAL_LATENCY' ORDER BY at")
+        .all(tenant)) as { detail: string | null }[]
+    ).map((r) => {
+      try {
+        return JSON.parse(String(r.detail ?? '{}')) as { seconds?: number };
+      } catch {
+        return {};
+      }
+    });
+    const xs = rows
+      .map((d) => d.seconds)
+      .filter((s): s is number => typeof s === 'number' && Number.isFinite(s))
+      .sort((a, b) => a - b);
+    const pick = (q: number): number | null =>
+      xs.length === 0 ? null : Math.min(xs[Math.min(xs.length - 1, Math.floor(q * xs.length))]!, xs[xs.length - 1]!);
+    return { n: xs.length, medianSeconds: pick(0.5), p90Seconds: pick(0.9), maxSeconds: xs[xs.length - 1] ?? null };
+  }
+
   async function refusalStats(tenant: string) {
     const total = (
       (await db
@@ -705,5 +761,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     expireStale,
     refusalStats,
     openEscalations,
+    recordApprovalLatency,
+    approvalLatencyStats,
   };
 }
