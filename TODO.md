@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors
-tests      <!-- vital:testcount -->192/192 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
+tests      <!-- vital:testcount -->193/193 GREEN<!-- /vital:testcount --> (full Db→AsyncDb port: 19 modules + CLI + seed + suite)
 commits    8 on main this session (aaa2674, d9797c3, 8751ac9, 145f39c, 3bf3f11, f86f622, f02474c, 364011e)
 built           ledger+decisions+replay+export+subjects · coord+decompose+escalation gate · router+registry+calibration
            compiler+mining+registry+trustTier · gov (matrix/trust/honey/kill/sample/batch/shell/act/limits)
@@ -246,7 +246,7 @@ The only phase that must produce a number.
 
 ### 2.3 Human approval (Buzz rooms)
 - [ ] `L` approval surface in-room: draft + evidence chips + confidence + cost + owner (needs Buzz rooms + UI)
-- [x] `M` override capture — every edit stored as a diff, feeds the eval spine (built 2026-09-17 on the console surface: `POST /api/claims/:id/correct` → `correctClaim` supersedes + audits the `oldId->newId` diff, the response carries `{before, after}`, and the CLAIM_CORRECTED audit row is bridged into `proposeEvalFromCorrection` as a `correction-regression` case in the `overrides` suite — a spine failure degrades to `evalCaseId: null`, never un-corrects the claim)
+- [x] `M` override capture — every edit stored as a diff, feeds the eval spine (built 2026-09-17 on the console surface: `POST /api/claims/:id/correct` → `correctClaim` supersedes + audits the `oldId->newId` diff, the response carries `{before, after}`, and the CLAIM_CORRECTED audit row is bridged into `proposeEvalFromCorrection` as a `correction-regression` case in the `overrides` suite — a spine failure degrades to `evalCaseId: null`, never un-corrects the claim. **Proven red→green 2026-09-17**: a downstream reader caching the pre-correction statement FAILS the captured `overrides` case (red run recorded in eval_runs, failure detail names the stale value); the same reader serving the corrected ledger passes it)
 - [x] `M` **claims checker** — scan drafts for unverifiable assertions; block on `CANDIDATE`/`SELF_SERVED` sources (`checkDraft`: unverified citations block, regulated denylist forces human)
 - [x] `M` regulated-claim denylist (health/finance/superlatives/guarantees) → forces human (tested: `deniedPhrases`)
 - [x] `S` publish is **always** human-command in year 1 (`ACT_IRREVERSIBLE`) (enforced in R/A/I matrix + `recordDecision`)
