@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { AsyncDb } from '../core/db.ts';
 import { dayOf as sqlDayOf, jsonNumber, jsonText } from '../core/db.ts';
+import type { RequestRow } from '../core/rows.ts';
 import {
   MESSAGE_CLASSES,
   TERMINAL_REQUEST_STATES,
@@ -148,7 +149,7 @@ export const DEFAULT_LIMITS: SchedulerLimits = {
   },
 };
 
-function rowToRequest(r: Record<string, unknown>): CoordinationRequest {
+function rowToRequest(r: RequestRow): CoordinationRequest {
   return {
     id: String(r.id),
     tenant: String(r.tenant),
@@ -281,7 +282,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
 
   const load = async (tenant: string, id: string): Promise<CoordinationRequest | null> => {
     const row = (await db.prepare('SELECT * FROM requests WHERE id = ? AND tenant = ?').get(id, tenant)) as
-      Record<string, unknown> | undefined;
+      RequestRow | undefined;
     return row ? rowToRequest(row) : null;
   };
 
@@ -365,7 +366,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       // of the same content put the occurrence (a date, a run id) in the goal.
       const dup = (await db
         .prepare('SELECT * FROM requests WHERE tenant = ? AND idem_key = ? ORDER BY created_at DESC LIMIT 1')
-        .get(p.tenant, idem)) as Record<string, unknown> | undefined;
+        .get(p.tenant, idem)) as RequestRow | undefined;
       if (dup) {
         const existing = rowToRequest(dup);
         const terminal = TERMINAL_REQUEST_STATES.includes(existing.state);
@@ -673,7 +674,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       }
       return (
         await db.prepare(`SELECT * FROM requests WHERE ${where.join(' AND ')} ORDER BY created_at`).all(...args)
-      ).map((r) => rowToRequest(r as Record<string, unknown>));
+      ).map((r) => rowToRequest(r as RequestRow));
     },
     accept: (t, id) => transition(t, id, 'ACCEPTED'),
     complete: async (t, id, o) => {

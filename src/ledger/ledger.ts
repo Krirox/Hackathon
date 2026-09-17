@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
 import { nextSeq } from '../core/db.ts';
+import type { ClaimRow, DecisionRow, SubjectRow } from '../core/rows.ts';
 import {
   ACTION_CLASSES,
   AGENT_CREATABLE_KINDS,
@@ -286,7 +287,7 @@ export interface OutcomeRecord {
 }
 
 export function createLedger(db: AsyncDb): Ledger {
-  const rowToClaim = (r: Record<string, unknown>): Claim => ({
+  const rowToClaim = (r: ClaimRow): Claim => ({
     id: String(r.id),
     tenant: String(r.tenant),
     subject: String(r.subject),
@@ -387,13 +388,13 @@ export function createLedger(db: AsyncDb): Ledger {
           seq,
         );
       await audit(c.tenant, `${c.authorType}:${c.scope}`, 'CLAIM_APPEND', id, `${c.kind} ${c.subject}`);
-      return rowToClaim((await db.prepare('SELECT * FROM claims WHERE id = ?').get(id)) as Record<string, unknown>);
+      return rowToClaim((await db.prepare('SELECT * FROM claims WHERE id = ?').get(id)) as ClaimRow);
     });
   }
 
   async function get(tenant: string, id: string): Promise<Claim | null> {
     const r = (await db.prepare('SELECT * FROM claims WHERE id = ? AND tenant = ?').get(id, tenant)) as
-      Record<string, unknown> | undefined;
+      ClaimRow | undefined;
     return r ? rowToClaim(r) : null;
   }
 
@@ -435,14 +436,14 @@ export function createLedger(db: AsyncDb): Ledger {
             AND c.id <> ?`,
         )
         .all(tenant, claimId, claimId, claimId)
-    ).map(rowToClaim);
+    ).map((r) => rowToClaim(r as ClaimRow));
   }
 
   async function bySubject(tenant: string, subject: string, opts: { includeStale?: boolean } = {}): Promise<Claim[]> {
     const sql = opts.includeStale
       ? "SELECT * FROM claims WHERE tenant = ? AND subject = ? AND status <> 'RETIRED' ORDER BY seq"
       : "SELECT * FROM claims WHERE tenant = ? AND subject = ? AND status NOT IN ('RETIRED','STALE','SUPERSEDED') ORDER BY seq";
-    return (await db.prepare(sql).all(tenant, subject)).map(rowToClaim);
+    return (await db.prepare(sql).all(tenant, subject)).map((r) => rowToClaim(r as ClaimRow));
   }
 
   /**
@@ -462,7 +463,7 @@ export function createLedger(db: AsyncDb): Ledger {
            AND (valid_until IS NULL OR valid_until > ?)`,
         )
         .all(tenant, ...ids, now)
-    ).map(rowToClaim);
+    ).map((r) => rowToClaim(r as ClaimRow));
     const dropped = ids.length - rows.length;
     if (dropped > 0) {
       await audit(tenant, 'ledger', 'CONTEXT_DROPPED_UNUSABLE', ids.join(','), `${dropped} claim(s) not usable`);
@@ -576,7 +577,7 @@ export function createLedger(db: AsyncDb): Ledger {
     return rec;
   }
 
-  function rowToDecision(r: Record<string, unknown>): DecisionRecord {
+  function rowToDecision(r: DecisionRow): DecisionRecord {
     return {
       id: String(r.id),
       tenant: String(r.tenant),
@@ -595,7 +596,7 @@ export function createLedger(db: AsyncDb): Ledger {
 
   async function getDecision(tenant: string, id: string): Promise<DecisionRecord | null> {
     const r = (await db.prepare('SELECT * FROM decisions WHERE id = ? AND tenant = ?').get(id, tenant)) as
-      Record<string, unknown> | undefined;
+      DecisionRow | undefined;
     return r ? rowToDecision(r) : null;
   }
 
@@ -736,7 +737,7 @@ export function createLedger(db: AsyncDb): Ledger {
            AND status <> 'RETIRED' ORDER BY seq`,
         )
         .all(tenant, subject, at, at, at)
-    ).map(rowToClaim);
+    ).map((r) => rowToClaim(r as ClaimRow));
   }
 
   async function duePredictions(tenant: string, now: string): Promise<Claim[]> {
@@ -748,7 +749,7 @@ export function createLedger(db: AsyncDb): Ledger {
            AND valid_until IS NOT NULL AND valid_until <= ? ORDER BY valid_until`,
         )
         .all(tenant, now)
-    ).map(rowToClaim);
+    ).map((r) => rowToClaim(r as ClaimRow));
   }
 
   async function voidPrediction(tenant: string, id: string, now: string): Promise<void> {
@@ -789,7 +790,7 @@ export function createLedger(db: AsyncDb): Ledger {
          ORDER BY valid_until`,
         )
         .all(tenant, now, horizon)
-    ).map(rowToClaim);
+    ).map((r) => rowToClaim(r as ClaimRow));
   }
 
   async function correctClaim(tenant: string, id: string, statement: string, by: string, now: string): Promise<Claim> {
@@ -870,7 +871,7 @@ export function createLedger(db: AsyncDb): Ledger {
 
   // ---- entity/subject registry (TODO 1.1) ---------------------------------
 
-  const rowToSubject = (r: Record<string, unknown>): Subject => ({
+  const rowToSubject = (r: SubjectRow): Subject => ({
     id: String(r.id),
     tenant: String(r.tenant),
     key: String(r.key),
@@ -900,7 +901,7 @@ export function createLedger(db: AsyncDb): Ledger {
     return db.transaction(async () => {
       const existing = (await db
         .prepare('SELECT * FROM subjects WHERE tenant = ? AND key = ?')
-        .get(s.tenant, s.key)) as Record<string, unknown> | undefined;
+        .get(s.tenant, s.key)) as SubjectRow | undefined;
       if (existing) {
         const merged = [
           ...new Set([
@@ -947,7 +948,7 @@ export function createLedger(db: AsyncDb): Ledger {
 
   async function subjectByKey(tenant: string, key: string): Promise<Subject | null> {
     const row = (await db.prepare('SELECT * FROM subjects WHERE tenant = ? AND key = ?').get(tenant, key)) as
-      Record<string, unknown> | undefined;
+      SubjectRow | undefined;
     return row ? rowToSubject(row) : null;
   }
 
@@ -956,7 +957,7 @@ export function createLedger(db: AsyncDb): Ledger {
     if (byKey) return byKey;
     const row = (await db
       .prepare('SELECT * FROM subjects WHERE tenant = ? AND aliases_json LIKE ? LIMIT 1')
-      .get(tenant, `%"${keyOrAlias.toLowerCase()}"%`)) as Record<string, unknown> | undefined;
+      .get(tenant, `%"${keyOrAlias.toLowerCase()}"%`)) as SubjectRow | undefined;
     return row ? rowToSubject(row) : null;
   }
 
@@ -964,16 +965,15 @@ export function createLedger(db: AsyncDb): Ledger {
     const rows = kind
       ? ((await db
           .prepare('SELECT * FROM subjects WHERE tenant = ? AND kind = ? ORDER BY key')
-          .all(tenant, kind)) as Record<string, unknown>[])
-      : ((await db.prepare('SELECT * FROM subjects WHERE tenant = ? ORDER BY key').all(tenant)) as Record<
-          string,
-          unknown
-        >[]);
+          .all(tenant, kind)) as SubjectRow[])
+      : ((await db.prepare('SELECT * FROM subjects WHERE tenant = ? ORDER BY key').all(tenant)) as SubjectRow[]);
     return rows.map(rowToSubject);
   }
 
   async function stats(tenant: string, now: string): Promise<LedgerStats> {
-    const all = (await db.prepare('SELECT * FROM claims WHERE tenant = ?').all(tenant)).map(rowToClaim);
+    const all = (await db.prepare('SELECT * FROM claims WHERE tenant = ?').all(tenant)).map((r) =>
+      rowToClaim(r as ClaimRow),
+    );
     const byKind: Record<string, number> = {};
     let verified = 0,
       candidate = 0,
