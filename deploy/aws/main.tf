@@ -1,7 +1,7 @@
 # Vital on AWS — all-in-one stack.
 #
-# Maps to idea.md §17 (VPS-1 Buzz · VPS-2 core+PG · VPS-3 jcode) as:
-#   Buzz relay            -> ECS Fargate service (talk layer, own Nostr relay)
+# Maps to idea.md §17 (all-AWS topology) as:
+#   Buzz relay            -> ECS Fargate + Cloud Map (deploy/aws/buzz.tf)
 #   Vital core + Postgres -> ECS Fargate service + RDS Postgres 16 (PITR on)
 #   jcode sibling         -> sidecar container in the core task (localhost socket,
 #                            same REQUEST/bid path as src/jcode/runner.ts — coordinated, not mounted)
@@ -482,7 +482,11 @@ resource "aws_iam_policy" "ecs_execution_secrets" {
           aws_secretsmanager_secret.serper.arn,
           aws_secretsmanager_secret.gemini.arn,
           aws_secretsmanager_secret.novita.arn
-        ], aws_secretsmanager_secret.operator[*].arn)
+        ], aws_secretsmanager_secret.operator[*].arn, var.enable_buzz ? [
+          aws_secretsmanager_secret.buzz_db_url[0].arn,
+          aws_secretsmanager_secret.buzz_redis_url[0].arn,
+          aws_secretsmanager_secret.buzz_relay_key[0].arn
+        ] : [])
       }
     ]
   })
@@ -599,6 +603,11 @@ resource "aws_lb_target_group" "core" {
   health_check {
     # Constant-cost liveness: never point a probe at analytics
     # (/api/approval-latency scans audit history per probe per target).
+    # Liveness is not readiness: after deploy, run the LB→task smoke
+    # (scripts/verify-topology.mjs --base-url https://<alb-dns>) which
+    # checks Host routing, X-Forwarded-Proto handling (the task runs with
+    # TRUST_PROXY=1 — see task definition env), the reachability-only
+    # pill, and authenticated readiness through the ALB (FLOW-006/E2E-17).
     path                = "/healthz"
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -674,15 +683,24 @@ resource "aws_ecs_task_definition" "core" {
         { sourceVolume = "sandboxes", containerPath = "/var/vital/sandboxes" },
         { sourceVolume = "jcode-sock", containerPath = "/run" }
       ]
-      environment = [
+      environment = concat([
         { name = "HOST", value = "0.0.0.0" },
         { name = "PORT", value = "3100" },
+        # FLOW-006: behind this ALB the task trusts proxy headers for
+        # client IP (rate limiting) and scheme. Never set TRUST_PROXY
+        # on direct/loopback serving — clients could spoof both.
+        { name = "TRUST_PROXY", value = "1" },
         { name = "VITAL_TENANT", value = "acme" },
+        { name = "VITAL_WITH_WORKER", value = "1" },
         { name = "TALK_SURFACE", value = "buzz" },
         { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" },
         { name = "ARTIFACT_DIR", value = "/var/vital/sandboxes/artifacts" },
+        { name = "ARTIFACT_BUCKET", value = aws_s3_bucket.artifacts.bucket },
+        { name = "AWS_REGION", value = var.region },
         { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
-      ]
+      ], var.enable_buzz ? [
+        { name = "BUZZ_RELAY_URL", value = local.buzz_discovery }
+      ] : [])
       secrets = concat(
         [
           { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.db_url.arn}" },
@@ -910,6 +928,19 @@ resource "aws_lambda_event_source_mapping" "executor" {
 
 # ------------------------------------------------------------------- ops -----
 resource "aws_sns_topic" "ops" { name = "${local.name}-ops" }
+
+# F27: an alarm topic with no subscriber alerts nobody. The email
+# subscription requires the operator to CONFIRM via the mail AWS sends on
+# apply — apply without confirming leaves the alarms formally firing and
+# factually silent, which is worse than no alarm. Delivery to a confirmed
+# endpoint is verified per Phase 6's pilot gate ("alerts reach a named
+# operator"), not by this resource existing.
+resource "aws_sns_topic_subscription" "ops_email" {
+  count     = var.ops_alarm_email == "" ? 0 : 1
+  topic_arn = aws_sns_topic.ops.arn
+  protocol  = "email"
+  endpoint  = var.ops_alarm_email
+}
 
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   alarm_name          = "${local.name}-alb-5xx"

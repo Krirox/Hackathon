@@ -14,6 +14,7 @@
     "format": "prettier --write src test scripts *.mjs",
     "format:check": "prettier --check src test scripts *.mjs",
     "verify:provenance": "node scripts/verify-provenance.mjs",
+    "verify:topology": "node scripts/verify-topology.mjs",
     "verify:jcode-live": "tsx scripts/live-jcode-hello.ts",
     "docs:refresh": "node scripts/refresh-docs.mjs",
     "docs:check": "node scripts/refresh-docs.mjs --check",

@@ -190,6 +190,29 @@ ALTER TABLE users DROP COLUMN email_verified_at;
 DROP TABLE IF EXISTS mfa_factors;
 `,
   },
+  {
+    name: '0004_email_verification_mfa_recovery',
+    up: `
+CREATE TABLE IF NOT EXISTS email_verifications (
+  token_hash TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  expires_at TEXT NOT NULL,
+  used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_email_verifications_user ON email_verifications(user_id);
+CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+  code_hash  TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  used_at    TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_mfa_recovery_codes_user ON mfa_recovery_codes(user_id);
+`,
+    down: `
+DROP TABLE IF EXISTS mfa_recovery_codes;
+DROP TABLE IF EXISTS email_verifications;
+`,
+  },
 ];
 
 /** Idle session lifetime. Rolling: each successful touch re-arms the full window. */
@@ -1249,23 +1272,94 @@ export async function confirmPasswordReset(
 
 const RANK: Record<Role, number> = { member: 0, admin: 1, owner: 2 };
 
-export const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-export const MFA_RECENT_AUTH_WINDOW_MS = 15 * 60 * 1000; // 15 min for sensitive ops
+export const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24h single-use token
+export const MFA_RECENT_AUTH_WINDOW_MS = 15 * 60 * 1000; // 15 min step-up for sensitive ops
+export const MFA_TOTP_STEP_SEC = 30;
+export const MFA_TOTP_DIGITS = 6;
+export const MFA_RECOVERY_CODE_COUNT = 10;
 
-/** FLOW-007: email verification before relying on it as recovery channel. */
-export async function verifyEmailBeforeRecovery(
+/**
+ * FLOW-007: email-verification lifecycle. `email_verified_at` on the user row
+ * is the persistent verified flag — set once by confirming a single-use
+ * token, never cleared except by an explicit address change (there is no
+ * address-change flow yet, so in practice it is write-once). The 24h TTL
+ * above applies to the *token*, not to the verified state: a verified
+ * address stays verified.
+ */
+export async function requestEmailVerification(
   db: AsyncDb,
   tenant: string,
   userId: string,
   now: string,
-): Promise<boolean> {
+): Promise<string> {
+  const user = await getUser(db, tenant, userId);
+  if (!user) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  const token = newToken();
+  const expiresAt = new Date(Date.parse(now) + EMAIL_VERIFICATION_TTL_MS).toISOString();
+  await db
+    .prepare('INSERT INTO email_verifications (token_hash, user_id, expires_at, used_at) VALUES (?, ?, ?, NULL)')
+    .run(sha256(token), userId, expiresAt);
+  await audit(db, tenant, userId, 'auth.email_verification_requested', `user:${userId}`, now);
+  return token;
+}
+
+export async function confirmEmailVerification(db: AsyncDb, token: string, now: string): Promise<User> {
+  const r = (await db.prepare('SELECT * FROM email_verifications WHERE token_hash = ?').get(sha256(token))) as
+    | { user_id: string; expires_at: string; used_at: string | null }
+    | undefined;
+  if (!r) throw new AuthError('BAD_VERIFICATION_TOKEN', 'unknown verification token');
+  if (r.used_at !== null && r.used_at !== '') throw new AuthError('BAD_VERIFICATION_TOKEN', 'token already used');
+  if (r.expires_at <= now) throw new AuthError('BAD_VERIFICATION_TOKEN', 'verification token expired');
+  const user = (await db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id)) as Row | undefined;
+  if (!user) throw new AuthError('UNKNOWN_USER', 'verification token points at a deleted user');
+  return db.transaction(async () => {
+    await db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').run(now, r.user_id);
+    await db.prepare('UPDATE email_verifications SET used_at = ? WHERE token_hash = ?').run(now, sha256(token));
+    await audit(db, String((user as Row).tenant), r.user_id, 'auth.email_verified', `user:${r.user_id}`, now);
+    const next = (await db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id)) as Row;
+    return rowToUser(next);
+  });
+}
+
+/** Persistent verified flag — true once any token was confirmed. No expiry. */
+export async function isEmailVerified(db: AsyncDb, tenant: string, userId: string): Promise<boolean> {
   const user = (await db
     .prepare('SELECT email_verified_at FROM users WHERE tenant = ? AND id = ?')
     .get(tenant, userId)) as { email_verified_at: string | null } | undefined;
-  return (
-    !!user?.email_verified_at &&
-    new Date(user.email_verified_at).getTime() > new Date(now).getTime() - EMAIL_VERIFICATION_TTL_MS
-  );
+  const v = user?.email_verified_at;
+  return v !== null && v !== undefined && v !== '';
+}
+
+/**
+ * FLOW-007: gate recovery messaging on verification. Returns false for
+ * unverified or unknown users — callers must not reveal which.
+ */
+export async function verifyEmailBeforeRecovery(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  _now: string,
+): Promise<boolean> {
+  return isEmailVerified(db, tenant, userId);
+}
+
+/**
+ * FLOW-007: recovery-channel status for messaging. `verified` is false when
+ * the address was never confirmed — the forgot-password page says the quiet
+ * part out loud (verify first) without enumerating accounts to strangers.
+ */
+export async function recoveryChannelStatus(
+  db: AsyncDb,
+  tenant: string,
+  email: string,
+): Promise<{ exists: boolean; verified: boolean; userId: string | null }> {
+  const normalized = email.trim().toLowerCase();
+  const row = (await db
+    .prepare('SELECT id, email_verified_at FROM users WHERE tenant = ? AND email = ?')
+    .get(tenant, normalized)) as { id: string; email_verified_at: string | null } | undefined;
+  if (!row) return { exists: false, verified: false, userId: null };
+  const v = row.email_verified_at;
+  return { exists: true, verified: v !== null && v !== undefined && v !== '', userId: row.id };
 }
 
 /** FLOW-007: MFA-capable identity strategy — enforcement, recovery, recent-auth policy. */
@@ -1277,6 +1371,251 @@ export interface MfaFactor {
   lastUsedAt: string | null;
 }
 
+function rowToMfaFactor(r: Row): MfaFactor {
+  return {
+    id: String(r.id),
+    userId: String(r.user_id),
+    kind: String(r.kind) === 'webauthn' ? 'webauthn' : 'totp',
+    verifiedAt: String(r.verified_at),
+    lastUsedAt: r.last_used_at === null || r.last_used_at === undefined ? null : String(r.last_used_at),
+  };
+}
+
+/** Supported MFA strategy, pinned for docs and tests. Passwords stay the
+ *  first factor; TOTP is the supported second factor; recovery codes are the
+ *  supported recovery path; sensitive operations additionally demand a fresh
+ *  (≤15min) authentication regardless of MFA state. WebAuthn rows are
+ *  schema-reserved for a future passkey addition — not claimed as working. */
+export function mfaPolicy(): {
+  firstFactor: string;
+  secondFactor: string;
+  recovery: string;
+  recentAuthWindowMs: number;
+  sensitiveOps: string[];
+  webauthn: string;
+} {
+  return {
+    firstFactor: 'password (salted scrypt, 12-char floor)',
+    secondFactor: 'TOTP (RFC 6238, 30s step, ±1 window)',
+    recovery: 'single-use hashed recovery codes',
+    recentAuthWindowMs: MFA_RECENT_AUTH_WINDOW_MS,
+    sensitiveOps: ['role-change', 'disable', 'transfer-ownership', 'reactivate', 'recovery'],
+    webauthn: 'schema-reserved only — not an offered factor',
+  };
+}
+
+/** Sensitive operations that demand step-up recent authentication. */
+export const SENSITIVE_OPS_REQUIRING_RECENT_AUTH = [
+  'role-change',
+  'disable',
+  'transfer-ownership',
+  'reactivate',
+  'recovery',
+] as const;
+
+// --- TOTP (RFC 6238, SHA-1, no new dependency) ---
+
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+export function base32Encode(bytes: Uint8Array): string {
+  let out = '';
+  let bits = 0;
+  let acc = 0;
+  for (const b of bytes) {
+    acc = (acc << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += B32[(acc >>> bits) & 31];
+    }
+  }
+  if (bits > 0) out += B32[(acc << (5 - bits)) & 31];
+  return out;
+}
+
+export function base32Decode(s: string): Uint8Array {
+  const clean = s.trim().replace(/=+$/, '').toUpperCase();
+  let bits = 0;
+  let acc = 0;
+  const bytes: number[] = [];
+  for (const ch of clean) {
+    const v = B32.indexOf(ch);
+    if (v < 0) throw new AuthError('BAD_TOTP_SECRET', 'invalid base32 secret');
+    acc = (acc << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((acc >>> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+/** 20-byte (160-bit) secret, base32 without padding — the otpauth secret. */
+export function newTotpSecret(): string {
+  return base32Encode(randomBytes(20));
+}
+
+function hotp(secret: Uint8Array, counter: bigint, digits: number): string {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(counter);
+  const hmac = createHash('sha1');
+  // node:crypto Hash lacks Uint8Array constructor overload typing here; feed Buffers.
+  hmac.update(Buffer.from(secret));
+  const mac = hmac.update(msg).digest();
+  const offset = mac[mac.length - 1]! & 0x0f;
+  const code =
+    ((mac[offset]! & 0x7f) << 24) | (mac[offset + 1]! << 16) | (mac[offset + 2]! << 8) | mac[offset + 3]!;
+  return String(code % 10 ** digits).padStart(digits, '0');
+}
+
+export function totpCode(secretBase32: string, atMs: number, stepSec = MFA_TOTP_STEP_SEC): string {
+  const secret = base32Decode(secretBase32);
+  const counter = BigInt(Math.floor(atMs / 1000 / stepSec));
+  return hotp(secret, counter, MFA_TOTP_DIGITS);
+}
+
+/** Accept codes from the adjacent 30s steps to tolerate clock skew. */
+export function verifyTotpCode(secretBase32: string, code: string, atMs: number, window = 1): boolean {
+  const digitsOnly = /^\d{6}$/.test(code.trim());
+  if (!digitsOnly) return false;
+  const want = code.trim();
+  const secret = base32Decode(secretBase32);
+  const center = Math.floor(atMs / 1000 / MFA_TOTP_STEP_SEC);
+  for (let d = -window; d <= window; d++) {
+    if (hotp(secret, BigInt(center + d), MFA_TOTP_DIGITS) === want) return true;
+  }
+  return false;
+}
+
+/**
+ * Enroll a TOTP factor: the caller generates the secret (newTotpSecret),
+ * shows the otpauth URI to the user, and only on a correct code does this
+ * persist the factor. The secret is stored reversibly in the factors table —
+ * it is as sensitive as a password hash input and relies on DB access
+ * control (documented limitation).
+ */
+export async function confirmMfaEnrollment(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  secretBase32: string,
+  code: string,
+  now: string,
+): Promise<MfaFactor> {
+  const user = await getUser(db, tenant, userId);
+  if (!user) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  if (user.disabled) throw new AuthError('DISABLED_USER', 'reactivate the account before enrolling MFA');
+  if (!verifyTotpCode(secretBase32, code, Date.parse(now))) throw new AuthError('BAD_TOTP_CODE', 'code not accepted');
+  const factor: MfaFactor = {
+    id: newId('mfa'),
+    userId,
+    kind: 'totp',
+    verifiedAt: now,
+    lastUsedAt: null,
+  };
+  await db
+    .prepare(
+      'INSERT INTO mfa_factors (id, user_id, kind, secret, credential_id, public_key, verified_at, last_used_at, created_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, ?)',
+    )
+    .run(factor.id, userId, 'totp', secretBase32, now, now);
+  await audit(db, tenant, userId, 'auth.mfa_enrolled', `mfa:${factor.id}`, now, 'kind=totp');
+  return factor;
+}
+
+export async function listMfaFactors(db: AsyncDb, userId: string): Promise<MfaFactor[]> {
+  const rows = await db.prepare('SELECT * FROM mfa_factors WHERE user_id = ? ORDER BY created_at').all(userId);
+  return rows.map(rowToMfaFactor);
+}
+
+export async function isMfaEnabled(db: AsyncDb, userId: string): Promise<boolean> {
+  const row = (await db.prepare('SELECT COUNT(*) AS n FROM mfa_factors WHERE user_id = ?').get(userId)) as {
+    n: number;
+  };
+  return Number(row.n) > 0;
+}
+
+export async function removeMfaFactor(db: AsyncDb, tenant: string, userId: string, factorId: string, now: string): Promise<void> {
+  const out = await db.prepare('DELETE FROM mfa_factors WHERE id = ? AND user_id = ?').run(factorId, userId);
+  if (out.changes === 0) throw new AuthError('UNKNOWN_MFA_FACTOR', `no MFA factor ${factorId}`);
+  await db.prepare('DELETE FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL').run(userId);
+  await audit(db, tenant, userId, 'auth.mfa_removed', `mfa:${factorId}`, now);
+}
+
+/** Verify a TOTP code against any enrolled TOTP factor; stamps last_used_at. */
+export async function verifyMfaCode(db: AsyncDb, tenant: string, userId: string, code: string, now: string): Promise<boolean> {
+  const factors = await listMfaFactors(db, userId);
+  const atMs = Date.parse(now);
+  for (const f of factors) {
+    if (f.kind !== 'totp') continue;
+    const row = (await db.prepare('SELECT secret FROM mfa_factors WHERE id = ?').get(f.id)) as {
+      secret: string | null;
+    };
+    if (!row?.secret) continue;
+    if (verifyTotpCode(row.secret, code, atMs)) {
+      await db.prepare('UPDATE mfa_factors SET last_used_at = ? WHERE id = ?').run(now, f.id);
+      await audit(db, tenant, userId, 'auth.mfa_verified', `mfa:${f.id}`, now);
+      return true;
+    }
+  }
+  await audit(db, tenant, userId, 'auth.mfa_failed', `user:${userId}`, now);
+  return false;
+}
+
+/**
+ * Issue a fresh set of single-use recovery codes. Plaintexts are returned
+ * once — only hashes persist. Issuing rotates: unused prior codes are
+ * discarded so there is exactly one live set.
+ */
+export async function generateMfaRecoveryCodes(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  now: string,
+  count = MFA_RECOVERY_CODE_COUNT,
+): Promise<string[]> {
+  const user = await getUser(db, tenant, userId);
+  if (!user) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  const codes: string[] = [];
+  for (let i = 0; i < count; i++) codes.push(randomBytes(6).toString('base64url'));
+  await db.transaction(async () => {
+    await db.prepare('DELETE FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL').run(userId);
+    for (const c of codes)
+      await db.prepare('INSERT INTO mfa_recovery_codes (code_hash, user_id, used_at, created_at) VALUES (?, ?, NULL, ?)').run(
+        sha256(c),
+        userId,
+        now,
+      );
+    await audit(db, tenant, userId, 'auth.mfa_recovery_issued', `user:${userId}`, now, `count=${count}`);
+  });
+  return codes;
+}
+
+/** Consume one recovery code; each code works exactly once. */
+export async function consumeMfaRecoveryCode(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  code: string,
+  now: string,
+): Promise<boolean> {
+  const out = await db
+    .prepare('UPDATE mfa_recovery_codes SET used_at = ? WHERE code_hash = ? AND user_id = ? AND used_at IS NULL')
+    .run(now, sha256(code), userId);
+  if (out.changes > 0) {
+    await audit(db, tenant, userId, 'auth.mfa_recovery_used', `user:${userId}`, now);
+    return true;
+  }
+  return false;
+}
+
+export async function countLiveRecoveryCodes(db: AsyncDb, userId: string): Promise<number> {
+  const row = (await db
+    .prepare('SELECT COUNT(*) AS n FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL')
+    .get(userId)) as { n: number };
+  return Number(row.n);
+}
+
 export async function assertRecentAuthForSensitiveOp(
   db: AsyncDb,
   userId: string,
@@ -1284,10 +1623,10 @@ export async function assertRecentAuthForSensitiveOp(
   windowMs = MFA_RECENT_AUTH_WINDOW_MS,
 ): Promise<void> {
   const session = (await db
-    .prepare('SELECT created_at FROM auth_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1')
+    .prepare('SELECT created_at FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1')
     .get(userId)) as { created_at: string } | undefined;
   if (!session) throw new AuthError('REAUTH_REQUIRED', 'recent authentication required for sensitive operation');
-  if (new Date(now).getTime() - new Date(session.created_at).getTime() > windowMs) {
+  if (Date.parse(now) - Date.parse(session.created_at) > windowMs) {
     throw new AuthError('REAUTH_REQUIRED', 'session too old; re-authenticate to proceed');
   }
 }

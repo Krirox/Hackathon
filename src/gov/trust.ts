@@ -613,7 +613,47 @@ export interface RuntimeHaltDrill {
   actionClass: string;
   held: boolean;
   released: boolean;
+  /**
+   * FLOW-022: while the drill stop was held, the real authorization path
+   * refused new work (guardedAuthorize → denied). A runtime drill that
+   * cannot demonstrate this proves nothing about the halt path.
+   */
+  authorizationHeld: boolean;
+  /** What happens to in-flight, queued, and external work under this stop. */
+  effects: HaltEffectMatrix;
   at: string;
+}
+
+/**
+ * FLOW-022: the two drill modes, in operator words. Policy-only checks
+ * kill-switch matching on an isolated drill tenant and never engages a
+ * real stop; runtime-halt briefly engages a real stop on the target scope,
+ * verifies the halt path, then releases. Audit evidence is labeled by
+ * mode (`KILL_DRILL` vs `RUNTIME_HALT_DRILL`) so a passing policy check
+ * can never masquerade as a proven halt.
+ */
+export function describeDrillMode(mode: 'policy-only' | 'runtime-halt'): {
+  touchesRuntime: boolean;
+  evidence: string;
+  summary: string;
+} {
+  if (mode === 'policy-only') {
+    return {
+      touchesRuntime: false,
+      evidence: 'KILL_DRILL',
+      summary:
+        'policy-only drill: checks kill-switch matching on an isolated drill tenant; ' +
+        'never engages a real stop and never touches queued or in-flight work',
+    };
+  }
+  return {
+    touchesRuntime: true,
+    evidence: 'RUNTIME_HALT_DRILL',
+    summary:
+      'runtime halt drill: engages a real stop on the target scope, verifies new ' +
+      'authorizations are denied and queued/in-flight effects, then releases immediately ' +
+      'with audited evidence',
+  };
 }
 
 function parseStopRow(tenant: string, key: string, value: string): StopRecord | null {
@@ -808,9 +848,18 @@ export async function runtimeHaltDrill(
     .run(key, JSON.stringify({ by, at, reason: 'runtime halt drill — real engagement, released immediately' }));
   const probeScope = kill.scope === '*' ? 'drill-probe' : kill.scope;
   const probeClass = kill.actionClass === '*' ? 'READ' : kill.actionClass;
-  const held = await checkKill(db, tenant, probeScope, probeClass).finally(async () => {
+  const effects = haltEffects(kill.scope, kill.actionClass);
+  let held: boolean;
+  let authorizationHeld: boolean;
+  try {
+    held = await checkKill(db, tenant, probeScope, probeClass);
+    // Exercise the real halt path while the stop is held: the same
+    // guardedAuthorize call sites use must refuse new work.
+    const verdict = await guardedAuthorize(db, { tenant, scope: probeScope, actionClass: probeClass });
+    authorizationHeld = verdict.verdict === 'denied';
+  } finally {
     await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
-  });
+  }
   const released = !(await checkKill(db, tenant, probeScope, probeClass));
   await audit(
     db,
@@ -818,14 +867,92 @@ export async function runtimeHaltDrill(
     by,
     'RUNTIME_HALT_DRILL',
     `${kill.scope}/${kill.actionClass}`,
-    JSON.stringify({ mode: 'runtime-halt', held, released }),
+    JSON.stringify({ mode: 'runtime-halt', held, released, authorizationHeld, effects }),
     at,
   );
-  return { mode: 'runtime-halt', scope: kill.scope, actionClass: kill.actionClass, held, released, at };
+  return {
+    mode: 'runtime-halt',
+    scope: kill.scope,
+    actionClass: kill.actionClass,
+    held,
+    released,
+    authorizationHeld,
+    effects,
+    at,
+  };
 }
 
 export function liveness(now?: string): { alive: true; at: string } {
   return { alive: true, at: now ?? new Date().toISOString() };
+}
+
+// ------------------------------------------------------- worker heartbeat ----
+// FLOW-023: the application worker owns a durable heartbeat (`substrate/
+// worker.ts` records it on every tick, best-effort). Readiness treats the
+// three heartbeat states differently on purpose:
+//   never recorded → unconfigured-optional (no worker deployed yet; dev and
+//     fresh installs stay green rather than crying wolf);
+//   fresh          → ok;
+//   stale          → failing (a deployed worker that went silent is an
+//     outage, not an unconfigured optional).
+
+/** A recorded heartbeat older than this makes readiness fail. */
+export const WORKER_HEARTBEAT_STALE_MS = 60_000;
+
+const workerHeartbeatKey = (tenant: string): string => `worker:heartbeat:${tenant}`;
+
+export async function recordWorkerHeartbeat(
+  db: AsyncDb,
+  tenant: string,
+  input: { workerId: string; now?: string },
+): Promise<void> {
+  const at = input.now ?? new Date().toISOString();
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(workerHeartbeatKey(tenant), JSON.stringify({ workerId: input.workerId, at }));
+}
+
+export async function readWorkerHeartbeat(
+  db: AsyncDb,
+  tenant: string,
+): Promise<{ workerId: string; at: string } | null> {
+  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(workerHeartbeatKey(tenant))) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(String(row.value)) as { workerId?: unknown; at?: unknown };
+    if (typeof parsed.workerId !== 'string' || typeof parsed.at !== 'string') return null;
+    return { workerId: parsed.workerId, at: parsed.at };
+  } catch {
+    return null;
+  }
+}
+
+/** Readiness projection of the worker heartbeat — shaped for DependencyCheck. */
+export async function workerReadiness(
+  db: AsyncDb,
+  tenant: string,
+  opts: { staleMs?: number; now?: string } = {},
+): Promise<{ ok: boolean; detail?: string; unconfigured?: boolean }> {
+  const staleMs = opts.staleMs ?? WORKER_HEARTBEAT_STALE_MS;
+  const nowMs = Date.parse(opts.now ?? new Date().toISOString());
+  const beat = await readWorkerHeartbeat(db, tenant);
+  if (!beat) {
+    return {
+      ok: false,
+      unconfigured: true,
+      detail: 'no worker heartbeat recorded — run `vital worker` or `vital serve --with-worker`',
+    };
+  }
+  const ageMs = nowMs - Date.parse(beat.at);
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return { ok: false, detail: `worker heartbeat timestamp unreadable (${beat.workerId})` };
+  }
+  if (ageMs > staleMs) {
+    return { ok: false, detail: `worker ${beat.workerId} heartbeat stale (${Math.round(ageMs / 1000)}s old)` };
+  }
+  return { ok: true, detail: `worker ${beat.workerId} heartbeat ${Math.round(ageMs / 1000)}s old` };
 }
 
 export interface DependencyCheck {

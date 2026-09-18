@@ -15,6 +15,7 @@ import {
   clearFreeze,
   clearKill,
   correlateDiagnostic,
+  describeDrillMode,
   describeStops,
   effectivePolicy,
   evaluateFreeze,
@@ -27,9 +28,11 @@ import {
   listStops,
   liveness,
   mintSupportRef,
+  readWorkerHeartbeat,
   recoverStop,
   recordSelfHalt,
   recordTrustOutcome,
+  recordWorkerHeartbeat,
   recoveryRequired,
   resolveHoneytask,
   retryGuidance,
@@ -39,7 +42,9 @@ import {
   SETTINGS_INVENTORY,
   trustFor,
   validatePolicyChange,
+  workerReadiness,
 } from '../src/gov/trust.ts';
+import { integrationReadinessState } from '../src/ingest/health.ts';
 import { actReversible, actRetryGuidance, assertNoHalt, compensateReversible } from '../src/gov/act.ts';
 import {
   checkBatch,
@@ -876,6 +881,158 @@ T('FLOW-022: engaging a stop audits KILL_ENGAGED with actor and reason', async (
   eq(rows[0]?.target, 'engineering/ACT_REVERSIBLE');
   eq(rows[0]?.detail.includes('bad deploy drill'), true);
   eq(await checkKill(db, TEN, 'engineering', 'ACT_REVERSIBLE'), true);
+});
+
+T('FLOW-022: policy-only drills never touch real stops or live work', async () => {
+  const { db } = await fresh();
+  await setKill(db, TEN, { scope: 'engineering', actionClass: 'READ' }, 'human:ops', NOW, {
+    reason: 'real incident in progress',
+  });
+  const mode = describeDrillMode('policy-only');
+  eq(mode.touchesRuntime, false);
+  eq(mode.evidence, 'KILL_DRILL');
+  const drill = await killDrill(db, TEN, 'human:drill', NOW);
+  eq(drill.mode, 'policy-only');
+  eq('executorHalt' in drill, false, 'no executor is engaged by a policy check:');
+  eq(await checkKill(db, TEN, 'engineering', 'READ'), true, 'the real stop survives the drill:');
+  const realKeys = (await db.prepare("SELECT key FROM meta WHERE key LIKE 'kill:' || ? || ':%'").all(TEN)) as {
+    key: string;
+  }[];
+  eq(realKeys.length, 1, 'the drill leaves no kill keys on the real tenant:');
+  const evidence = await listHaltEvidence(db, TEN);
+  eq(
+    evidence.drills.every((row) => row.action === 'KILL_DRILL'),
+    true,
+  );
+  eq(
+    evidence.real.some((row) => row.action === 'KILL_ENGAGED' && row.target === 'engineering/READ'),
+    true,
+  );
+});
+
+T('FLOW-022: runtime drill engages the real halt path, verifies effects, and releases', async () => {
+  const { db } = await fresh();
+  const mode = describeDrillMode('runtime-halt');
+  eq(mode.touchesRuntime, true);
+  eq(mode.evidence, 'RUNTIME_HALT_DRILL');
+  const runtime = await runtimeHaltDrill(db, TEN, { scope: 'marketing', actionClass: 'READ' }, 'human:drill', NOW);
+  eq(runtime.mode, 'runtime-halt');
+  eq(runtime.held, true);
+  eq(runtime.authorizationHeld, true, 'the real authorization path refused while held:');
+  eq(runtime.effects.inFlight.effect, 'not-force-terminated');
+  eq(runtime.effects.queued.effect, 'held-at-admission');
+  eq(runtime.effects.external.effect, 'human-command-only');
+  eq(runtime.released, true);
+  eq(await checkKill(db, TEN, 'marketing', 'READ'), false, 'the drill releases its real engagement:');
+  eq(
+    (await guardedAuthorize(db, { tenant: TEN, scope: 'marketing', actionClass: 'READ' })).verdict !== 'denied',
+    true,
+    'authorization flows again after release:',
+  );
+  const rows = (await db
+    .prepare("SELECT detail FROM audit_log WHERE action = 'RUNTIME_HALT_DRILL'")
+    .all()) as { detail: string }[];
+  eq(rows.length, 1);
+  const detail = JSON.parse(String(rows[0]?.detail)) as {
+    mode: string;
+    held: boolean;
+    released: boolean;
+    authorizationHeld: boolean;
+  };
+  eq(detail.mode, 'runtime-halt');
+  eq(detail.held, true);
+  eq(detail.released, true);
+  eq(detail.authorizationHeld, true);
+});
+
+T('FLOW-022: drill CLI separates policy-only from runtime evidence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-drill-'));
+  const dbPath = join(dir, 'drill.db');
+  try {
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+    const signup = run(['signup', '--tenant', 'drilltenant', '--email', 'o@d.test', '--password', 'long-enough-pw-1', '--db', dbPath]);
+    eq(signup.status, 0, `signup seeds the drill tenant: ${signup.stderr}`);
+    const policy = run(['drill', '--policy-only', '--tenant', 'drilltenant', '--db', dbPath]);
+    eq(policy.status, 0, `policy-only drill passes: ${policy.stderr}`);
+    const policyOut = JSON.parse(policy.stdout) as { mode: string; evidence: string; result: { allHalted: boolean } };
+    eq(policyOut.mode, 'policy-only');
+    eq(policyOut.evidence, 'KILL_DRILL');
+    eq(policyOut.result.allHalted, true);
+    const runtime = run([
+      'drill',
+      '--runtime',
+      '--scope',
+      'engineering',
+      '--class',
+      'READ',
+      '--tenant',
+      'drilltenant',
+      '--db',
+      dbPath,
+    ]);
+    eq(runtime.status, 0, `runtime drill passes: ${runtime.stderr}`);
+    const runtimeOut = JSON.parse(runtime.stdout) as {
+      evidence: string;
+      result: { held: boolean; released: boolean; authorizationHeld: boolean };
+    };
+    eq(runtimeOut.evidence, 'RUNTIME_HALT_DRILL');
+    eq(runtimeOut.result.held, true);
+    eq(runtimeOut.result.released, true);
+    eq(runtimeOut.result.authorizationHeld, true);
+    const bare = run(['drill', '--tenant', 'drilltenant', '--db', dbPath]);
+    eq(bare.status, 1, 'a drill without a mode names its usage:');
+    eq(`${bare.stderr}${bare.stdout}`.includes('--policy-only'), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-023: worker heartbeat separates unconfigured, live, and silent workers', async () => {
+  const { db } = await fresh();
+  const missing = await workerReadiness(db, TEN, { now: NOW });
+  eq(missing.ok, false);
+  eq(missing.unconfigured, true, 'a never-deployed worker never fails readiness:');
+  await recordWorkerHeartbeat(db, TEN, { workerId: 'worker-1', now: NOW });
+  eq(await readWorkerHeartbeat(db, TEN), { workerId: 'worker-1', at: NOW });
+  const live = await workerReadiness(db, TEN, { now: NOW });
+  eq(live.ok, true);
+  const stale = await workerReadiness(db, TEN, { now: '2026-09-09T12:05:00.000Z' });
+  eq(stale.ok, false);
+  eq(stale.unconfigured ?? false, false, 'a silent worker is an outage, not an unconfigured optional:');
+  eq(stale.detail?.includes('stale'), true);
+});
+
+T('FLOW-023: integration readiness separates unconfigured-optional from broken', async () => {
+  const baseHealth = { collector: 'files:/data', configured: true, disabled: false } as const;
+  const unconfigured = integrationReadinessState({
+    ...baseHealth,
+    state: 'unconfigured',
+    stateDetail: 'choose a source before syncing',
+  } as Parameters<typeof integrationReadinessState>[0]);
+  eq(unconfigured.ok, false);
+  eq(unconfigured.unconfigured, true);
+  for (const state of ['ready', 'empty', 'syncing'] as const) {
+    const healthy = integrationReadinessState({
+      ...baseHealth,
+      state,
+      stateDetail: 'fine',
+    } as Parameters<typeof integrationReadinessState>[0]);
+    eq(healthy.ok, true, `${state} is healthy:`);
+  }
+  for (const state of ['failed', 'rejected', 'rate_limited', 'delayed'] as const) {
+    const broken = integrationReadinessState({
+      ...baseHealth,
+      state,
+      stateDetail: 'needs attention',
+    } as Parameters<typeof integrationReadinessState>[0]);
+    eq(broken.ok, false, `${state} fails readiness:`);
+    eq(broken.unconfigured ?? false, false, `${state} is not unconfigured:`);
+  }
 });
 
 T('FLOW-022: stop command refuses without scope/class and reason', async () => {

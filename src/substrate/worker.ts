@@ -40,7 +40,7 @@ export interface ApplicationWorkerOptions {
    */
   buzz?: {
     surface: BuzzSurface;
-    channelFor(requestId: string): { channel: string; threadRoot?: string } | null;
+    channelFor(requestId: string, request?: CoordinationRequest): { channel: string; threadRoot?: string } | null;
   };
 }
 
@@ -203,6 +203,16 @@ export class ApplicationWorker {
   async tick(now?: string): Promise<WorkerTickResult> {
     const nowMs = Date.parse(now ?? new Date().toISOString());
     const nowIso = new Date(nowMs).toISOString();
+
+    // FLOW-023: durable heartbeat so readiness (and operators) can tell a
+    // live worker from a silent one. Best-effort by design: a heartbeat
+    // write must never fail the tick it reports on.
+    try {
+      const { recordWorkerHeartbeat } = await import('../gov/trust.ts');
+      await recordWorkerHeartbeat(this.db, this.tenant, { workerId: this.workerId, now: nowIso });
+    } catch {
+      /* heartbeat is observability, not work */
+    }
 
     const result: WorkerTickResult = {
       swept: { readmitted: 0, reclaimed: 0, expired: 0 },
@@ -481,7 +491,7 @@ export class ApplicationWorker {
               // (no operator-visible thread noise from CI runs). Relay
               // failures are counted but never fatal to dispatch.
               if (this.buzz && !outcome.isTestBaseline) {
-                const buzzCoords = this.buzz.channelFor(reqId);
+                const buzzCoords = this.buzz.channelFor(reqId, request);
                 if (buzzCoords) {
                   const handle = watchRun(
                     () => { /* progress subscription: runner already ran */ },

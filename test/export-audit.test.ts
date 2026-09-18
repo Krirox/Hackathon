@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
 import {
   auditLinks,
@@ -5,9 +8,13 @@ import {
   createExportTracker,
   exportLedger,
   exportLedgerWithManifest,
+  EXPORT_RETENTION_POLICY,
+  filesystemArchivalProbe,
   streamExportLedger,
   exportLedgerStream,
   queryAudit,
+  verifyArchivalDelivery,
+  type ExportProgressEvent,
 } from '../src/ledger/export.ts';
 
 console.log('\n\x1b[1mLedger export and audit — FLOW-024\x1b[0m');
@@ -282,4 +289,99 @@ T('F23: concurrent exports run in parallel without mutual blocking or data corru
   eq(runs[0]?.export.claims.length, 2);
   eq(runs[1]?.export.claims.length, 2);
   eq(runs[2]?.export.claims.length, 2);
+});
+
+T('FLOW-024: manifests carry the retention/expiry policy — no silent expiry', async () => {
+  const { db } = await seedLedger();
+  for (const kind of ['snapshot', 'evidence-package', 'backup-reference'] as const) {
+    const { manifest } = await exportLedgerWithManifest(db, TEN, kind, NOW);
+    eq(manifest.retention, EXPORT_RETENTION_POLICY);
+    eq(manifest.retention.includes('no automatic expiry'), true, `${kind} states its retention:`);
+  }
+});
+
+T('FLOW-024: large exports emit start/batch/complete progress per section', async () => {
+  const { db, ledger } = await fresh();
+  for (let i = 0; i < 7; i++) {
+    await ledger.append({
+      tenant: TEN,
+      subject: 'launch',
+      kind: 'FACT',
+      statement: `shipped ${i}`,
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'human:priya',
+      scope: 'marketing',
+      authorType: 'system',
+      provenance: { ...sor(), retrievedAt: NOW },
+      now: NOW,
+    });
+  }
+  const events: ExportProgressEvent[] = [];
+  let jsonText = '';
+  const { counts, manifest } = await streamExportLedger(
+    db,
+    TEN,
+    (chunk) => {
+      jsonText += chunk;
+    },
+    {
+      batchSize: 2,
+      now: NOW,
+      onProgress: (event) => events.push(event),
+    },
+  );
+  eq(counts.claims, 7);
+  const sections = ['claims', 'claimLinks', 'decisions', 'outcomes', 'audit'] as const;
+  for (const section of sections) {
+    const scoped = events.filter((e) => e.section === section);
+    eq(scoped.length > 0, true, `${section} emits progress:`);
+    eq(scoped[0]!.phase, 'start');
+    eq(scoped[scoped.length - 1]!.phase, 'complete');
+  }
+  const claimBatches = events.filter((e) => e.section === 'claims' && e.phase === 'batch');
+  eq(claimBatches.length >= 3, true, 'paged reads surface as multiple batch events:');
+  const final = events.filter((e) => e.section === 'export' && e.phase === 'complete');
+  eq(final.length, 1, 'one terminal completion event:');
+  eq(final[0]!.completed, counts.claims + counts.claimLinks + counts.decisions + counts.outcomes + counts.audit);
+  eq(JSON.parse(jsonText).claims.length, 7, 'progress never corrupts the byte stream:');
+  eq(manifest.retention.includes('no automatic expiry'), true);
+});
+
+T('FLOW-024: archival delivery is verified by read-back — never claimed when unconfigured', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-archive-'));
+  const file = join(dir, 'ledger-export.json');
+  writeFileSync(file, JSON.stringify({ tenant: TEN, claims: [1, 2, 3] }));
+  const archiveDir = mkdtempSync(join(tmpdir(), 'vital-archive-shelf-'));
+  const key = basename(file);
+  // No bucket configured: explicit unconfigured state, never success.
+  delete process.env.VITAL_ARCHIVE_BUCKET;
+  const unconfigured = await verifyArchivalDelivery(file, { probe: filesystemArchivalProbe(archiveDir) });
+  eq(unconfigured.status, 'unconfigured');
+  eq(unconfigured.detail.includes('not claimed'), true);
+  // Bucket configured but object absent: missing, not verified.
+  const missing = await verifyArchivalDelivery(file, {
+    bucket: 'audit-vault',
+    key,
+    probe: filesystemArchivalProbe(archiveDir),
+  });
+  eq(missing.status, 'missing');
+  // Deliver the bytes, then verify: byte-compared read-back passes.
+  writeFileSync(join(archiveDir, key), JSON.stringify({ tenant: TEN, claims: [1, 2, 3] }));
+  const verified = await verifyArchivalDelivery(file, {
+    bucket: 'audit-vault',
+    key,
+    probe: filesystemArchivalProbe(archiveDir),
+  });
+  eq(verified.status, 'verified');
+  eq(verified.expectedSha256 !== undefined, true, 'report names the compared hash:');
+  // Tampered or crossed object: mismatch, never success.
+  writeFileSync(join(archiveDir, key), JSON.stringify({ tenant: TEN, claims: [9] }));
+  const mismatch = await verifyArchivalDelivery(file, {
+    bucket: 'audit-vault',
+    key,
+    probe: filesystemArchivalProbe(archiveDir),
+  });
+  eq(mismatch.status, 'mismatch');
 });

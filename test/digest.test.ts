@@ -401,7 +401,7 @@ T('FLOW-019: shared nav resolves home and lists only available destinations', as
   eq(html.includes('Team'), false);
   eq(html.includes('Account'), false);
   const evil = renderConsoleNav([{ key: 'digest', label: '<script>', href: '/console/digest?x="y' }]);
-  eq(evil.includes('<script>'), false);
+  eq(evil.includes('&lt;script&gt;'), true, 'nav label is escaped:');
   eq(evil.includes('"y'), false);
 });
 

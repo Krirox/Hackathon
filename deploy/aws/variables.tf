@@ -215,8 +215,91 @@ variable "operator_secret" {
   default     = ""
 }
 
+variable "ops_alarm_email" {
+  description = "Confirmed-subscription target for ops alarms (RDS free storage, ALB 5xx, executor errors, queue age). Empty = alarms fire but notify nobody — allowed only for throwaway stacks. AWS sends a confirmation mail on apply; the alarms are live only after it is confirmed."
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Extra tags merged onto every resource"
   type        = map(string)
   default     = {}
+}
+
+variable "enable_buzz" {
+  description = "Provision the Buzz relay stack (ECS + RDS + ElastiCache + S3). Replaces the former MinIO/Redis/docker-compose path."
+  type        = bool
+  default     = true
+}
+
+variable "buzz_image" {
+  description = "Container image for the Buzz Nostr relay"
+  type        = string
+  default     = "ghcr.io/block/buzz:main"
+}
+
+variable "buzz_desired_count" {
+  description = "Buzz relay Fargate tasks behind the ALB + Cloud Map"
+  type        = number
+  default     = 2
+}
+
+variable "buzz_cpu" {
+  description = "Fargate CPU units for the Buzz relay task"
+  type        = string
+  default     = "512"
+}
+
+variable "buzz_memory" {
+  description = "Fargate memory (MB) for the Buzz relay task"
+  type        = string
+  default     = "1024"
+}
+
+variable "buzz_db_instance_class" {
+  description = "RDS instance class for the Buzz Postgres database"
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "buzz_db_name" {
+  type    = string
+  default = "buzz"
+}
+
+variable "buzz_db_username" {
+  type    = string
+  default = "buzz"
+}
+
+variable "buzz_db_multi_az" {
+  description = "Multi-AZ for Buzz Postgres (pilot+ posture)"
+  type        = bool
+  default     = true
+}
+
+variable "buzz_db_max_allocated_storage" {
+  description = "Buzz RDS storage-autoscaling ceiling in GiB"
+  type        = number
+  default     = 50
+}
+
+variable "buzz_redis_node_type" {
+  description = "ElastiCache node type for Buzz Redis"
+  type        = string
+  default     = "cache.t4g.micro"
+}
+
+variable "buzz_relay_private_key" {
+  description = "Hex-encoded secp256k1 private key for the Buzz relay identity. Set via TF_VAR_buzz_relay_private_key, never in git."
+  type        = string
+  sensitive   = true
+  default     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+
+variable "buzz_hostname" {
+  description = "Optional host header for public Buzz relay access via the ALB (e.g. buzz.example.com). Empty = internal Cloud Map only."
+  type        = string
+  default     = ""
 }

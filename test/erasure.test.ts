@@ -1,12 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { T, eq, rejects, fresh, TEN, NOW } from './helpers.ts';
 import {
+  collectErasureArtifacts,
   eraseTenant,
   ERASURE_ACTION,
+  ERASURE_COLLECT_ACTION,
   ERASURE_DONE_ACTION,
   erasedTenantOf,
+  verifyErasureReceipt,
   type ErasureReceipt,
 } from '../src/core/erasure.ts';
 import { storeArtifact, type RawEvent } from '../src/ingest/collectors.ts';
@@ -344,6 +347,125 @@ T('FLOW-004: erased slug cannot be reused for a new organization', async () => {
   const { db } = await world();
   await eraseTenant(db, TEN, 'op', NOW);
   await rejects(() => signupTenant(db, SIGNUP, NOW), 'SLUG_RESERVED', 'erased slug reuse is refused:');
+});
+
+T('FLOW-004: post-commit collector deletes exclusive artifacts and never shared blobs', async () => {
+  const { db } = await world();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
+  const exclusive: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/only-acme',
+    summary: 'exclusive',
+    fingerprint: 'fp-collect-exclusive',
+    occurredAt: NOW,
+    payload: { only: TEN },
+  };
+  const sharedEv: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/shared-blob',
+    summary: 'shared',
+    fingerprint: 'fp-collect-shared',
+    occurredAt: NOW,
+    payload: { both: true },
+  };
+  const exclusiveRef = storeArtifact(db, exclusive, artifactDir);
+  const sharedRef = storeArtifact(db, sharedEv, artifactDir);
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(exclusiveRef, 'clm_e1');
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(sharedRef, 'clm_z1');
+  // A second surviving claim on the erased tenant also points at the shared blob.
+  await db
+    .prepare(
+      `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor,
+        extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, created_at, seq, raw_ref)
+       VALUES ('clm_e2', ?, 'release:v1', 'FACT', 'also ships', 1, 'https://x.test/3', 'SYSTEM_OF_RECORD', 'e', '1', ?, ?, ?, 'CURRENT', 'sync:gh', 'eng', ?, 2, ?)`,
+    )
+    .run(TEN, NOW, NOW, NOW, NOW, sharedRef);
+  const r = await eraseTenant(db, TEN, 'op', NOW, { artifactDir });
+  const deferredRefs = r.receipt.deferred.find((d) => d.category === 'artifacts')?.items ?? [];
+  eq(deferredRefs.includes(exclusiveRef), true, 'exclusive ref is deferred for post-commit collection:');
+  // The shared blob is now exclusive to zenith — but the collector must still
+  // re-check ownership instead of trusting the pre-commit receipt.
+  const collected = await collectErasureArtifacts(db, TEN, [...deferredRefs, sharedRef], {
+    artifactDir,
+    actor: 'op',
+    now: NOW,
+  });
+  eq(collected.deleted.includes(exclusiveRef), true, 'exclusive file deleted post-commit:');
+  eq(existsSync(join(artifactDir, exclusiveRef)), false);
+  eq(collected.retainedShared.includes(sharedRef), true, 'surviving reference keeps the shared blob:');
+  eq(existsSync(join(artifactDir, sharedRef)), true, 'shared file untouched:');
+  const audit = (await db
+    .prepare('SELECT COUNT(*) AS n FROM audit_log WHERE tenant = ? AND action = ?')
+    .get(erasedTenantOf(TEN), ERASURE_COLLECT_ACTION)) as { n: number };
+  eq(Number(audit.n) >= 1, true, 'collection is audited under the receipt tenant:');
+});
+
+T('FLOW-004: collector is idempotent — reruns report missing, never fail', async () => {
+  const { db } = await world();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
+  const event: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/rerun',
+    summary: 'rerun',
+    fingerprint: 'fp-collect-rerun',
+    occurredAt: NOW,
+    payload: { v: 1 },
+  };
+  const ref = storeArtifact(db, event, artifactDir);
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_e1');
+  await eraseTenant(db, TEN, 'op', NOW, { artifactDir });
+  const first = await collectErasureArtifacts(db, TEN, [ref], { artifactDir, now: NOW });
+  eq(first.deleted, [ref]);
+  const second = await collectErasureArtifacts(db, TEN, [ref], { artifactDir, now: NOW });
+  eq(second.deleted, [], 'nothing left to delete:');
+  eq(second.missing, [ref], 'rerun reports already-collected:');
+  eq(second.failed, [], 'rerun does not fail:');
+});
+
+T('FLOW-004: collector rollback safety — failed erasure leaves every blob file untouched', async () => {
+  const { db } = await world();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
+  const event: RawEvent = {
+    source: 'github',
+    uri: 'https://x.test/rollback',
+    summary: 'rollback',
+    fingerprint: 'fp-collect-rollback',
+    occurredAt: NOW,
+    payload: { v: 1 },
+  };
+  const ref = storeArtifact(db, event, artifactDir);
+  await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_e1');
+  const exportDir = mkdtempSync(join(tmpdir(), 'vital-erasure-'));
+  const blocker = join(exportDir, 'blocked');
+  writeFileSync(blocker, 'not a directory');
+  await rejects(() => eraseTenant(db, TEN, 'op', NOW, { exportTo: blocker, artifactDir }), 'EEXIST');
+  eq(existsSync(join(artifactDir, ref)), true, 'no file deleted when the transaction rolled back:');
+  eq(
+    ((await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number }).n,
+    1,
+    'the referencing claim survived the rollback:',
+  );
+});
+
+T('FLOW-004: operator receipt verification names every bucket and checks the export file', async () => {
+  const { db } = await world();
+  const exportDir = mkdtempSync(join(tmpdir(), 'vital-erasure-'));
+  const r = await eraseTenant(db, TEN, 'op', NOW, { exportTo: exportDir });
+  const verified = await verifyErasureReceipt(db, TEN);
+  eq(verified.found, true);
+  eq(verified.receipt?.deleted['claims'] ?? 0, 1);
+  eq(verified.receipt?.retained.some((x) => x.category === 'ledger-export'), true, 'retained export listed:');
+  eq(verified.receipt?.deferred.some((x) => x.category === 'backups'), true, 'deferred backups listed:');
+  eq(verified.exportFile?.status, 'verified', 'durable export re-checks against the receipt:');
+  // Tamper with the file: verification must notice.
+  writeFileSync(verified.exportFile!.path, JSON.stringify({ tenant: TEN, exportedAt: 'tampered' }));
+  const tampered = await verifyErasureReceipt(db, TEN);
+  eq(tampered.exportFile?.status, 'mismatch', 'tampered export fails verification:');
+  void r;
+  const missing = await verifyErasureReceipt(db, 'no-such-tenant');
+  eq(missing.found, false, 'unknown slug reports not-found, not success:');
+  const parsed = JSON.parse(readFileSync(verified.exportFile!.path, 'utf8')) as { exportedAt: string };
+  eq(typeof parsed.exportedAt, 'string');
 });
 
 T('FLOW-004: exclusive artifact refs are planned for post-commit deletion', async () => {

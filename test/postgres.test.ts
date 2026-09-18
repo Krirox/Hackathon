@@ -2,7 +2,9 @@ import { openPostgres, toPostgresPlaceholders } from '../src/core/pg.ts';
 import { migrate, nextSeq } from '../src/core/db.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
 import { createCoordinator } from '../src/coord/coordinator.ts';
-import { T, eq, NOW, sor } from './helpers.ts';
+import { claimOutbox, settleOutbox, enqueueOutbox } from '../src/substrate/scheduler.ts';
+import { claimInbox, settleInbox, stageToInbox } from '../src/ingest/collectors.ts';
+import { T, eq, NOW, sor, rejects } from './helpers.ts';
 
 /**
  * Postgres lane (CI postgres service, TEST_PG_URL).
@@ -141,4 +143,129 @@ pgT('coordinator dialect helpers execute against real postgres', async () => {
 T('placeholder rewriting never touches a ? inside a string literal', () => {
   eq(toPostgresPlaceholders("SELECT '?' , ?"), "SELECT '?' , $1");
   eq(toPostgresPlaceholders("UPDATE t SET x = 'it''s ?' WHERE id = ?"), "UPDATE t SET x = 'it''s ?' WHERE id = $1");
+});
+
+// ---- F10/F07: two TRUE connection drills — CAS and migration under real READ COMMITTED
+// The sqlite F10 tests interleave claims through ONE connection (JS awaits
+// between statements). These drills open two SEPARATE pool connections so
+// the ownership CAS is exercised exactly as two deployed workers would:
+// both transactions observe the same rows under READ COMMITTED, and only
+// the conditional UPDATE decides who owns what.
+
+const pgTwo = async (): Promise<[Awaited<ReturnType<typeof openPostgres>>, Awaited<ReturnType<typeof openPostgres>>]> => {
+  const a = openPostgres(url!);
+  const b = openPostgres(url!);
+  try {
+    await migrate(a);
+    await migrate(b);
+  } catch (e) {
+    await a.close();
+    await b.close();
+    throw e;
+  }
+  return [a, b];
+};
+
+pgT('F07: two connections racing migrate() on a fresh database both succeed, one journal stamp', async () => {
+  const [dbA, dbB] = await pgTwo();
+  try {
+    // Reset the journal so both connections see a "fresh" database and race
+    // the full migrate() path: base DDL, additive list, journal stamp.
+    await dbA.exec('DROP TABLE IF EXISTS schema_migrations');
+    await dbA.prepare('DELETE FROM meta WHERE key = ?').run('schema_version');
+    await dbA.prepare('DELETE FROM meta WHERE key = ?').run('spent_mirrors_backfilled');
+    await Promise.all([migrate(dbA), migrate(dbB)]);
+    const stamps = (await dbA.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?').get(
+      'additive-list-v6',
+    )) as { n: number };
+    eq(Number(stamps.n), 1, 'exactly one journal stamp after the race:');
+    const version = (await dbA.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')) as {
+      value: string;
+    };
+    eq(version.value, '6', 'version stamped exactly once at 6:');
+    // A third sequential re-run stays idempotent.
+    await migrate(dbA);
+    await migrate(dbB);
+    const stampsAfter = (await dbA.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?').get(
+      'additive-list-v6',
+    )) as { n: number };
+    eq(Number(stampsAfter.n), 1, 're-run does not duplicate the stamp:');
+  } finally {
+    await dbA.close();
+    await dbB.close();
+  }
+});
+
+pgT('F10: two Postgres connections cannot both own one outbox row; stale owner cannot settle', async () => {
+  const [dbA, dbB] = await pgTwo();
+  try {
+    for (let i = 0; i < 4; i++) await enqueueOutbox(dbA, tenant, 'sqs-send', { i }, { now: NOW });
+    // Both relays claim CONCURRENTLY — two pools, two transactions, same rows.
+    const [aRows, bRows] = await Promise.all([
+      claimOutbox(dbA, 10, NOW, { owner: 'relay-a', leaseMs: 60_000 }),
+      claimOutbox(dbB, 10, NOW, { owner: 'relay-b', leaseMs: 60_000 }),
+    ]);
+    const ownedByA = new Set(aRows.map((r) => r.id));
+    const ownedByB = new Set(bRows.map((r) => r.id));
+    for (const id of ownedByA) eq(ownedByB.has(id), false, `row ${id} owned by both relays:`);
+    eq(ownedByA.size + ownedByB.size, 4, 'every row claimed exactly once:');
+    // The loser of a row cannot settle it — ownership fencing on the live engine.
+    if (ownedByB.size > 0) {
+      await rejects(
+        async () => await settleOutbox(dbA, [...ownedByB], 'DONE', { owner: 'relay-a' }),
+        'NOT_OWNER',
+        'stale owner settlement refused:',
+      );
+    }
+    await settleOutbox(dbA, [...ownedByA], 'DONE', { owner: 'relay-a' });
+    await settleOutbox(dbB, [...ownedByB], 'DONE', { owner: 'relay-b' });
+    const left = (await dbA.prepare("SELECT COUNT(*) AS n FROM outbox WHERE status = 'CLAIMED'").get()) as {
+      n: number;
+    };
+    eq(Number(left.n), 0, 'nothing stranded in CLAIMED:');
+  } finally {
+    await dbA.close();
+    await dbB.close();
+  }
+});
+
+pgT('F10: two Postgres connections cannot both own one inbox row; lease recovery works', async () => {
+  const [dbA, dbB] = await pgTwo();
+  try {
+    const events = Array.from({ length: 4 }, (_, n) => ({
+      source: 's',
+      uri: `https://example.com/pg-f10-${n}`,
+      fingerprint: `pgfp${n}`,
+      eventId: `pge${n}`,
+      revision: 'r1',
+      occurredAt: NOW,
+      summary: `pg event ${n}`,
+      payload: {},
+    }));
+    await stageToInbox(dbA, tenant, 'col', events, NOW);
+    const [aRows, bRows] = await Promise.all([
+      claimInbox(dbA, tenant, 'col', 10, { owner: 'consumer-a', leaseMs: 60_000, now: NOW }),
+      claimInbox(dbB, tenant, 'col', 10, { owner: 'consumer-b', leaseMs: 60_000, now: NOW }),
+    ]);
+    const ownedByA = new Set(aRows.map((r) => r.id));
+    const ownedByB = new Set(bRows.map((r) => r.id));
+    for (const id of ownedByA) eq(ownedByB.has(id), false, `inbox row ${id} owned by both consumers:`);
+    eq(ownedByA.size + ownedByB.size, 4, 'every staged row claimed exactly once:');
+    await settleInbox(dbA, [...ownedByA], 'DONE', { owner: 'consumer-a' });
+    if (ownedByB.size > 0) {
+      await rejects(
+        async () => await settleInbox(dbA, [...ownedByB], 'DONE', { owner: 'consumer-a' }),
+        'NOT_OWNER',
+        'inbox stale owner settlement refused:',
+      );
+    }
+    await settleInbox(dbB, [...ownedByB], 'DONE', { owner: 'consumer-b' });
+    const stranded = (await dbA
+      .prepare("SELECT id FROM ingest_inbox WHERE tenant = ? AND status = 'CLAIMED'")
+      .all(tenant)) as { id: unknown }[];
+    eq(stranded.length, 0, 'nothing stranded:');
+  } finally {
+    await dbA.close();
+    await dbB.close();
+  }
 });

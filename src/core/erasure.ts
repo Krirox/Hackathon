@@ -1,4 +1,5 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -29,9 +30,21 @@ import { exportLedger, type LedgerExport } from '../ledger/export.ts';
  * switches, dedupe markers) are inventoried and cleared where verified.
  *
  * Retained by design (listed on the receipt, not promised deleted):
- *  - the `erased:<slug>` audit receipt row;
+ *  - the `erased:<slug>` audit receipt row (retained indefinitely — it is
+ *    the proof erasure happened; see "Export retention policy" below);
  *  - raw artifacts still referenced by another tenant's claims;
  *  - operator backups and external object stores outside this command's scope.
+ *
+ * Export retention policy:
+ *  - API / in-memory exports are returned to the caller only; nothing is
+ *    written to disk and no expiry applies because there is nothing to expire.
+ *  - CLI `--export-to` files are operator-managed evidence with NO automatic
+ *    expiry and NO automatic deletion — they are listed on the receipt as
+ *    retained, and `verifyErasureReceipt` re-checks them on demand.
+ *  - Exclusive artifact files are NOT deleted inside the erasure
+ *    transaction; `collectErasureArtifacts` removes them post-commit after
+ *    re-checking ownership, and is safe to rerun (idempotent, audited).
+ *  - The `erased:<slug>` receipt row itself is never expired by this module.
  *
  * Slug reuse is blocked while an erasure receipt exists (`signupTenant` checks).
  */
@@ -40,6 +53,8 @@ import { exportLedger, type LedgerExport } from '../ledger/export.ts';
 export const ERASURE_ACTION = 'erasure.tenant_requested';
 /** Written after deletion under the synthetic receipt tenant. */
 export const ERASURE_DONE_ACTION = 'erasure.tenant_erased';
+/** Written by the post-commit collector for every collection run (idempotent). */
+export const ERASURE_COLLECT_ACTION = 'erasure.artifacts_collected';
 /** Synthetic tenant the receipt row lives under after erasure. */
 export const erasedTenantOf = (slug: string): string => `erased:${slug}`;
 
@@ -262,6 +277,138 @@ export async function eraseTenant(
 
     return { export: exported, receipt, deleted, erasedAt: at };
   });
+}
+
+export interface ErasureCollectorResult {
+  /** Refs whose files were deleted by this run. */
+  deleted: string[];
+  /** Refs still referenced by surviving claims — never deleted. */
+  retainedShared: string[];
+  /** Refs with no file on disk — already collected or never written. */
+  missing: string[];
+  /** Refs that could not be collected (unsafe path, I/O error). */
+  failed: { ref: string; reason: string }[];
+}
+
+export interface CollectErasureArtifactsOptions {
+  /** Raw artifact directory (default `data/artifacts`). */
+  artifactDir?: string;
+  /** Audit actor (default `erasure:collector`). */
+  actor?: string;
+  now?: string;
+}
+
+/**
+ * Post-commit exclusive-artifact collector (FLOW-004).
+ *
+ * Runs AFTER the erasure transaction commits — never inside it — so a
+ * rollback can never restore claim rows that point at already-deleted
+ * blobs. For every candidate ref it re-checks ownership against the live
+ * store: any surviving `claims.raw_ref` row (any tenant) means the blob is
+ * shared and the file is left untouched. Missing files are reported, not
+ * errors, so reruns are idempotent. Each run appends one audited row under
+ * the `erased:<slug>` receipt tenant.
+ */
+export async function collectErasureArtifacts(
+  db: AsyncDb,
+  tenant: string,
+  refs: string[],
+  opts: CollectErasureArtifactsOptions = {},
+): Promise<ErasureCollectorResult> {
+  const artifactDir = resolve(opts.artifactDir ?? process.env.ARTIFACT_DIR ?? join('data', 'artifacts'));
+  const actor = opts.actor ?? 'erasure:collector';
+  const at = opts.now ?? new Date().toISOString();
+  const result: ErasureCollectorResult = { deleted: [], retainedShared: [], missing: [], failed: [] };
+  for (const ref of [...new Set(refs)].sort()) {
+    let full: string;
+    try {
+      full = verifyArtifactRef(ref, artifactDir);
+    } catch (e) {
+      result.failed.push({ ref, reason: e instanceof Error ? e.message : String(e) });
+      continue;
+    }
+    const row = (await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE raw_ref = ?').get(ref)) as { n: number };
+    if (Number(row.n) > 0) {
+      result.retainedShared.push(ref);
+      continue;
+    }
+    if (!existsSync(full)) {
+      result.missing.push(ref);
+      continue;
+    }
+    try {
+      unlinkSync(full);
+      result.deleted.push(ref);
+    } catch (e) {
+      result.failed.push({ ref, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  await db
+    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(erasedTenantOf(tenant), actor, ERASURE_COLLECT_ACTION, `tenant:${tenant}`, JSON.stringify(result), at);
+  return result;
+}
+
+export type ExportFileStatus = 'verified' | 'missing' | 'unreadable' | 'mismatch';
+
+export interface ErasureReceiptVerification {
+  found: boolean;
+  slug: string;
+  receipt?: ErasureReceipt;
+  erasedAt?: string;
+  exportFile?: { path: string; status: ExportFileStatus; detail: string };
+}
+
+/**
+ * Operator/browser receipt verification (FLOW-004): read the surviving
+ * `erased:<slug>` receipt and, when the receipt names a durable export
+ * file, check the file still parses and matches the receipt's tenant and
+ * export timestamp. Post-hoc verification is structural — the live rows are
+ * gone, so byte-equality against the in-transaction document is only
+ * possible at erase time (`verifyErasureExportFile`).
+ */
+export async function verifyErasureReceipt(
+  db: AsyncDb,
+  slug: string,
+  opts: { checkExportFile?: boolean } = {},
+): Promise<ErasureReceiptVerification> {
+  const row = (await db
+    .prepare('SELECT detail, at FROM audit_log WHERE tenant = ? AND action = ? ORDER BY seq DESC LIMIT 1')
+    .get(erasedTenantOf(slug), ERASURE_DONE_ACTION)) as { detail: string; at: string } | undefined;
+  if (!row) return { found: false, slug };
+  const receipt = JSON.parse(String(row.detail)) as ErasureReceipt;
+  const out: ErasureReceiptVerification = { found: true, slug, receipt, erasedAt: row.at };
+  if (opts.checkExportFile !== false && receipt.exportFile) {
+    out.exportFile = checkErasureExportFile(receipt.exportFile, slug, receipt.exportedAt);
+  }
+  return out;
+}
+
+function checkErasureExportFile(
+  path: string,
+  slug: string,
+  exportedAt: string,
+): { path: string; status: ExportFileStatus; detail: string } {
+  if (!existsSync(path)) return { path, status: 'missing', detail: 'export file no longer on disk (operator-managed retention)' };
+  let parsed: { tenant?: unknown; exportedAt?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as { tenant?: unknown; exportedAt?: unknown };
+  } catch (e) {
+    return { path, status: 'unreadable', detail: e instanceof Error ? e.message : String(e) };
+  }
+  if (parsed.tenant !== slug || parsed.exportedAt !== exportedAt) {
+    return {
+      path,
+      status: 'mismatch',
+      detail: `file names tenant=${String(parsed.tenant)} exportedAt=${String(parsed.exportedAt)}; receipt expects tenant=${slug} exportedAt=${exportedAt}`,
+    };
+  }
+  return { path, status: 'verified', detail: 'file parses and matches receipt tenant + export timestamp' };
+}
+
+/** sha256 of a file, used by archival delivery verification. */
+export function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 /** True when an erasure receipt blocks slug reuse for a new organization. */

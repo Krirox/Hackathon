@@ -84,6 +84,66 @@ export function retainDraftFields(input: Record<string, string | undefined>): Re
   return out;
 }
 
+/**
+ * FLOW-010: carry non-secret drafts across a session-expiry bounce. Same
+ * allowlist as retainDraftFields, plus length/count caps so a hostile client
+ * cannot smuggle a blob through the login round-trip. Never call with raw
+ * secrets — they are dropped here even if the caller forgot.
+ */
+export function expiredDraftCarry(
+  input: Record<string, string | undefined>,
+  opts: { maxFieldChars?: number; maxFields?: number } = {},
+): Record<string, string> {
+  const maxFieldChars = opts.maxFieldChars ?? 2000;
+  const maxFields = opts.maxFields ?? 20;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input)) {
+    if (value === undefined) continue;
+    if (!isRetainableField(name)) continue;
+    if (Object.keys(out).length >= maxFields) break;
+    out[name] = value.slice(0, maxFieldChars);
+  }
+  return out;
+}
+
+/** FLOW-010: JSON expiry envelope carries the retainable draft, never secrets. */
+export function sessionExpiredWithDraft(
+  returnPath?: string,
+  fields?: Record<string, string | undefined>,
+): {
+  ok: false;
+  code: 'SESSION_EXPIRED';
+  error: string;
+  loginUrl: string;
+  draft: Record<string, string>;
+} {
+  return { ...sessionExpiredPayload(returnPath), draft: expiredDraftCarry(fields ?? {}) };
+}
+
+// ---------------------------------------------------------------- pre-session --
+// FLOW-010 multi-tab: the pre-session CSRF cookie is a token FAMILY, not a
+// single slot. Each form page load appends its token; any presented token in
+// the family validates. Opening tab B must never invalidate tab A.
+
+/** Maximum live pre-session tokens per browser — bounds the Cookie header. */
+export const PRE_CSRF_FAMILY_MAX = 10;
+
+export function parsePreCsrfFamily(cookieValue: string | undefined): string[] {
+  if (!cookieValue) return [];
+  return cookieValue.split('.').map((t) => t.trim()).filter(Boolean);
+}
+
+export function addPreCsrfToken(existing: string | undefined, token: string, max = PRE_CSRF_FAMILY_MAX): string {
+  const family = parsePreCsrfFamily(existing).filter((t) => t !== token);
+  family.push(token);
+  return family.slice(-max).join('.');
+}
+
+export function preCsrfFamilyOk(cookieValue: string | undefined, presented: string | null | undefined): boolean {
+  if (!cookieValue || !presented) return false;
+  return parsePreCsrfFamily(cookieValue).includes(presented);
+}
+
 export interface ReauthResume {
   notice: string;
   loginUrl: string;

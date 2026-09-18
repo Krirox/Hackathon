@@ -142,7 +142,7 @@ T('FLOW-005: status on uninitialized db exits nonzero without migrating', async 
   }
 });
 
-T('FLOW-005: report and status share sqlite targeting and report rejects postgres', async () => {
+T('FLOW-005: report and status share sqlite targeting; report accepts postgres targets (F26)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vital-cli-report-'));
   const path = join(dir, 'shared.sqlite');
   try {
@@ -157,9 +157,12 @@ T('FLOW-005: report and status share sqlite targeting and report rejects postgre
     eq(statusJson.db_source, '--db');
     eq(statusJson.db.includes('shared.sqlite'), true);
 
-    const pg = runCli(['report', '--db', 'postgres://u:p@localhost/db', '--tenant', 'acme']);
+    // F26: the read model is engine-agnostic, so a postgres URL is no longer
+    // refused at parse time. (Connection failures surface naturally from the
+    // driver — here against a closed port — instead of a fake engine gate.)
+    const pg = runCli(['report', '--db', 'postgres://vital:pw@127.0.0.1:1/nope', '--tenant', 'acme']);
     eq(pg.status, 1);
-    eq(pg.stderr.includes('ENGINE_UNSUPPORTED'), true);
+    eq(pg.stderr.includes('ENGINE_UNSUPPORTED'), false, 'no engine refusal for postgres:');
 
     const missingTenant = runCli(['report', '--db', path]);
     eq(missingTenant.status, 1);

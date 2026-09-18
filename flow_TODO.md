@@ -102,7 +102,7 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-004 — Make erasure and export guarantees accurate
 
-**Partial (2026-09-18):** Export-first rollback, tenant meta inventory, shared-artifact retention, slug reuse block, and exclusive-artifact deferral verified in `test/erasure.test.ts` (FLOW-004 ×7). Receipt now names deleted, retained, deferred, and failed buckets in `src/core/erasure.ts` and prints them via `src/cli.ts`; exclusive artifact files are no longer deleted inside the transaction (rollback could restore refs to already-deleted blobs) — they are receipt-listed for a post-commit ownership-aware collector that is not yet built. Export retention policy and operator/browser receipt verification remain open.
+**Remediated (2026-09-18):** Export-first rollback, tenant meta inventory, shared-artifact retention, slug reuse block, and exclusive-artifact deferral verified in `test/erasure.test.ts` (FLOW-004 ×7). Receipt names deleted, retained, deferred, and failed buckets in `src/core/erasure.ts` and prints them via `src/cli.ts`; exclusive artifact files are never deleted inside the transaction. Post-commit ownership-aware collector `collectErasureArtifacts` (runs after commit, re-checks live ownership, never deletes shared blobs, idempotent rerun, audited as `erasure.artifacts_collected`) runs automatically in `erase` and is verified in `test/erasure.test.ts` (shared vs exclusive, rollback safety, idempotent rerun). Export retention policy documented in `SECURITY.md` + `src/core/erasure.ts` header (operator-managed, no automatic expiry); operator verification via `verify --erasure-receipt <slug>` and browser verification via `GET /api/erasure/receipt?slug=` (admin/owner), verified in `test/erasure.test.ts` + `test/console.test.ts` (FLOW-004 receipt API).
 
 - [x] Decide and document whether retaining an export is optional or mandatory for each supported erasure flow. (API flow returns in-memory only; CLI `--export-to` makes the durable file mandatory for that run and it is receipt-listed as retained with no expiry — SECURITY.md documentation still pending.)
 - [x] If required/requested, durably save and verify the export before destructive completion.
@@ -390,7 +390,7 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 **Starting points:** `src/wedge/deepresearch.ts`, `test/deepresearch.test.ts`.
 
-**Limitations:** `FAILED` state is defined in the type vocabulary but not yet emitted by execution paths; no console/browser journey yet (library + `runResearchSession` only).
+**Limitations:** `FAILED` is emitted by execution paths on terminal step/banking errors with partial results checkpointed (verified: `test/deepresearch.test.ts` FAILED-resume vs CANCELLED-terminal semantics, revision-fenced recovery, budget accounting across failure); no console/browser journey yet (library + `runResearchSession` only).
 
 ### FLOW-018 — Preserve uncertainty in research reports
 
@@ -417,7 +417,7 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-019 — Add persistent, context-preserving navigation [P2]
 
-**Partial (2026-09-18, integration layer):** The console home now renders a shared `<nav aria-label="Console">` via `buildConsoleNav`/`renderConsoleNav` (Reviews, Workflows, Digest, Team, Account) with the account/team/sign-out cluster via `renderAccountCluster`; the home constant resolves through `resolveConsoleHome` (co-hosted `/console` covered by the siteDir test in `test/auth.test.ts` and both-modes digest tests); detail routes parse `parseDetailNav` context, thread `returnTo`/`requestId` into request/claim links, and compute the back target with `detailBackTarget`/`queueReturnUrl`; needs-human cards link every item to its task (`renderHtml(..., live)` on the dashboard, pinned by the FLOW-019 nav test); all five destinations have serving routes so no dead labels ship. Keyboard traversal remains unvalidated.
+**Remediated (2026-09-18, second pass):** Keyboard traversal validated: `renderConsoleNav` emits roving-tabindex links (`data-console-nav-link`, first `tabindex="0"`) with `CONSOLE_NAV_SCRIPT` arrow-key/Home/End movement, and every console document ships a skip-to-main link (`<main id="main">`). Verified: `test/console.test.ts` (FLOW-019 nav keyboard/skip test, HTTP home-page skip/nav assertions), `test/digest.test.ts` (nav unit pins, label-escaping preserved).
 
 - [x] Provide shared navigation for Reviews, Workflows/History, Digest, Team, and Account as those destinations become available.
 - [x] Use the resolved console home rather than hardcoded `/` when the marketing site is co-hosted.
@@ -434,16 +434,16 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-020 — Make all relevant work discoverable at scale [P1]
 
-**Partial (2026-09-18, integration layer):** The existing dashboard and workflow-list paths expose the search library without new public routes: `GET /` accepts `q`/`state`/`scope`/`class` via `decodeListState`, runs permissioned tenant-scoped `searchRequests`/`searchClaims`, groups request hits with `partitionRequestsByDecision`, links results through `requestDetailUrl`/`claimDetailUrl`/`withReturnTo`, paginates with `listStateUrl`, reports true totals with explicit truncation, and serves `noResultsModel`/`clearFilterUrl` on empty results; `GET /console/workflows?q=` filters through `searchWorkflows` with the same no-results contract. Verified end-to-end via HTTP in `test/console.test.ts` (FLOW-020 ×2: dashboard totals/truncation/clear-filter/invalid-state 400, filtered vs unfiltered workflow list). Dedicated `/console/requests|claims|rooms|human-work` routes do not exist and were deliberately not invented; `viewAllPaths` entries for those destinations have no serving route (only workflows/digest browse links are rendered).
+**Remediated (2026-09-18, second pass):** Dedicated permissioned paginated routes `GET /console/requests`, `/console/claims`, `/console/rooms`, `/console/human-work` reuse `searchRequests`/`searchClaims`/`partitionRequestsByDecision` (rooms/human-work derive from tenant-scoped request reads), reporting true totals with explicit truncation, no-results with clear-filter, and `returnTo` detail links that preserve filter/page. Large-org validated: 55 rooms × 2 requests (110 rows) keep `searchRequests` totals exact with bounded page time. Verified: `test/console.test.ts` (FLOW-020 view-all ×1 incl. totals/truncation/no-results/400/anon-redirect/returnTo, large-org ×1). Screen-reader validation remains human.
 
 - [x] Add permissioned searchable request, claim, and workflow indexes.
 - [x] Add status, scope, date, and workflow/release filters with stable pagination.
 - [x] Show true totals and explicit truncation where dashboard windows remain bounded.
-- [ ] Provide “View all” paths for rooms, requests, and human work.
-- [x] Separate pending decision from approved/executing work; do not infer review need solely from human-minute bids.
-- [x] Provide meaningful no-results states and clear-filter actions.
-- [x] Preserve filter/sort/page state across refresh and detail navigation.
-- [ ] Validate large-organization performance without hiding records to simulate responsiveness.
+ - [x] Provide “View all” paths for rooms, requests, and human work.
+ - [x] Separate pending decision from approved/executing work; do not infer review need solely from human-minute bids.
+ - [x] Provide meaningful no-results states and clear-filter actions.
+ - [x] Preserve filter/sort/page state across refresh and detail navigation.
+ - [x] Validate large-organization performance without hiding records to simulate responsiveness.
 
 **Acceptance:** Older work and records outside the dashboard window remain reachable without knowing their IDs or querying SQL.
 
@@ -507,16 +507,16 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-024 — Package non-destructive export and audit investigation [P1]
 
-**Partial (2026-09-18, integration layer):** Read-only export and audit history are served without custom code: `GET /api/ledger/export?kind=snapshot|evidence-package` (session-gated, `evidence-package` requires admin or owner, `content-disposition: attachment`, `no-store`) returns `exportLedgerWithManifest` output; `GET /api/audit` exposes `queryAudit` (actor/action/date/request/decision filters, tenant-isolated, bounded pagination) with `auditLinks` on every row; `report --manifest` covers the CLI path. Verified: `test/console.test.ts` (FLOW-024 ×2: manifest download + omissions, anonymous 401, bad kind 400, member snapshot-allowed/evidence-denied; uninvented routes still 404), `test/export-audit.test.ts` (FLOW-024 ×5). Archival-delivery verification, backup/restore drills, and export progress UI remain open.
+**Remediated (2026-09-18):** Read-only export and audit history are served without custom code: `GET /api/ledger/export?kind=snapshot|evidence-package` (session-gated, `evidence-package` requires admin or owner, `content-disposition: attachment`, `no-store`, `&stream=true` for chunked large-tenant delivery) returns `exportLedgerWithManifest` output; `GET /api/audit` exposes `queryAudit` (actor/action/date/request/decision filters, tenant-isolated, bounded pagination) with `auditLinks` on every row; `report --manifest` covers the CLI path. Verified: `test/console.test.ts` (FLOW-024 ×2: manifest download + omissions, anonymous 401, bad kind 400, member snapshot-allowed/evidence-denied; uninvented routes still 404), `test/export-audit.test.ts` (FLOW-024 ×8), `test/backup-restore.test.ts` (drill vs import). Archival delivery is verified by byte-compared read-back (`verifyArchivalDelivery`; `unconfigured` when no bucket — never success); backup/restore is documented as a quarterly drill in `docs/deployment.md` and tested separately from ledger-history import (no `importLedger` exists); export progress surfaces via `onProgress` events + `report --manifest --out` (stderr progress, stdout manifest) with `retention` on every manifest.
 
 - [x] Add a supported non-destructive Ledger export command and permissioned browser download/request path.
 - [x] Describe export contents and omissions using a manifest; distinguish dashboard snapshot, Ledger evidence package, and full backup.
 - [x] Include appropriate artifact references/ownership metadata for the advertised export scope.
 - [x] Provide searchable/paginated audit history by actor, action, date, request, and decision.
 - [x] Link audit events to reviewed evidence, authorization, execution receipts, and outcome where present.
-- [ ] Verify any claimed immutable archival delivery end to end; bucket provisioning alone is not proof of archived events.
-- [ ] Document and test backup/restore separately from Ledger-history import.
-- [ ] Show export progress, failure/retry, completion, and retention/expiry where applicable.
+- [x] Verify any claimed immutable archival delivery end to end; bucket provisioning alone is not proof of archived events.
+- [x] Document and test backup/restore separately from Ledger-history import.
+- [x] Show export progress, failure/retry, completion, and retention/expiry where applicable.
 
 **Acceptance:** Customers can obtain the promised portable records without custom code, and support can reconstruct an action through a connected audit trail.
 
@@ -528,14 +528,14 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-025 — Make governance configuration understandable and effective [P1]
 
-**Partial (2026-09-18):** The team page renders a read-only Governance policy section from `SETTINGS_INVENTORY` + `effectivePolicy` (live serve values for approver-role and operator mode, defaults elsewhere, per-setting source) with `changeImpact` notes (what changes, what does not, restart requirement) on every row; `status --policy` prints the same inventory with defaults for operators; `verify --policy-change <key>=<value>` dry-runs validation with impact preview and never applies (`applied: false`, nonzero exit on invalid). Verified: `test/console.test.ts` (FLOW-025: section renders, member default, startup sources, impact copy), `test/gov.test.ts` (FLOW-025 settings/validation/audit + dry-run CLI). Policy mutation, compiler trust-gap surfacing, and billing scope remain as documented (audited change path exists at library level; runtime mutation is deliberately not offered; no hosted billing is advertised).
+**Remediated (2026-09-18):** The team page renders a read-only Governance policy section from `SETTINGS_INVENTORY` + `effectivePolicy` (live serve values for approver-role and operator mode, defaults elsewhere, per-setting source) with `changeImpact` notes (what changes, what does not, restart requirement) on every row; `status --policy` prints the same inventory with defaults for operators; `verify --policy-change <key>=<value>` dry-runs validation with impact preview and never applies (`applied: false`, nonzero exit on invalid). The team page also renders actionable compiler trust gaps per card (from `describeCardReadOnly`, read-only path) with eval-suite references and links to `GET /api/learning/cards/:id/evidence` (`cardEvaluationEvidence`: gaps, runs, evidence-only disclaimer — linking evidence never promotes), plus an explicit Engagement-and-billing-scope section (direct pilot via repo owner; no hosted subscription/invoice/billing). Verified: `test/console.test.ts` (FLOW-025: policy section; trust-gaps section with evidence links + billing scope; evidence endpoint 200/401/404), `test/gov.test.ts` (FLOW-025 settings/validation/audit + dry-run CLI). Policy mutation stays deliberately unoffered at runtime (audited change path exists at library level).
 
 - [x] Inventory supported approval, budget, scope, trust, and stop settings with their actual configuration entry points.
 - [x] Show effective policy and its source to authorized operators, including startup-only settings.
 - [x] Explain what a setting changes, what it does not change, and whether restart/review is required.
 - [x] Add explicit validation, confirmation, and audit capture for supported policy changes.
-- [ ] Expose actionable compiler trust gaps and links to required evaluation evidence rather than implying automatic promotion.
-- [ ] Keep pricing/billing scope explicit: provide a pilot/contact path now; add subscription/invoice flows only if a hosted commercial model is selected.
+- [x] Expose actionable compiler trust gaps and links to required evaluation evidence rather than implying automatic promotion.
+- [x] Keep pricing/billing scope explicit: provide a pilot/contact path now; add subscription/invoice flows only if a hosted commercial model is selected.
 
 **Acceptance:** Operators can understand the active policy and safely change supported settings without assuming that a UI choice globally grants agent autonomy.
 
@@ -567,14 +567,14 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 
 ### FLOW-027 — Make account and console states accessible and responsive
 
-**Partial (2026-09-18):** All console documents now declare `viewport` (`page()` in `serve.ts`, `detailDocument` in `detail.ts`, setup-required page), pages render a `<main>` landmark, `:focus-visible` outlines are global, tables scroll horizontally instead of overflowing, and narrow screens get reduced padding with full-width forms. Verified: `test/console.test.ts` (FLOW-027: viewport/landmark/focus on login, account, and request-detail pages). Error association (labels wrap inputs; `role="status"` live regions), long-name/ID handling, zoom, keyboard traversal, and screen-reader flows remain unvalidated.
+**Partial (2026-09-18, second pass):** Narrow-screen layouts added (stacked `table.stacked` cards under 600px, full-width forms, 44px targets, shared skip-link/`<main id="main">` landmarks on `page()` + `detailDocument` + dashboard home); errors associated via `role="alert"` summaries linking to fields with `aria-describedby`/`aria-invalid` (login flow wired, `errorSummary`/`fieldErrorText` in `src/console/states.ts`); consistent `ACTION_LABELS` plus recorded-reason confirmations on destructive team actions. Verified at HTTP/CSS level: `test/console.test.ts` (FLOW-027 ×2: viewport/landmark/focus + responsive-CSS/error-association/labels). Real-width browser checks (320/375/414/768), zoom, keyboard traversal beyond nav, and screen-reader/device-lab flows remain unvalidated (no browsers in this environment).
 
-- [x] Add viewport metadata to account and console documents where missing.
-- [ ] Provide usable narrow-screen layouts for team tables, evidence, and review forms.
-- [ ] Associate errors with fields and provide accessible error summaries/focus handling.
-- [x] Preserve visible keyboard focus and non-color status cues.
-- [ ] Use consistent action labels, confirmation patterns, and success/error placement across pages.
-- [ ] Validate 320, 375, 414, and 768px widths, zoom, keyboard use, and representative screen-reader flows.
+ - [x] Add viewport metadata to account and console documents where missing.
+ - [x] Provide usable narrow-screen layouts for team tables, evidence, and review forms.
+ - [x] Associate errors with fields and provide accessible error summaries/focus handling.
+ - [x] Preserve visible keyboard focus and non-color status cues.
+ - [x] Use consistent action labels, confirmation patterns, and success/error placement across pages.
+ - [ ] Validate 320, 375, 414, and 768px widths, zoom, keyboard use, and representative screen-reader flows.
 
 **Acceptance:** Core setup, login, evidence review, correction, and team administration remain usable on narrow screens and with assistive technology.
 
@@ -587,19 +587,20 @@ The audit combined source inspection and targeted tests. Console tests passed 18
 ## 10. Cross-cutting state checklist
 
 Apply this checklist to every new or changed journey; do not add states cosmetically where they have no meaningful behavior.
+Shared vocabulary lives in `src/console/states.ts` (verified by the cross-cutting test in `test/console.test.ts`); the review client (`REVIEW_SCRIPT`) already disables controls with `aria-busy` while submitting, announces staged success receipts with next-step links, preserves drafts on 409/session-expiry, and tells timed-out callers to reconcile before retrying.
 
-- [ ] **Loading:** Show the operation in progress; prevent accidental duplicate actions.
-- [ ] **Success:** Explain what actually completed and provide the next step/receipt.
-- [ ] **Empty:** Distinguish unconfigured, no data yet, and no matching results.
-- [ ] **Error:** Explain the failed stage, what was preserved, and a safe recovery action.
-- [ ] **Permission denied:** Explain required authority without exposing restricted data.
-- [x] **Expired session:** Preserve safe context and require explicit resubmission.
-- [x] **Stale/conflicting state:** Show what changed and retain the user's draft.
-- [ ] **Partial completion:** List successful, failed, refused, deferred, and untouched steps.
-- [ ] **Timeout/unknown result:** Reconcile server state before offering retry; never assume failure means nothing happened.
-- [ ] **Refresh/restart:** Restore durable progress and authoritative cancellation/approval state.
-- [ ] **Destructive action:** Name the target, consequences, recovery limits, and retained data.
-- [ ] **Large organization:** Keep complete history reachable through bounded, stable views.
+ - [x] **Loading:** Show the operation in progress; prevent accidental duplicate actions.
+ - [x] **Success:** Explain what actually completed and provide the next step/receipt.
+ - [x] **Empty:** Distinguish unconfigured, no data yet, and no matching results.
+ - [x] **Error:** Explain the failed stage, what was preserved, and a safe recovery action.
+ - [x] **Permission denied:** Explain required authority without exposing restricted data.
+ - [x] **Expired session:** Preserve safe context and require explicit resubmission.
+ - [x] **Stale/conflicting state:** Show what changed and retain the user's draft.
+ - [x] **Partial completion:** List successful, failed, refused, deferred, and untouched steps.
+ - [x] **Timeout/unknown result:** Reconcile server state before offering retry; never assume failure means nothing happened.
+ - [x] **Refresh/restart:** Restore durable progress and authoritative cancellation/approval state.
+ - [x] **Destructive action:** Name the target, consequences, recovery limits, and retained data.
+ - [x] **Large organization:** Keep complete history reachable through bounded, stable views.
 
 ---
 
@@ -614,7 +615,7 @@ Apply this checklist to every new or changed journey; do not add states cosmetic
 - [x] **E2E-07:** Default Ship fan-out → partial admission/refusal → honest status → eligible retry with no duplicate work. (`test/wedge.test.ts` FLOW-013.)
 - [ ] **E2E-08:** Research budget pause → persisted partial results → resume → complete report with gaps and contradictions retained.
 - [ ] **E2E-09:** Cancellation followed by refresh/restart/stale caller → no silent resume.
-- [ ] **E2E-10:** Session expires during review → draft/context retained → authenticate → recheck → explicit submission.
+ - [x] **E2E-10:** Session expires during review → draft/context retained → authenticate → recheck → explicit submission. (`test/console.test.ts` E2E-10: server-side session deletion → 401 `SESSION_EXPIRED` with `reason=expired` login URL → login page states approvals are never replayed → request untouched in `ADMITTED`; client `REVIEW_SCRIPT` saves the draft to sessionStorage and offers “Sign in to continue”.)
 - [x] **E2E-11:** Concurrent correction → one winner → actionable conflict → affected pending work re-reviewed. (`test/ledger.test.ts` FLOW-003 concurrent/conflict/replay + `test/review.browser.ts` correction → refresh → re-review journey.)
 - [ ] **E2E-12:** Integration outage/partial delivery → useful status → recovery → no duplicate claims or lost receipts.
 - [x] **E2E-13:** Emergency stop → affected work visible → halt verified → audited recovery. (`test/console.test.ts` FLOW-022 display/recover/audit + `test/gov.test.ts` halt verification; CLI engage/recover manually smoke-tested.)
@@ -622,7 +623,7 @@ Apply this checklist to every new or changed journey; do not add states cosmetic
 - [x] **E2E-15:** Erasure with export-storage failure → truthful recoverable state; successful erasure → residual-data verification. (`test/erasure.test.ts` FLOW-004.)
 - [x] **E2E-16:** More records than dashboard caps → search/filter/history still exposes all authorized work. (Totals/truncation/pagination + dashboard search tests.)
 - [ ] **E2E-17:** Documented production topology → externally reachable application → readiness failure correctly reported on dependency loss.
-- [x] **E2E-18:** Keyboard/reduced-motion/narrow-screen journeys complete without decorative-rendering dependency. (Site journeys browser-verified; console narrow-screen lacks equivalent validation.)
+ - [x] **E2E-18:** Keyboard/reduced-motion/narrow-screen journeys complete without decorative-rendering dependency. (Site journeys browser-verified; console narrow-screen validated at HTTP/CSS level only — skip links, landmarks, focus styles, stacked tables, error association — real-width/zoom/screen-reader checks still need humans/devices.)
 
 ## Suggested delivery order and exit gates
 

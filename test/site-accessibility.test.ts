@@ -1,8 +1,22 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium, expect } from '@playwright/test';
-import type { Browser, BrowserContextOptions, Page } from '@playwright/test';
+import type { Browser, BrowserContextOptions, LaunchOptions, Page } from '@playwright/test';
+import { T } from './helpers.ts';
+
+/**
+ * Launch with the pinned Playwright headless shell, falling back to the
+ * system Chrome channel when the shell was not downloaded (restricted
+ * networks cannot reach the Playwright CDN; `npx playwright install` half-
+ * completes). Same assertions run on either engine.
+ */
+async function launchBrowser(): Promise<Browser> {
+  try {
+    return await chromium.launch();
+  } catch {
+    return await chromium.launch({ channel: 'chrome' } satisfies LaunchOptions);
+  }
+}
 
 const origin = 'http://127.0.0.1:43260';
 const files = new Map<string, { body: Buffer; contentType: string }>();
@@ -79,7 +93,7 @@ async function readableContent(page: Page) {
   assert.ok(hero && story && story.y >= hero.y + hero.height - 1);
 }
 
-test('FLOW-011 source: governed release copy, proof levels, same-origin CTAs, invite-only', () => {
+T('FLOW-011 source: governed release copy, proof levels, same-origin CTAs, invite-only', () => {
   const html = files.get('/index.html')!.body.toString();
   const app = files.get('/app.js')!.body.toString();
   assert.match(html, /Governed release workflow/);
@@ -108,7 +122,7 @@ test('FLOW-011 source: governed release copy, proof levels, same-origin CTAs, in
   assert.match(html, /<meta name="vital-console-url" content=""/);
 });
 
-test('FLOW-026 source: noscript fallback, reduced motion, menu keyboard attributes, CTA markers', () => {
+T('FLOW-026 source: noscript fallback, reduced motion, menu keyboard attributes, CTA markers', () => {
   const html = files.get('/index.html')!.body.toString();
   const app = files.get('/app.js')!.body.toString();
   const css = files.get('/styles.css')!.body.toString();
@@ -145,11 +159,10 @@ test('FLOW-026 source: noscript fallback, reduced motion, menu keyboard attribut
   assert.doesNotMatch(app, /requestAnimationFrame|IntersectionObserver/);
 });
 
-test(
+T(
   'FLOW-011/026 browser: CTA markers reachable, same-origin sign-in, no surprise tabs',
-  { timeout: 120000 },
   async () => {
-    const browser = await chromium.launch();
+    const browser = await launchBrowser();
     try {
       const { context, page } = await localPage(browser, { viewport: { width: 375, height: 812 } });
       try {
@@ -181,8 +194,9 @@ test(
       await browser.close();
     }
   },
+  { timeout: 120_000 },
 );
-test('FLOW-026 source: content is not gated by scripts or animation loops', () => {
+T('FLOW-026 source: content is not gated by scripts or animation loops', () => {
   const html = files.get('/index.html')!.body.toString();
   const app = files.get('/app.js')!.body.toString();
   const graphics = files.get('/graphics.js')!.body.toString();
@@ -196,8 +210,13 @@ test('FLOW-026 source: content is not gated by scripts or animation loops', () =
   );
 });
 
-test('FLOW-026 browser: progressive enhancement and keyboard/mobile access', { timeout: 120000 }, async (t) => {
-  const browser = await chromium.launch();
+T(
+  'FLOW-026 browser: progressive enhancement and keyboard/mobile access',
+  async () => {
+    // Sub-steps run inline: a thrown failure fails the whole journey, which
+    // is what the browser gate wants (no silently skipped phase).
+    const t = { test: async (_name: string, fn: () => Promise<void>) => await fn() };
+    const browser = await launchBrowser();
   try {
     await t.test('JavaScript disabled: readable sections, early CTA, usable console and footer links', async () => {
       for (const width of [320, 375, 414, 768, 1280]) {
@@ -372,4 +391,4 @@ test('FLOW-026 browser: progressive enhancement and keyboard/mobile access', { t
   } finally {
     await browser.close();
   }
-});
+}, { timeout: 120_000 });

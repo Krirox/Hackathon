@@ -125,6 +125,8 @@ export interface ConsoleReport {
   approvalLatency: ApprovalLatencyStats;
   /** Cost-per-signal (TODO 4.1): the expensive tier's share of routed arrivals vs the <1% gate. */
   costPerSignal: Awaited<ReturnType<CognitiveRouter['costPerSignal']>>;
+  /** F26: rows beyond each bounded window — 0 means the window held everything. */
+  omitted: { needsHuman: number; rooms: number; decisions: number; cards: number };
 }
 
 const TERMINAL = ['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'];
@@ -143,20 +145,20 @@ export async function buildReport(
   const pairs = await ledger.disputedPairs(tenant);
 
   // Oldest open contradiction, from the CONTRADICTION_OPEN audit trail.
-  const audits = (await db
-    .prepare("SELECT target, at FROM audit_log WHERE tenant = ? AND action = 'CONTRADICTION_OPEN' ORDER BY at")
-    .all(tenant)) as { target: string; at: string }[];
+  // F26: the oldest-contradiction read is bounded in SQL — only rows whose
+  // target matches an OPEN contradiction pair are fetched (the audit trail
+  // itself is history-sized and must never be pulled whole per dashboard GET).
   const openKeys = new Set(pairs.flatMap((p) => [`${p.a.id}<>${p.b.id}`, `${p.b.id}<>${p.a.id}`]));
-  const openAts = audits.filter((a) => openKeys.has(String(a.target))).map((a) => Date.parse(String(a.at)));
-  // Iterative minimum: the audit trail is history-sized and must never be
-  // spread into an argument list (call-stack overflow past ~100k rows).
   let oldestOpenHours: number | null = null;
-  if (openAts.length > 0) {
-    let earliest = openAts[0]!;
-    for (let i = 1; i < openAts.length; i++) {
-      if (openAts[i]! < earliest) earliest = openAts[i]!;
-    }
-    oldestOpenHours = (Date.parse(now) - earliest) / 3_600_000;
+  if (openKeys.size > 0) {
+    const targetList = [...openKeys].map(() => '?').join(',');
+    const rows = (await db
+      .prepare(
+        `SELECT MIN(at) AS earliest FROM audit_log WHERE tenant = ? AND action = 'CONTRADICTION_OPEN' AND target IN (${targetList})`,
+      )
+      .get(tenant, ...openKeys)) as { earliest: unknown } | undefined;
+    const earliest = rows?.earliest === null || rows?.earliest === undefined ? null : String(rows.earliest);
+    if (earliest) oldestOpenHours = (Date.parse(now) - Date.parse(earliest)) / 3_600_000;
   }
 
   const requests = await coord.list(tenant);
@@ -240,6 +242,18 @@ export async function buildReport(
 
   const digestCount = requests.filter((r) => r.messageClass === 'NOTICE').length;
 
+  // F26: omitted counts — the dashboard is a bounded window, so every capped
+  // section also reports how many rows exist beyond it. A reader must be able
+  // to tell "the queue is clear" from "the queue is longer than the window",
+  // and the View-all pages are the recovery path for the omitted rows.
+  const roomScopes = [...new Set(requests.flatMap((r) => [r.originScope, r.targetScope]))];
+  const omitted = {
+    needsHuman: Math.max(0, openHuman.length - MAX_NEEDS_HUMAN),
+    rooms: Math.max(0, roomScopes.length - MAX_ROOMS),
+    decisions: Math.max(0, decisions.length - COST_CURVE_BUDGET),
+    cards: 0 as number,
+  };
+
   const states: SkillState[] = ['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'];
   const compiler: CompilerColumn[] = [];
   for (const state of states) {
@@ -260,6 +274,13 @@ export async function buildReport(
       });
     }
     compiler.push({ state, cards });
+  }
+  // F26: cards beyond each column's display window. comp.list returns ALL
+  // cards in the state (the dashboard slices its own view), so the full list
+  // length is the true total — a large tenant can see how many cards the
+  // column is hiding.
+  for (const state of states) {
+    omitted.cards += Math.max(0, (await comp.list(tenant, { state })).length - MAX_CARDS_PER_STATE);
   }
 
   const scopes = [...new Set(requests.flatMap((r) => [r.originScope, r.targetScope]))];
@@ -328,6 +349,7 @@ export async function buildReport(
     // routing_decisions — no timers, no writes — so building a throwaway one
     // here is free and keeps every caller's report shape identical.
     costPerSignal: await new CognitiveRouter(db).costPerSignal(tenant),
+    omitted,
   };
 }
 

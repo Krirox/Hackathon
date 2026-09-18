@@ -562,6 +562,69 @@ T('candidate mining: mineCandidates returns intents with >= 3 successful runs', 
   eq(mined[0]?.repeats, 3);
 });
 
+T('F15: simulated traces never satisfy mining thresholds — exclusion is by construction', async () => {
+  const { db } = await fresh();
+  const { mineCandidates } = await import('../src/compiler/compiler.ts');
+  // Six simulated SUCCESS traces — far past the threshold if they were counted.
+  for (let i = 0; i < 6; i++) {
+    await db
+      .prepare(
+        `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        `tr_sim_mine_${i}`,
+        TEN,
+        `req_sim_${i}`,
+        'product',
+        'release.summarize',
+        'simulated:ship-to-result',
+        '[]',
+        'WORKFLOW',
+        'SUCCESS',
+        JSON.stringify({ simulated: true }),
+        null,
+        0.95,
+        NOW,
+      );
+  }
+  // Three real traces below the default threshold (minRepeats=3 would admit
+  // them if simulated rows leaked in — they must stand alone).
+  for (let i = 0; i < 2; i++) {
+    await db
+      .prepare(
+        `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        `tr_real_mine_${i}`,
+        TEN,
+        `req_real_${i}`,
+        'engineering',
+        'engineering.implement',
+        'real.pattern.y',
+        '[]',
+        'MODEL',
+        'SUCCESS',
+        '{}',
+        null,
+        0.9,
+        NOW,
+      );
+  }
+  const mined = await mineCandidates(db, TEN, 3);
+  eq(
+    mined.some((m) => m.intent.startsWith('simulated:')),
+    false,
+    'no simulated intent is ever mined:',
+  );
+  eq(mined.some((m) => m.intent === 'real.pattern.y'), false, 'real traces below threshold still wait:');
+  // A simulated run plus two real successes cannot pool into a candidate: the
+  // simulated rows do not count toward ANY intent's threshold.
+  const withOneMoreReal = await mineCandidates(db, TEN, 3);
+  eq(withOneMoreReal.length, 0);
+});
+
 T('CLI learn command runs drift, budget breach, and mining sweeps', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vital-learn-cli-'));
   const dbPath = join(dir, 'test.db');

@@ -59,6 +59,7 @@ jobs:
           TF_VAR_gemini_api_key: ${{ secrets.TF_VAR_GEMINI_API_KEY }}
           TF_VAR_novita_api_key: ${{ secrets.TF_VAR_NOVITA_API_KEY }}
           TF_VAR_operator_secret: ${{ secrets.TF_VAR_OPERATOR_SECRET }}
+          TF_VAR_buzz_relay_private_key: ${{ secrets.TF_VAR_BUZZ_RELAY_PRIVATE_KEY }}
         run: |
           if [ -n "${{ secrets.TF_BACKEND_BUCKET }}" ]; then
             terraform init -input=false \

@@ -112,6 +112,39 @@ T('blocklists filter; budgets cap; cancellation keeps completed work', async () 
   eq(cancelled.findingIds.length > 0, true, 'completed research survives cancellation:');
 });
 
+T('F16: an in-flight search is aborted and its result never banked when cancellation fires mid-search', async () => {
+  const { ledger, db } = await fresh();
+  const run = approveResearchPlan(
+    createResearchRun(TEN, 'in-flight abort?', ['slow question', 'later question'], { now: NOW }),
+    'human:priya',
+  );
+  let searchesStarted = 0;
+  let searchResolved = 0;
+  const slowSearch = async (q: string): Promise<SearchHit[]> => {
+    searchesStarted += 1;
+    // Long enough that the cancellation poll (250ms) fires mid-search.
+    await new Promise((r) => setTimeout(r, 1500));
+    searchResolved += 1;
+    return search(q);
+  };
+  // Cancel once the FIRST search is in flight (before it resolves).
+  const result = await executeResearchRun(ledger, run, slowSearch, {
+    by: 'a',
+    scope: 'e',
+    now: NOW,
+    cancelled: () => searchesStarted >= 1,
+  });
+  eq(result.status, 'CANCELLED', 'mid-search cancellation settles CANCELLED:');
+  eq(result.completedSteps.length, 0, 'the aborted step is not marked completed:');
+  eq(result.findingIds.length, 0, 'the aborted search banks nothing:');
+  eq(result.cancelledBy, 'a', 'cancelling actor recorded:');
+  // Give the abandoned promise a chance to settle, then confirm it never banked.
+  await new Promise((r) => setTimeout(r, 1700));
+  eq(searchResolved >= 1, true, 'the discarded search promise settles on its own:');
+  const claims = (await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number };
+  eq(Number(claims.n), 0, 'no claims from the aborted search:');
+});
+
 T('unapproved runs never execute', async () => {
   const { ledger } = await fresh();
   const run = createResearchRun(TEN, 'q?', ['a'], { now: NOW });
@@ -356,6 +389,56 @@ T('FLOW-017: step failure lands in a durable FAILED state with the failing quest
   eq(done.failure, null);
   eq(done.completedSteps.length, 2);
   eq(done.findingIds.length, 3, 'banked findings survive the failure:');
+});
+
+T('FLOW-017: FAILED resumes with recovery while CANCELLED stays terminal even with recovery', async () => {
+  const { db, ledger } = await fresh();
+  const failedApproved = await approveAndPersistResearchPlan(
+    db,
+    createResearchRun(TEN, 'resume me?', ['magic link expiry'], { now: NOW, id: 'rsr_flow17_fail_vs_cancel_a' }),
+    'human:priya',
+    NOW,
+  );
+  const failed = await executeResearchRun(
+    ledger,
+    failedApproved,
+    async () => {
+      throw new Error('provider down');
+    },
+    { by: 'a', scope: 'e', now: NOW, db },
+  );
+  eq(failed.status, 'FAILED');
+  eq(failed.findingIds, [], 'failure before banking preserves partial (empty) results, not phantom findings:');
+  // FAILED without explicit recovery refuses — the operator must name recovery.
+  await rejects(() => resumeResearchRun(db, TEN, failedApproved.id), 'EXECUTION_CONFLICT');
+  const recovered = await resumeResearchRun(db, TEN, failedApproved.id, {
+    by: 'agent:b',
+    expectedRevision: failed.revision!,
+    now: NOW,
+  });
+  eq(recovered.status, 'APPROVED', 'FAILED reopens to the exact approved plan:');
+  eq(recovered.failure, { code: 'RESEARCH_STEP_FAILED', subquestion: 'magic link expiry' });
+
+  const cancelApproved = await approveAndPersistResearchPlan(
+    db,
+    createResearchRun(TEN, 'stay dead?', ['magic link expiry'], { now: NOW, id: 'rsr_flow17_fail_vs_cancel_b' }),
+    'human:priya',
+    NOW,
+  );
+  const cancelled = await cancelPersistedResearchRun(db, cancelApproved, 'human:priya', NOW);
+  eq(cancelled.status, 'CANCELLED');
+  // CANCELLED rejects even explicit named recovery — cancellation is terminal.
+  await rejects(
+    () =>
+      resumeResearchRun(db, TEN, cancelApproved.id, {
+        by: 'agent:b',
+        expectedRevision: cancelled.revision!,
+        now: NOW,
+      }),
+    'RUN_CANCELLED',
+    'cancelled runs never reopen, even with recovery:',
+  );
+  await db.close();
 });
 
 T('FLOW-017: recovering an interrupted RUNNING run is fenced by revision', async () => {

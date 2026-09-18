@@ -704,10 +704,34 @@ export const PG_SCHEMA: string = SCHEMA.split('INTEGER PRIMARY KEY AUTOINCREMENT
  * column-existence probe for each ALTER, and the meta-flagged backfill.
  * Concurrent boots may race the journal INSERT; the ON CONFLICT keeps the
  * first stamp and both write identical schema, so either outcome is sound.
+ * Two boots can ALSO race inside Postgres itself: both pass the IF NOT
+ * EXISTS existence check for the same table and collide in the catalog
+ * (pg_type/pg_class unique indexes). That error means the object exists —
+ * which is all idempotency needs — so schema DDL retries once on exactly
+ * that class of failure (F07 concurrent-startup drill).
  */
+
+/** True only for the duplicate-object catalog race (or its internal 23505). */
+function isCatalogRace(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  if (code === '42P07' || code === '42710') return true; // duplicate_table / duplicate_object
+  const msg = (error as Error).message ?? '';
+  return msg.includes('pg_type_typname_nsp_index') || msg.includes('pg_class_relname_nsp_index');
+}
+
+/** Run IF NOT EXISTS DDL; one retry absorbs the concurrent-boot catalog race. */
+async function execIdempotent(db: AsyncDb, sql: string): Promise<void> {
+  try {
+    await db.exec(sql);
+  } catch (error) {
+    if (!isCatalogRace(error)) throw error;
+    await db.exec(sql); // the object now exists; IF NOT EXISTS skips it
+  }
+}
+
 export async function migrate(db: AsyncDb): Promise<void> {
-  await db.exec(db.engine === 'postgres' ? PG_SCHEMA : SCHEMA);
-  await db.exec(MIGRATION_JOURNAL);
+  await execIdempotent(db, db.engine === 'postgres' ? PG_SCHEMA : SCHEMA);
+  await execIdempotent(db, MIGRATION_JOURNAL);
   const additiveName = 'additive-list-v6';
   const stamped = (await db.prepare('SELECT name FROM schema_migrations WHERE name = ?').get(additiveName)) as
     { name: string } | undefined;

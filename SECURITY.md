@@ -120,9 +120,45 @@ Ledger export (`exportLedgerWithManifest` in `src/ledger/export.ts`) is
 read-only and carries a manifest naming contents and omissions per kind
 (snapshot, evidence package, backup reference). It is the portable second
 copy, not the backup strategy: point-in-time recovery plus the quarterly
-restore drill in `docs/deployment.md` remain the backup proof, and no
-immutable archival delivery is claimed. Ledger-history import is
-unsupported.
+restore drill in `docs/deployment.md` remain the backup proof.
+Ledger-history import is unsupported — merging two append-only histories
+is not offered, and no `importLedger` entry point exists (pinned by
+`test/backup-restore.test.ts`).
+
+### Export retention policy (FLOW-004)
+
+Exports are operator-managed retained evidence with **no automatic expiry
+and no automatic deletion**:
+
+- API / in-memory erasure exports are returned to the caller only; nothing
+  is written to disk and there is nothing to expire.
+- CLI `--export-to` files are listed on the erasure receipt as retained and
+  stay on the operator's disk until the operator removes them. Every export
+  manifest carries the same `retention` statement.
+- The `erased:<slug>` receipt row itself is retained indefinitely — it is
+  the proof erasure happened, and slug reuse stays blocked while it exists.
+- Exclusive artifact files are removed post-commit by
+  `collectErasureArtifacts` (ownership re-checked, idempotent, audited);
+  shared blobs are never deleted.
+
+### Erasure receipt verification (FLOW-004)
+
+- Operator: `vital verify --erasure-receipt <slug> --db <target>` prints
+  the surviving receipt (deleted / retained / deferred / failed buckets)
+  and re-checks the durable export file (parses, tenant + export timestamp
+  match). Exit nonzero when the receipt is missing or the file mismatches.
+- Browser (admin or owner): `GET /api/erasure/receipt?slug=<slug>`
+  returns the same verification as JSON.
+
+### Archival delivery verification (FLOW-024)
+
+No immutable archival delivery is claimed by default. When an archive
+bucket is configured, `verifyArchivalDelivery` (CLI:
+`vital verify --archival <file> [--bucket b] [--key k] [--archive-dir d]`)
+proves delivery by byte-compared sha256 read-back: `verified` only on a
+hash match; `missing` / `mismatch` / `error` otherwise; `unconfigured`
+when no bucket is set — never success. Bucket provisioning alone is not
+proof of archived events.
 
 Emergency stops (`setKill` / `recoverStop` in `src/gov/trust.ts`) are
 tenant/scope/action-class halt and audited recovery. Stops persist across

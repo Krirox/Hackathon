@@ -2,7 +2,7 @@
 
 **The grounding and reflex layer for the sovereign agent stack.**
 
-Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->422/422 tests passing<!-- /vital:testcount -->**
+Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->715/715 tests passing<!-- /vital:testcount -->**
 (real sockets, real sqlite; lint/format/provenance/audit gates green).
 Supersedes: "Final Idea: The Living Company.md" (v1), the v2 assessment rewrite, and the v3 sovereign-stack revision. This is the single source of truth.
 
@@ -450,7 +450,7 @@ Reading actual source rather than a README changed the plan twice. First it show
 The earlier version of this section was titled "Why composition beats construction." The argument still holds, but the mechanism changed, and so did one of its claims:
 
 1. **Scope shrinks, but not as far as claimed.** Absorbing removes the fork/sync/upstream-drift discipline — a real saving — and gives us total control of the substrate. It does **not** give us the substrate for free. Sandbox, scheduler, egress proxy and sensing plane are ours to build and operate.
-2. **COGS stays low** — VPS + open harnesses + aggressive L0/L1 triage. No per-seat margin anxiety. (Unchanged by the switch: we were never paying per-seat for QM.)
+2. **COGS stays low** — AWS Fargate/RDS/Lambda + open harnesses + aggressive L0/L1 triage. No per-seat margin anxiety. (Unchanged by the switch: we were never paying per-seat for QM.)
 3. **Sovereignty is a live 2026 buying reason** — for EU, fintech, health, and residency-constrained buyers, "your runtime, your boxes, your models" beats any hosted agent platform.
 4. **Harness-agnosticism is a hedge** — we sit above the frontier-model race, so model churn doesn't invalidate us.
 5. **Audit is partly free** — Buzz's signed identities are genuinely free. QM's "everything is audited" posture is now a *pattern we re-implement*, not something we inherit. The audit log, the separate immutable store, and the egress sink are ours.
@@ -492,13 +492,13 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ VPS-1  BUZZ   (Rust/TS, Nostr, Apache-2.0)                             │
+│ AWS-1  BUZZ   (ECS Fargate · RDS · ElastiCache · S3 · Rust/TS/Nostr)   │
 │  humans + agents as signed identities · channels · threads · voice ·    │
 │  repos · workflows        →  THE PUBLIC, NON-REPUDIABLE RECORD          │
 └──────────────┬─────────────────────────────────────────────────────────┘
-               │ claim IDs ↔ event signatures
+               │ claim IDs ↔ event signatures (BUZZ_RELAY_URL / Cloud Map)
 ┌──────────────▼─────────────────────────────────────────────────────────┐
-│ VPS-2  VITAL CORE  (headless TS/Node + Postgres)  ← our substrate      │
+│ AWS-2  VITAL CORE  (ECS Fargate · RDS Postgres · ALB)  ← our substrate │
 │  API · identity · policy · scheduler · agent loop · queue · memory      │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
 │  │  ★ src/  =  VITAL  (MIT, our code)                                │  │
@@ -529,13 +529,13 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 │  └──────────────────────────────────────────────────────────────────┘  │
 │  per-scope durable sandboxes                                            │
 │   ├ Market ├ Customer ├ Product ├ Marketing ├ Sales ├ Finance           │
-│   └ Engineering → jcode harness API (sibling process)                   │
+│   └ Engineering → jcode harness API (ECS sidecar / Fargate task)        │
 └──────────────┬─────────────────────────────────────────────────────────┘
                │
 ┌──────────────▼─────────────────────────────────────────────────────────┐
-│ VPS-3  jcode (Rust, MIT) — TUI/SDK, swarms, graph memory, MCP, 30+ tools│
+│ AWS-3  jcode (ECS sidecar or Fargate task, Rust MIT) — TUI/SDK, swarms  │
 │         driven via jcode-harness-api / TS SDK ← NOT a QM harness:       │
-│         a sibling process, coordinated rather than mounted              │
+│         coordinated rather than mounted; short jobs fan to Lambda       │
 └────────────────────────────────────────────────────────────────────────┘
 
  SENSING   our scheduler: crons + watches + webhooks → L0 collect → L1 triage
@@ -563,7 +563,7 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 | **7 Act** | ongoing | `ACT_REVERSIBLE` autonomy via Trust Ledger | honeytask detection ≥ threshold; kill-switch drills pass; legal review |
 | **8 Runtime** | 12mo+ | expand beyond launches; sell to COO/CFO | `cost_per_good_decision` falling **3 consecutive quarters** — the only proof the thesis is true |
 
-**v2 progress (2026-09-09, <!-- vital:testcount -->422/422 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
+**v2 progress (2026-09-09, <!-- vital:testcount -->715/715 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
 as tested code (scheduler, sandbox, egress core, screen, identity, two
 harness adapters) — deployment, not design, is what's left. Ledger v0 is
 built past its gate shape (decisions, bundles, replay, outcomes, curation
@@ -666,7 +666,7 @@ and rooms, not substrate.
 
 ## 24. Verified build state (v2, 2026-09-09)
 
-**Typecheck: 0 errors. Tests: <!-- vital:testcount -->422/422 green<!-- /vital:testcount -->** (real sockets, real sqlite;
+**Typecheck: 0 errors. Tests: <!-- vital:testcount -->715/715 green<!-- /vital:testcount -->** (real sockets, real sqlite;
 eslint, prettier, provenance-guard, and audit gates green; 20 commits on
 main). Every behaviour below is proven by a named test — `[x]` in TODO.md
 means verified by a passing test or run, never "written".
@@ -787,7 +787,7 @@ ledger metaphor is dead. Arbitrary categories use teal tints plus grey. No dark
 deck except an optional inverted closing slide; no gradients, shadows, or thin
 rules; test on a projector, not a 6K display.
 
-**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->422 tests green<!-- /vital:testcount -->
+**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->715 tests green<!-- /vital:testcount -->
 (reproducible: `npm run typecheck && npm test`), `HYPOTHESIS` PM/Growth
 will pay (untested), `PREDICTION` precision ≥ 0.90 by month 9
 (dated, checkable). One slide, four lines. It proves the product by using it and it

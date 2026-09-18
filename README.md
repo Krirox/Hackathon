@@ -34,7 +34,7 @@ Requires Node 22.
 ```sh
 npm install
 npm run typecheck   # tsc --noEmit, must be 0 errors
-npm test            # tsx test/run.ts — <!-- vital:testcount -->422 tests, real sockets, real sqlite<!-- /vital:testcount -->
+npm test            # tsx test/run.ts — <!-- vital:testcount -->715 tests, real sockets, real sqlite<!-- /vital:testcount -->
 
 # The console is authenticated. Boot it, then claim the tenant in the browser:
 tsx src/cli.ts serve --db var/vital.db --tenant acme --port 3100
@@ -104,8 +104,8 @@ docs/adr/     architecture decisions (0001–0005)
 
 ## Current state (2026-09-17)
 
-Typecheck clean, suite <!-- vital:testcount -->422/422 green<!-- /vital:testcount -->.
-Typecheck clean, suite <!-- vital:testcount -->422/422 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->715/715 green<!-- /vital:testcount -->.
+Typecheck clean, suite <!-- vital:testcount -->715/715 green<!-- /vital:testcount -->.
 Built: ledger (+decisions/outcomes), coordination (+escalation gate),
 router, compiler, gov matrix (trust, honeytasks, kills), eval spine,
 attribution, ingest, sensing (Watch Contracts + Integrity Gate), the wedge

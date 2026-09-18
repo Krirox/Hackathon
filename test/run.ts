@@ -34,6 +34,7 @@ import './jcode.test.ts';
 import './vendor.test.ts';
 import './talk.test.ts';
 import './auth.test.ts';
+import './flow-007-010.test.ts';
 import './operator.test.ts';
 import './erasure.test.ts';
 import './aws.test.ts';
@@ -43,7 +44,9 @@ import './worker.test.ts';
 import './digest.test.ts';
 import './site-accessibility.test.ts';
 import './export-audit.test.ts';
+import './backup-restore.test.ts';
 import './learning.test.ts';
+import './e2e-gates.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

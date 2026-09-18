@@ -6,10 +6,9 @@ import { renderHtml } from './console/render.ts';
 import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
 import { installAuthSchema, signupTenant, operatorSetPassword, tryPasswordReset } from './core/auth.ts';
-import { eraseTenant, ERASURE_DONE_ACTION } from './core/erasure.ts';
+import { collectErasureArtifacts, eraseTenant, ERASURE_DONE_ACTION, verifyErasureReceipt } from './core/erasure.ts';
 import {
   assertTenantExists,
-  CliTargetError,
   formatTargetHeader,
   migrateDbTarget,
   openDbTarget,
@@ -25,14 +24,25 @@ import { getIntegrationHealth, testFileDirectory } from './ingest/health.ts';
 import {
   changeImpact,
   checkReadiness,
+  describeDrillMode,
   describeStops,
   effectivePolicy,
+  killDrill,
   recoverStop,
+  runtimeHaltDrill,
   setKill,
   SETTINGS_INVENTORY,
   validatePolicyChange,
+  workerReadiness,
 } from './gov/trust.ts';
-import { exportLedgerWithManifest } from './ledger/export.ts';
+import { collectorName, loadActivationConfig } from './console/activation.ts';
+import { integrationReadinessState, listKnownCollectors } from './ingest/health.ts';
+import {
+  exportLedgerWithManifest,
+  filesystemArchivalProbe,
+  streamExportLedger,
+  verifyArchivalDelivery,
+} from './ledger/export.ts';
 import { runIngestionWorker } from './ingest/worker.ts';
 import { runApplicationWorker } from './substrate/worker.ts';
 
@@ -46,10 +56,15 @@ import { runApplicationWorker } from './substrate/worker.ts';
  *   tsx src/cli.ts verify [--db path]                    migrate + smoke probe
  *   tsx src/cli.ts verify --recover-stop <scope>/<class> --reason <text> --tenant slug
  *   tsx src/cli.ts verify --policy-change <key>=<value> [--db <target>]   validate a governed setting without applying it
+ *   tsx src/cli.ts verify --erasure-receipt <slug> [--db <target>]        verify a surviving erasure receipt + export file
+ *   tsx src/cli.ts verify --archival <export-file> [--bucket b] [--key k] [--archive-dir d]
+ *       verify archival delivery by byte-compared read-back (unconfigured bucket is reported, never success)
  *   tsx src/cli.ts stop --engage <scope>/<action-class> --reason <text> --tenant slug [--recovery-requires <text>] [--db <target>]
  *   tsx src/cli.ts report [--db path] [--out report.html] [--tenant slug]
  *   tsx src/cli.ts report --manifest <snapshot|evidence-package|backup-reference> --tenant slug
- *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme]
+ *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme] [--trust-proxy]
+ *   tsx src/cli.ts drill --policy-only [--tenant slug] [--db <target>]
+ *   tsx src/cli.ts drill --runtime --scope <scope> --class <action-class> --tenant <slug> [--db <target>]
  *   tsx src/cli.ts ingest-files --tenant acme --scope engineering --source dir --artifacts dir --db path
  *   tsx src/cli.ts ingest-test --source dir [--db path] [--tenant slug]
  *   tsx src/cli.ts signup --tenant acme --email o@a.test --password '...'
@@ -95,18 +110,47 @@ if (cmd === 'status') {
         );
         process.exitCode = 1;
       } else if (args.includes('--readiness')) {
-        const readiness = await checkReadiness(
-          [
-            {
-              name: 'database',
-              check: async () => {
-                await db.prepare('SELECT 1 AS ok').get();
-                return { ok: true as const, detail: `${target.engine} reachable` };
-              },
+        // FLOW-023: same vocabulary as GET /api/metrics — database is
+        // required; worker/integration status joins in when a tenant is
+        // selected (worker silent = failing, source never configured =
+        // unconfigured-optional, configured-but-broken = failing).
+        const at = new Date().toISOString();
+        const checks: Parameters<typeof checkReadiness>[0] = [
+          {
+            name: 'database',
+            check: async () => {
+              await db.prepare('SELECT 1 AS ok').get();
+              return { ok: true as const, detail: `${target.engine} reachable` };
             },
-          ],
-          { now: new Date().toISOString() },
-        );
+          },
+        ];
+        if (tenant) {
+          await assertTenantExists(db, tenant);
+          // optional: true maps never-deployed → unconfigured-optional;
+          // a stale heartbeat still returns { ok: false } → failing.
+          checks.push({ name: 'worker', optional: true, check: async () => workerReadiness(db, tenant, { now: at }) });
+          checks.push({
+            name: 'integrations',
+            optional: true,
+            check: async () => {
+              const config = await loadActivationConfig(db, tenant);
+              const collectors = new Set(await listKnownCollectors(db, tenant));
+              if (config) collectors.add(collectorName(config.sourcePath));
+              if (collectors.size === 0) return { ok: false, unconfigured: true, detail: 'no source configured' };
+              const parts: string[] = [];
+              let failing = false;
+              for (const collector of collectors) {
+                const health = await getIntegrationHealth(db, tenant, collector, { configured: true, now: at });
+                const projected = integrationReadinessState(health);
+                parts.push(projected.detail);
+                if (!projected.ok && projected.unconfigured !== true) failing = true;
+              }
+              if (failing) return { ok: false, detail: parts.join(' | ') };
+              return { ok: true as const, detail: parts.join(' | ') };
+            },
+          });
+        }
+        const readiness = await checkReadiness(checks, { now: at });
         console.log(JSON.stringify({ ...header, ...readiness }, null, 2));
         if (!readiness.ready) process.exitCode = 1;
       } else if (args.includes('--stops')) {
@@ -182,6 +226,8 @@ if (cmd === 'status') {
       const result = await verifyInstance(db);
       const recoverArg = flag('--recover-stop');
       const changeArg = flag('--policy-change');
+      const receiptArg = flag('--erasure-receipt');
+      const archivalArg = flag('--archival');
       if (changeArg) {
         // Dry-run only: most governed settings are startup-only or code
         // entry points, so the CLI validates and explains instead of
@@ -221,6 +267,30 @@ if (cmd === 'status') {
           ),
         );
         if (!checked.ok) process.exitCode = 1;
+      } else if (receiptArg) {
+        // Operator receipt verification (FLOW-004): the surviving
+        // erased:<slug> receipt plus the durability of its export file.
+        const slug = receiptArg.trim().toLowerCase();
+        if (!slug) throw new Error('usage: vital verify --erasure-receipt <slug> [--db <target>]');
+        const verification = await verifyErasureReceipt(db, slug);
+        console.log(JSON.stringify({ vital: '0.0.1', ok: verification.found, ...formatTargetHeader(target), ...verification }, null, 2));
+        if (!verification.found || verification.exportFile?.status === 'mismatch' || verification.exportFile?.status === 'unreadable') {
+          process.exitCode = 1;
+        }
+      } else if (archivalArg) {
+        // Archival-delivery verification (FLOW-024): byte-compared
+        // read-back against the configured archive. An unconfigured bucket
+        // is reported explicitly — never claimed as delivered.
+        const bucket = flag('--bucket') ?? process.env.VITAL_ARCHIVE_BUCKET ?? '';
+        const key = flag('--key') ?? process.env.VITAL_ARCHIVE_KEY ?? undefined;
+        const archiveDir = flag('--archive-dir') ?? process.env.VITAL_ARCHIVE_DIR ?? undefined;
+        const report = await verifyArchivalDelivery(archivalArg, {
+          bucket: bucket || undefined,
+          key,
+          probe: archiveDir ? filesystemArchivalProbe(archiveDir) : undefined,
+        });
+        console.log(JSON.stringify({ vital: '0.0.1', ok: report.status === 'verified' || report.status === 'unconfigured', ...formatTargetHeader(target), archival: report }, null, 2));
+        if (report.status !== 'verified' && report.status !== 'unconfigured') process.exitCode = 1;
       } else if (recoverArg) {
         const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
         const reason = flag('--reason');
@@ -309,12 +379,9 @@ if (cmd === 'status') {
 } else if (cmd === 'report') {
   try {
     const target = resolveDbTarget({ flag: flag('--db'), requirePersistent: true });
-    if (target.engine === 'postgres') {
-      throw new CliTargetError(
-        'ENGINE_UNSUPPORTED',
-        'report renders from sqlite in v2 — use a local sqlite file (--db path) or export from the console; postgres read-model wiring is not yet supported for this command',
-      );
-    }
+    // F26: the read model is engine-agnostic (every query goes through the
+    // AsyncDb dialect helpers), so Postgres targets are supported — verified
+    // against a live engine in the PG lane. No sqlite-only refusal.
     const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
     const out = flag('--out') ?? 'vital-report.html';
     const db = openDbTarget(target);
@@ -326,8 +393,43 @@ if (cmd === 'status') {
         const kind = manifestKind.trim();
         if (kind !== 'snapshot' && kind !== 'evidence-package' && kind !== 'backup-reference')
           throw new Error('--manifest must be snapshot | evidence-package | backup-reference');
-        const { manifest } = await exportLedgerWithManifest(db, tenant, kind, new Date().toISOString());
-        console.log(JSON.stringify(manifest, null, 2));
+        const outFile = flag('--out');
+        if (outFile && kind !== 'backup-reference') {
+          // Streaming file export with operator-visible progress
+          // (FLOW-024): per-section start/batch/complete on stderr, then
+          // the manifest (with retention policy) on stdout.
+          const { createWriteStream } = await import('node:fs');
+          const sink = createWriteStream(outFile, { mode: 0o600 });
+          try {
+            const { manifest } = await streamExportLedger(
+              db,
+              tenant,
+              (chunk) =>
+                new Promise<void>((resolve, reject) => {
+                  sink.write(chunk, (err) => (err ? reject(err) : resolve()));
+                }),
+              {
+                now: new Date().toISOString(),
+                kind,
+                onProgress: (event) => {
+                  if (event.phase === 'complete' || event.section === 'export') {
+                    console.error(`export [${event.section}]: ${event.phase} (${event.completed} rows)`);
+                  }
+                },
+              },
+            );
+            await new Promise<void>((resolve, reject) => {
+              sink.end((err?: Error | null) => (err ? reject(err) : resolve()));
+            });
+            console.error(`export complete: ${outFile} (retention: operator-managed, no automatic expiry)`);
+            console.log(JSON.stringify(manifest, null, 2));
+          } finally {
+            sink.destroy();
+          }
+        } else {
+          const { manifest } = await exportLedgerWithManifest(db, tenant, kind, new Date().toISOString());
+          console.log(JSON.stringify(manifest, null, 2));
+        }
       } else {
         const now = new Date().toISOString();
         const report = await buildReport(
@@ -367,6 +469,9 @@ if (cmd === 'status') {
     const keys = (blocks ?? [text]).map((s) => s.trim()).filter((s) => s.length > 0);
     return keys.length > 0 ? keys : undefined;
   };
+  // FLOW-006: behind the ALB the task must trust proxy headers for client
+  // IP and scheme; direct/loopback serving leaves them ignored.
+  const trustProxy = args.includes('--trust-proxy') || process.env.TRUST_PROXY === '1';
   const server = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
     port,
     host,
@@ -375,6 +480,7 @@ if (cmd === 'status') {
     approverRole,
     operatorSecret: process.env.VITAL_OPERATOR_SECRET,
     operatorKeys: parseOperatorKeys(process.env.VITAL_OPERATOR_KEYS),
+    trustProxy,
   });
   const localUrl =
     server.host === '0.0.0.0' || server.host === '::'
@@ -601,6 +707,17 @@ if (cmd === 'status') {
       await installAuthSchema(db);
       await assertTenantExists(db, tenant!, { strict: true });
       const result = await eraseTenant(db, tenant!, actor, undefined, { exportTo: exportDir ?? undefined });
+      // Post-commit collector: runs AFTER the transaction commits so a
+      // rollback can never restore refs to already-deleted blobs.
+      const deferredRefs = (result.receipt.deferred.find((d) => d.category === 'artifacts')?.items ?? []).slice().sort();
+      let collected: { deleted: string[]; retainedShared: string[]; missing: string[]; failed: { ref: string; reason: string }[] } | null = null;
+      if (deferredRefs.length > 0) {
+        collected = await collectErasureArtifacts(db, tenant!, deferredRefs, { actor });
+        console.log(
+          `artifacts collected post-commit: ${collected.deleted.length} deleted, ${collected.retainedShared.length} retained-shared, ${collected.missing.length} already-gone, ${collected.failed.length} failed`,
+        );
+        for (const f of collected.failed) console.error(`collect failed [${f.ref}]: ${f.reason}`);
+      }
       if (result.receipt.exportFile) console.log(`export written: ${result.receipt.exportFile}`);
       const rows = Object.entries(result.receipt.deleted)
         .filter(([, n]) => n > 0)
@@ -625,7 +742,7 @@ if (cmd === 'status') {
       for (const f of result.receipt.failed) {
         console.error(`failed [${f.category}]: ${f.items.join(', ')} (${f.reason})`);
       }
-      if (result.receipt.failed.length > 0) process.exitCode = 1;
+      if (result.receipt.failed.length > 0 || (collected && collected.failed.length > 0)) process.exitCode = 1;
     } finally {
       await db.close();
     }
@@ -680,9 +797,59 @@ if (cmd === 'status') {
   } catch (e) {
     fail(e);
   }
+} else if (cmd === 'drill') {
+  // FLOW-022: the two drill modes are separate commands with separate
+  // audit evidence. --policy-only (KILL_DRILL) never engages a real stop;
+  // --runtime (RUNTIME_HALT_DRILL) briefly engages a real stop on the
+  // given scope/class, verifies the halt path, then releases. Neither
+  // mode proves production readiness — see `vital status --readiness`.
+  try {
+    const target = resolveDbTarget({ flag: flag('--db') });
+    const tenant = resolveTenant({ flag: flag('--tenant'), defaultTenant: 'acme' })!;
+    const db = openDbTarget(target);
+    try {
+      await migrateDbTarget(db);
+      const now = new Date().toISOString();
+      if (args.includes('--policy-only')) {
+        await assertTenantExists(db, tenant);
+        const mode = describeDrillMode('policy-only');
+        const result = await killDrill(db, tenant, 'cli:drill', now);
+        console.log(
+          JSON.stringify(
+            { vital: '0.0.1', ok: result.allHalted, ...formatTargetHeader(target, tenant), mode: result.mode, ...mode, result },
+            null,
+            2,
+          ),
+        );
+        if (!result.allHalted) process.exitCode = 1;
+      } else if (args.includes('--runtime')) {
+        const scope = flag('--scope')?.trim();
+        const actionClass = (flag('--class') ?? flag('--action-class'))?.trim();
+        if (!scope || !actionClass)
+          throw new Error('usage: vital drill --runtime --scope <scope> --class <action-class> --tenant <slug> [--db <target>]');
+        await assertTenantExists(db, tenant, { strict: true });
+        const mode = describeDrillMode('runtime-halt');
+        const result = await runtimeHaltDrill(db, tenant, { scope, actionClass }, 'cli:drill', now);
+        console.log(
+          JSON.stringify(
+            { vital: '0.0.1', ok: result.held && result.released && result.authorizationHeld, ...formatTargetHeader(target, tenant), ...mode, result },
+            null,
+            2,
+          ),
+        );
+        if (!result.held || !result.released || !result.authorizationHeld) process.exitCode = 1;
+      } else {
+        throw new Error('usage: vital drill (--policy-only | --runtime --scope <s> --class <c>) --tenant <slug> [--db <target>]');
+      }
+    } finally {
+      await db.close();
+    }
+  } catch (e) {
+    fail(e);
+  }
 } else {
   console.error(
-    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | erase | stop)`,
+    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | erase | stop | drill)`,
   );
   process.exit(1);
 }

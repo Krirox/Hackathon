@@ -1,10 +1,10 @@
 # Deployment — the one supported topology
 
-Reference (production on AWS): **ECS vital-core + jcode sidecar · RDS Postgres ·
-Lambda executor microVMs · ALB entry** (`deploy/aws/` Terraform — the only
-supported production path). Legacy VPS shape it replaces: VPS-1 Buzz · VPS-2
-Vital core + Postgres · VPS-3 jcode (sibling process over the harness API).
-Dev approximation: `deploy/compose.yml` (Buzz + core + Postgres on one box).
+Reference (production on AWS): **ECS vital-core + jcode sidecar · ECS Buzz
+relay · RDS Postgres (Ledger + Buzz) · ElastiCache Redis · S3 artifacts +
+Buzz media · Lambda executor microVMs · ALB entry** (`deploy/aws/` Terraform —
+the only supported production path). Local smoke only: `deploy/compose.yml`
+(loopback console + Postgres for CI/E2E-17; no Buzz, jcode, or workers).
 
 ## Finite file ingestion (F04a)
 
@@ -64,14 +64,14 @@ alerting and restore/redrive drills remain unverified production gates.
 - Kill switches exist at tenant / scope / action-class level and are
   drilled (`killDrill`). An untested kill switch is a UI element.
 
-## Postgres (VPS-2)
+## Postgres (RDS)
 
 - The schema is derived, never maintained twice: `PG_SCHEMA` is the one
   SCHEMA translated (`AUTOINCREMENT` → `BIGSERIAL`), verified identical in
   CI. Migrations: `migratePostgres` + additive journal; version stamped.
-- **PITR is on.** RDS: automated backups with a 7-day (min) retention
-  window before any pilot data lands; Cloud SQL: point-in-time recovery
-  enabled at instance creation. Verify with a restore drill to a scratch
+- **PITR is on.** RDS automated backups with a 7-day (min) retention window
+  before any pilot data lands (Ledger and Buzz each have their own RDS
+  instance in `deploy/aws/`). Verify with a restore drill to a scratch
   instance quarterly — an untested backup is a UI element, like the kill
   switch. Ledger export (`exportLedger`) is the portable second copy, not
   the backup strategy.
@@ -102,18 +102,23 @@ All-AWS, Terraform in `deploy/aws/` (`main.tf` · `variables.tf` ·
 real secrets, CI supplies every `TF_VAR_*`).
 
 ```
-internet → ALB ──→ ECS Fargate vital-core (HOST=0.0.0.0, PORT=3100)
+internet → ALB ──→ ECS Fargate vital-core (HOST=0.0.0.0, PORT=3100, VITAL_WITH_WORKER=1)
    webhooks, console, Slack-HMAC fallback all ride the ALB     │
          ┌─────────────────────────────────────────────────────┘
          │  sidecar: jcode harness API on /run/jcode-api.sock (localhost —
          │  the same coordinated REQUEST/bid path as src/jcode/runner.ts)
-         ├── RDS Postgres 16 (Multi-AZ, PITR 7d, private subnets)
+         ├── Cloud Map buzz.vital.local:3000 ← BUZZ_RELAY_URL (deploy/aws/buzz.tf)
+         ├── RDS Postgres 16 Ledger (Multi-AZ, PITR 7d, private subnets)
+         ├── RDS Postgres 16 Buzz relay DB + ElastiCache Redis 7 (Buzz only)
          ├── EFS /var/vital/sandboxes (rebuildable manifests, never trust-bearing)
          ├── S3 artifacts (content-addressed) + S3 audit (Object Lock 365d,
-         │   separate from the Ledger — idea.md §12)
+         │   separate from the Ledger — idea.md §12) + S3 buzz-media
          └── SQS vital-requests ──→ Lambda executor (container image,
-             Firecracker microVM per invocation, 10 GB ephemeral, ≤15 min,
+             Firecracker microVM per invocation, 512 MB ephemeral, ≤15 min,
              reserved concurrency = infra budget-death backstop, DLQ after 3×)
+
+Optional: ALB host rule buzz.example.com → Buzz relay (var.buzz_hostname).
+Without it, Buzz stays reachable inside the VPC via Cloud Map only.
 ```
 
 Why this shape, per Vital's own rules:
@@ -149,7 +154,7 @@ non-billable executor dry-run invocation).
 First-time bootstrap:
 
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
-2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`).
+2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`, `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`).
 3. Run the `deploy-aws` workflow or run `terraform apply` directly (safe local image fallbacks allow initial infrastructure bootstrap without chicken-and-egg failure).
 
 ## Status: liveness vs readiness
@@ -194,26 +199,50 @@ These are separate operations with separate tests. Do not confuse them.
 
 - Backup/restore: RDS automated backups (7-day minimum PITR window) plus a
   quarterly restore drill to a scratch instance. The restore drill is the
-  proof; bucket or snapshot provisioning alone is not delivery proof, and
-  no S3 archival delivery is claimed.
+  proof; bucket or snapshot provisioning alone is not delivery proof.
+  Drill procedure (record date, operator, and row counts each quarter):
+  1. Restore the automated backup to a scratch instance (never over
+     production).
+  2. Open the scratch instance read-only and compare tenant row counts
+     (claims, decisions, outcomes, audit) against production.
+  3. Append one canary OBSERVATION on scratch and confirm history grows
+     append-only (no rewritten rows, no recycled identities).
+  4. Destroy the scratch instance; file the drill record with the quarter's
+     ops notes. The SQLite equivalent of this drill — file copy, reopen,
+     count, append — is automated in `test/backup-restore.test.ts`.
 - Ledger export: `exportLedgerWithManifest(db, tenant, kind)` in
   `src/ledger/export.ts` is read-only (SELECT only, verified by test) and
   ships a manifest per kind — `snapshot` (point-in-time view, not a
   backup), `evidence-package` (full portable record with artifact ownership
   refs), `backup-reference` (manifest describing what backup covers versus
   what export covers). Download over HTTP at `GET /api/ledger/export?kind=`
-  (session-gated; `evidence-package` requires admin or owner) and audit
-  history at `GET /api/audit` (actor/action/date/request/decision filters,
+  (session-gated; `evidence-package` requires admin or owner; add
+  `&stream=true` for chunked delivery of large tenants) and audit history
+  at `GET /api/audit` (actor/action/date/request/decision filters,
   tenant-isolated, paginated). Omissions are listed in the manifest: users,
   sessions, credentials, raw artifact bytes, external stores, other
-  tenants.
+  tenants. Every manifest also carries `retention`: operator-managed, no
+  automatic expiry — see `SECURITY.md` (Export retention policy).
+- Export progress, failure, and retry: `streamExportLedger` accepts
+  `onProgress` (start/batch/complete per section plus a terminal export
+  event; totals arrive with `complete` because reads are paged). The CLI
+  surfaces this via `report --manifest <kind> --out <file>` (progress on
+  stderr, manifest on stdout). Partial-failure tracking across sections is
+  available through `createExportTracker` (in-progress / partial-failure /
+  failed / completed / expired).
+- Archival delivery: only a byte-compared read-back counts as delivered.
+  `verifyArchivalDelivery` in `src/ledger/export.ts` (CLI:
+  `verify --archival <file>`) reports `verified` / `missing` /
+  `mismatch` / `error`, and `unconfigured` when no bucket is set — never
+  success without a hash match.
 - Ledger-history import is unsupported: history is append-only and merging
-  two histories is not offered. Audit investigation uses `queryAudit` (actor,
-  action, date, request, decision; tenant-isolated, paginated) and
-  `auditLinks` (evidence / authorization / receipt / outcome) in the same
-  module. Export progress and partial failure surface through
-  `createExportTracker` (in-progress / partial-failure / failed / completed
-  / expired).
+  two histories is not offered (no `importLedger` entry point exists).
+  Audit investigation uses `queryAudit` (actor, action, date, request,
+  decision; tenant-isolated, paginated) and `auditLinks` (evidence /
+  authorization / receipt / outcome) in the same module.
+- Erasure receipts: `vital verify --erasure-receipt <slug>` (operator) and
+  `GET /api/erasure/receipt?slug=` (browser, admin or owner) re-check the
+  surviving receipt and its durable export file on demand.
 
 ## Pilot and contact path
 

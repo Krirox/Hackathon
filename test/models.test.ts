@@ -105,7 +105,10 @@ T('unapproved models never run — the registry is default-deny', async () => {
 
 T('the judge scores, and fails closed on garbage or errors', async () => {
   const profile = prodProfile({} as NodeJS.ProcessEnv);
-  const hi = await judgeText(
+  // F25 strict parsing: prose replies are NOT scored by substring extraction
+  // ("The risk is 0.9..." used to extract 0.9). Any reply that is not a bare
+  // number in [0,1] fails closed to score=1 / judge_unparseable.
+  const prose = await judgeText(
     {
       profile,
       apiKey: 'k',
@@ -113,7 +116,17 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
     },
     'do bad',
   );
-  eq(hi.score, 0.9);
+  eq(prose.score, 1, 'prose reply fails closed:');
+  eq(prose.flags, ['judge_unparseable']);
+  const hi = await judgeText(
+    {
+      profile,
+      apiKey: 'k',
+      fetchFn: stubFetch({ choices: [{ message: { content: '0.9' } }] }).fetchFn,
+    },
+    'do bad',
+  );
+  eq(hi.score, 0.9, 'a bare-number reply scores directly:');
   eq(hi.flags, ['model_judge']);
   const lo = await judgeText(
     { profile, apiKey: 'k', fetchFn: stubFetch({ choices: [{ message: { content: '0.1' } }] }).fetchFn },

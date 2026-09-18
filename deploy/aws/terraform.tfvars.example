@@ -33,6 +33,11 @@ novita_api_key     = "CHANGEME"
 # Private ALB posture (keep deployment private first — F01):
 # alb_internal      = true
 # alb_ingress_cidrs = ["10.0.0.0/16"]
+# Ops alarm recipient (F27): an unsubscribed alarm topic alerts nobody.
+# Set to a mailbox an operator actually reads, then CONFIRM the AWS
+# subscription mail after apply — unconfirmed = formally firing, factually
+# silent. Leave empty only for throwaway stacks.
+# ops_alarm_email = "ops@example.test"
 
 # Remote state (see commented backend block in main.tf): create the bucket +
 # lock table once, then uncomment there and init with -backend-config flags
@@ -41,3 +46,14 @@ novita_api_key     = "CHANGEME"
 allowed_egress_hosts         = "api.novita.ai,generativelanguage.googleapis.com,api.serper.dev"
 lambda_memory_mb             = 2048
 lambda_reserved_concurrency  = 20
+
+# Buzz relay (AWS-native — replaces deploy/docker-compose.buzz.yml MinIO/Redis path)
+enable_buzz              = true
+buzz_image               = "ghcr.io/block/buzz:main"
+buzz_desired_count       = 2
+buzz_db_instance_class   = "db.t4g.micro"
+buzz_db_multi_az         = true
+buzz_redis_node_type     = "cache.t4g.micro"
+# buzz_relay_private_key via TF_VAR_buzz_relay_private_key (64-char hex secp256k1 key)
+# Public relay hostname on the shared ALB (optional — internal Cloud Map always works):
+# buzz_hostname = "buzz.example.com"

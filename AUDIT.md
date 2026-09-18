@@ -955,3 +955,51 @@ The scoped browser review workflow is implemented and verified. `src/console/det
 Validation for this completion pass: `npm run test:browser` **1/1 passed**; `npm test` **359/359 passed**; `npm run typecheck`, `npm run build`, and targeted ESLint passed. Browser installation/run instructions are in `README.md`. No live Postgres, production deployment, or downstream worker execution was verified by this browser test. Database-level bounded queries, immutable payload-bound approval, and background dispatch remain separate work; UI pagination does not establish load-scale readiness.
 
 Validation: typecheck and build passed; console/auth tests **52/52 passed**, including HTTP render→approve/decline→refresh and an isolated client-script test for successful declines and errors. Full suite result is **355/355 passed**: all adapter completion, jcode trace creation, live progress, and review controls pass cleanly.
+
+## 2026-09-18 — F10/F07/F15/F16/F26/F27 completion pass
+
+Closed the remaining open items from sections 2 and the still-open register. Suite: **715/715 green** (`npm test`), PG lane **8/8** (`TEST_PG_URL=… npm run test:postgres`), typecheck clean, lint clean on all touched paths, `npm run build` produces a bootable `dist/cli.js`, `docs:check` green.
+
+### F10 — two-connection Postgres concurrency drills (was "still open")
+
+The sqlite F10 tests interleave claims through one connection; the audit required the same drills over two true Postgres connections. Added to `test/postgres.test.ts` (PG lane):
+
+- **Outbox**: two separate pools claim the same due batch CONCURRENTLY under READ COMMITTED — rows partition with no double ownership, loser-side settlement is refused with `NOT_OWNER`, winners settle cleanly, nothing strands in CLAIMED.
+- **Inbox**: the same concurrent-claim drill for staged receipts — exactly-once claiming across connections, owner-fenced settlement, no stranded rows.
+
+### F07 — concurrent startup drill (was "future work")
+
+New PG-lane drill drops `schema_migrations` and races `migrate()` from two connections against the same empty journal. **It caught a real defect**: under Postgres, two concurrent boots both pass the `IF NOT EXISTS` existence check and collide inside the catalog (`pg_type_typname_nsp_index` unique violation) — one boot crashed at startup. Fix in `src/core/db.ts`: `execIdempotent` retries schema DDL once on exactly that error class (`42P07` duplicate_table, `42710` duplicate_object, or the named catalog indexes) — the object existing is all idempotency needs. The drill now proves: one journal stamp after the race, version stamped 6 exactly once, sequential re-runs stay idempotent. Verified stable across repeated runs.
+
+### F15 — simulated-run isolation enforced at the consumer (was partial)
+
+`mineCandidates` in `src/compiler/compiler.ts` now excludes `simulated:%` intents **in SQL** (`WHERE intent NOT LIKE 'simulated:%'`), so the dogfood pipeline's synthetic traces can never satisfy a mining threshold through this path — exclusion is by construction, not caller convention. `checkDrift` adds defense-in-depth against simulated intents. Regression tests in `test/learning.test.ts` prove six simulated SUCCESSes never mine a candidate and never pool with real traces to reach a threshold.
+
+### F16 — in-flight search abort on cancellation (was "still open" in the deferred list)
+
+`executeResearchRun` in `src/wedge/deepresearch.ts` now races each search against a 250 ms cancellation poll (`runSearchWithAbort`). When cancellation fires mid-search, the in-flight result is discarded (never banked, its promise settled detached so a late rejection cannot become unhandled), and the run settles `CANCELLED` immediately with the cancelling actor recorded — instead of waiting for the step to finish. New test in `test/deepresearch.test.ts` proves a mid-search cancel banks zero claims, marks no step complete, and records `cancelledBy`.
+
+### F26 — reporting semantics, omitted counts, bounded queries, engine parity (was partial)
+
+- **Metric label fixed**: the provenance-complete card no longer claims "FACT only" — the calculation covers FACT + MEASUREMENT (`src/console/render.ts`).
+- **Omitted counts**: `buildReport` now returns `omitted = { needsHuman, rooms, decisions, cards }` — rows beyond each bounded window. The dashboard renders an explicit "Also beyond this view" line linking to the unbounded `/console/human-work` and `/console/rooms` list pages; the Needs-a-human heading shows "N shown of M". A reader can tell "queue clear" from "queue longer than the window". Pinned by a 500-decision/60-scope test in `test/console.test.ts`.
+- **Bounded reads**: the oldest-open-contradiction query no longer pulls the CONTRADICTION_OPEN audit trail whole per dashboard GET — it computes `MIN(at)` over only the open pairs' targets in SQL.
+- **CLI report engine parity**: the sqlite-only refusal on `vital report --db postgres://…` is removed; the read model is engine-agnostic through the AsyncDb dialect helpers, verified against a live engine. Test updated to assert the absence of the engine gate.
+- **Status counter honesty**: `T()` in `test/helpers.ts` accepts `opts.timeout`, and the five direct `node:test` registrations in `test/site-accessibility.test.ts` (browser journeys, 120 s) were converted to `T()` so `var/status.json` counts every suite test — 715 now matches node's own TAP total exactly. Docs refreshed to 715.
+
+### F27 — alarm recipients (was "SNS topic/alarms lack supplied recipient")
+
+`deploy/aws` gains `ops_alarm_email` (variables.tf): set, it creates the SNS email subscription for all four alarms; empty (throwaway stacks only) creates no subscription. Comments state plainly that the subscription requires operator confirmation of AWS's mail and that delivery verification belongs to the Phase 6 pilot gate — an unconfirmed topic is formally firing and factually silent. `terraform.tfvars.example` documents the choice.
+
+### Also fixed in passing
+
+- `test/models.test.ts` judge expectation contradicted F25's strict parsing (expected substring extraction of 0.9 from prose); updated to expect fail-closed `judge_unparseable`, with a bare-number 0.9 case added.
+- Playwright browser tests fall back to the system Chrome channel when the pinned headless shell is not installed (restricted networks cannot reach the Playwright CDN); assertions are identical on either engine.
+- Pre-existing lint errors in tracked files fixed (nested ternary, useless assignments, unused vars in `src/console/serve.ts`, `src/gov/trust.ts`, and several tests).
+
+### Still open (unchanged)
+
+- F15's deferred half: real review identity, factual evidence coverage, and actual deliverable/eval receipts remain absent until a real pilot exists.
+- F16's deferred half: plan-review UI, production search/model composition, run history page, report delivery.
+- F27's restore/redrive drills and F08's live first/repeat deploy remain production gates, not repository work.
+- The untracked `src/talk/*` files and `test/buzz.test.ts` in the working tree are separate in-progress work, not part of this audit pass.

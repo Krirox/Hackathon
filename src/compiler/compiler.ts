@@ -641,7 +641,13 @@ export class OrganizationalCompiler {
         `SELECT outcome FROM traces WHERE tenant = ? AND intent = ? AND tier = 'WORKFLOW'
            AND skill_card = ? ORDER BY created_at DESC LIMIT ?`,
       )
-      .all(tenant, card.intent, cardId, window)) as { outcome: string }[];
+      // F15: simulated traces are not real execution evidence; a card can
+      // only be PROMOTED through genuine cross-model transfer tests, so a
+      // `simulated:` intent should never even be here — the filter is
+      // defense in depth, not the primary gate.
+      .all(tenant, card.intent.startsWith('simulated:') ? '\u0000no-simulated-intent' : card.intent, cardId, window)) as {
+      outcome: string;
+    }[];
     if (rows.length < 10) return { drifting: false, ewma: 1, samples: rows.length, demoted: false };
 
     let ewma = 1;
@@ -718,6 +724,11 @@ export interface MinedCandidate {
  * Candidate mining (TODO §5): repeated intent detection over SUCCESS traces
  * the router did not doubt, deduped by intent. Returns intents worth
  * compiling — compilation itself stays an explicit, gated act.
+ *
+ * F15: simulated traces (the dogfood pipeline mints `simulated:`-prefixed
+ * intents) are excluded BY CONSTRUCTION here, not by a caller convention —
+ * a synthetic run can never satisfy a promotion candidate threshold or leak
+ * into learning evidence through this path.
  */
 export async function mineCandidates(db: AsyncDb, tenant: string, minRepeats = 3): Promise<MinedCandidate[]> {
   const compilable = `SUM(CASE WHEN outcome = 'SUCCESS' AND router_confidence >= 0.5 THEN 1 ELSE 0 END)`;
@@ -727,7 +738,7 @@ export async function mineCandidates(db: AsyncDb, tenant: string, minRepeats = 3
               ${groupConcat(db.engine, 'scope')} AS scopes,
               ${groupConcat(db.engine, 'task_type')} AS types
          FROM traces
-        WHERE tenant = ?
+        WHERE tenant = ? AND intent NOT LIKE 'simulated:%'
         GROUP BY intent HAVING ${compilable} >= ?`,
     )
     .all(tenant, minRepeats)) as { intent: string; n: number; total: number; scopes: string; types: string }[];

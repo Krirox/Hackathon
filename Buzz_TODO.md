@@ -205,36 +205,47 @@ For each activated room, operators can configure:
 ## 6. Implementation Roadmap
 
 ### Phase 1: Room Topology & Provisioning
-- [ ] Create seed script `scripts/seed-buzz-rooms.ts` to provision the 12 canonical rooms on the local relay.
-- [ ] Register cryptographic agent identities for each room (Nostr keypairs for `fact-agent`, `risk-agent`, `ops-agent`, etc.).
-- [ ] Bind room identities to Vital scopes (`src/talk/surface.ts`).
+- [x] Create seed script `scripts/seed-buzz-rooms.ts` to provision the 12 canonical rooms on the local relay.
+- [x] Register cryptographic agent identities for each room (Nostr keypairs for `fact-agent`, `risk-agent`, `ops-agent`, etc.).
+- [x] Bind room identities to Vital scopes (`src/talk/surface.ts` & `src/talk/rooms.ts`).
 
 ### Phase 2: Dynamic Health Telemetry Engine
-- [ ] Build `ScopeHealthEvaluator` in `src/gov/trust.ts` to compute composite status (`healthy` | `degraded` | `halted` | `idle`) per scope based on:
+- [x] Build `ScopeHealthEvaluator` in `src/talk/health.ts` to compute composite status (`healthy` | `degraded` | `halted` | `idle`) per scope based on:
   - Active stops (`describeStops`)
   - Drift alerts (`checkDrift`)
   - Pending approval count (`coord.listPendingApprovals`)
   - Budget consumption vs quota
-- [ ] Implement Nostr status beacon publisher: periodically post room status events (`Kind 30315` or custom NIP status tags) to render 🟢/🟡/🔴 badges in the Buzz sidebar.
+- [x] Implement Nostr status beacon publisher: periodically post room status events (`Kind 30315` or custom NIP status tags) to render 🟢/🟡/🔴 badges in the Buzz sidebar.
 
 ### Phase 3: Scope-Aware Application Worker Dispatch
-- [ ] Update `ApplicationWorkerOptions['buzz']` in `src/substrate/worker.ts` with a dynamic `channelFor(requestId)` router that maps `request.scope` to the appropriate room ID.
-- [ ] Ensure non-baseline runs stream execution steps live into the room thread via `watchRun`.
-- [ ] Verify that failures increment `buzzRelayFailures` gracefully without crashing the worker.
+- [x] Update `ApplicationWorkerOptions['buzz']` in `src/substrate/worker.ts` with a dynamic `channelFor(requestId)` router that maps `request.scope` to the appropriate room ID.
+- [x] Ensure non-baseline runs stream execution steps live into the room thread via `watchRun`.
+- [x] Verify that failures increment `buzzRelayFailures` gracefully without crashing the worker.
 
 ### Phase 4: In-Room Review & Approval Interface
-- [ ] Implement NIP-29 review card renderer: format `requiresHumanApproval` requests into structured room cards with evidence chips, confidence score, token cost, and approval action links.
-- [ ] Implement Buzz webhook receiver in `src/console/serve.ts` (`POST /api/buzz/webhook`) to handle approvals and declines initiated from Buzz rooms.
-- [ ] Bind approved decisions to `buzzEventSig` in the Reality Ledger.
+- [x] Implement NIP-29 review card renderer: format `requiresHumanApproval` requests into structured room cards with evidence chips, confidence score, token cost, and approval action links.
+- [x] Implement Buzz webhook receiver in `src/console/serve.ts` (`POST /api/buzz/webhook`) to handle approvals and declines initiated from Buzz rooms.
+- [x] Bind approved decisions to `buzzEventSig` in the Reality Ledger.
 
 ### Phase 5: In-Room Slash Commands & Emergency Controls
-- [ ] Implement room command parser for `/halt <scope>`, `/recover <scope>`, `/status <scope>`, and `/cost`.
-- [ ] Connect `/halt` and `/recover` directly to `gov/trust.ts` functions (`setKill`, `recoverStop`) with audit logging.
-- [ ] Test end-to-end: trigger synthetic procedure drift → observe `#risk-monitor` turn 🟡 → guide agent via thread → observe return to 🟢.
+- [x] Implement room command parser for `/halt <scope>`, `/recover <scope>`, `/status <scope>`, and `/cost`.
+- [x] Connect `/halt` and `/recover` directly to `gov/trust.ts` functions (`setKill`, `recoverStop`) with audit logging.
+- [x] Test end-to-end: trigger synthetic procedure drift → observe `#risk-monitor` turn 🟡 → guide agent via thread → observe return to 🟢.
 
 ### Phase 6: Room Selection & Onboarding Setup Wizard
-- [ ] Build room selection onboarding step in Console setup (`/setup/rooms` and signup flow).
-- [ ] Add room configuration schema in `src/gov/trust.ts` (storing room mission, autonomy tier, budget cap, and SoR connections per scope).
-- [ ] Add in-room slash command handler for `/policy set <key>=<value>` with `audit_log` recording.
-- [ ] Create UI modal in Buzz/Console to enable/disable rooms and adjust per-room parameters on the fly.
+- [x] Build room selection onboarding step in Console setup (`/setup/rooms` and signup flow).
+- [x] Add room configuration schema in `src/talk/rooms.ts` (storing room mission, autonomy tier, budget cap, and SoR connections per scope).
+- [x] Add in-room slash command handler for `/policy set <key>=<value>` with `audit_log` recording.
+- [x] Create UI modal in Buzz/Console to enable/disable rooms and adjust per-room parameters on the fly.
+
+---
+
+## 7. Standout Capabilities Summary
+All 6 standout capabilities have been implemented, integrated, and verified in test suites:
+1. **Cross-Room Agent Handoffs & Deliberations (`src/talk/swarm.ts`)**: Autonomous cross-room dispatch (`@finance-agent assess churn impact of [clm_market_42]`), proposal admission, epistemic claim linking (`derived_from`), and high-risk cascade to `#exec` & `#growth`.
+2. **Live Epistemic Canvases (`src/talk/canvas.ts`)**: Pinned Kind 30023 live documents tailored per room (#risk-monitor exposure tables & drift EWMA graph, #reality-core epistemic DAG, #finance cost-per-signal gas gauges, #compliance regulatory tracker).
+3. **Automated "Honeytask" Canaries (`src/talk/canary.ts`)**: Benign synthetic anomalies dropped into rooms to calibrate trust vigilance, awarding `🟢 calibrated` badges or auto-freezing trust with retraining tickets.
+4. **Ambient Morning Voice Briefing (`src/talk/huddle.ts`)**: Autonomous 60-second audio summary generator with valid RIFF/WAVE PCM audio synthesis and Kind 30024 Buzz Huddle events.
+5. **Ambient Budget Gas Gauges (`src/talk/budget-gauge.ts`)**: Room header status strings with ASCII progress bars, token burn rate calculation (`tokens/hr`), and 80% quota yellow alert warnings.
+6. **In-Room Time-Travel Forking (`src/talk/fork.ts`)**: `/fork-decision` & `/fork-run` commands cloning request context into `#sandbox`, re-executing with alternative model/temperature parameters, and rendering side-by-side diff tables.
 

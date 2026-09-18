@@ -218,15 +218,26 @@ export function renderHtml(r: ConsoleReport, live = false): string {
           .join('')}</div>`,
     )
     .join('');
+  // F26: bounded sections surface what the window omits — 0 means the
+  // window held everything; >0 links to the unbounded list page.
+  const omittedLine = (): string => {
+    const parts: string[] = [];
+    if (r.omitted.needsHuman > 0)
+      parts.push(`${r.omitted.needsHuman} more in queue → <a href="/console/human-work">human work</a>`);
+    if (r.omitted.rooms > 0) parts.push(`${r.omitted.rooms} rooms hidden → <a href="/console/rooms">all rooms</a>`);
+    if (r.omitted.decisions > 0) parts.push(`${r.omitted.decisions} decisions beyond the chart window`);
+    if (r.omitted.cards > 0) parts.push(`${r.omitted.cards} cards beyond the compiler columns`);
+    return parts.length > 0 ? `<p class="sub">Also beyond this view: ${parts.join(' · ')}</p>` : '';
+  };
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Vital Console — ${esc(r.tenant)}</title>
 <style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:${INK};margin:0;padding:24px}h1{font-size:28px;margin:0}h2{font-size:16px;margin:24px 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid ${HAIRLINE};border-radius:10px;padding:16px;background:#fff}.big{font-size:32px;font-weight:800}.sub{font-size:11px;color:${MUTED}}.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.bar{height:6px;background:${HAIRLINE};border-radius:3px}.bar>i{display:block;height:100%;background:${TEAL};border-radius:3px}</style>
 </head><body>
-<p class="sub">${esc(r.tenant)} · ${esc(r.at)}</p>
+<p class="sub">${esc(r.tenant)} · ${esc(r.at)}</p>${omittedLine()}
 <h1>Reality health</h1>
 <div class="grid">
 <div class="card"><div class="sub">stale-fact rate</div><div class="big">${(h.staleFactRate * 100).toFixed(1)}%</div><div class="bar"><i style="width:${Math.min(100, (h.staleFactRate / h.staleFactGate) * 100).toFixed(0)}%"></i></div><div class="sub">gate &lt; ${(h.staleFactGate * 100).toFixed(0)}%</div></div>
 <div class="card"><div class="sub">contradictions open</div><div class="big">${h.contradictions.open}</div><div class="sub">MTTR ${h.contradictions.mttrHours === null ? 'unmeasured — resolution timestamps pending' : h.contradictions.mttrHours.toFixed(0) + 'h'} · SLA ${h.contradictions.slaHours}h</div></div>
-<div class="card"><div class="sub">provenance complete</div><div class="big">${(h.provenanceComplete * 100).toFixed(0)}%</div><div class="sub">FACT only</div></div>
+<div class="card"><div class="sub">provenance complete</div><div class="big">${(h.provenanceComplete * 100).toFixed(0)}%</div><div class="sub">FACT + MEASUREMENT with ground provenance</div></div>
 <div class="card"><div class="sub">orphan claims</div><div class="big">${h.orphanClaims}</div><div class="sub">target 0</div></div>
 <div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? '—' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}${r.approvalLatency.byHuman.length === 0 ? '' : ` · slowest: ${esc(r.approvalLatency.byHuman[0]!.human)} ${fmtDuration(r.approvalLatency.byHuman[0]!.medianSeconds)}`}</div></div>
 <div class="card"><div class="sub">cost per signal</div>${r.costPerSignal === null ? '<div class="big">—</div><div class="sub">no router configured</div>' : `<div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div>`}</div>
@@ -236,7 +247,7 @@ export function renderHtml(r: ConsoleReport, live = false): string {
  <div class="card">${lineChart(curve, r.costTarget)}</div>
 <h2>Tier mix</h2>
 <div class="card">${tierStack(r.tierMix)}</div>
-<h2>Needs a human (${needsHuman.length} open · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${live ? `<a href="/console/digest">${r.digestCount} notices → digest</a>` : `${r.digestCount} notices → digest`})</h2>
+<h2>Needs a human (${needsHuman.length} shown${r.omitted.needsHuman > 0 ? ` of ${needsHuman.length + r.omitted.needsHuman}` : ''} · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${live ? `<a href="/console/digest">${r.digestCount} notices → digest</a>` : `${r.digestCount} notices → digest`})</h2>
 <div class="grid">${needsHuman.map((n) => needsHumanCard(n, live)).join('') || '<p class="sub">queue clear</p>'}</div>
 <h2>Compiler — why not trusted yet</h2>
 <div class="cols">${['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'].map((s) => `<div><div class="sub">${s}</div>${cards(s)}</div>`).join('')}</div>
@@ -305,15 +316,44 @@ export function buildConsoleNav(home: string, availability: Partial<NavAvailabil
 
 export function renderConsoleNav(items: NavDestination[], current?: NavKey): string {
   const links = items
-    .map((item) => {
+    .map((item, i) => {
+      const tab = i === 0 ? ' tabindex="0"' : ' tabindex="-1"';
+      const roving = ' data-console-nav-link';
       if (current !== undefined && item.key === current) {
-        return `<a href="${esc(item.href)}" aria-current="page">${esc(item.label)}</a>`;
+        return `<a href="${esc(item.href)}" aria-current="page"${tab}${roving}>${esc(item.label)}</a>`;
       }
-      return `<a href="${esc(item.href)}">${esc(item.label)}</a>`;
+      return `<a href="${esc(item.href)}"${tab}${roving}>${esc(item.label)}</a>`;
     })
     .join(' · ');
-  return `<nav aria-label="Console">${links}</nav>`;
+  return `<nav aria-label="Console">${links}</nav><script>${CONSOLE_NAV_SCRIPT}</script>`;
 }
+
+/**
+ * FLOW-019 keyboard traversal: roving tabindex with arrow-key movement
+ * inside the shared console nav. Links remain plain Tab stops (first link
+ * tabindex 0); ArrowLeft/Right/Home/End move focus without activating.
+ */
+export const CONSOLE_NAV_SCRIPT = `(() => {
+  const nav = document.querySelector('nav[aria-label="Console"]');
+  if (!nav) return;
+  const links = Array.from(nav.querySelectorAll('a[data-console-nav-link]'));
+  if (links.length === 0) return;
+  nav.addEventListener('keydown', (event) => {
+    const current = document.activeElement;
+    const i = links.indexOf(current);
+    if (i < 0) return;
+    let next = -1;
+    if (event.key === 'ArrowRight') next = (i + 1) % links.length;
+    else if (event.key === 'ArrowLeft') next = (i - 1 + links.length) % links.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = links.length - 1;
+    else return;
+    event.preventDefault();
+    links.forEach((l) => l.tabIndex = -1);
+    links[next].tabIndex = 0;
+    links[next].focus();
+  });
+})();`;
 
 export function renderAccountCluster(email: string, role: string, csrf: string): string {
   return `<div style="margin-top:24px;display:flex;gap:12px;align-items:center" class="sub"><span>signed in as ${esc(email)} · ${esc(role)}</span><a href="/account">account</a><a href="/team">team</a><form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280">Sign out</button></form></div>`;
@@ -380,4 +420,35 @@ export function withReturnTo(url: string, returnTo?: string): string {
     return `${url}&return=${encodeURIComponent(returnTo)}`;
   }
   return `${url}?return=${encodeURIComponent(returnTo)}`;
+}
+
+/** Shared paginated list shell for the /console view-all routes (FLOW-020). */
+export function renderListPage(opts: {
+  title: string;
+  heading: string;
+  searchAction: string;
+  query: string;
+  total: number;
+  truncated: boolean;
+  shown: number;
+  prevUrl: string | null;
+  nextUrl: string | null;
+  clearUrl: string;
+  body: string;
+  returnNote?: string;
+}): string {
+  const pages = [opts.prevUrl ? `<a href="${esc(opts.prevUrl)}">Previous</a>` : '', opts.nextUrl ? `<a href="${esc(opts.nextUrl)}">Next</a>` : '']
+    .filter(Boolean)
+    .join(' · ');
+  return `<h1>${esc(opts.heading)}</h1>
+<form method="get" action="${esc(opts.searchAction)}">
+<label class="sub" for="q">search</label>
+<input id="q" name="q" value="${esc(opts.query)}">
+<button type="submit">Search</button>
+<a href="${esc(opts.clearUrl)}">Clear</a>
+</form>
+<p class="sub">${opts.total} total · showing ${opts.shown}${opts.truncated ? ' · explicit truncation: narrow the search or page further' : ''}</p>
+${opts.body}
+${pages ? `<p class="sub">${pages}</p>` : ''}
+${opts.returnNote ? `<p class="sub">${esc(opts.returnNote)}</p>` : ''}`;
 }

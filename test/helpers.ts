@@ -64,9 +64,18 @@ let fail = 0;
  * (the failure mode that already bit the jcode handshake) now fails the suite
  * instead of wedging CI forever. `node --test` supplies the reporter and the
  * exit code, so there is no hand-rolled pass/fail plumbing left.
+ *
+ * `opts.timeout` overrides the default 15s for legitimately slow tests
+ * (browser journeys). Register through T rather than node:test directly so
+ * var/status.json's test count covers every suite test — that count is the
+ * machine-readable truth `docs:check` pins.
  */
-export const T = (name: string, fn: () => void | Promise<void>): void => {
-  test(name, { timeout: 15_000 }, async () => {
+export const T = (
+  name: string,
+  fn: () => void | Promise<void>,
+  opts: { timeout?: number } = {},
+): void => {
+  test(name, { timeout: opts.timeout ?? 15_000 }, async () => {
     try {
       await fn();
       pass += 1;

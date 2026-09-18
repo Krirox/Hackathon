@@ -1,116 +1,13 @@
-name: buzz-local
-
-services:
-  postgres:
-    image: postgres:17-alpine
-    container_name: buzz-postgres
-    environment:
-      POSTGRES_DB: buzz
-      POSTGRES_USER: buzz
-      POSTGRES_PASSWORD: buzz_dev_password
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - buzz-postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 5s
-    restart: unless-stopped
-    networks:
-      - buzz-net
-
-  redis:
-    image: redis:7-alpine
-    container_name: buzz-redis
-    command: ["redis-server", "--requirepass", "buzz_dev_redis"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "buzz_dev_redis", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-    restart: unless-stopped
-    networks:
-      - buzz-net
-
-  minio:
-    image: minio/minio:latest
-    container_name: buzz-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: buzz_dev
-      MINIO_ROOT_PASSWORD: buzz_dev_secret
-    ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
-    volumes:
-      - buzz-minio-data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    restart: unless-stopped
-    networks:
-      - buzz-net
-
-  minio-init:
-    image: minio/mc:latest
-    container_name: buzz-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    networks:
-      - buzz-net
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 buzz_dev buzz_dev_secret &&
-        mc mb --ignore-existing local/buzz-media &&
-        mc anonymous set download local/buzz-media
-      "
-    restart: "no"
-
-  relay:
-    image: ghcr.io/block/buzz:main
-    container_name: buzz-relay
-    environment:
-      BUZZ_BIND_ADDR: "0.0.0.0:3000"
-      BUZZ_HEALTH_PORT: "8080"
-      BUZZ_METRICS_PORT: "9102"
-      DATABASE_URL: "postgres://buzz:buzz_dev_password@postgres:5432/buzz"
-      REDIS_URL: "redis://:buzz_dev_redis@redis:6379"
-      BUZZ_S3_ENDPOINT: "http://minio:9000"
-      BUZZ_S3_ADDRESSING_STYLE: "path"
-      BUZZ_S3_ACCESS_KEY: "buzz_dev"
-      BUZZ_S3_SECRET_KEY: "buzz_dev_secret"
-      BUZZ_S3_BUCKET: "buzz-media"
-      BUZZ_AUTO_MIGRATE: "true"
-      BUZZ_GIT_CONFORMANCE_PROBE: "false"
-      BUZZ_REQUIRE_AUTH_TOKEN: "false"
-      BUZZ_SERVE_GIT_WEB_GUI: "true"
-      BUZZ_RELAY_PRIVATE_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-      RUST_LOG: "buzz_relay=info,buzz_db=info,tower_http=info"
-    ports:
-      - "127.0.0.1:3000:3000"
-      - "127.0.0.1:8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-    restart: unless-stopped
-    networks:
-      - buzz-net
-
-volumes:
-  buzz-postgres-data:
-  buzz-minio-data:
-
-networks:
-  buzz-net:
-    driver: bridge
+# DEPRECATED — Buzz runs on AWS only (deploy/aws/buzz.tf).
+#
+# Production Buzz stack (replaces this file):
+#   ECS Fargate relay  -> ghcr.io/block/buzz
+#   RDS Postgres 16    -> Buzz schema (BUZZ_AUTO_MIGRATE)
+#   ElastiCache Redis 7 -> cache (TLS + auth token)
+#   S3                 -> buzz-media bucket (IAM task role, no MinIO)
+#
+# Apply: cd deploy/aws && terraform apply
+# Outputs: buzz_relay_internal_url, buzz_relay_public_url (when buzz_hostname set)
+#
+# For local Vital development without Buzz, use the HMAC talk surface
+# (src/talk/surface.ts) or point BUZZ_RELAY_URL at a deployed relay.

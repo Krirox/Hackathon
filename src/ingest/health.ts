@@ -423,6 +423,53 @@ export function permissionNoteForCollector(collector: Collector): string {
   return FILE_PERMISSION_NOTE;
 }
 
+/**
+ * FLOW-023: every collector with a recorded poll-health row for this tenant.
+ * Readiness walks this list so a configured-but-broken source reports
+ * `failing` while a never-configured tenant reports `unconfigured-optional`
+ * instead of green or red alike.
+ */
+export async function listKnownCollectors(db: AsyncDb, tenant: string): Promise<string[]> {
+  const prefix = `ingest:health:${tenant}:`;
+  const rows = (await db.prepare('SELECT key FROM meta WHERE key LIKE ?').all(`${prefix}%:lastPoll`)) as {
+    key: string;
+  }[];
+  const out = new Set<string>();
+  for (const row of rows) {
+    const key = String(row.key);
+    if (!key.startsWith(prefix) || !key.endsWith(':lastPoll')) continue;
+    const collector = key.slice(prefix.length, -':lastPoll'.length);
+    if (collector) out.add(collector);
+  }
+  return [...out].sort();
+}
+
+/**
+ * FLOW-023: project one collector's health onto the readiness vocabulary.
+ * `ready`/`empty`/`syncing` are healthy; `disabled`/`unconfigured` mean the
+ * operator has not set this source up (optional, never fails readiness);
+ * everything else (`failed`, `rejected`, `rate_limited`, `delayed`) means a
+ * configured source is unhealthy.
+ */
+export function integrationReadinessState(health: IntegrationHealth): {
+  ok: boolean;
+  detail: string;
+  unconfigured?: boolean;
+} {
+  const label = `${health.collector}: ${health.state} — ${health.stateDetail}`;
+  switch (health.state) {
+    case 'ready':
+    case 'empty':
+    case 'syncing':
+      return { ok: true, detail: label };
+    case 'disabled':
+    case 'unconfigured':
+      return { ok: false, detail: label, unconfigured: true };
+    default:
+      return { ok: false, detail: label };
+  }
+}
+
 /** Poll once and record health — used by worker and explicit connection tests. */
 export async function pollCollectorWithHealth(
   db: AsyncDb,

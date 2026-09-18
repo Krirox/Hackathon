@@ -534,6 +534,45 @@ export async function executeResearchRun(
     return null;
   };
 
+  /**
+   * F16: in-flight abort — the search promise races a cancellation poll. If
+   * cancellation wins, the pending search is aborted (its result discarded,
+   * never banked) and the run settles CANCELLED immediately instead of
+   * waiting for the step to finish and being cancelled between steps. A
+   * slow search's lost work is bounded to the request it was already
+   * serving; the abort is cooperative — the search fn's underlying request
+   * is cancelled only if it honors the signal.
+   */
+  const pollMs = 250;
+  const runSearchWithAbort = async (sub: string): Promise<SearchHit[] | null> => {
+    const searchPromise = search(sub);
+    if (!opts.cancelled) return await searchPromise;
+    for (;;) {
+      let timedOut = false;
+      const loser = await Promise.race([
+        searchPromise.then(() => 'done' as const, (e) => Promise.reject(e)),
+        new Promise<'poll'>((r) => {
+          const t = setTimeout(() => {
+            timedOut = true;
+            r('poll');
+          }, pollMs);
+          if (typeof t.unref === 'function') t.unref();
+        }),
+      ]);
+      if (loser === 'done') return await searchPromise;
+      if (!timedOut) continue; // safety: re-poll
+      if (opts.cancelled()) {
+        // Discard the in-flight result. The promise is left to settle on its
+        // own (a rejected search here must not become an unhandled rejection).
+        searchPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        return null;
+      }
+    }
+  };
+
   const subject = `research:${slugOf(run.question)}`;
 
   let activeQuestion: string | null = null;
@@ -565,7 +604,13 @@ export async function executeResearchRun(
         await persistResearchRun(opts.db, next);
         durableRevision = next.revision;
       }
-      const hits = await search(sub);
+      const hits = await runSearchWithAbort(sub);
+      if (hits === null) {
+        // In-flight search aborted on cancellation: settle CANCELLED now.
+        const cancelled: ResearchRun = { ...cancelResearchRun(next, opts.by), updatedAt: opts.now };
+        if (opts.db) await persistResearchRun(opts.db, cancelled);
+        return cancelled;
+      }
       const stoppedAfterSearch = await checkOwnership();
       if (stoppedAfterSearch) return stoppedAfterSearch;
       const acceptResults = async () => {

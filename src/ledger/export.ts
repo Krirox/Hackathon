@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 import type { AuditLogRow, ClaimLinkRow, ClaimRow, DecisionRow, OutcomeRow } from '../core/rows.ts';
 
@@ -109,6 +112,128 @@ export interface StreamExportOptions {
   asOfClaimSeq?: number;
   asOfAuditSeq?: number;
   kind?: ExportKind;
+  /** Progress callback: start/batch/complete per section plus a final export event. */
+  onProgress?: (event: ExportProgressEvent) => void;
+}
+
+/**
+ * Progress event for large exports (FLOW-024). Totals are unknown until the
+ * section completes (paged reads), so consumers should render `completed`
+ * counts as they arrive and treat `phase: 'complete'` as the section total.
+ */
+export interface ExportProgressEvent {
+  section: 'claims' | 'claimLinks' | 'decisions' | 'outcomes' | 'audit' | 'export';
+  phase: 'start' | 'batch' | 'complete';
+  /** Rows emitted so far in this section (final total when phase is complete). */
+  completed: number;
+  /** Attempts at this section including the current one (retry visibility). */
+  attempts: number;
+}
+
+/**
+ * Export retention/expiry policy (FLOW-004 / FLOW-024), surfaced on every
+ * manifest: exports are operator-managed portable records with no automatic
+ * expiry. Retention of the file, and of the erasure receipt that names it,
+ * is the operator's job — `verifyErasureReceipt` re-checks on demand.
+ */
+export const EXPORT_RETENTION_POLICY =
+  'operator-managed retained evidence: no automatic expiry, no automatic deletion; ' +
+  'verify with verifyErasureReceipt (erasure files) or re-export (live ledger)';
+
+export type ArchivalDeliveryStatus = 'verified' | 'missing' | 'mismatch' | 'unconfigured' | 'error';
+
+export interface ArchivalDeliveryReport {
+  status: ArchivalDeliveryStatus;
+  bucket?: string;
+  key?: string;
+  expectedSha256?: string;
+  detail: string;
+}
+
+export interface ArchivalProbe {
+  /** Return the stored object's bytes, or null when the key does not exist. */
+  read: (bucket: string, key: string) => Promise<Buffer | null>;
+}
+
+/**
+ * Filesystem archival probe: treats a local directory as the archive shelf
+ * (`<dir>/<key>`). Used by the CLI (`--archive-dir` / `VITAL_ARCHIVE_DIR`)
+ * and by the backup/restore drill to prove a byte-compared read-back.
+ */
+export function filesystemArchivalProbe(dir: string): ArchivalProbe {
+  return {
+    read: async (_bucket, key) => {
+      if (key.includes('..') || key.includes('/') || key.includes('\\')) return null;
+      const full = join(dir, key);
+      if (!existsSync(full)) return null;
+      return readFileSync(full);
+    },
+  };
+}
+
+function sha256HexBytes(data: Buffer | string): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Archival-delivery verification (FLOW-024): confirm an exported file
+ * actually landed in the configured archive by reading the object back and
+ * comparing sha256. When no bucket is configured the report is explicitly
+ * `unconfigured` — never success. Bucket provisioning alone is not proof;
+ * only a byte-compared read-back is `verified`.
+ */
+export async function verifyArchivalDelivery(
+  localFile: string,
+  opts: {
+    bucket?: string;
+    key?: string;
+    probe?: ArchivalProbe;
+    readLocal?: (path: string) => Buffer;
+  } = {},
+): Promise<ArchivalDeliveryReport> {
+  const bucket = opts.bucket ?? process.env.VITAL_ARCHIVE_BUCKET ?? '';
+  if (!bucket) {
+    return {
+      status: 'unconfigured',
+      detail: 'no archival bucket configured (VITAL_ARCHIVE_BUCKET) — delivery is not claimed',
+    };
+  }
+  const key = opts.key ?? process.env.VITAL_ARCHIVE_KEY ?? localFile.split(/[\\/]/).pop() ?? localFile;
+  let expected: Buffer;
+  try {
+    expected = opts.readLocal ? opts.readLocal(localFile) : readFileSync(localFile);
+  } catch (e) {
+    return { status: 'error', bucket, key, detail: `cannot read local export "${localFile}": ${(e as Error).message}` };
+  }
+  if (!opts.probe) {
+    return {
+      status: 'error',
+      bucket,
+      key,
+      detail: 'bucket is configured but no archive probe was supplied — cannot verify delivery without a read-back',
+    };
+  }
+  let remote: Buffer | null;
+  try {
+    remote = await opts.probe.read(bucket, key);
+  } catch (e) {
+    return { status: 'error', bucket, key, detail: `archive read-back failed: ${(e as Error).message}` };
+  }
+  if (remote === null) {
+    return { status: 'missing', bucket, key, detail: `object "${key}" not found in bucket "${bucket}"` };
+  }
+  const want = sha256HexBytes(expected);
+  const got = sha256HexBytes(remote);
+  if (want !== got) {
+    return {
+      status: 'mismatch',
+      bucket,
+      key,
+      expectedSha256: want,
+      detail: `archived bytes hash to ${got}, expected ${want} — object is missing, partial, or crossed`,
+    };
+  }
+  return { status: 'verified', bucket, key, expectedSha256: want, detail: `object "${key}" exists and matches sha256 ${want}` };
 }
 
 export async function streamExportLedger(
@@ -125,6 +250,13 @@ export async function streamExportLedger(
   const kind = opts.kind ?? 'snapshot';
 
   return db.transaction(async () => {
+    const emit = opts.onProgress;
+    const attempts = new Map<string, number>();
+    const progress = (section: ExportProgressEvent['section'], phase: ExportProgressEvent['phase'], completed: number): void => {
+      if (!emit) return;
+      attempts.set(section, (attempts.get(section) ?? 0) + (phase === 'start' ? 1 : 0));
+      emit({ section, phase, completed, attempts: attempts.get(section) ?? 1 });
+    };
     const maxClaimSeq =
       opts.asOfClaimSeq ??
       Number(
@@ -152,6 +284,7 @@ export async function streamExportLedger(
     const claimIds = new Set<string>();
     let claimCount = 0;
     let firstClaim = true;
+    progress('claims', 'start', 0);
     for (let offset = 0; ; offset += batchSize) {
       const rows = (await db
         .prepare(
@@ -170,12 +303,15 @@ export async function streamExportLedger(
         await sink((firstClaim ? '' : ',') + JSON.stringify(r));
         firstClaim = false;
       }
+      progress('claims', 'batch', claimCount);
       if (rows.length < batchSize) break;
     }
+    progress('claims', 'complete', claimCount);
 
     await sink('],"claimLinks":[');
     let linkCount = 0;
     let firstLink = true;
+    progress('claimLinks', 'start', 0);
     for (let offset = 0; ; offset += batchSize) {
       const rows = (await db
         .prepare(
@@ -191,12 +327,15 @@ export async function streamExportLedger(
         await sink((firstLink ? '' : ',') + JSON.stringify(r));
         firstLink = false;
       }
+      progress('claimLinks', 'batch', linkCount);
       if (rows.length < batchSize) break;
     }
+    progress('claimLinks', 'complete', linkCount);
 
     await sink('],"decisions":[');
     let decisionCount = 0;
     let firstDecision = true;
+    progress('decisions', 'start', 0);
     for (let offset = 0; ; offset += batchSize) {
       const rows = (await db
         .prepare(
@@ -208,12 +347,15 @@ export async function streamExportLedger(
         await sink((firstDecision ? '' : ',') + JSON.stringify(r));
         firstDecision = false;
       }
+      progress('decisions', 'batch', decisionCount);
       if (rows.length < batchSize) break;
     }
+    progress('decisions', 'complete', decisionCount);
 
     await sink('],"outcomes":[');
     let outcomeCount = 0;
     let firstOutcome = true;
+    progress('outcomes', 'start', 0);
     for (let offset = 0; ; offset += batchSize) {
       const rows = (await db
         .prepare(
@@ -225,12 +367,15 @@ export async function streamExportLedger(
         await sink((firstOutcome ? '' : ',') + JSON.stringify(r));
         firstOutcome = false;
       }
+      progress('outcomes', 'batch', outcomeCount);
       if (rows.length < batchSize) break;
     }
+    progress('outcomes', 'complete', outcomeCount);
 
     await sink('],"audit":[');
     let auditCount = 0;
     let firstAudit = true;
+    progress('audit', 'start', 0);
     for (let offset = 0; ; offset += batchSize) {
       const rows = (await db
         .prepare('SELECT * FROM audit_log WHERE tenant = ? AND seq <= ? ORDER BY seq ASC LIMIT ? OFFSET ?')
@@ -240,8 +385,10 @@ export async function streamExportLedger(
         await sink((firstAudit ? '' : ',') + JSON.stringify(r));
         firstAudit = false;
       }
+      progress('audit', 'batch', auditCount);
       if (rows.length < batchSize) break;
     }
+    progress('audit', 'complete', auditCount);
 
     await sink(']}');
 
@@ -269,8 +416,10 @@ export async function streamExportLedger(
       counts,
       artifacts,
       note: EXPORT_NOTES[kind],
+      retention: EXPORT_RETENTION_POLICY,
     };
 
+    progress('export', 'complete', claimCount + linkCount + decisionCount + outcomeCount + auditCount);
     return { manifest, counts };
   });
 }
@@ -359,6 +508,8 @@ export interface ExportManifest {
   counts: { claims: number; claimLinks: number; decisions: number; outcomes: number; audit: number };
   artifacts: ArtifactOwnership[];
   note: string;
+  /** Retention/expiry policy for the exported file (FLOW-024). */
+  retention: string;
 }
 
 export function collectArtifactOwnership(claims: { id: string; raw_ref: string | null }[]): ArtifactOwnership[] {
@@ -418,6 +569,7 @@ export async function exportLedgerWithManifest(
     },
     artifacts: collectArtifactOwnership(data.claims),
     note: EXPORT_NOTES[kind],
+    retention: EXPORT_RETENTION_POLICY,
   };
   return { export: data, manifest };
 }
