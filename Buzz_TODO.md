@@ -134,7 +134,75 @@ Humans steer agents without leaving Buzz:
 
 ---
 
-## 5. Implementation Roadmap
+## 5. Room Selection & Customization Flow (Onboarding & Ongoing Tuning)
+
+Tenants should not be forced into a rigid, one-size-fits-all room structure. During signup/onboarding—and at any time afterward in workspace settings—operators can select which rooms to activate, define their exact use cases, adjust autonomy levels, and set financial guardrails.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       ROOM PROVISIONING & TUNING WIZARD                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. SELECT ACTIVE ROOMS                                                      │
+│    [x] 🟢 reality-core      (scope:core)      — Mandatory epistemic root   │
+│    [x] 🟢 risk-monitor      (scope:risk)      — Exposure & procedure drift  │
+│    [x] 🟢 compliance        (scope:legal)     — Regulatory & policy audits │
+│    [x] 🟢 finance           (scope:finance)   — Stripe/warehouse metrics   │
+│    [ ] ⚪ market-intel      (scope:research)  — Competitive research       │
+│    [x] 🟢 ops               (scope:infra)     — Cluster & worker telemetry │
+│                                                                             │
+│ 2. CONFIGURE ROOM: #risk-monitor                                            │
+│    ┌───────────────────────────────────────────────────────────────────┐    │
+│    │ Mission Prompt:                                                   │    │
+│    │ "Monitor counterparty credit exposure and flag variance > 10%."   │    │
+│    ├───────────────────────────────────────────────────────────────────┤    │
+│    │ Autonomy Level:                                                   │    │
+│    │ ( ) Autonomous  (•) Guarded (Require approval on spend > $250)   │    │
+│    │ ( ) Supervised  (Human approval required before any hedge action) │    │
+│    ├───────────────────────────────────────────────────────────────────┤    │
+│    │ Budget Ceiling:  [ $1,000 / month ]    Max Tokens: [ 5,000,000 ]  │    │
+│    │ Connected SoR:   [x] Warehouse  [x] Bloomberg API  [ ] SEC Edgar  │    │
+│    │ Model Policy:    [ Recommended: Claude 3.5 Sonnet / Gemini Pro ]  │    │
+│    └───────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│ [ < Back ]                                          [ Save & Deploy Rooms ] │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.1 Onboarding Wizard (`/setup/rooms`)
+* **Industry Presets**:
+  * **FinTech & Capital**: `reality-core`, `risk-monitor`, `compliance`, `finance`, `data-pipeline`.
+  * **SaaS & Product**: `reality-core`, `user-feedback`, `growth`, `ops`, `exec`.
+  * **Deep Research**: `reality-core`, `fact-check`, `market-intel`, `sandbox`.
+  * **Custom**: Granular checklist to enable/disable any of the 12 canonical scopes.
+* **Scope Tenant Claiming**: Activating a room registers its corresponding `tenant:scope` binding in the Reality Ledger, provisions its Nostr room keypair, and sets its initial operational policies.
+
+### 5.2 Room Parameter Customization (Per-Room Configuration)
+For each activated room, operators can configure:
+1. **Mission & Operating Objectives**:
+   * Natural language system instruction specifying the scope's mandate, constraints, and target outcomes.
+2. **Autonomy & Gate Thresholds**:
+   * **Full Autonomous**: Agent handles discovery, planning, verification, and execution end-to-end without pausing.
+   * **Guarded (Default)**: Autonomous for routine actions; triggers yellow (`🟡`) review gates when:
+     * Dollar bid / token spend exceeds configured limit (e.g. `> $250`).
+     * Action class is sensitive (`MUTATE`, `DISPUTE`, `EXTERNAL`).
+     * Model confidence score drops below tolerance (e.g. `< 0.85`).
+   * **Supervised (Human-in-the-Loop)**: Requires explicit human review (`coord.settle`) for every state mutation or deliverable publish.
+3. **Budget Quotas**:
+   * Hard stop limits on monthly dollars and tokens. Breaching the quota immediately transitions the room to red (`🔴`) and engages `setKill(scope)`.
+4. **Connected Systems of Record (SoR)**:
+   * Selects which collectors and diff streams (`files:`, `stripe://`, `warehouse://`, `github://`) pipe evidence into this room's ledger queue.
+
+### 5.3 Ongoing Tuning & Runtime Mutation
+* **Room Settings Panel**: Accessible via `#room-name > Room Settings` or `/console/settings/rooms`. Changes can be previewed before applying.
+* **In-Room Slash Command Tuning**:
+  * `/policy set autonomy=guarded spend_limit=500`
+  * `/policy set mission="Focus on Q4 enterprise user churn trends"`
+  * `/policy budget set tokens=10000000`
+* **Immutable Policy Audit**: Every modification to room autonomy, prompts, or budget ceilings logs a `POLICY_MUTATE` event in `audit_log`, ensuring governance changes cannot be introduced untracked.
+
+---
+
+## 6. Implementation Roadmap
 
 ### Phase 1: Room Topology & Provisioning
 - [ ] Create seed script `scripts/seed-buzz-rooms.ts` to provision the 12 canonical rooms on the local relay.
@@ -163,3 +231,10 @@ Humans steer agents without leaving Buzz:
 - [ ] Implement room command parser for `/halt <scope>`, `/recover <scope>`, `/status <scope>`, and `/cost`.
 - [ ] Connect `/halt` and `/recover` directly to `gov/trust.ts` functions (`setKill`, `recoverStop`) with audit logging.
 - [ ] Test end-to-end: trigger synthetic procedure drift → observe `#risk-monitor` turn 🟡 → guide agent via thread → observe return to 🟢.
+
+### Phase 6: Room Selection & Onboarding Setup Wizard
+- [ ] Build room selection onboarding step in Console setup (`/setup/rooms` and signup flow).
+- [ ] Add room configuration schema in `src/gov/trust.ts` (storing room mission, autonomy tier, budget cap, and SoR connections per scope).
+- [ ] Add in-room slash command handler for `/policy set <key>=<value>` with `audit_log` recording.
+- [ ] Create UI modal in Buzz/Console to enable/disable rooms and adjust per-room parameters on the fly.
+
