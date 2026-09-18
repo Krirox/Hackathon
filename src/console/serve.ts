@@ -406,6 +406,28 @@ const redirect = (res: ServerResponse, location: string, cookie?: string): void 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+async function wrapInWorkspaceShell(
+  html: string,
+  db: import('../core/db.ts').AsyncDb,
+  tenant: string,
+  home: string,
+  auth: { user: import('../core/auth.ts').User; session: { csrfToken: string } },
+  navKey?: import('./render.ts').NavKey,
+): Promise<string> {
+  const rooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
+    scope: h.scope,
+    roomName: h.roomName,
+    badge: h.badge,
+    pending: h.pendingApprovals,
+  }));
+  const isAdmin = (await import('../core/auth.ts')).atLeast(auth.user.role, 'admin');
+  const avail: Record<string, boolean> = { requests: true, claims: true, rooms: true, humanWork: true, buzz: isAdmin, settings: isAdmin, learning: isAdmin, audit: isAdmin, data: isAdmin };
+  const nav = (await import('./render.ts')).renderConsoleNav((await import('./render.ts')).buildConsoleNav(home, avail), navKey);
+  const cluster = (await import('./render.ts')).renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+  const shell = renderWorkspaceShell({ rooms, home, consoleNav: nav, accountCluster: cluster, innerHtml: html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) });
+  return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
+}
+
 function page(title: string, body: string): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -2672,7 +2694,7 @@ export function startConsoleServer(
             home,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'digest'));
           return;
         }
         // FINAL-004: human surface for learning review (labeling + card gaps).
@@ -2695,7 +2717,9 @@ export function startConsoleServer(
           if (!atLeast(auth.user.role, 'admin')) {
             const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(detailDocument('Learning review', body, detailOpts));
+            res.end(
+              await wrapInWorkspaceShell(detailDocument('Learning review', body, detailOpts), db, tenant, home, auth, 'learning'),
+            );
             return;
           }
           const labeled = url.searchParams.get('labeled');
@@ -2710,7 +2734,9 @@ export function startConsoleServer(
             notice,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument('Learning review', body, detailOpts));
+          res.end(
+            await wrapInWorkspaceShell(detailDocument('Learning review', body, detailOpts), db, tenant, home, auth, 'learning'),
+          );
           return;
         }
         // ------------------------------------------------------------ Workspace (internal: buzz)
@@ -2894,7 +2920,7 @@ export function startConsoleServer(
           if (!atLeast(auth.user.role, 'admin')) {
             const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(detailDocument('Skill card', body, detailOpts));
+            res.end(await wrapInWorkspaceShell(detailDocument('Skill card', body, detailOpts), db, tenant, home, auth, 'learning'));
             return;
           }
           let cardId: string;
@@ -2906,7 +2932,7 @@ export function startConsoleServer(
           const body = await renderLearningCardPage(db, comp, tenant, cardId);
           if (!body) return json(res, 404, { ok: false, error: 'skill card not found' });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument('Skill card', body, detailOpts));
+          res.end(await wrapInWorkspaceShell(detailDocument('Skill card', body, detailOpts), db, tenant, home, auth, 'learning'));
           return;
         }
         if (path === '/console/learning/label' && method === 'POST') {
@@ -2968,7 +2994,14 @@ export function startConsoleServer(
           if (!atLeast(auth.user.role, 'admin')) {
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
-              detailDocument('Audit log', '<p class="sub">Audit log requires the admin or owner role.</p>', detailOpts),
+              await wrapInWorkspaceShell(
+                detailDocument('Audit log', '<p class="sub">Audit log requires the admin or owner role.</p>', detailOpts),
+                db,
+                tenant,
+                home,
+                auth,
+                'audit',
+              ),
             );
             return;
           }
@@ -2982,7 +3015,7 @@ export function startConsoleServer(
             offset: Number.isSafeInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument('Audit log', html, detailOpts));
+          res.end(await wrapInWorkspaceShell(detailDocument('Audit log', html, detailOpts), db, tenant, home, auth, 'audit'));
           return;
         }
         if (method === 'GET' && path === '/console/data') {
@@ -3002,10 +3035,17 @@ export function startConsoleServer(
           if (!atLeast(auth.user.role, 'admin')) {
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
-              detailDocument(
-                'Data & retention',
-                '<p class="sub">Data & retention requires the admin or owner role.</p>',
-                detailOpts,
+              await wrapInWorkspaceShell(
+                detailDocument(
+                  'Data & retention',
+                  '<p class="sub">Data & retention requires the admin or owner role.</p>',
+                  detailOpts,
+                ),
+                db,
+                tenant,
+                home,
+                auth,
+                'data',
               ),
             );
             return;
@@ -3017,7 +3057,9 @@ export function startConsoleServer(
             error: url.searchParams.get('error') ?? undefined,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument('Data & retention', html, detailOpts));
+          res.end(
+            await wrapInWorkspaceShell(detailDocument('Data & retention', html, detailOpts), db, tenant, home, auth, 'data'),
+          );
           return;
         }
         if (method === 'GET' && path === '/console/data/export') {
@@ -3107,7 +3149,7 @@ export function startConsoleServer(
             ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
             : listHtml;
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows'));
           return;
         }
         const workflowDetail = path.match(/^\/console\/workflows\/([^/]+)$/);
@@ -3130,7 +3172,7 @@ export function startConsoleServer(
             actor: by(auth.user),
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows'));
           return;
         }
         const workflowAction = path.match(/^\/console\/workflows\/([^/]+)\/(preregister|outcome|retry|cancel)$/);
@@ -3290,7 +3332,7 @@ export function startConsoleServer(
                 detailOpts,
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(html);
+              res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'requests'));
               return;
             }
             const pageResult = await searchClaims(db, tenant, {
@@ -3342,7 +3384,7 @@ export function startConsoleServer(
               detailOpts,
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(html);
+            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'claims'));
             return;
           } catch (e) {
             return json(res, 400, { ok: false, error: (e as Error).message });
@@ -3420,7 +3462,7 @@ export function startConsoleServer(
               detailOpts,
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(html);
+            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'rooms'));
             return;
           }
           const q = (state.q ?? '').trim().toLowerCase();
@@ -3461,7 +3503,7 @@ export function startConsoleServer(
             detailOpts,
           );
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'humanWork'));
           return;
         }
         const detail = path.match(/^\/console\/(claims|requests|decisions)\/([^/]+)$/);
@@ -3505,8 +3547,11 @@ export function startConsoleServer(
             html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts, artifactDir, navCtx);
           }
           if (!html) return respondGetError(req, res, 404, 'evidence not found');
+          let detailNavKey: import('./render.ts').NavKey | undefined;
+          if (detail[1] === 'claims') detailNavKey = 'claims';
+          else if (detail[1] === 'requests') detailNavKey = 'requests';
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, detailNavKey));
           return;
         }
         const deliverableDraftPost = path.match(/^\/console\/requests\/([^/]+)\/deliverable$/);

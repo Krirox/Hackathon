@@ -81,7 +81,8 @@ Goal: Image 2 (table + `□□□□`) → Image 1 (avatar stream + reactions + 
 
 - [x] `buzz/ui/Shell.ts` — left `250px` Workspace sidebar (rooms with 🟢/🟡/🔴 + pending pill) + right main, keeps `<nav aria-label="Console">` for tests
 - [x] Dashboard (`/`) now renders inside shell — `ScopeHealthEvaluator` rooms → `renderWorkspaceShell` — verified on Docker Postgres (`has-Workspace/has-ROOMS` + `e2e-journey: OK`)
-- [ ] Apply shell to remaining pages: `/team`, `/console/buzz/*`, `/console/workflows`, `/console/digest`, `/console/data` — same wrapper, no duplicate sidebars
+- [x] Team (`/team`) — same shell, `ROOMS` sidebar + `Emergency stops` + `Governance` inside chat chrome
+- [x] Remaining console pages (`/console/workflows`, `/console/workflows/:id`, `/console/digest`, `/console/learning`, `/console/audit`, `/console/data`, `/console/rooms`, `/console/human-work`, `/console/requests`, `/console/claims`, `/console/decisions|claims|requests/:id`) — all via `wrapInWorkspaceShell` (`serve.ts:2697` digest, `2721/2738` learning, `2997/3018` audit, `3038/3061` data, `3152` workflows list, `3175` workflow detail, `3335` requests, `3387` claims, `3465` rooms, `3506` human-work, `3554` detail) — no duplicate sidebars, buzz routes excluded (already chat)
 
 ## Phase 4 — How agents talk (keep, do not reimplement)
 
