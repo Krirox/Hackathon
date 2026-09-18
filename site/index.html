@@ -7,9 +7,30 @@
 <meta name="description" content="Vital closes the release loop with cited assets, human approval, frozen decisions, and measured outcomes — the grounding layer for production agents, not an autonomous company OS."/>
 <!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
 <meta name="vital-console-url" content=""/>
+<!-- Replace vital.company with your own domain before deploying. -->
+<link rel="canonical" href="https://vital.company/"/>
+<meta name="robots" content="index,follow"/>
+<meta name="color-scheme" content="dark"/>
+<meta name="theme-color" content="#111111"/>
+<link rel="icon" href="favicon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="apple-touch-icon.png"/>
+<link rel="manifest" href="manifest.json"/>
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="VITAL"/>
+<meta property="og:url" content="https://vital.company/"/>
+<meta property="og:title" content="VITAL — Governed Ship-to-Result"/>
+<meta property="og:description" content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work, not an autonomous company OS."/>
+<meta property="og:image" content="https://vital.company/og-cover.png"/>
+<meta property="og:image:width" content="1200"/>
+<meta property="og:image:height" content="630"/>
+<meta property="og:image:alt" content="VITAL — governed release workflow"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="VITAL — Governed Ship-to-Result"/>
+<meta name="twitter:description" content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work."/>
+<meta name="twitter:image" content="https://vital.company/og-cover.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css"/>
 <!-- Three.js 3D Engine (served locally from assets/three.min.js) -->
 <script src="app.js" defer></script>
@@ -22,21 +43,25 @@
 <noscript><div class="noscript-note"><p><strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval &#8594; measured outcome. Vital is the accountability layer for agent work.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="/login">Sign in to your console (existing members)</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>All content and contact paths on this page work without JavaScript. Sign in is invite-only and names its bound organization on login.</p></div></noscript>
 <canvas id="bg-canvas" aria-hidden="true"></canvas>
 <div class="bg-vignette" aria-hidden="true"></div>
+<div class="fx-grain" aria-hidden="true"></div>
+<div class="fx-spotlight" aria-hidden="true"></div>
 
 <!-- Header Navigation Bar -->
 <header id="site-header">
-  <a class="pill" href="#top">‹ HOME ›</a>
-  <button class="brand" id="menu-btn" type="button" aria-label="Open menu" aria-controls="overlay" aria-haspopup="dialog" aria-expanded="false" hidden>
-    <span>vital ›</span>
-    <span class="burger"><i></i><i></i></span>
-  </button>
-  <nav class="header-nav" aria-label="Account and contact">
-    <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
-    <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
-      <span>Contact</span>
-      <span class="cta-accent-icon">›</span>
-    </a>
-  </nav>
+  <div class="header-bar">
+    <a class="pill" href="#top">‹ HOME ›</a>
+    <button class="brand" id="menu-btn" type="button" aria-label="Open menu" aria-controls="overlay" aria-haspopup="dialog" aria-expanded="false" hidden>
+      <span>vital ›</span>
+      <span class="burger"><i></i><i></i></span>
+    </button>
+    <nav class="header-nav" aria-label="Account and contact">
+      <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
+      <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+        <span>Contact</span>
+        <span class="cta-accent-icon">›</span>
+      </a>
+    </nav>
+  </div>
 </header>
 
 <!-- Fullscreen Menu Overlay -->
@@ -59,6 +84,19 @@
   <div class="story-sticky-viewport" id="story-viewport">
 
     <div class="hero-overlay" id="hero-overlay">
+      <div class="orbit-field" aria-hidden="true">
+        <svg viewBox="-280 -40 560 340" preserveAspectRatio="xMidYMid slice">
+          <g fill="none" stroke="currentColor" stroke-width="0.55">
+            <ellipse rx="250" ry="92" transform="rotate(-14)"/>
+            <ellipse rx="228" ry="84" transform="rotate(16)"/>
+            <ellipse rx="206" ry="76" transform="rotate(-32)"/>
+            <ellipse rx="184" ry="68" transform="rotate(38)"/>
+            <ellipse rx="162" ry="60" transform="rotate(-50)"/>
+            <ellipse rx="262" ry="98" transform="rotate(6)"/>
+            <ellipse rx="140" ry="52" transform="rotate(58)"/>
+          </g>
+        </svg>
+      </div>
       <div class="hero-content">
         <div class="badge-wrap">
           <div class="eyebrow-badge">

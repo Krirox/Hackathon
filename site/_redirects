@@ -1,0 +1,11 @@
+# Static-host routing (Netlify / Cloudflare Pages read this file from the publish root).
+#
+# The console owns /login when co-hosted via `vital serve --site`. On a static
+# deploy nothing answers that path, so serve the sign-in landing page instead of
+# a 404. Keep the URL as /login so the links in index.html stay unchanged.
+# (login/index.html already resolves as a directory index on every static host —
+# this rule just skips the extra 301 hop.)
+/login    /login/index.html   200
+
+# One canonical entry point.
+/index.html   /   301

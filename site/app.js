@@ -136,3 +136,39 @@
       );
   }
 })();
+
+(function initScrollProgress() {
+  const bar = document.getElementById('progress-bar');
+  const steps = [...document.querySelectorAll('.steps-list li')];
+  const wedge = document.getElementById('wedge');
+  if (!bar && !steps.length) return;
+
+  function paint() {
+    const doc = document.documentElement;
+    if (bar) {
+      const travel = doc.scrollHeight - doc.clientHeight;
+      const ratio = travel > 0 ? Math.min(1, Math.max(0, doc.scrollTop / travel)) : 0;
+      bar.style.width = (ratio * 100).toFixed(2) + '%';
+    }
+    if (steps.length && wedge) {
+      const box = wedge.getBoundingClientRect();
+      const span = box.height + doc.clientHeight;
+      const seen = span > 0 ? (doc.clientHeight - box.top) / span : 0;
+      const index = Math.min(steps.length - 1, Math.max(0, Math.floor(seen * steps.length)));
+      steps.forEach((step, i) => step.classList.toggle('active', i === index));
+    }
+  }
+
+  window.addEventListener('scroll', paint, { passive: true });
+  window.addEventListener('resize', paint, { passive: true });
+  paint();
+})();
+
+(function initPointerAtmosphere() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const root = document.documentElement;
+  window.addEventListener('pointermove', (event) => {
+    root.style.setProperty('--mx', event.clientX + 'px');
+    root.style.setProperty('--my', event.clientY + 'px');
+  }, { passive: true });
+})();
