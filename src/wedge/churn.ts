@@ -60,22 +60,24 @@ async function validateChurnRiskClaims(
   }
 }
 
-async function ensureChurnDecision(
-  db: AsyncDb,
-  ledger: Ledger,
-  run: FanOutWorkflowRun,
-): Promise<FanOutWorkflowRun> {
+async function ensureChurnDecision(db: AsyncDb, ledger: Ledger, run: FanOutWorkflowRun): Promise<FanOutWorkflowRun> {
   if (run.decisionId) return run;
   if (run.status !== 'COMPLETE') return run;
+  const firstLeg = run.legs.length > 0 ? run.legs[0]! : null;
+  let firstRequestId: string | null = null;
+  if (firstLeg !== null) {
+    firstRequestId = firstLeg.requestId;
+  }
   const decision = await ledger.recordDecision({
     tenant: run.tenant,
     goal: `respond to churn risk in ${run.subject}`,
-    action: 'churn-response loop',
+    action: JSON.stringify({ loop: 'churn-response', fanOutRunId: run.id, segment: run.subject }),
     actionClass: 'RECOMMEND',
     claimIds: run.claimIds,
     decidedBy: run.onBehalfOf,
     scope: 'customer',
     autonomy: 'approval',
+    requestId: firstRequestId,
     now: run.now,
   });
   const updated = { ...run, decisionId: decision.id, updatedAt: new Date().toISOString() };
@@ -201,6 +203,8 @@ export interface CompletedChurnPlay {
   offerCopyCheck: DraftCheck;
   executedAt: string;
   status: 'COMPLETED';
+  fanOutRunId: string | null;
+  recommendationDecisionId: string | null;
 }
 
 export interface ExecuteChurnPlayInput {
@@ -232,19 +236,43 @@ export async function executeChurnPlay(
   adapter: HarnessAdapter,
   tenant: string,
   input: ExecuteChurnPlayInput,
+  opts?: { db?: AsyncDb },
 ): Promise<CompletedChurnPlay> {
   const now = input.now ?? new Date().toISOString();
 
-  // 1. Establish the churn response legs and preliminary recommendation decision
-  const response = await churnRespond(coord, ledger, tenant, {
-    segment: input.segment,
-    riskClaimIds: input.riskClaimIds,
-    onBehalfOf: input.onBehalfOf,
-    now,
-  });
+  let fanOutRunId: string | null = null;
+  let recommendationDecisionId: string | null = null;
+  let productQueryId: string;
+  let outreachRequestId: string;
+  let offerRequestId: string;
+  if (opts !== undefined && opts.db !== undefined) {
+    const run = await churnRespondWorkflow(opts.db, coord, ledger, tenant, {
+      segment: input.segment,
+      riskClaimIds: input.riskClaimIds,
+      onBehalfOf: input.onBehalfOf,
+      now,
+    });
+    requireCompleteFanOut(run);
+    if (!run.decisionId) throw new WedgeError('INCOMPLETE_FANOUT', 'churn workflow completed without a decision');
+    const legs = churnLegIds(run);
+    fanOutRunId = run.id;
+    recommendationDecisionId = run.decisionId;
+    productQueryId = legs.productQueryId;
+    outreachRequestId = legs.outreachRequestId;
+    offerRequestId = legs.offerRequestId;
+  } else {
+    const response = await churnRespond(coord, ledger, tenant, {
+      segment: input.segment,
+      riskClaimIds: input.riskClaimIds,
+      onBehalfOf: input.onBehalfOf,
+      now,
+    });
+    productQueryId = response.productQueryId;
+    outreachRequestId = response.outreachRequestId;
+    offerRequestId = response.offerRequestId;
+  }
 
-  // 2. Execute investigation leg (QUERY) via adapter
-  const investigationOutcome = await adapter.run(tenant, response.productQueryId, {
+  const investigationOutcome = await adapter.run(tenant, productQueryId, {
     command: input.investigationCommand ?? `investigate pain links for ${input.segment}`,
     claimRefs: input.riskClaimIds,
     onBehalfOf: input.onBehalfOf,
@@ -261,9 +289,8 @@ export async function executeChurnPlay(
     }
   }
 
-  // 4. Execute save play leg (REQUEST) via adapter
   const savePlayCommand = input.savePlayCommand ?? `prepare save play actions for ${input.segment}`;
-  const savePlayOutcome = await adapter.run(tenant, response.outreachRequestId, {
+  const savePlayOutcome = await adapter.run(tenant, outreachRequestId, {
     command: savePlayCommand,
     claimRefs: input.riskClaimIds,
     onBehalfOf: input.onBehalfOf,
@@ -277,9 +304,8 @@ export async function executeChurnPlay(
     throw new WedgeError('DRAFT_BLOCKED', `save play draft failed claims checker: ${reasons}`);
   }
 
-  // 5. Execute retention offer leg (REQUEST) via adapter
   const offerCopyCommand = input.offerCopyCommand ?? `prepare retention offer copy for ${input.segment}`;
-  const offerCopyOutcome = await adapter.run(tenant, response.offerRequestId, {
+  const offerCopyOutcome = await adapter.run(tenant, offerRequestId, {
     command: offerCopyCommand,
     claimRefs: input.riskClaimIds,
     onBehalfOf: input.onBehalfOf,
@@ -293,26 +319,34 @@ export async function executeChurnPlay(
     throw new WedgeError('DRAFT_BLOCKED', `offer copy draft failed claims checker: ${reasons}`);
   }
 
-  // 5. Record human approval decision now that deliverables have been produced and verified
+  let approvalAction = `approved outreach and retention offer for ${input.segment}`;
+  if (fanOutRunId !== null) {
+    approvalAction = JSON.stringify({
+      play: 'churn-play-approval',
+      fanOutRunId,
+      recommendationDecisionId,
+      segment: input.segment,
+    });
+  }
   const approvalDecision = await ledger.recordDecision({
     tenant,
     goal: `execute approved churn play for ${input.segment}`,
-    action: `approved outreach and retention offer for ${input.segment}`,
+    action: approvalAction,
     actionClass: 'ACT_REVERSIBLE',
     claimIds: input.riskClaimIds,
     decidedBy: input.onBehalfOf,
     approvedBy: input.approvedBy,
     scope: 'customer',
     autonomy: 'approval',
-    requestId: response.outreachRequestId,
+    requestId: outreachRequestId,
     now,
   });
 
   return {
     decisionId: approvalDecision.id,
-    productQueryId: response.productQueryId,
-    outreachRequestId: response.outreachRequestId,
-    offerRequestId: response.offerRequestId,
+    productQueryId,
+    outreachRequestId,
+    offerRequestId,
     investigationOutcome,
     savePlayDraft,
     savePlayCheck,
@@ -320,5 +354,7 @@ export async function executeChurnPlay(
     offerCopyCheck,
     executedAt: now,
     status: 'COMPLETED',
+    fanOutRunId,
+    recommendationDecisionId,
   };
 }

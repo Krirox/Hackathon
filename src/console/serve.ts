@@ -12,14 +12,18 @@ import {
   csrfOk,
   acceptInvitation,
   changeUserRole,
+  createAccountNotice,
   createInvitation,
+  disableConfirmation,
   disableUser,
   getTenant,
   getUser,
   installAuthSchema,
+  invitationNextSteps,
   inviteUser,
   listInvitations,
   listUsers,
+  membershipRoster,
   membershipStatus,
   peekInvitationByToken,
   reactivateUser,
@@ -40,17 +44,58 @@ import {
   setupSecretOk,
   signupRequiresSetupSecret,
   CLEAR_SESSION_COOKIE,
+  type DisableConfirmation,
   type Invitation,
   type Session,
   type TenantAccessState,
   type User,
 } from '../core/auth.ts';
 import { LedgerError, type Ledger } from '../ledger/ledger.ts';
+import {
+  auditLinks,
+  exportLedgerWithManifest,
+  streamExportLedger,
+  queryAudit,
+  type AuditQuery,
+  type ExportKind,
+} from '../ledger/export.ts';
+import { changeImpact, effectivePolicy, SETTINGS_INVENTORY } from '../gov/trust.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
+import {
+  ExecutionSpecError,
+  assertFreshReview,
+  serializeExecutionSpec,
+  validateApprovalBoundary,
+} from '../coord/execution-spec.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verifyApproval } from '../gov/operator.ts';
 import { buildReport } from './report.ts';
-import { renderHtml } from './render.ts';
+import {
+  clearFilterUrl,
+  decodeListState,
+  listStateUrl,
+  noResultsModel,
+  partitionRequestsByDecision,
+  searchClaims,
+  searchRequests,
+  searchWorkflows,
+  viewAllPaths,
+  type ClaimSummary,
+  type ListState,
+  type RequestSummary,
+} from './report.ts';
+import {
+  buildConsoleNav,
+  claimDetailUrl,
+  queueReturnUrl,
+  renderAccountCluster,
+  renderConsoleNav,
+  renderHtml,
+  requestDetailUrl,
+  resolveConsoleHome,
+  withReturnTo,
+} from './render.ts';
+import { renderDigest, digestWindowSince, type DigestDays } from './digest.ts';
 import { renderReview } from './review.ts';
 import {
   buildActivationState,
@@ -68,7 +113,14 @@ import {
   testConfiguredSource,
 } from './activation.ts';
 import { getIntegrationHealth } from '../ingest/health.ts';
-import { claimDetail, decisionDetail, detailDocument, requestDetail } from './detail.ts';
+import {
+  claimDetail,
+  decisionDetail,
+  detailBackTarget,
+  detailDocument,
+  parseDetailNav,
+  requestDetail,
+} from './detail.ts';
 import {
   buildWorkspaceView,
   cancelWorkflow,
@@ -89,12 +141,20 @@ import {
 import { join } from 'node:path';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
+import { isBrowserForm, loginPath, safeReturnPath, sessionExpiredPayload } from './session-flow.ts';
+import { accountNav, formErrorShape, passwordChangeResult, reauthResume, retainDraftFields } from './session-flow.ts';
 import {
-  isBrowserForm,
-  loginPath,
-  safeReturnPath,
-  sessionExpiredPayload,
-} from './session-flow.ts';
+  checkReadiness,
+  correlateDiagnostic,
+  describeStops,
+  haltEffects,
+  listHaltEvidence,
+  liveness,
+  recoverStop,
+  retryGuidance,
+  type StopDisplay,
+} from '../gov/trust.ts';
+import { recordReviewOutcome } from '../gov/review.ts';
 
 /**
  * Console serve mode (TODO V2.1 + V2.1.1): the read-model report plus working
@@ -233,12 +293,15 @@ const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 function page(title: string, body: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${esc(title)}</title>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0;padding:24px}
 form{max-width:360px;display:grid;gap:10px}input{padding:8px;border:1px solid #E4E4E1;border-radius:6px}
 button{padding:8px 14px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer}
-.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:12px}</style>
-</head><body>${body}</body></html>`;
+.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:12px}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}
+table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto}
+@media (max-width:640px){body{padding:12px}form{max-width:100%}}</style>
+</head><body><main>${body}</main></body></html>`;
 }
 
 // ---------------------------------------------------------------- pre-session CSRF --
@@ -312,7 +375,7 @@ function loginPage(
   const slug = opts.boundSlug ?? 'this-organization';
   const name = opts.boundName ?? slug;
   const expiredNotice = opts.expired
-    ? '<p class="sub"><strong>Sign in to continue</strong> — your session expired. You will return to your task after signing in.</p>'
+    ? `<p class="sub"><strong>${esc(reauthResume(opts.next).notice)}</strong> You will return to your task after signing in.</p>`
     : '';
   return page(
     'Vital Console — sign in',
@@ -361,11 +424,7 @@ ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
   );
 }
 
-function resetPasswordPage(
-  csrf: string,
-  token: string,
-  opts: { error?: string; next?: string } = {},
-): string {
+function resetPasswordPage(csrf: string, token: string, opts: { error?: string; next?: string } = {}): string {
   const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
   return page(
     'Vital Console — choose a new password',
@@ -435,11 +494,12 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 }
 
 function changePasswordPage(csrf: string, error?: string): string {
+  const result = passwordChangeResult('forced');
   return page(
     'Vital Console — activate your account',
-    `<h1>Activate your account</h1>
+    `<h1>${esc(result.heading)}</h1>
 <p class="sub">Your operator issued a temporary password. Choose a new one before using the console.
-Saving signs out every other session — you will sign in again afterward.</p>
+${esc(result.sessionNote)} — ${esc(result.nextStep)}</p>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <form method="post" action="/change-password">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
@@ -450,7 +510,16 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
   );
 }
 
-function accountPage(csrf: string, user: User, error?: string, notice?: string): string {
+function accountPage(csrf: string, user: User, error?: string, notice?: string, homeRef = '/'): string {
+  const result = passwordChangeResult('voluntary');
+  const nav = accountNav('account')
+    .map((item) => {
+      if (item.active) {
+        return `<span aria-current="page">${esc(item.label)}</span>`;
+      }
+      return `<a href="${esc(item.href)}">${esc(item.label)}</a>`;
+    })
+    .join(' · ');
   return page(
     'Vital Console — account and security',
     `<h1>Account and security</h1>
@@ -458,14 +527,14 @@ function accountPage(csrf: string, user: User, error?: string, notice?: string):
 ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <h2>Change password</h2>
-<p class="sub">Saving a new password signs out every other session. You will sign in again on this device afterward.</p>
+<p class="sub">${esc(result.sessionNote)} — ${esc(result.nextStep)}</p>
 <form method="post" action="/account/password">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
   <label class="sub" for="password">new password (min 12 chars)</label>
   <input id="password" name="password" type="password" autocomplete="new-password" required minlength="12">
   <button type="submit">Save new password</button>
 </form>
-<p class="sub"><a href="/">Back to console</a> · <a href="/team">Team</a></p>`,
+<p class="sub"><a href="${esc(homeRef)}">Back to console</a> · ${nav}</p>`,
   );
 }
 
@@ -627,14 +696,24 @@ function handoffOptions(users: User[], excludeId: string): string {
     .join('');
 }
 
-function disableForm(csrf: string, u: User, users: User[]): string {
+function disableForm(csrf: string, u: User, users: User[], confirmation?: DisableConfirmation): string {
   const handoff = handoffOptions(users, u.id);
+  let consequences = `<p class="sub">Disabling <strong>${esc(u.name)}</strong> (${esc(u.email)}) revokes every live session immediately. They cannot sign in again until reactivated.</p>`;
+  if (confirmation) {
+    const workNote = confirmation.needsHandoff
+      ? ` They own ${confirmation.work.claimCount} open claim(s) and ${confirmation.work.requestCount} open request(s) — choose a handoff below.`
+      : '';
+    const ownerNote = confirmation.lastUsableOwner
+      ? ' This is the last usable owner — disabling them leaves the organization without an active owner.'
+      : '';
+    consequences = `<p class="sub">Disabling <strong>${esc(confirmation.person.name)}</strong> (${esc(confirmation.person.email)}) ${esc(confirmation.sessionConsequence)} ${esc(confirmation.accessConsequence)}${workNote}${ownerNote}</p>`;
+  }
   return `<details>
   <summary style="cursor:pointer;color:#6B7280">Disable</summary>
   <form method="post" action="/team/disable" style="margin-top:8px;display:grid;gap:8px;max-width:360px">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
     <input type="hidden" name="userId" value="${esc(u.id)}">
-    <p class="sub">Disabling <strong>${esc(u.name)}</strong> (${esc(u.email)}) revokes every live session immediately. They cannot sign in again until reactivated.</p>
+    ${consequences}
     <label class="sub" for="confirm-${esc(u.id)}">type their email to confirm</label>
     <input id="confirm-${esc(u.id)}" name="confirmEmail" type="email" required placeholder="${esc(u.email)}">
     ${
@@ -668,8 +747,26 @@ function teamPage(
   users: User[],
   invitations: Invitation[],
   notice?: string,
+  extra?: {
+    now?: string;
+    confirmations?: Map<string, DisableConfirmation>;
+    stops?: StopDisplay[];
+    selfHalts?: { action: string; actor: string; target: string; detail: string | null; at: string }[];
+    policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
+  },
 ): string {
   const canManage = atLeast(viewer.role, 'admin') && !viewer.mustChangePassword;
+  const accountNotice = createAccountNotice();
+  const roster = extra?.now !== undefined ? membershipRoster(users, invitations, extra.now) : null;
+  let membersHeading = 'Members';
+  let invitesHeading = 'Pending invitations';
+  if (roster) {
+    const active = roster.filter((row) => row.kind === 'active').length;
+    const disabled = roster.filter((row) => row.kind === 'disabled').length;
+    const invited = roster.filter((row) => row.kind === 'invited').length;
+    membersHeading = `Members (${active} active · ${disabled} disabled)`;
+    invitesHeading = `Pending invitations (${invited} invited)`;
+  }
   const roleOptions = grantableRoles(viewer.role)
     .map((r) => `<option value="${r}">${r}</option>`)
     .join('');
@@ -715,7 +812,7 @@ function teamPage(
     <input type="hidden" name="userId" value="${esc(u.id)}">
     <button type="submit">Reactivate</button>
   </form>`);
-      if (canDisable(viewer, u)) actions.push(disableForm(csrf, u, users));
+      if (canDisable(viewer, u)) actions.push(disableForm(csrf, u, users, extra?.confirmations?.get(u.id)));
       return `<tr>
   <td>${esc(u.email)}${u.id === viewer.id ? ' <span class="sub">(you)</span>' : ''}</td>
   <td>${esc(u.name)}</td>
@@ -730,14 +827,14 @@ function teamPage(
     `<p class="sub"><a href="/">← console</a></p>
 <h1>Team</h1>
 ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
-<h2>Members</h2>
+<h2>${membersHeading}</h2>
 <table style="border-collapse:collapse;min-width:640px">
   <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th></th></tr></thead>
   <tbody>${rows}</tbody>
 </table>
 ${
   pendingInvites.length
-    ? `<h2>Pending invitations</h2>
+    ? `<h2>${invitesHeading}</h2>
 <table style="border-collapse:collapse;min-width:640px">
   <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th align="left">expires</th><th></th></tr></thead>
   <tbody>${inviteRows}</tbody>
@@ -746,8 +843,8 @@ ${
 }
 ${
   canManage
-    ? `<h2>Create account</h2>
-<p class="sub">Creates a pending invitation. Deliver the acceptance link to this person out of band (email, chat, ticket). They choose their own password when accepting — you never set it here.</p>
+    ? `<h2>${esc(accountNotice.heading)}</h2>
+<p class="sub">${esc(accountNotice.detail)}</p>
 <form method="post" action="/team/invite">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
   <label class="sub" for="email">work email</label>
@@ -758,20 +855,101 @@ ${
   <select id="role" name="role">
     ${roleOptions}
   </select>
-  <button type="submit">Create account</button>
+  <button type="submit">${esc(accountNotice.button)}</button>
 </form>`
     : '<p class="sub">Ask an admin or the owner to create accounts.</p>'
 }
+${stopsSection(csrf, canManage, extra?.stops, extra?.selfHalts)}
+${governanceSection(extra?.policy)}
 `,
   );
 }
 
-function acceptInvitePage(
+function stopsSection(
   csrf: string,
-  token: string,
-  inv: Invitation,
-  opts: { error?: string } = {},
+  canManage: boolean,
+  stops?: StopDisplay[],
+  selfHalts?: { action: string; actor: string; target: string; detail: string | null; at: string }[],
 ): string {
+  if (stops === undefined) return '';
+  const entries = stops
+    .map((stop) => {
+      const effects = haltEffects(stop.scope, stop.actionClass);
+      const reason = stop.reason ?? 'no reason recorded';
+      const recover = canManage
+        ? `<form method="post" action="/team/stops/recover" style="margin-top:8px;display:grid;gap:8px;max-width:360px">
+    <input type="hidden" name="csrf" value="${esc(csrf)}">
+    <input type="hidden" name="scope" value="${esc(stop.scope)}">
+    <input type="hidden" name="actionClass" value="${esc(stop.actionClass)}">
+    <label class="sub" for="reason-${esc(stop.scope)}-${esc(stop.actionClass)}">recovery reason (recorded in the audit log)</label>
+    <input id="reason-${esc(stop.scope)}-${esc(stop.actionClass)}" name="reason" required>
+    <button type="submit">Recover stop</button>
+  </form>`
+        : '';
+      return `<article>
+  <p><strong>scope ${esc(stop.scope)} × class ${esc(stop.actionClass)}</strong> — engaged by ${esc(stop.by)} at ${esc(stop.at)}</p>
+  <p class="sub">reason: ${esc(reason)}</p>
+  <p class="sub">${esc(stop.affected)}</p>
+  <ul class="sub"><li>in-flight work: ${esc(effects.inFlight.detail)}</li><li>queued work: ${esc(effects.queued.detail)}</li><li>external operations: ${esc(effects.external.detail)}</li></ul>
+  <p class="sub">recovery: ${esc(stop.recovery)}</p>
+  ${recover}
+</article>`;
+    })
+    .join('');
+  return `<h2>Emergency stops</h2>
+<p class="sub">A stop denies new authorizations at once and never force-terminates work already executing. Recovery is audited with a recorded reason — a restart does not clear a stop.</p>
+${entries || '<p class="sub">No active stops.</p>'}${selfHaltEntries(selfHalts)}`;
+}
+
+function selfHaltEntries(
+  selfHalts?: { action: string; actor: string; target: string; detail: string | null; at: string }[],
+): string {
+  if (!selfHalts || selfHalts.length === 0) return '';
+  const items = selfHalts
+    .map(
+      (h) =>
+        `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${h.detail ? ` — ${esc(h.detail.slice(0, 200))}` : ''}</li>`,
+    )
+    .join('');
+  return `<h3>Recent automation self-halts</h3>
+<p class="sub">Recorded when automation froze itself (trust freeze); the audit log is the delivery fallback — no silent halts.</p>
+<ul class="sub">${items}</ul>`;
+}
+
+// FLOW-025: effective governance policy with its source. Read-only display:
+// startup-only settings name their flag, runtime settings name their API,
+// and every row states what it changes, what it does not, and whether a
+// restart or re-review is required. No secret values are rendered.
+function governanceSection(policy?: {
+  approverRole: string;
+  operatorMode: 'signature' | 'secret' | 'session';
+}): string {
+  if (!policy) return '';
+  const { policy: values, sources } = effectivePolicy({
+    values: { 'approver-role': policy.approverRole, 'operator-mode': policy.operatorMode },
+    startupKeys: ['approver-role', 'operator-mode'],
+  });
+  const sourceOf = new Map(sources.map((s) => [s.setting, s.source]));
+  const rows = SETTINGS_INVENTORY.map((entry) => {
+    const impact = changeImpact(entry.key);
+    return `<tr>
+  <td><code>${esc(entry.key)}</code></td>
+  <td>${esc(entry.area)}</td>
+  <td><code>${esc(values[entry.key] ?? '')}</code></td>
+  <td>${esc(sourceOf.get(entry.key) ?? 'default')}</td>
+  <td class="sub">${esc(entry.entryPoint)}</td>
+  <td class="sub">changes: ${esc(impact.changes)} · does not change: ${esc(impact.notChanges)} · ${esc(impact.requires)}</td>
+</tr>`;
+  }).join('');
+  return `<h2>Governance policy</h2>
+<p class="sub">The active policy and where each setting comes from. Startup-only settings require a restart; runtime settings are audited per change. This page never grants autonomy — agents act only inside the R/A/I matrix.</p>
+<table style="border-collapse:collapse;min-width:640px">
+  <thead><tr class="sub"><th align="left">setting</th><th align="left">area</th><th align="left">value</th><th align="left">source</th><th align="left">entry point</th><th align="left">impact</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>`;
+}
+
+function acceptInvitePage(csrf: string, token: string, inv: Invitation, opts: { error?: string } = {}): string {
   return page(
     'Vital Console — accept invitation',
     `<h1>Join ${esc(inv.tenant)}</h1>
@@ -794,6 +972,102 @@ ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
 
 /** Stable audit identity string for a user. */
 const by = (u: User): string => `${u.id} (${u.email})`;
+
+/**
+ * Dashboard search (FLOW-020) over the existing home path: permissioned
+ * searchable request/claim indexes with stable pagination, true totals with
+ * explicit truncation, meaningful no-results with a clear-filter action, and
+ * filter state preserved across refresh via the URL. Returns '' when no
+ * filter is active so the default dashboard is byte-identical.
+ */
+async function dashboardSearchSection(
+  db: AsyncDb,
+  tenant: string,
+  state: ListState,
+  base: string,
+  returnTo: string,
+): Promise<string> {
+  const form = `<section aria-label="Search"><h2>Search</h2>
+<form method="get" action="${esc(base)}">
+  <label class="sub" for="q">search requests and claims</label>
+  <input id="q" name="q" value="${esc(state.q ?? '')}">
+  <label class="sub" for="state">status (blank for all)</label>
+  <input id="state" name="state" value="${esc(state.states?.[0] ?? '')}">
+  <label class="sub" for="scope">scope (blank for all)</label>
+  <input id="scope" name="scope" value="${esc(state.scopes?.[0] ?? '')}">
+  <label class="sub" for="since">since (inclusive date)</label>
+  <input id="since" name="since" type="date" value="${esc(state.since ?? '')}">
+  <label class="sub" for="until">until (inclusive date)</label>
+  <input id="until" name="until" type="date" value="${esc(state.until ?? '')}">
+  <label class="sub" for="workflow">workflow id (blank for all)</label>
+  <input id="workflow" name="workflow" value="${esc(state.workflowId ?? '')}">
+  <button type="submit">Search</button>
+  <a href="${esc(clearFilterUrl(base))}">Clear</a>
+</form>`;
+  const scoped = state.scopes ?? [];
+  const filtering =
+    (state.q ?? '').trim() !== '' ||
+    (state.states ?? []).length > 0 ||
+    scoped.length > 0 ||
+    (state.messageClass ?? '') !== '' ||
+    (state.since ?? '') !== '' ||
+    (state.until ?? '') !== '' ||
+    (state.workflowId ?? '') !== '';
+  if (!filtering) return `${form}</section>`;
+  const requests = await searchRequests(db, tenant, {
+    q: state.q,
+    states: state.states,
+    scope: scoped[0],
+    messageClass: state.messageClass,
+    workflowId: state.workflowId,
+    since: state.since,
+    until: state.until,
+    limit: state.limit,
+    offset: state.offset,
+  });
+  const claims = await searchClaims(db, tenant, {
+    q: state.q,
+    kinds: state.kinds,
+    statuses: state.statuses,
+    scope: scoped[0],
+    since: state.since,
+    until: state.until,
+    limit: state.limit,
+    offset: state.offset,
+  });
+  if (requests.total + claims.total === 0) {
+    const model = noResultsModel(base, state);
+    return `${form}<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p></section>`;
+  }
+  const groups = partitionRequestsByDecision(requests.rows);
+  const requestRow = (r: RequestSummary): string =>
+    `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), returnTo))}">${esc(r.goal)}</a> <span class="sub">${esc(r.state)} · ${esc(r.originScope)}→${esc(r.targetScope)}</span></li>`;
+  const claimRow = (c: ClaimSummary): string =>
+    `<li><a href="${esc(withReturnTo(claimDetailUrl(c.id), returnTo))}">${esc(c.subject)}</a> <span class="sub">${esc(c.kind)} · ${esc(c.status)}</span></li>`;
+  let body = `<p class="sub">${requests.total} matching request(s) · ${claims.total} matching claim(s)</p>`;
+  if (groups.pending.length > 0) body += `<h3>Pending decision</h3><ul>${groups.pending.map(requestRow).join('')}</ul>`;
+  if (groups.active.length > 0)
+    body += `<h3>Approved or executing</h3><ul>${groups.active.map(requestRow).join('')}</ul>`;
+  if (groups.other.length > 0) body += `<h3>Other states</h3><ul>${groups.other.map(requestRow).join('')}</ul>`;
+  if (requests.truncated)
+    body += `<p class="sub">explicit truncation: showing ${requests.rows.length} of ${requests.total} matching requests</p>`;
+  if (claims.truncated)
+    body += `<p class="sub">explicit truncation: showing ${claims.rows.length} of ${claims.total} matching claims</p>`;
+  if (claims.rows.length > 0) body += `<h3>Claims</h3><ul>${claims.rows.map(claimRow).join('')}</ul>`;
+  const pages: string[] = [];
+  if (requests.offset > 0)
+    pages.push(
+      `<a href="${esc(listStateUrl(base, { ...state, offset: Math.max(0, requests.offset - requests.limit) }))}">Previous</a>`,
+    );
+  if (requests.hasMore)
+    pages.push(
+      `<a href="${esc(listStateUrl(base, { ...state, offset: requests.offset + requests.rows.length }))}">Next</a>`,
+    );
+  if (pages.length > 0) body += `<p class="sub">${pages.join(' · ')}</p>`;
+  const paths = viewAllPaths();
+  body += `<p class="sub"><a href="${esc(clearFilterUrl(base))}">Clear search and filters</a> · Browse: <a href="${esc(paths.workflows)}">Workflows</a> · <a href="${esc(paths.digest)}">Digest</a></p>`;
+  return `${form}${body}</section>`;
+}
 
 async function auditConsole(
   db: AsyncDb,
@@ -826,7 +1100,7 @@ export function startConsoleServer(
   // When a site is mounted, the marketing page owns `/` and the console app
   // lives under `/console` (login/signup/change-password keep their paths —
   // they are console routes regardless).
-  const home = siteDir ? '/console' : '/';
+  const home = resolveConsoleHome(siteDir);
   const operatorSecret = opts.operatorSecret ?? null;
   const setupSecret = opts.setupSecret ?? process.env.VITAL_SETUP_SECRET ?? null;
   const operatorKeys = opts.operatorKeys ?? [];
@@ -982,6 +1256,7 @@ export function startConsoleServer(
             '/team/transfer-ownership',
             '/team/invitation/resend',
             '/team/invitation/revoke',
+            '/team/stops/recover',
             '/accept-invite',
             '/setup',
             '/setup/ingest',
@@ -998,7 +1273,7 @@ export function startConsoleServer(
         )
           logPath = path;
         if (method === 'GET' && path === '/healthz')
-          return json(res, 200, { ok: true, vital: '0.0.1', listen: boundAddress });
+          return json(res, 200, { ok: true, vital: '0.0.1', listen: boundAddress, ...liveness(now()) });
         const ip = req.socket.remoteAddress ?? undefined;
         const at = now();
 
@@ -1014,9 +1289,13 @@ export function startConsoleServer(
         };
         const returnPath = (): string => path + (url.search || '');
         const redirectLogin = (expired = hadSessionCookie): void => {
-          const loc = loginPath({ next: returnPath(), reason: expired ? 'expired' : undefined });
-          if (expired && hadSessionCookie) redirect(res, loc, CLEAR_SESSION_COOKIE);
-          else redirect(res, loc);
+          if (expired) {
+            const resume = reauthResume(returnPath());
+            if (hadSessionCookie) redirect(res, resume.loginUrl, CLEAR_SESSION_COOKIE);
+            else redirect(res, resume.loginUrl);
+          } else {
+            redirect(res, loginPath({ next: returnPath() }));
+          }
         };
         const sessionExpiredApi = (): void => {
           json(res, 401, sessionExpiredPayload(returnPath()));
@@ -1064,6 +1343,7 @@ export function startConsoleServer(
           // Login-CSRF: the form must echo the pre-session cookie value.
           if (!preCsrfOk(req, call.csrf)) {
             const fresh = randomBytes(32).toString('hex');
+            const shape = formErrorShape('csrf-expired');
             const msg = 'This sign-in form expired. Your email is preserved — submit again.';
             if (isBrowserForm(req)) {
               res.writeHead(200, {
@@ -1071,28 +1351,51 @@ export function startConsoleServer(
                 'set-cookie': preCsrfCookie(fresh, secure),
               });
               const tenantCtx = await loginTenantContext(db, tenant);
+              const retained = retainDraftFields(call.fields);
               res.end(
-                loginPage(fresh, { error: msg, next, email, recovery: accessState === 'recovery', ...tenantCtx }),
+                loginPage(fresh, {
+                  error: msg,
+                  next,
+                  email: retained.email ?? '',
+                  recovery: accessState === 'recovery',
+                  ...tenantCtx,
+                }),
               );
               return;
             }
-            return json(res, 403, { ok: false, error: msg });
+            return json(res, 403, { ok: false, error: msg, code: shape.code });
           }
           if (!rateOk(`login:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
             const bucket = buckets.get(`login:${ip ?? '-'}:${tenant}`);
             const retryAt = bucket ? new Date(bucket.reset).toISOString() : undefined;
-            const msg = retryAt
-              ? `too many attempts — try again after ${retryAt}`
-              : 'too many attempts — slow down and try again in a few minutes';
+            const shape = formErrorShape('rate-limited', {
+              retryAfterMs: bucket ? Math.max(0, bucket.reset - Date.parse(at)) : undefined,
+            });
+            const guidance = retryGuidance('rate-limit');
+            const msg = retryAt ? `${shape.message} — try again after ${retryAt}` : shape.message;
             if (isBrowserForm(req)) {
-              res.writeHead(429, { 'content-type': 'text/html; charset=utf-8' });
+              res.writeHead(shape.status, { 'content-type': 'text/html; charset=utf-8' });
               const tenantCtx = await loginTenantContext(db, tenant);
+              const retained = retainDraftFields(call.fields);
               res.end(
-                loginPage(call.csrf ?? '', { error: msg, next, email, recovery: accessState === 'recovery', ...tenantCtx }),
+                loginPage(call.csrf ?? '', {
+                  error: msg,
+                  next,
+                  email: retained.email ?? '',
+                  recovery: accessState === 'recovery',
+                  ...tenantCtx,
+                }),
               );
               return;
             }
-            return json(res, 429, { ok: false, error: msg, retryAt });
+            return json(res, shape.status, {
+              ok: false,
+              error: msg,
+              code: shape.code,
+              retryAfterMs: shape.retryAfterMs,
+              retryable: guidance.retryable,
+              retryAt,
+            });
           }
           try {
             const { user, session, token } = await login(
@@ -1144,8 +1447,17 @@ export function startConsoleServer(
           }
           if (!preCsrfOk(req, call.csrf))
             return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          if (!rateOk(`reset:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at)))
-            return json(res, 429, { ok: false, error: 'too many attempts — slow down' });
+          if (!rateOk(`reset:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
+            const shape = formErrorShape('rate-limited');
+            const guidance = retryGuidance('rate-limit');
+            return json(res, shape.status, {
+              ok: false,
+              error: shape.message,
+              code: shape.code,
+              retryAfterMs: shape.retryAfterMs,
+              retryable: guidance.retryable,
+            });
+          }
           const next = safeReturnPath(call.fields.next);
           const email = call.fields.email ?? '';
           const token = await tryPasswordReset(db, tenant, email, at);
@@ -1198,23 +1510,23 @@ export function startConsoleServer(
           const token = call.fields.token ?? '';
           const inv = token ? await peekInvitationByToken(db, token, at) : undefined;
           try {
-            const { user, session, token: sessionToken } = await (async () => {
-              const { user } = await acceptInvitation(db, token, call.fields.password ?? '', at);
-              const { session, token: sessionToken } = await login(
-                db,
-                { tenant: user.tenant, email: user.email, password: call.fields.password ?? '' },
-                at,
-              );
-              return { user, session, token: sessionToken };
-            })();
-            return redirect(res, home, sessionCookie(sessionToken, at, secure, session));
+            const accepted = await acceptInvitation(db, token, call.fields.password ?? '', at);
+            const signed = await login(
+              db,
+              { tenant: accepted.user.tenant, email: accepted.user.email, password: call.fields.password ?? '' },
+              at,
+            );
+            return redirect(res, home, sessionCookie(signed.token, at, secure, signed.session));
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               inv
                 ? acceptInvitePage(call.csrf ?? '', token, inv, { error: msg })
-                : page('Vital Console — accept invitation', `<p class="err">${esc(msg)}</p><p class="sub"><a href="/login">Sign in</a></p>`),
+                : page(
+                    'Vital Console — accept invitation',
+                    `<p class="err">${esc(msg)}</p><p class="sub"><a href="/login">Sign in</a></p>`,
+                  ),
             );
             return;
           }
@@ -1253,10 +1565,10 @@ export function startConsoleServer(
           if (publicBind && !hasBootstrapCreds()) {
             res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
-              `<!doctype html><html><head><meta charset="utf-8"><title>Setup required</title></head><body>
+              `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup required</title></head><body><main>
 <p>This console is reachable remotely but has no owner yet. Web signup is disabled on non-loopback binds.</p>
 <p>Configure <code>VITAL_BOOTSTRAP_EMAIL</code> and <code>VITAL_BOOTSTRAP_PASSWORD</code> before exposing the service, or bind to loopback for local claiming.</p>
-</body></html>`,
+</main></body></html>`,
             );
             return;
           }
@@ -1303,13 +1615,22 @@ export function startConsoleServer(
                 ? 'setup authorization required — provide the configured setup secret'
                 : 'remote organization claiming requires setup authorization — configure VITAL_SETUP_SECRET',
             });
-          if (!rateOk(`signup:${ip ?? '-'}:${tenant}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at)))
-            return json(res, 429, { ok: false, error: 'too many attempts — slow down' });
-          const values = {
+          if (!rateOk(`signup:${ip ?? '-'}:${tenant}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at))) {
+            const shape = formErrorShape('rate-limited');
+            const guidance = retryGuidance('rate-limit');
+            return json(res, shape.status, {
+              ok: false,
+              error: shape.message,
+              code: shape.code,
+              retryAfterMs: shape.retryAfterMs,
+              retryable: guidance.retryable,
+            });
+          }
+          const values = retainDraftFields({
             orgname: call.fields.orgname ?? '',
             email: call.fields.email ?? '',
             ownerName: call.fields.ownerName ?? '',
-          };
+          });
           try {
             // The claimed tenant is the one this console is BOUND to — a
             // signup cannot conjure an arbitrary tenant and land on someone
@@ -1412,7 +1733,7 @@ export function startConsoleServer(
           if (!auth) return redirectLogin();
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(accountPage(auth.session.csrfToken, auth.user));
+          res.end(accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home));
           return;
         }
         if (path === '/account/password' && method === 'POST') {
@@ -1428,7 +1749,9 @@ export function startConsoleServer(
           if (!csrfOk(auth.session, call.csrf)) {
             if (isBrowserForm(req)) {
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(accountPage(auth.session.csrfToken, auth.user, 'This form expired — submit again.'));
+              res.end(
+                accountPage(auth.session.csrfToken, auth.user, 'This form expired — submit again.', undefined, home),
+              );
               return;
             }
             return json(res, 403, { ok: false, error: 'bad CSRF token' });
@@ -1442,6 +1765,8 @@ export function startConsoleServer(
                 auth.session.csrfToken,
                 auth.user,
                 e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+                undefined,
+                home,
               ),
             );
             return;
@@ -1513,17 +1838,68 @@ export function startConsoleServer(
           res.end(detailDocument('Deliverable', html, detailOpts));
           return;
         }
+        if (path === '/console/digest') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          if (method !== 'GET') {
+            res.setHeader('allow', 'GET');
+            return json(res, 405, { ok: false, error: 'digest is read-only' });
+          }
+          const days = url.searchParams.get('days') ?? '7';
+          if (!['1', '7', '30', 'all'].includes(days))
+            return json(res, 400, { ok: false, error: 'days must be 1, 7, 30 or all' });
+          const window = days as DigestDays;
+          const since = digestWindowSince(at, window);
+          const navigation = `<nav aria-label="Digest time window">${(['1', '7', '30', 'all'] as DigestDays[]).map((value) => `<a href="/console/digest?days=${value}"${value === window ? ' aria-current="page"' : ''}>${value === 'all' ? 'All history' : `Last ${value} day(s)`}</a>`).join(' ')}</nav>`;
+          const body = navigation + (await renderDigest(coord, db, tenant, at, { since }));
+          const html = detailDocument('Digest', body, {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session',
+            home,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(html);
+          return;
+        }
         if (method === 'GET' && path === '/console/workflows') {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           const items = await listWorkflows(db, ledger, coord, comp, tenant);
-          const html = renderWorkflowListPage(items, {
+          const q = (url.searchParams.get('q') ?? '').trim();
+          let shown = items;
+          let filterNote = '';
+          if (q !== '') {
+            let found: { rows: { id: string }[]; total: number };
+            try {
+              found = await searchWorkflows(db, tenant, { q });
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            const ids = new Set(found.rows.map((row) => row.id));
+            shown = items.filter((item) => ids.has(item.id));
+            if (shown.length === 0) {
+              const model = noResultsModel('/console/workflows', { q });
+              filterNote = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search</a></p>`;
+            } else {
+              filterNote = `<p class="sub">${shown.length} matching workflow(s) for search "${esc(q)}" (${found.total} total). <a href="/console/workflows">Clear search</a></p>`;
+            }
+          }
+          const listHtml = renderWorkflowListPage(shown, {
             home,
             csrf: auth.session.csrfToken,
             actor: by(auth.user),
           });
+          const html = filterNote
+            ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
+            : listHtml;
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(html);
           return;
@@ -1645,6 +2021,7 @@ export function startConsoleServer(
           const pageIndex = Number(url.searchParams.get('page') ?? '0');
           if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
             return json(res, 400, { ok: false, error: 'page must be a nonnegative integer' });
+          const detailNav = parseDetailNav(url.search);
           const fallbackMode = operatorSecret ? 'secret' : 'session';
           const detailOpts = {
             tenant,
@@ -1653,15 +2030,19 @@ export function startConsoleServer(
             canApprove: atLeast(auth.user.role, approverMin),
             requiredRole: approverMin,
             operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
-            home,
+            home: detailBackTarget(detailNav.returnTo, queueReturnUrl(home, {})),
+          };
+          const navCtx = {
+            returnTo: detailNav.returnTo ?? undefined,
+            requestId: detailNav.requestId ?? undefined,
           };
           let html: string | null;
           if (detail[1] === 'claims') {
-            html = await claimDetail(db, ledger, coord, id, pageIndex, detailOpts);
+            html = await claimDetail(db, ledger, coord, id, pageIndex, detailOpts, navCtx);
           } else if (detail[1] === 'decisions') {
             html = await decisionDetail(ledger, id, detailOpts);
           } else {
-            html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts);
+            html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts, artifactDir, navCtx);
           }
           if (!html) return json(res, 404, { ok: false, error: 'evidence not found' });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -1682,6 +2063,13 @@ export function startConsoleServer(
           const reviewPage = Number(url.searchParams.get('reviewPage') ?? '0');
           if (!Number.isSafeInteger(reviewPage) || reviewPage < 0)
             return json(res, 400, { ok: false, error: 'reviewPage must be a nonnegative integer' });
+          const listState = decodeListState(url.search);
+          let searchHtml: string;
+          try {
+            searchHtml = await dashboardSearchSection(db, tenant, listState, home, returnPath());
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
           const users = await listUsers(db, tenant);
           const activationState = await buildActivationState(db, ledger, coord, tenant, at, users, {
             approverRole: approverMin,
@@ -1701,7 +2089,7 @@ export function startConsoleServer(
           });
           const html = report.replace(
             '<h1>Reality health</h1>',
-            `${activation}${review}<h1>Reality health</h1>`,
+            `${searchHtml}${activation}${review}<h1>Reality health</h1>`,
           );
           // The CSRF token rides in the page so same-origin form posts and
           // same-origin fetches can both present it.
@@ -1709,18 +2097,9 @@ export function startConsoleServer(
             '</head>',
             `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head>`,
           );
-          const withUser = withCsrf.replace(
-            '</body>',
-            `<div style="margin-top:24px;display:flex;gap:12px;align-items:center" class="sub">
-  <span>signed in as ${esc(auth.user.email)} · ${esc(auth.user.role)}</span>
-  <a href="/account">account</a>
-  <a href="/team">team</a>
-  <form method="post" action="/logout" style="display:inline">
-    <input type="hidden" name="csrf" value="${esc(auth.session.csrfToken)}">
-    <button type="submit" style="background:#6B7280">Sign out</button>
-  </form>
-</div></body>`,
-          );
+          const consoleNav = renderConsoleNav(buildConsoleNav(home));
+          const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+          const withUser = withCsrf.replace('</body>', `${consoleNav}${accountCluster}</body>`);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(withUser);
           return;
@@ -1873,14 +2252,7 @@ export function startConsoleServer(
           const users = await listUsers(db, tenant);
           try {
             const seeded = await seedSampleWalkthrough(db, ledger, coord, tenant, auth.user, at);
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'setup.sample',
-              `request:${seeded.requestId}`,
-              at,
-            );
+            await auditConsole(db, tenant, by(auth.user), 'setup.sample', `request:${seeded.requestId}`, at);
             return redirect(res, `${home}#pending-review`);
           } catch (e) {
             const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
@@ -1934,7 +2306,31 @@ export function startConsoleServer(
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           const data = await teamData();
-          const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations);
+          const confirmations = new Map<string, DisableConfirmation>();
+          for (const u of data.users) {
+            if (!canDisable(auth.user, u)) continue;
+            try {
+              confirmations.set(u.id, await disableConfirmation(db, tenant, u.id));
+            } catch {
+              continue;
+            }
+          }
+          const stops = await describeStops(db, tenant);
+          const haltEvidence = await listHaltEvidence(db, tenant);
+          const selfHalts = haltEvidence.real
+            .filter((h) => h.action === 'AUTOMATION_SELF_HALT' || h.action === 'TRUST_FROZEN')
+            .slice(-5)
+            .reverse();
+          let operatorMode: 'signature' | 'secret' | 'session' = 'session';
+          if (keyAuth) operatorMode = 'signature';
+          else if (operatorSecret) operatorMode = 'secret';
+          const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+            now: at,
+            confirmations,
+            stops,
+            selfHalts,
+            policy: { approverRole: approverMin, operatorMode },
+          });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
           return;
@@ -1990,13 +2386,24 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const hint =
-              e instanceof AuthError && e.code === 'DISABLED_USER_EXISTS'
-                ? ' Reactivate the disabled account instead of creating a new invitation.'
-                : e instanceof AuthError && e.code === 'INVITATION_PENDING'
-                  ? ' Resend or revoke the existing invitation first.'
-                  : '';
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `create account failed: ${msg}${hint}`);
+            const attempted = (call.fields.email ?? '').trim().toLowerCase();
+            let hint = '';
+            if (e instanceof AuthError) {
+              if (e.code === 'DISABLED_USER_EXISTS') {
+                hint = ` ${invitationNextSteps('disabled_account', attempted).action}`;
+              } else if (e.code === 'INVITATION_PENDING') {
+                hint = ` ${invitationNextSteps('pending_invitation', attempted).action}`;
+              } else if (e.code === 'DUPLICATE_USER') {
+                hint = ` ${invitationNextSteps('active_account', attempted).action}`;
+              }
+            }
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `create account failed: ${msg}${hint}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2026,7 +2433,9 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'team.invite_resend', `invitation:${invitation.id}`, at);
             const link = `/accept-invite?token=${encodeURIComponent(token)}`;
             const exposeInvite =
-              process.env.VITAL_EXPOSE_INVITE_LINK === '1' ? ` New link: ${link}` : ' Deliver the new acceptance link out of band.';
+              process.env.VITAL_EXPOSE_INVITE_LINK === '1'
+                ? ` New link: ${link}`
+                : ' Deliver the new acceptance link out of band.';
             const html = teamPage(
               auth.session.csrfToken,
               auth.user,
@@ -2038,7 +2447,13 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `resend failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `resend failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2077,7 +2492,13 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `revoke failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `revoke failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2116,7 +2537,13 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `reactivate failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `reactivate failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2156,7 +2583,13 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `role change failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `role change failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2173,7 +2606,8 @@ export function startConsoleServer(
             return json(res, 400, { ok: false, error: (e as Error).message });
           }
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (auth.user.role !== 'owner') return json(res, 403, { ok: false, error: 'only the owner may transfer ownership' });
+          if (auth.user.role !== 'owner')
+            return json(res, 403, { ok: false, error: 'only the owner may transfer ownership' });
           const data = await teamData();
           try {
             const { to } = await transferOwnership(
@@ -2195,7 +2629,13 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `transfer failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `transfer failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
@@ -2223,19 +2663,20 @@ export function startConsoleServer(
             if (target.id === auth.user.id) return json(res, 400, { ok: false, error: 'you cannot disable yourself' });
             const confirm = (call.fields.confirmEmail ?? '').trim().toLowerCase();
             if (confirm !== target.email)
-              throw new AuthError('CONFIRM_MISMATCH', 'confirmation email does not match — type the member email exactly');
+              throw new AuthError(
+                'CONFIRM_MISMATCH',
+                'confirmation email does not match — type the member email exactly',
+              );
             const handoffToUserId = call.fields.handoffToUserId?.trim() || undefined;
-            const { work, reassigned } = await disableUser(db, tenant, target.id, at, {
+            const { reassigned } = await disableUser(db, tenant, target.id, at, {
               handoffToUserId,
               actorId: auth.user.id,
             });
             await auditConsole(db, tenant, by(auth.user), 'team.disable', `user:${target.id}`, at);
-            const handoffMsg =
-              reassigned.claims + reassigned.requests > 0
-                ? ` ${reassigned.claims} claim(s) and ${reassigned.requests} request(s) were reassigned.`
-                : work.claimCount + work.requestCount === 0
-                  ? ''
-                  : '';
+            let handoffMsg = '';
+            if (reassigned.claims + reassigned.requests > 0) {
+              handoffMsg = ` ${reassigned.claims} claim(s) and ${reassigned.requests} request(s) were reassigned.`;
+            }
             const html = teamPage(
               auth.session.csrfToken,
               auth.user,
@@ -2247,11 +2688,74 @@ export function startConsoleServer(
             res.end(html);
           } catch (e) {
             const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, `disable failed: ${msg}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `disable failed: ${msg}`,
+            );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
           }
           return;
+        }
+        if (path === '/team/stops/recover' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
+          const scope = (call.fields.scope ?? '').trim();
+          const actionClass = (call.fields.actionClass ?? '').trim();
+          const reason = (call.fields.reason ?? '').trim();
+          if (!scope || !actionClass)
+            return json(res, 400, { ok: false, error: 'scope and action class are required' });
+          if (!reason) {
+            const data = await teamData();
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              'recover failed: a recorded reason is required',
+            );
+            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(html);
+            return;
+          }
+          try {
+            const recovered = await recoverStop(db, tenant, { scope, actionClass }, by(auth.user), { reason, now: at });
+            await auditConsole(
+              db,
+              tenant,
+              by(auth.user),
+              'team.stops_recover',
+              `${recovered.scope}/${recovered.actionClass}`,
+              at,
+              reason,
+            );
+            return redirect(res, '/team');
+          } catch (e) {
+            const data = await teamData();
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              data.users,
+              data.invitations,
+              `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
+            );
+            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(html);
+            return;
+          }
         }
 
         const act = path.match(/^\/api\/requests\/([^/]+)\/(approve|decline)$/);
@@ -2335,29 +2839,28 @@ export function startConsoleServer(
               }
               if (request.state !== 'ADMITTED')
                 throw new Error(`Request is ${request.state}, not awaiting review. Refresh to see its current status.`);
-              if (action === 'approve' && !existing && request.claimRefs.length === 0) {
-                throw new Error(
-                  'Request has no valid evidence in the ledger. Review cannot proceed without grounded evidence.',
-                );
-              }
-              const decision =
+              // FLOW-002: a decline on a stale page would refuse different
+              // content than reviewed — the explanation is preserved (409
+              // preservedDraft) and the reviewer resubmits after re-review.
+              if (action === 'decline') assertFreshReview(request, call.fields.requestUpdatedAt);
+              const executionSpec =
                 action === 'approve' && !existing
+                  ? await validateApprovalBoundary(ledger, request, at, {
+                      expectedRequestUpdatedAt: call.fields.requestUpdatedAt,
+                      planFingerprint: call.fields.planFingerprint,
+                      assetVersion: call.fields.assetVersion,
+                      command: call.fields.command,
+                    })
+                  : null;
+              const decision =
+                action === 'approve' && !existing && executionSpec
                   ? await ledger.recordDecision({
                       id: decisionId,
                       tenant,
                       goal: request.goal,
-                      // This records a begin-work review, not authority to run an
-                      // arbitrary command or approve an unseen final deliverable.
-                      action: JSON.stringify({
-                        approvalStage: 'begin-work',
-                        requestId: id,
-                        requestUpdatedAt: request.updatedAt,
-                        deliverableSchema: request.deliverableSchema,
-                        originScope: request.originScope,
-                        targetScope: request.targetScope,
-                        budget: request.bid,
-                        stopCondition: request.stopCondition,
-                      }),
+                      // FLOW-002: frozen, versioned execution specification — not a
+                      // replacement instruction or unseen final deliverable.
+                      action: serializeExecutionSpec(executionSpec),
                       actionClass: 'RECOMMEND',
                       claimIds: request.claimRefs,
                       decidedBy: who,
@@ -2372,6 +2875,15 @@ export function startConsoleServer(
                 action === 'approve'
                   ? await coord.accept(tenant, id)
                   : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
+              await recordReviewOutcome(db, tenant, {
+                requestId: id,
+                scope: request.targetScope,
+                actionClass: 'RECOMMEND',
+                approved: action === 'approve',
+                reviewer: who,
+                reason: action === 'decline' ? call.fields.reason : undefined,
+                now: at,
+              });
               await auditConsole(db, tenant, who, `console.${action}`, `request:${id}`, at);
               let latencySeconds: number | null;
               try {
@@ -2389,7 +2901,13 @@ export function startConsoleServer(
                 latencySeconds,
                 repeated: false,
                 ...(receipt
-                  ? { decisionId: receipt.id, decisionUrl: `/console/decisions/${encodeURIComponent(receipt.id)}` }
+                  ? {
+                      decisionId: receipt.id,
+                      decisionUrl: `/console/decisions/${encodeURIComponent(receipt.id)}`,
+                      ...(executionSpec
+                        ? { specFingerprint: executionSpec.fingerprint, requestUpdatedAt: request.updatedAt }
+                        : {}),
+                    }
                   : {}),
               };
             });
@@ -2398,7 +2916,17 @@ export function startConsoleServer(
             }
             json(res, 200, { ok: action === 'approve', id, ...result, ...identity });
           } catch (e) {
-            json(res, 409, { ok: false, error: (e as Error).message });
+            const code = e instanceof ExecutionSpecError ? e.code : undefined;
+            json(res, 409, {
+              ok: false,
+              error: (e as Error).message,
+              ...(code ? { code, ...(e instanceof ExecutionSpecError ? e.detail : {}) } : {}),
+              // The reviewer's explanation survives a stale rejection: the
+              // client restores it so re-review resubmits the same rationale.
+              ...(action === 'decline' && typeof call.fields.reason === 'string' && call.fields.reason.trim() !== ''
+                ? { preservedDraft: { reason: call.fields.reason } }
+                : {}),
+            });
           }
           return;
         }
@@ -2559,7 +3087,28 @@ export function startConsoleServer(
           const auth = await sessionOf();
           if (!auth) return sessionExpiredApi();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          json(res, 200, { ...metrics, uptimeMs: Date.now() - metrics.startedAt });
+          const readiness = await checkReadiness(
+            [
+              {
+                name: 'database',
+                check: async () => {
+                  await db.prepare('SELECT 1 AS ok').get();
+                  return { ok: true as const, detail: `${db.engine} reachable` };
+                },
+              },
+              {
+                name: 'ingest-source',
+                optional: true,
+                check: async () => {
+                  const config = await loadActivationConfig(db, tenant);
+                  if (!config) return { ok: false, unconfigured: true, detail: 'no source configured' };
+                  return { ok: true as const, detail: `source ${collectorName(config.sourcePath)} configured` };
+                },
+              },
+            ],
+            { now: at },
+          );
+          json(res, 200, { ...metrics, uptimeMs: Date.now() - metrics.startedAt, readiness });
           return;
         }
 
@@ -2620,10 +3169,7 @@ export function startConsoleServer(
               return;
             }
             const rawSeq = call.json && 'expectedSeq' in call.json ? call.json.expectedSeq : call.fields.expectedSeq;
-            const expectedSeq =
-              rawSeq === undefined || rawSeq === null || rawSeq === ''
-                ? undefined
-                : Number(rawSeq);
+            const expectedSeq = rawSeq === undefined || rawSeq === null || rawSeq === '' ? undefined : Number(rawSeq);
             if (expectedSeq !== undefined && !Number.isInteger(expectedSeq)) {
               json(res, 400, { ok: false, error: 'expectedSeq must be an integer claim version' });
               return;
@@ -2754,6 +3300,229 @@ export function startConsoleServer(
           return;
         }
 
+        // FLOW-024: permissioned, read-only ledger export with a manifest.
+        // Snapshot is available to any activated member; the full
+        // evidence package requires admin or owner. Nothing is written.
+        const ledgerExport = path === '/api/ledger/export' && method === 'GET';
+        if (ledgerExport) {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          const kind = url.searchParams.get('kind') ?? 'snapshot';
+          if (kind !== 'snapshot' && kind !== 'evidence-package') {
+            json(res, 400, {
+              ok: false,
+              error: 'unknown export kind — snapshot or evidence-package',
+            });
+            return;
+          }
+          if (kind === 'evidence-package' && !atLeast(auth.user.role, 'admin')) {
+            json(res, 403, { ok: false, error: 'evidence-package export requires admin or owner' });
+            return;
+          }
+          const streamParam = url.searchParams.get('stream');
+          const isStream = streamParam === 'true' || streamParam === '1';
+          if (isStream) {
+            res.writeHead(200, {
+              'content-type': 'application/json; charset=utf-8',
+              'content-disposition': `attachment; filename="vital-ledger-${tenant}-${kind}.json"`,
+              'cache-control': 'no-store',
+              'transfer-encoding': 'chunked',
+            });
+            res.write('{"ok":true,"export":');
+            const { manifest } = await streamExportLedger(
+              db,
+              tenant,
+              (chunk) => {
+                res.write(chunk);
+              },
+              { now: at, kind: kind as ExportKind },
+            );
+            res.write(',"manifest":' + JSON.stringify(manifest) + '}');
+            res.end();
+            return;
+          }
+          const { export: data, manifest } = await exportLedgerWithManifest(db, tenant, kind as ExportKind, at);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="vital-ledger-${tenant}-${kind}.json"`,
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify({ ok: true, manifest, export: data }));
+          return;
+        }
+
+        // FLOW-024: permissioned, paginated, tenant-isolated audit history.
+        // Rows carry links to reviewed evidence, authorization, execution
+        // receipts, and outcomes where the row references them.
+        const auditHistory = path === '/api/audit' && method === 'GET';
+        if (auditHistory) {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          const q = url.searchParams;
+          const query: AuditQuery = {};
+          const actor = q.get('actor');
+          const action = q.get('action');
+          const from = q.get('from');
+          const to = q.get('to');
+          const requestId = q.get('request');
+          const decisionId = q.get('decision');
+          const limit = q.get('limit');
+          const offset = q.get('offset');
+          if (actor !== null) query.actor = actor;
+          if (action !== null) query.action = action;
+          if (from !== null) query.from = from;
+          if (to !== null) query.to = to;
+          if (requestId !== null) query.requestId = requestId;
+          if (decisionId !== null) query.decisionId = decisionId;
+          if (limit !== null) query.limit = Number(limit);
+          if (offset !== null) query.offset = Number(offset);
+          const page = await queryAudit(db, tenant, query);
+          json(res, 200, {
+            ok: true,
+            ...page,
+            rows: page.rows.map((row) => ({ ...row, links: auditLinks(row) })),
+          });
+          return;
+        }
+
+        // F23: Authenticated learning review administration — labeling queue
+        if (method === 'GET' && path === '/api/learning/labeling-queue') {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          const rawLimit = url.searchParams.get('limit');
+          const limit = rawLimit ? Math.min(Math.max(1, Number(rawLimit)), 200) : 50;
+          const queue = await new CognitiveRouter(db).labelingQueue(tenant, limit);
+          json(res, 200, { ok: true, queue });
+          return;
+        }
+
+        // F23: Authenticated learning review administration — label decision
+        if (method === 'POST' && path === '/api/learning/label') {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            bodyError(res, e);
+            return;
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const rawId = call.json && 'decisionId' in call.json ? call.json.decisionId : call.fields.decisionId;
+          const decisionId = Number(rawId);
+          if (!Number.isInteger(decisionId) || decisionId <= 0) {
+            json(res, 400, { ok: false, error: 'decisionId must be a positive integer' });
+            return;
+          }
+          const rawTier = call.json && 'correctTier' in call.json ? call.json.correctTier : call.fields.correctTier;
+          const validTiers = ['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'];
+          if (typeof rawTier !== 'string' || !validTiers.includes(rawTier)) {
+            json(res, 400, { ok: false, error: `correctTier must be one of: ${validTiers.join(', ')}` });
+            return;
+          }
+          const reviewer = by(auth.user);
+          try {
+            await new CognitiveRouter(db).label(tenant, decisionId, rawTier as any, reviewer);
+            await auditConsole(
+              db,
+              tenant,
+              reviewer,
+              'console.label_decision',
+              String(decisionId),
+              at,
+              `correct_tier=${rawTier}`,
+            );
+            json(res, 200, { ok: true, decisionId, correctTier: rawTier, reviewer });
+          } catch (e) {
+            json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          return;
+        }
+
+        // F23: Authenticated skill card administration — list cards
+        if (method === 'GET' && path === '/api/learning/cards') {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          const state = url.searchParams.get('state') as any;
+          const intent = url.searchParams.get('intent') ?? undefined;
+          const cards = await comp.list(tenant, { state: state ?? undefined, intent });
+          json(res, 200, { ok: true, cards });
+          return;
+        }
+
+        // F23: Authenticated skill card administration — get card detail with tests and revisions
+        const cardMatch = path.match(/^\/api\/learning\/cards\/([^/]+)$/);
+        if (method === 'GET' && cardMatch) {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          const cardId = decodeURIComponent(cardMatch[1]!);
+          const card = await comp.get(tenant, cardId);
+          if (!card) {
+            json(res, 404, { ok: false, error: `skill card ${cardId} not found` });
+            return;
+          }
+          const tests = await comp.transferResults(tenant, cardId);
+          const revisions = await comp.cardRevisions(tenant, cardId);
+          json(res, 200, { ok: true, card, tests, revisions });
+          return;
+        }
+
+        // F23: Authenticated skill card administration — advance card
+        const advanceMatch = path.match(/^\/api\/learning\/cards\/([^/]+)\/advance$/);
+        if (method === 'POST' && advanceMatch) {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          if (!atLeast(auth.user.role, 'admin')) {
+            json(res, 403, { ok: false, error: 'card administration requires admin or owner role' });
+            return;
+          }
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            bodyError(res, e);
+            return;
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const cardId = decodeURIComponent(advanceMatch[1]!);
+          const rawTo = call.json && 'to' in call.json ? call.json.to : call.fields.to;
+          if (typeof rawTo !== 'string' || !rawTo) {
+            json(res, 400, { ok: false, error: 'target state (to) is required' });
+            return;
+          }
+          const evidence = (
+            call.json && 'evidence' in call.json && typeof call.json.evidence === 'object' ? call.json.evidence : {}
+          ) as any;
+          try {
+            const result = await comp.attemptAdvance(tenant, cardId, rawTo as any, evidence);
+            if (result.ok) {
+              await auditConsole(db, tenant, by(auth.user), 'console.advance_card', cardId, at, `to=${rawTo}`);
+            }
+            json(res, result.ok ? 200 : 422, {
+              ok: result.ok,
+              card: result.card,
+              reasons: result.reasons,
+            });
+          } catch (e) {
+            json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          return;
+        }
+
         // Static site fallthrough (opt-in via siteDir). Console routes and
         // the auth pages always take precedence; only unmatched GETs fall
         // through to files, with traversal-defence inside serveStatic.
@@ -2767,9 +3536,16 @@ export function startConsoleServer(
         }
 
         json(res, 404, { ok: false, error: 'not found' });
-      })().catch(() => {
+      })().catch((err) => {
         metrics.errors += 1;
-        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error' });
+        const diag = correlateDiagnostic({
+          detail: (err as Error).message,
+          tenant,
+          action: logPath,
+          now: new Date().toISOString(),
+        });
+        if (process.env.VITAL_DEBUG_CONSOLE === '1') console.error('[console]', diag.supportRef, diag.sanitized);
+        if (!res.headersSent) json(res, 500, { ok: false, error: 'internal error', supportRef: diag.supportRef });
         else res.destroy();
       });
     });

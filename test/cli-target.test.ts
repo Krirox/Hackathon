@@ -57,10 +57,7 @@ T('FLOW-005: SQLITE_PATH is used when flag and DATABASE_URL are absent', () => {
 });
 
 T('FLOW-005: status requires a persistent default, not silent :memory:', () => {
-  throws(
-    () => resolveDbTarget({ requirePersistent: true, defaultPath: ':memory:' }),
-    'PERSISTENT_DB_REQUIRED',
-  );
+  throws(() => resolveDbTarget({ requirePersistent: true, defaultPath: ':memory:' }), 'PERSISTENT_DB_REQUIRED');
 });
 
 T('FLOW-005: resolveTenant requires explicit tenant when configured', () => {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
+import { recordTrustOutcome } from './trust.ts';
 
 /**
  * Governance plane, part 3 (TODO §3.3): approval sampling, batch ceilings,
@@ -94,4 +95,41 @@ export async function checkRateLimit(
     return { allowed: true, remaining: maxPerDay - used - 1 };
   }
   return { allowed: false, remaining: 0 };
+}
+
+export interface ReviewOutcomeInput {
+  requestId: string;
+  scope: string;
+  actionClass?: string;
+  approved: boolean;
+  reviewer: string;
+  reason?: string;
+  now?: string;
+}
+
+/**
+ * Connect human reviews (approve / decline) back into the Trust Ledger.
+ * Approvals count as clean autonomous/reviewed executions; declines record an override.
+ */
+export async function recordReviewOutcome(db: AsyncDb, tenant: string, input: ReviewOutcomeInput): Promise<void> {
+  const at = input.now ?? new Date().toISOString();
+  const actionClass = input.actionClass ?? 'RECOMMEND';
+  await recordTrustOutcome(db, tenant, input.scope, actionClass, {
+    clean: input.approved,
+    override: !input.approved,
+    now: at,
+  });
+  await db.prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)').run(
+    tenant,
+    input.reviewer,
+    'REVIEW_RECORDED',
+    `${input.scope}/${actionClass}`,
+    JSON.stringify({
+      requestId: input.requestId,
+      approved: input.approved,
+      reviewer: input.reviewer,
+      reason: input.reason ?? null,
+    }),
+    at,
+  );
 }

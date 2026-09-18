@@ -991,9 +991,9 @@ export function createLedger(db: AsyncDb): Ledger {
     claimId: string,
     by: string,
   ): Promise<{ statement: string; expectedSeq?: number; at: string } | null> {
-    const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(correctionDraftKey(tenant, claimId, by))) as
-      | { value: string }
-      | undefined;
+    const row = (await db
+      .prepare('SELECT value FROM meta WHERE key = ?')
+      .get(correctionDraftKey(tenant, claimId, by))) as { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(String(row.value)) as { statement: string; expectedSeq?: number; at: string };

@@ -95,3 +95,38 @@ classification, data residency, SOC 2 path. See `TODO.md` V2 backlog.
 Security issues: contact the repo owner directly (no public issue). Include
 the claim/decision/request IDs if the report concerns ledger integrity —
 replayability cuts both ways.
+
+## Status wording and support diagnostics
+
+A green liveness response must never be worded as proof of workflow
+readiness. Liveness (`liveness()` in `src/gov/trust.ts`) answers only
+process reachability; readiness (`checkReadiness` in the same module) checks
+required dependencies under per-check timeouts and reports
+optional-but-unconfigured integrations as `unconfigured-optional` instead
+of failing. Status surfaces that conflate the two mislead operators during
+an outage.
+
+User-facing failures carry an opaque support reference (`mintSupportRef`)
+correlated with a sanitized diagnostic excerpt (`correlateDiagnostic`):
+support locates the error by reference, never by guessing from timestamps,
+and secrets (tokens, passwords, keys, database URLs) are redacted by
+`sanitizeDiagnostic` before the excerpt is stored or shown. Support contact
+is the repo owner directly; triage needs the support reference, tenant
+slug, attempted action, and the readiness report at failure time.
+
+## Backup, export, and emergency stops
+
+Ledger export (`exportLedgerWithManifest` in `src/ledger/export.ts`) is
+read-only and carries a manifest naming contents and omissions per kind
+(snapshot, evidence package, backup reference). It is the portable second
+copy, not the backup strategy: point-in-time recovery plus the quarterly
+restore drill in `docs/deployment.md` remain the backup proof, and no
+immutable archival delivery is claimed. Ledger-history import is
+unsupported.
+
+Emergency stops (`setKill` / `recoverStop` in `src/gov/trust.ts`) are
+tenant/scope/action-class halt and audited recovery. Stops persist across
+restarts — there is no silent resume; recovery requires a recorded reason
+and lands in the audit log. Policy-check drills (`killDrill`) and real
+runtime halt drills (`runtimeHaltDrill`) are labeled by mode so drill
+evidence can never be mistaken for real halt evidence.

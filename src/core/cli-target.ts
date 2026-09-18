@@ -1,6 +1,4 @@
 import { openDb, migrate, type AsyncDb } from './db.ts';
-import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { openPostgres } from './pg.ts';
 
 /**
@@ -141,7 +139,8 @@ export function resolveTenant(opts: ResolveTenantOptions = {}): string | undefin
 
 export async function assertTenantExists(db: AsyncDb, tenant: string, opts?: { strict?: boolean }): Promise<void> {
   if (!(await tableExists(db, 'tenants'))) {
-    if (opts?.strict) throw new CliTargetError('TENANT_NOT_FOUND', `tenant "${tenant}" does not exist in the selected database`);
+    if (opts?.strict)
+      throw new CliTargetError('TENANT_NOT_FOUND', `tenant "${tenant}" does not exist in the selected database`);
     return;
   }
   const count = (await db.prepare('SELECT COUNT(*) AS n FROM tenants').get()) as { n: number | string };
@@ -155,8 +154,7 @@ export async function readSchemaStatus(db: AsyncDb): Promise<SchemaStatus> {
   const hasMeta = await tableExists(db, 'meta');
   if (!hasMeta) return { ready: false, schemaVersion: null, migrationCount: null };
   const version = (await db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   let migrationCount: number | null = null;
   if (await tableExists(db, 'schema_migrations')) {
     const row = (await db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()) as { n: number | string };
@@ -198,11 +196,14 @@ export function formatTargetHeader(target: ResolvedDbTarget, tenant?: string): R
 export async function verifyInstance(db: AsyncDb): Promise<{ schemaVersion: string; probe: string }> {
   await migrate(db);
   const key = `verify:${Date.now()}`;
-  await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, 'ok');
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(key, 'ok');
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as { value: string };
   if (row?.value !== 'ok') throw new CliTargetError('VERIFY_PROBE_FAILED', 'meta round-trip failed');
   await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
   const status = await readSchemaStatus(db);
-  if (!status.schemaVersion) throw new CliTargetError('VERIFY_NO_VERSION', 'schema migrated but schema_version is missing');
+  if (!status.schemaVersion)
+    throw new CliTargetError('VERIFY_NO_VERSION', 'schema migrated but schema_version is missing');
   return { schemaVersion: status.schemaVersion, probe: 'meta_round_trip' };
 }

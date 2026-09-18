@@ -17,12 +17,7 @@ import { checkDraft, type DraftCheck, WedgeError } from './ship.ts';
 
 export type DeliverableKind = 'launch' | 'support' | 'sales' | 'feature';
 
-export type DeliverableReviewStatus =
-  | 'draft'
-  | 'pending_review'
-  | 'revision_requested'
-  | 'approved'
-  | 'superseded';
+export type DeliverableReviewStatus = 'draft' | 'pending_review' | 'revision_requested' | 'approved' | 'superseded';
 
 export type DeliverableItemClass = 'finding' | 'hypothesis' | 'unsupported';
 
@@ -205,10 +200,14 @@ export async function persistDeliverableVersion(
 
   const parsed = parseItems(input.content, input.claimIds);
   const items = await classifyDeliverableItems(ledger, input.tenant, parsed, input.now);
-  const draftCheck = await checkDraft(ledger, input.tenant, { text: input.content, claimIds: input.claimIds }, input.now);
+  const draftCheck = await checkDraft(
+    ledger,
+    input.tenant,
+    { text: input.content, claimIds: input.claimIds },
+    input.now,
+  );
   const hasItemFailures = items.some((i) => i.checkFailed);
-  const status: DeliverableReviewStatus =
-    draftCheck.ok && !hasItemFailures ? 'pending_review' : 'revision_requested';
+  const status: DeliverableReviewStatus = draftCheck.ok && !hasItemFailures ? 'pending_review' : 'revision_requested';
 
   const versionId = `dlvver_${createHash('sha256').update(`${deliverableId}:${versionNum}`).digest('hex').slice(0, 20)}`;
   const version: DeliverableVersion = {
@@ -271,8 +270,7 @@ export async function loadDeliverableRecord(
 ): Promise<DeliverableRecord | null> {
   try {
     const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(recordKey(tenant, id))) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!r) return null;
     return JSON.parse(String(r.value)) as DeliverableRecord;
   } catch {
@@ -286,8 +284,7 @@ export async function loadDeliverableByRequest(
   requestId: string,
 ): Promise<DeliverableRecord | null> {
   const idx = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(requestIndexKey(tenant, requestId))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!idx) return null;
   return loadDeliverableRecord(db, tenant, String(idx.value));
 }
@@ -299,8 +296,7 @@ export async function loadDeliverableVersion(
 ): Promise<DeliverableVersion | null> {
   try {
     const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(versionKey(tenant, versionId))) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!r) return null;
     return JSON.parse(String(r.value)) as DeliverableVersion;
   } catch {
@@ -314,7 +310,7 @@ export async function listDeliverableVersions(
   deliverableId: string,
 ): Promise<DeliverableVersion[]> {
   const rows = (await db
-    .prepare("SELECT value FROM meta WHERE key LIKE ?")
+    .prepare('SELECT value FROM meta WHERE key LIKE ?')
     .all(`wedge:deliverable-ver:${tenant}:%`)) as { value: string }[];
   const versions: DeliverableVersion[] = [];
   for (const row of rows) {
@@ -341,8 +337,18 @@ async function saveDeliverableVersion(db: AsyncDb, version: DeliverableVersion):
 }
 
 export function diffDeliverableText(a: string, b: string): { added: string[]; removed: string[] } {
-  const al = new Set(a.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
-  const bl = new Set(b.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+  const al = new Set(
+    a
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean),
+  );
+  const bl = new Set(
+    b
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean),
+  );
   const added = [...bl].filter((l) => !al.has(l));
   const removed = [...al].filter((l) => !bl.has(l));
   return { added, removed };
@@ -413,7 +419,10 @@ export async function approveDeliverableVersion(
   const version = await loadDeliverableVersion(db, input.tenant, input.versionId);
   if (!version) throw new WedgeError('VERSION_NOT_FOUND', `deliverable version ${input.versionId} not found`);
   if (version.fingerprint !== input.fingerprint) {
-    throw new WedgeError('VERSION_MISMATCH', 'asset fingerprint does not match the reviewed version — refresh and re-review');
+    throw new WedgeError(
+      'VERSION_MISMATCH',
+      'asset fingerprint does not match the reviewed version — refresh and re-review',
+    );
   }
   if (version.status === 'approved') {
     if (version.decisionId) return { version, decisionId: version.decisionId };

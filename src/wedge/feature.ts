@@ -4,6 +4,7 @@ import type { HarnessAdapter, HarnessOutcome } from '../substrate/harness.ts';
 import type { Manifest } from '../substrate/sandbox.ts';
 import type { SourceTier } from '../core/types.ts';
 import { WedgeError } from './ship.ts';
+import { parseExecutionSpecFromDecision, validateExecutionAgainstSpec } from '../coord/execution-spec.ts';
 
 /**
  * Third workflow: feature-request with deep research (eng room loop).
@@ -217,46 +218,67 @@ export async function codeApprovedFeature(
     );
   }
 
-  // Request binding: decision approved for a specific request must not be used on another
-  if (replay.record.requestId && replay.record.requestId !== input.requestId) {
-    throw new WedgeError(
-      'REQUEST_MISMATCH',
-      `decision ${input.decisionId} is bound to request ${replay.record.requestId}, not ${input.requestId}`,
-    );
-  }
-
-  // Plan binding: plan fingerprint must match approved action
-  if (input.plan && !replay.record.action.includes(input.plan.fingerprint)) {
-    throw new WedgeError(
-      'PLAN_MISMATCH',
-      `plan fingerprint "${input.plan.fingerprint}" does not match approved action in decision ${input.decisionId}`,
-    );
-  }
-
-  // Drift and reapproval check: any mutation/superseding/staleness in the evidence bundle rejects execution
-  const drifted = replay.drift.filter((d) => d.drifted);
-  if (drifted.length > 0) {
-    const details = drifted.map((d) => `${d.id}:${d.frozenStatus}->${d.currentStatus}`).join(', ');
-    throw new WedgeError(
-      'DRIFTED_DECISION',
-      `decision evidence has drifted since approval (${details}) — reapproval required`,
-    );
-  }
-
-  // Check cited claims for unusable status or expiry
-  for (const entry of replay.record.bundle.claims) {
-    const live = await ledger.get(tenant, entry.id);
-    if (!live || (UNUSABLE as readonly string[]).includes(live.status)) {
+  const frozenSpec = parseExecutionSpecFromDecision(replay.record);
+  if (frozenSpec) {
+    try {
+      await validateExecutionAgainstSpec(
+        ledger,
+        coord,
+        tenant,
+        input.requestId,
+        {
+          command: input.command,
+          claimRefs: input.claimIds,
+          decisionId: input.decisionId,
+          planFingerprint: input.plan?.fingerprint,
+        },
+        now,
+      );
+    } catch (e) {
+      throw new WedgeError((e as { code?: string }).code ?? 'SPEC_VIOLATION', (e as Error).message);
+    }
+  } else {
+    // Request binding: decision approved for a specific request must not be used on another
+    if (replay.record.requestId && replay.record.requestId !== input.requestId) {
       throw new WedgeError(
-        'DRIFTED_DECISION',
-        `decision cites claim ${entry.id} which is now ${live ? live.status : 'missing'} — reapproval required`,
+        'REQUEST_MISMATCH',
+        `decision ${input.decisionId} is bound to request ${replay.record.requestId}, not ${input.requestId}`,
       );
     }
-    if (live.validUntil && live.validUntil <= now) {
+
+    // Plan binding: plan fingerprint must match approved action
+    if (input.plan && !replay.record.action.includes(input.plan.fingerprint)) {
+      throw new WedgeError(
+        'PLAN_MISMATCH',
+        `plan fingerprint "${input.plan.fingerprint}" does not match approved action in decision ${input.decisionId}`,
+      );
+    }
+
+    // Drift and reapproval check: any mutation/superseding/staleness in the evidence bundle rejects execution
+    const drifted = replay.drift.filter((d) => d.drifted);
+    if (drifted.length > 0) {
+      const details = drifted.map((d) => `${d.id}:${d.frozenStatus}->${d.currentStatus}`).join(', ');
       throw new WedgeError(
         'DRIFTED_DECISION',
-        `decision cites claim ${entry.id} which expired at ${live.validUntil} — reapproval required`,
+        `decision evidence has drifted since approval (${details}) — reapproval required`,
       );
+    }
+
+    // Check cited claims for unusable status or expiry
+    for (const entry of replay.record.bundle.claims) {
+      const live = await ledger.get(tenant, entry.id);
+      if (!live || (UNUSABLE as readonly string[]).includes(live.status)) {
+        throw new WedgeError(
+          'DRIFTED_DECISION',
+          `decision cites claim ${entry.id} which is now ${live ? live.status : 'missing'} — reapproval required`,
+        );
+      }
+      if (live.validUntil && live.validUntil <= now) {
+        throw new WedgeError(
+          'DRIFTED_DECISION',
+          `decision cites claim ${entry.id} which expired at ${live.validUntil} — reapproval required`,
+        );
+      }
     }
   }
 

@@ -166,6 +166,17 @@ function gapLine(gaps: string[]): string {
   return `<div style="font-size:11px;color:${HYPO}">? ${esc(gaps[0]!)}${extra}</div>`;
 }
 
+function needsHumanCard(
+  n: { requestId: string; goal: string; scope: string; deadline: string; state: string },
+  live: boolean,
+): string {
+  let title = esc(n.goal);
+  if (live) {
+    title = `<a href="${esc(needsHumanTaskUrl(n.requestId))}">${esc(n.goal)}</a>`;
+  }
+  return `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${title}</div><div class="sub">${esc(n.state)}</div></div>`;
+}
+
 export function renderHtml(r: ConsoleReport, live = false): string {
   const h = r.health;
   // Defensive second bound: the report is already windowed, but the
@@ -221,14 +232,152 @@ export function renderHtml(r: ConsoleReport, live = false): string {
 <div class="card"><div class="sub">cost per signal</div>${r.costPerSignal === null ? '<div class="big">—</div><div class="sub">no router configured</div>' : `<div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div>`}</div>
 </div>
  <h2>Intelligence cost per good decision</h2>
+ <div class="sub" style="margin-bottom:8px">Observed spend per good decision (descriptive — see caveats for causal attribution)</div>
  <div class="card">${lineChart(curve, r.costTarget)}</div>
 <h2>Tier mix</h2>
 <div class="card">${tierStack(r.tierMix)}</div>
-<h2>Needs a human (${needsHuman.length} open · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${r.digestCount} notices → digest)</h2>
-<div class="grid">${needsHuman.map((n) => `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${esc(n.goal)}</div><div class="sub">${esc(n.state)}</div></div>`).join('') || '<p class="sub">queue clear</p>'}</div>
+<h2>Needs a human (${needsHuman.length} open · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${live ? `<a href="/console/digest">${r.digestCount} notices → digest</a>` : `${r.digestCount} notices → digest`})</h2>
+<div class="grid">${needsHuman.map((n) => needsHumanCard(n, live)).join('') || '<p class="sub">queue clear</p>'}</div>
 <h2>Compiler — why not trusted yet</h2>
 <div class="cols">${['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'].map((s) => `<div><div class="sub">${s}</div>${cards(s)}</div>`).join('')}</div>
 <h2>Rooms</h2>
 ${rooms || '<p class="sub">no rooms yet</p>'}
 </body></html>`;
+}
+
+export type NavKey = 'reviews' | 'workflows' | 'digest' | 'team' | 'account';
+
+export interface NavAvailability {
+  reviews: boolean;
+  workflows: boolean;
+  digest: boolean;
+  team: boolean;
+  account: boolean;
+}
+
+export interface NavDestination {
+  key: NavKey;
+  label: string;
+  href: string;
+}
+
+export interface DetailNavContext {
+  evidencePage?: number;
+  queuePage?: number;
+  requestId?: string;
+  returnTo?: string;
+}
+
+export function resolveConsoleHome(siteDir?: string | null): string {
+  if (siteDir) {
+    return '/console';
+  }
+  return '/';
+}
+
+export function buildConsoleNav(home: string, availability: Partial<NavAvailability> = {}): NavDestination[] {
+  const open: NavAvailability = {
+    reviews: true,
+    workflows: true,
+    digest: true,
+    team: true,
+    account: true,
+    ...availability,
+  };
+  const items: NavDestination[] = [];
+  if (open.reviews) {
+    items.push({ key: 'reviews', label: 'Reviews', href: `${home}#pending-review` });
+  }
+  if (open.workflows) {
+    items.push({ key: 'workflows', label: 'Workflows', href: '/console/workflows' });
+  }
+  if (open.digest) {
+    items.push({ key: 'digest', label: 'Digest', href: '/console/digest' });
+  }
+  if (open.team) {
+    items.push({ key: 'team', label: 'Team', href: '/team' });
+  }
+  if (open.account) {
+    items.push({ key: 'account', label: 'Account', href: '/account' });
+  }
+  return items;
+}
+
+export function renderConsoleNav(items: NavDestination[], current?: NavKey): string {
+  const links = items
+    .map((item) => {
+      if (current !== undefined && item.key === current) {
+        return `<a href="${esc(item.href)}" aria-current="page">${esc(item.label)}</a>`;
+      }
+      return `<a href="${esc(item.href)}">${esc(item.label)}</a>`;
+    })
+    .join(' · ');
+  return `<nav aria-label="Console">${links}</nav>`;
+}
+
+export function renderAccountCluster(email: string, role: string, csrf: string): string {
+  return `<div style="margin-top:24px;display:flex;gap:12px;align-items:center" class="sub"><span>signed in as ${esc(email)} · ${esc(role)}</span><a href="/account">account</a><a href="/team">team</a><form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280">Sign out</button></form></div>`;
+}
+
+export function needsHumanTaskUrl(requestId: string): string {
+  return `/console/requests/${encodeURIComponent(requestId)}`;
+}
+
+function validDetailPage(n: number | undefined): n is number {
+  return n !== undefined && Number.isSafeInteger(n) && n >= 0;
+}
+
+export function requestDetailUrl(id: string, ctx: DetailNavContext = {}): string {
+  const params = new URLSearchParams();
+  if (validDetailPage(ctx.evidencePage) && ctx.evidencePage > 0) {
+    params.set('page', String(ctx.evidencePage));
+  }
+  if (ctx.returnTo) {
+    params.set('return', ctx.returnTo);
+  }
+  const query = params.toString();
+  const base = `/console/requests/${encodeURIComponent(id)}`;
+  if (query) {
+    return `${base}?${query}`;
+  }
+  return base;
+}
+
+export function claimDetailUrl(id: string, ctx: DetailNavContext = {}): string {
+  const params = new URLSearchParams();
+  if (validDetailPage(ctx.evidencePage) && ctx.evidencePage > 0) {
+    params.set('page', String(ctx.evidencePage));
+  }
+  if (ctx.requestId) {
+    params.set('requestId', ctx.requestId);
+  }
+  if (ctx.returnTo) {
+    params.set('return', ctx.returnTo);
+  }
+  const query = params.toString();
+  const base = `/console/claims/${encodeURIComponent(id)}`;
+  if (query) {
+    return `${base}?${query}`;
+  }
+  return base;
+}
+
+export function queueReturnUrl(home: string, ctx: DetailNavContext = {}): string {
+  if (ctx.returnTo) {
+    return ctx.returnTo;
+  }
+  if (validDetailPage(ctx.queuePage) && ctx.queuePage > 0) {
+    return `${home}?reviewPage=${String(ctx.queuePage)}#pending-review`;
+  }
+  return home;
+}
+
+export function withReturnTo(url: string, returnTo?: string): string {
+  if (!returnTo) {
+    return url;
+  }
+  if (url.includes('?')) {
+    return `${url}&return=${encodeURIComponent(returnTo)}`;
+  }
+  return `${url}?return=${encodeURIComponent(returnTo)}`;
 }

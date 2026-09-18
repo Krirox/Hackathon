@@ -1,23 +1,54 @@
 import { T, eq, TEN, NOW, fresh, rejects } from './helpers.ts';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AsyncDb } from '../src/core/db.ts';
 import { authorize } from '../src/gov/raci.ts';
 import { isShellTool, screenShellCommand } from '../src/gov/shell.ts';
 import {
+  auditPolicyChange,
+  buildSelfHaltNotification,
+  changeImpact,
   checkKill,
+  checkReadiness,
   clearFreeze,
   clearKill,
+  correlateDiagnostic,
+  describeStops,
+  effectivePolicy,
   evaluateFreeze,
   guardedAuthorize,
+  haltEffects,
   honeytaskDetectionRate,
   injectHoneytask,
   killDrill,
+  listHaltEvidence,
+  listStops,
+  liveness,
+  mintSupportRef,
+  recoverStop,
+  recordSelfHalt,
   recordTrustOutcome,
+  recoveryRequired,
   resolveHoneytask,
+  retryGuidance,
+  runtimeHaltDrill,
+  sanitizeDiagnostic,
   setKill,
+  SETTINGS_INVENTORY,
   trustFor,
+  validatePolicyChange,
 } from '../src/gov/trust.ts';
-import { actReversible, compensateReversible } from '../src/gov/act.ts';
-import { checkBatch, checkRateLimit, sampleForReview, selectReviewSample } from '../src/gov/review.ts';
+import { actReversible, actRetryGuidance, assertNoHalt, compensateReversible } from '../src/gov/act.ts';
+import {
+  checkBatch,
+  checkRateLimit,
+  sampleForReview,
+  selectReviewSample,
+  recordReviewOutcome,
+} from '../src/gov/review.ts';
+import { LocalEchoAdapter } from '../src/substrate/harness.ts';
 
 console.log('\n\x1b[1mGovernance — the R/A/I matrix\x1b[0m');
 
@@ -477,4 +508,387 @@ T('AUDIT F06: actReversible performs real execution, records concrete receipts, 
       }),
     'EXECUTION_FAILED',
   );
+});
+
+console.log('\n\x1b[1mGovernance — FLOW-022 emergency stop and recovery\x1b[0m');
+
+T('FLOW-022: stops list with display data and recover needs audited reason, no silent resume', async () => {
+  const { db } = await fresh();
+  eq(await listStops(db, TEN), []);
+  await setKill(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:priya', NOW, {
+    reason: 'suspected bad deploy',
+    recoveryRequires: 'incident review ref inc:42',
+  });
+  const stops = await listStops(db, TEN);
+  eq(stops.length, 1);
+  eq(stops[0]?.by, 'human:priya');
+  eq(stops[0]?.at, NOW);
+  eq(stops[0]?.reason, 'suspected bad deploy');
+  const shown = await describeStops(db, TEN);
+  eq(shown[0]?.affected.includes('engineering'), true);
+  eq(shown[0]?.recovery.includes('inc:42'), true);
+  eq(
+    (await guardedAuthorize(db, { tenant: TEN, scope: 'engineering', actionClass: 'ACT_REVERSIBLE' })).verdict,
+    'denied',
+  );
+  await rejects(
+    async () =>
+      await recoverStop(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:priya', {
+        reason: '',
+      }),
+    'RECOVERY_REASON_REQUIRED',
+  );
+  eq((await recoveryRequired(db, TEN)).length, 1, 'a restart re-lists the same durable stop:');
+  const recovered = await recoverStop(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:priya', {
+    reason: 'incident review complete',
+    approvedBy: 'human:owner',
+    now: NOW,
+  });
+  eq(recovered.scope, 'engineering');
+  eq(await listStops(db, TEN), []);
+  eq(
+    (await guardedAuthorize(db, { tenant: TEN, scope: 'engineering', actionClass: 'ACT_REVERSIBLE' })).verdict,
+    'approval',
+  );
+  const rows = await db.prepare("SELECT * FROM audit_log WHERE action = 'KILL_RECOVERED'").all();
+  eq(rows.length, 1);
+  eq(rows[0]?.actor, 'human:priya');
+  await rejects(
+    async () =>
+      await recoverStop(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:priya', {
+        reason: 'twice',
+      }),
+    'NO_ACTIVE_STOP',
+  );
+});
+
+T('FLOW-022: halted execution refuses and self-halt notifies with a persisted fallback', async () => {
+  const { db } = await fresh();
+  await setKill(db, TEN, { scope: '*', actionClass: '*' }, 'human:ops', NOW);
+  await rejects(async () => await assertNoHalt(db, TEN, 'marketing', 'READ'), 'HALTED_WHEN_STOPPED');
+  const note = buildSelfHaltNotification({
+    tenant: TEN,
+    scope: 'marketing',
+    actionClass: 'ACT_REVERSIBLE',
+    reason: 'budget death',
+    detectedAt: NOW,
+    affected: ['req_1'],
+  });
+  eq(note.kind, 'self-halt');
+  eq(note.fallback.includes('AUTOMATION_SELF_HALT'), true);
+  const recorded = await recordSelfHalt(
+    db,
+    TEN,
+    'marketing',
+    'ACT_REVERSIBLE',
+    'budget death',
+    'agent:coord',
+    ['req_1'],
+    NOW,
+  );
+  eq(recorded.detectedAt, NOW);
+  eq((await db.prepare("SELECT * FROM audit_log WHERE action = 'AUTOMATION_SELF_HALT'").all()).length, 1);
+});
+
+T('FLOW-022: drill evidence stays separate from real halt evidence', async () => {
+  const { db } = await fresh();
+  await setKill(db, TEN, { scope: 'engineering', actionClass: 'READ' }, 'human:ops', NOW, { reason: 'real incident' });
+  await killDrill(db, TEN, 'human:drill', NOW);
+  const runtime = await runtimeHaltDrill(db, TEN, { scope: 'marketing', actionClass: 'READ' }, 'human:drill', NOW);
+  eq(runtime.mode, 'runtime-halt');
+  eq(runtime.held, true);
+  eq(runtime.released, true);
+  eq(await checkKill(db, TEN, 'marketing', 'READ'), false, 'runtime drill releases its real engagement:');
+  eq(await checkKill(db, TEN, 'engineering', 'READ'), true, 'the real stop survives both drills:');
+  const evidence = await listHaltEvidence(db, TEN);
+  eq(evidence.drills.length, 2);
+  eq(evidence.drills.map((row) => row.action).sort(), ['KILL_DRILL', 'RUNTIME_HALT_DRILL']);
+  eq(
+    evidence.real.some((row) => row.action === 'KILL_ENGAGED' && row.target === 'engineering/READ'),
+    true,
+  );
+});
+
+T('FLOW-022: halt effect matrix separates in-flight, queued, and external work', async () => {
+  const matrix = haltEffects('engineering', 'ACT_REVERSIBLE');
+  eq(matrix.inFlight.effect, 'not-force-terminated');
+  eq(matrix.queued.effect, 'held-at-admission');
+  eq(matrix.external.effect, 'human-command-only');
+});
+
+T('FLOW-022: a honey-miss freeze notifies with a persisted self-halt row', async () => {
+  const { db } = await fresh();
+  await recordTrustOutcome(db, TEN, 'engineering', 'ACT_REVERSIBLE', { honeyMiss: true, clean: false, now: NOW });
+  eq((await trustFor(db, TEN, 'engineering', 'ACT_REVERSIBLE')).frozen, true);
+  const rows = (await db
+    .prepare("SELECT actor, target FROM audit_log WHERE action = 'AUTOMATION_SELF_HALT'")
+    .all()) as { actor: string; target: string }[];
+  eq(rows.length, 1, 'the freeze carries its operator notification:');
+  eq(rows[0]?.actor, 'trust');
+  eq(rows[0]?.target, 'engineering/ACT_REVERSIBLE');
+  const evidence = await listHaltEvidence(db, TEN);
+  eq(
+    evidence.real.some((r) => r.action === 'AUTOMATION_SELF_HALT'),
+    true,
+  );
+});
+
+console.log('\n\x1b[1mGovernance — FLOW-023 readiness and diagnostics\x1b[0m');
+
+T('FLOW-023: cheap liveness never touches dependencies; bounded readiness splits optional-unconfigured', async () => {
+  const live = liveness(NOW);
+  eq(live, { alive: true, at: NOW });
+  const report = await checkReadiness(
+    [
+      { name: 'db', check: async () => ({ ok: true, detail: 'sqlite open' }) },
+      {
+        name: 'serper',
+        check: async () => ({ ok: false, detail: 'serper not configured', unconfigured: true }),
+        optional: true,
+      },
+      { name: 'worker', check: async () => ({ ok: false, detail: 'worker stopped' }) },
+      { name: 'slow', check: async () => new Promise<{ ok: boolean }>(() => {}) },
+    ],
+    { timeoutMs: 50, now: NOW },
+  );
+  eq(report.ready, false);
+  eq(report.at, NOW);
+  eq(report.checks.find((check) => check.name === 'db')?.status, 'ok');
+  eq(report.checks.find((check) => check.name === 'serper')?.status, 'unconfigured-optional');
+  eq(report.checks.find((check) => check.name === 'worker')?.status, 'failing');
+  eq(report.checks.find((check) => check.name === 'slow')?.status, 'timeout');
+  const readyWhenOptionalMissing = await checkReadiness(
+    [{ name: 'serper', check: async () => ({ ok: false, unconfigured: true }), optional: true }],
+    { timeoutMs: 50, now: NOW },
+  );
+  eq(readyWhenOptionalMissing.ready, true);
+});
+
+T('FLOW-023: support references correlate sanitized diagnostics; sensitive failures never blind-replay', async () => {
+  const ref = mintSupportRef();
+  eq(ref.startsWith('sup_'), true);
+  const dirty =
+    'login failed bearer abcDEF123 with password: hunter2 and DATABASE_URL postgres://user:pass@host/db plus sk-abcdef123456';
+  const clean = sanitizeDiagnostic(dirty);
+  eq(clean.includes('hunter2'), false);
+  eq(clean.includes('pass@host'), false);
+  eq(clean.includes('sk-abcdef123456'), false);
+  const correlated = correlateDiagnostic({
+    detail: dirty,
+    tenant: TEN,
+    action: 'KILL_RECOVERED',
+    supportRef: ref,
+    now: NOW,
+  });
+  eq(correlated.supportRef, ref);
+  eq(correlated.tenant, TEN);
+  eq(correlated.at, NOW);
+  eq(correlated.sanitized.includes('hunter2'), false);
+  eq(retryGuidance('rate-limit').retryable, true);
+  eq(retryGuidance('timeout-unknown').strategy, 'reconcile-before-retry');
+  eq(retryGuidance('sensitive').retryable, false);
+  eq(retryGuidance('sensitive').strategy, 'explicit-resubmission-only');
+  eq(retryGuidance('auth').retryable, false);
+  eq(retryGuidance('unknown').retryable, false);
+  eq(actRetryGuidance('needs-approval', 'READ').retryable, false);
+  eq(actRetryGuidance('timeout-unknown', 'ACT_IRREVERSIBLE').retryable, false);
+});
+
+console.log('\n\x1b[1mGovernance — FLOW-025 policy configuration\x1b[0m');
+
+T('FLOW-025: settings inventory, effective policy sources, impact, validation, and audit', async () => {
+  const { db } = await fresh();
+  const areas = new Set(SETTINGS_INVENTORY.map((entry) => entry.area));
+  for (const area of ['approval', 'budget', 'scope', 'trust', 'stop']) eq(areas.has(area as 'approval'), true);
+  const effective = effectivePolicy({ values: { 'approver-role': 'admin' }, startupKeys: ['approver-role'] });
+  eq(effective.policy['approver-role'], 'admin');
+  eq(effective.sources.find((source) => source.setting === 'approver-role')?.source, 'startup');
+  eq(effective.sources.find((source) => source.setting === 'pinned-scopes')?.source, 'default');
+  const impact = changeImpact('approver-role');
+  eq(impact.requires.includes('restart'), true);
+  eq(impact.notChanges.includes('retroactively'), true);
+  eq(validatePolicyChange('approver-role', 'superuser').ok, false);
+  eq(validatePolicyChange('approver-role', 'admin').ok, true);
+  eq(validatePolicyChange('reversible-clean-threshold', '0').ok, false);
+  eq(validatePolicyChange('kill-switch', 'off').ok, false);
+  eq(validatePolicyChange('nope', 'x').ok, false);
+  await auditPolicyChange(db, TEN, 'human:owner', 'approver-role', 'member', 'admin', NOW);
+  const rows = await db.prepare("SELECT * FROM audit_log WHERE action = 'POLICY_CHANGED'").all();
+  eq(rows.length, 1);
+  eq(rows[0]?.target, 'approver-role');
+  await rejects(
+    async () => await auditPolicyChange(db, TEN, 'human:owner', 'approver-role', 'admin', 'superuser', NOW),
+    'INVALID_POLICY_CHANGE',
+  );
+});
+
+T('FLOW-025: policy-change dry run validates without applying', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-policy-'));
+  const dbPath = join(dir, 'policy.db');
+  try {
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        timeout: 12_000,
+      });
+    const bad = run(['verify', '--policy-change', 'approver-role=emperor', '--db', dbPath]);
+    eq(bad.status, 1, 'invalid values are refused:');
+    eq(JSON.parse(bad.stdout).valid, false);
+    const good = run(['verify', '--policy-change', 'approver-role=admin', '--db', dbPath]);
+    eq(good.status, 0);
+    const parsed = JSON.parse(good.stdout) as { valid: boolean; applied: boolean; key: string };
+    eq(parsed.valid, true);
+    eq(parsed.applied, false, 'dry run never mutates policy:');
+    eq(parsed.key, 'approver-role');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('AUDIT F19: recordTrustOutcome maintains overrides, override_rate, and granted atomically', async () => {
+  const { db } = await fresh();
+  // 199 clean outcomes: granted is false
+  for (let i = 0; i < 199; i++) {
+    await recordTrustOutcome(db, TEN, 'engineering', 'ACT_REVERSIBLE', { clean: true, now: NOW });
+  }
+  let t = await trustFor(db, TEN, 'engineering', 'ACT_REVERSIBLE');
+  eq(t.cleanInstances, 199);
+  eq(t.granted, false);
+  eq(t.total, 199);
+  eq(t.overrideRate, 0);
+
+  // 200th clean outcome: granted becomes true atomically
+  await recordTrustOutcome(db, TEN, 'engineering', 'ACT_REVERSIBLE', { clean: true, now: NOW });
+  t = await trustFor(db, TEN, 'engineering', 'ACT_REVERSIBLE');
+  eq(t.cleanInstances, 200);
+  eq(t.granted, true);
+  eq(t.total, 200);
+  eq(t.overrideRate, 0);
+
+  // Autonomy is granted
+  let v = authorize({ scope: 'engineering', actionClass: 'ACT_REVERSIBLE', trust: t });
+  eq(v.verdict, 'autonomous');
+
+  // Override breaks the streak and revokes granted
+  await recordTrustOutcome(db, TEN, 'engineering', 'ACT_REVERSIBLE', { clean: false, override: true, now: NOW });
+  t = await trustFor(db, TEN, 'engineering', 'ACT_REVERSIBLE');
+  eq(t.cleanInstances, 0);
+  eq(t.granted, false);
+  eq(t.total, 201);
+  eq(Math.round((t.overrideRate ?? 0) * 1000) / 1000, Math.round((1 / 201) * 1000) / 1000);
+
+  v = authorize({ scope: 'engineering', actionClass: 'ACT_REVERSIBLE', trust: t });
+  eq(v.verdict, 'approval');
+
+  // Override rate ceiling (> 0.10) refuses autonomy even with clean >= 200 and granted
+  const highOverrideTrust = { cleanInstances: 250, frozen: false, granted: true, overrideRate: 0.15, total: 300 };
+  const vHigh = authorize({ scope: 'engineering', actionClass: 'ACT_REVERSIBLE', trust: highOverrideTrust });
+  eq(vHigh.verdict, 'approval');
+  eq(
+    vHigh.reasons.some((r) => r.includes('override rate')),
+    true,
+  );
+});
+
+T('AUDIT F19: recordReviewOutcome links human review into Trust Ledger and audit trail', async () => {
+  const { db } = await fresh();
+  await recordReviewOutcome(db, TEN, {
+    requestId: 'req_approve',
+    scope: 'engineering',
+    approved: true,
+    reviewer: 'human:reviewer',
+    now: NOW,
+  });
+  let t = await trustFor(db, TEN, 'engineering', 'RECOMMEND');
+  eq(t.cleanInstances, 1);
+  eq(t.total, 1);
+  eq(t.overrideRate, 0);
+
+  let auditRows = (await db.prepare("SELECT * FROM audit_log WHERE action = 'REVIEW_RECORDED'").all()) as {
+    target: string;
+    detail: string;
+  }[];
+  eq(auditRows.length, 1);
+  eq(auditRows[0]?.target, 'engineering/RECOMMEND');
+  eq(JSON.parse(auditRows[0]!.detail).approved, true);
+
+  await recordReviewOutcome(db, TEN, {
+    requestId: 'req_decline',
+    scope: 'engineering',
+    approved: false,
+    reviewer: 'human:reviewer',
+    reason: 'inadequate evidence',
+    now: NOW,
+  });
+  t = await trustFor(db, TEN, 'engineering', 'RECOMMEND');
+  eq(t.cleanInstances, 0);
+  eq(t.total, 2);
+  eq(t.overrideRate, 0.5);
+
+  auditRows = (await db.prepare("SELECT * FROM audit_log WHERE action = 'REVIEW_RECORDED' ORDER BY seq").all()) as {
+    target: string;
+    detail: string;
+  }[];
+  eq(auditRows.length, 2);
+  eq(JSON.parse(auditRows[1]!.detail).approved, false);
+  eq(JSON.parse(auditRows[1]!.detail).reason, 'inadequate evidence');
+});
+
+T('AUDIT F19: kill drill verifies live executor halt and reports policy-and-executor mode', async () => {
+  const { db, ledger, coord } = await fresh();
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+
+  const drill = await killDrill(db, TEN, 'human:commander', {
+    now: NOW,
+    executor: { coord, adapter, scope: 'drill-exec' },
+  });
+
+  eq(drill.mode, 'policy-and-executor');
+  eq(drill.allHalted, true);
+  eq(drill.executorHalt?.halted, true);
+  eq(drill.executorHalt?.verified, true);
+  eq(drill.executorHalt?.adapter, 'local-echo');
+
+  const auditRows = (await db
+    .prepare("SELECT action FROM audit_log WHERE action IN ('KILL_DRILL', 'EXECUTOR_KILL_DRILL')")
+    .all()) as { action: string }[];
+  eq(
+    auditRows.some((r) => r.action === 'KILL_DRILL'),
+    true,
+  );
+  eq(
+    auditRows.some((r) => r.action === 'EXECUTOR_KILL_DRILL'),
+    true,
+  );
+});
+
+T('FLOW-022: engaging a stop audits KILL_ENGAGED with actor and reason', async () => {
+  const { db } = await fresh();
+  await setKill(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:ops', NOW, {
+    reason: 'bad deploy drill',
+  });
+  const rows = (await db
+    .prepare("SELECT actor, target, detail FROM audit_log WHERE action = 'KILL_ENGAGED'")
+    .all()) as { actor: string; target: string; detail: string }[];
+  eq(rows.length, 1);
+  eq(rows[0]?.actor, 'human:ops');
+  eq(rows[0]?.target, 'engineering/ACT_REVERSIBLE');
+  eq(rows[0]?.detail.includes('bad deploy drill'), true);
+  eq(await checkKill(db, TEN, 'engineering', 'ACT_REVERSIBLE'), true);
+});
+
+T('FLOW-022: stop command refuses without scope/class and reason', async () => {
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      timeout: 12_000,
+    });
+  const bare = run(['stop', '--tenant', TEN]);
+  eq(bare.status, 1, 'bare stop names its usage:');
+  eq(`${bare.stderr}${bare.stdout}`.includes('--engage'), true);
+  const noReason = run(['stop', '--engage', 'engineering/ACT_REVERSIBLE', '--tenant', TEN]);
+  eq(noReason.status, 1, 'engaging without a recorded reason is refused:');
+  eq(`${noReason.stderr}${noReason.stdout}`.includes('--reason'), true);
 });

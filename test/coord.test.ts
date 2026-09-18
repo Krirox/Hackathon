@@ -1,6 +1,13 @@
 import { openDb, migrate } from '../src/core/db.ts';
 import { jsonNumber, jsonText } from '../src/core/db.ts';
 import { createCoordinator, DEFAULT_LIMITS } from '../src/coord/coordinator.ts';
+import {
+  buildBeginWorkSpec,
+  parseExecutionSpec,
+  serializeExecutionSpec,
+  validateApprovalBoundary,
+  validateExecutionAgainstSpec,
+} from '../src/coord/execution-spec.ts';
 import { T, eq, TEN, NOW, DAY_LATER, fresh, base, rejects } from './helpers.ts';
 console.log('\n\x1b[1mCoordination — the channel model\x1b[0m');
 
@@ -493,9 +500,15 @@ T('FLOW-003: correction exposes pending requests and refresh rebinds evidence', 
     },
   });
   const { request } = await coord.submit(base({ id: 'flow3', claimRefs: [claim.id], bid: { humanMinutes: 5 } }));
-  eq((await coord.listPendingAffectedByClaim(TEN, claim.id)).map((r) => r.id), [request.id]);
+  eq(
+    (await coord.listPendingAffectedByClaim(TEN, claim.id)).map((r) => r.id),
+    [request.id],
+  );
   const { claim: neu } = await ledger.correctClaim(TEN, claim.id, '$79', 'human:priya', DAY_LATER);
-  eq((await coord.listPendingAffectedByClaim(TEN, claim.id)).map((r) => r.id), [request.id]);
+  eq(
+    (await coord.listPendingAffectedByClaim(TEN, claim.id)).map((r) => r.id),
+    [request.id],
+  );
   const refreshed = await coord.refreshEvidence(TEN, request.id, async (id) => {
     const cur = await ledger.currentReplacement(TEN, id);
     return cur && cur.id !== id ? cur.id : null;
@@ -561,4 +574,118 @@ T('F20: parent decomposition accounts for completed children and omitted bid def
   eq(directChild.admitted, false);
   eq(directChild.state, 'DENIED');
   eq(directChild.reason.includes('exceeds parent'), true);
+});
+
+T('FLOW-002: approval freezes a versioned execution specification with evidence versions', async () => {
+  const { ledger, coord } = await fresh();
+  const claim = await ledger.append({
+    tenant: TEN,
+    subject: 'launch',
+    kind: 'FACT',
+    statement: 'v2 ships Tuesday',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:priya',
+    scope: 'marketing',
+    authorType: 'human',
+    provenance: {
+      sourceUri: 'https://example.com/release',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'test',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+  const { request } = await coord.submit(
+    base({ id: 'flow2-spec', claimRefs: [claim.id], goal: 'draft launch copy', bid: { humanMinutes: 5 } }),
+  );
+  const spec = await validateApprovalBoundary(ledger, request, NOW);
+  eq(spec.requestId, request.id);
+  eq(spec.command, request.goal);
+  eq(spec.evidence.length, 1);
+  eq(spec.evidence[0]!.id, claim.id);
+  const roundTrip = parseExecutionSpec(serializeExecutionSpec(spec));
+  eq(roundTrip?.fingerprint, spec.fingerprint);
+});
+
+T('FLOW-002: stale review and task mismatch reject execution', async () => {
+  const { ledger, coord } = await fresh();
+  const claim = await ledger.append({
+    tenant: TEN,
+    subject: 'launch',
+    kind: 'FACT',
+    statement: 'v2 ships Tuesday',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:priya',
+    scope: 'marketing',
+    authorType: 'human',
+    provenance: {
+      sourceUri: 'https://example.com/release',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'test',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+  const { request } = await coord.submit(
+    base({ id: 'flow2-stale', claimRefs: [claim.id], goal: 'draft launch copy', bid: { humanMinutes: 5 } }),
+  );
+  await rejects(
+    async () => await validateApprovalBoundary(ledger, request, NOW, { expectedRequestUpdatedAt: 'stale-timestamp' }),
+    'STALE_REVIEW',
+  );
+  const spec = await buildBeginWorkSpec(ledger, request);
+  const dec = await ledger.recordDecision({
+    tenant: TEN,
+    goal: request.goal,
+    action: serializeExecutionSpec(spec),
+    actionClass: 'RECOMMEND',
+    claimIds: request.claimRefs,
+    decidedBy: 'human:priya',
+    approvedBy: 'human:priya',
+    scope: request.targetScope,
+    autonomy: 'approval',
+    requestId: request.id,
+    now: NOW,
+  });
+  await coord.accept(TEN, request.id);
+  await rejects(
+    async () =>
+      await validateExecutionAgainstSpec(
+        ledger,
+        coord,
+        TEN,
+        request.id,
+        {
+          command: 'run something else',
+          claimRefs: request.claimRefs,
+          decisionId: dec.id,
+        },
+        NOW,
+      ),
+    'TASK_MISMATCH',
+  );
+  await validateExecutionAgainstSpec(
+    ledger,
+    coord,
+    TEN,
+    request.id,
+    {
+      command: request.goal,
+      claimRefs: request.claimRefs,
+      decisionId: dec.id,
+      specFingerprint: spec.fingerprint,
+    },
+    NOW,
+  );
+});
+
+T('FLOW-002: IN_FLIGHT work cannot be pulled back to ACCEPTED', async () => {
+  const { coord } = await fresh();
+  const { request } = await coord.submit(base());
+  await coord.claimExecution(TEN, request.id, 'worker-one', NOW);
+  await rejects(() => coord.accept(TEN, request.id), 'INVALID_TRANSITION');
 });

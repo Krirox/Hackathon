@@ -28,6 +28,12 @@ export interface TrustState {
   cleanThreshold?: number;
   /** Set when a freeze/demotion is in force — approval max, no autonomy. */
   frozen?: boolean;
+  /** Explicit autonomous grant flag from trust_scores. */
+  granted?: boolean;
+  /** Maintained override rate. */
+  overrideRate?: number;
+  /** Total evaluated decisions. */
+  total?: number;
 }
 
 export interface AuthorizeInput {
@@ -95,10 +101,18 @@ export function authorize(input: AuthorizeInput): AuthorizeResult {
       if (trust?.frozen === true) {
         verdict = 'approval';
         reasons.push('trust frozen — approval max until cleared');
-      } else if ((trust?.cleanInstances ?? 0) >= (trust?.cleanThreshold ?? REVERSIBLE_CLEAN_THRESHOLD)) {
+      } else if (
+        trust?.granted === true ||
+        (trust?.cleanInstances ?? 0) >= (trust?.cleanThreshold ?? REVERSIBLE_CLEAN_THRESHOLD)
+      ) {
         if (pinned.includes(input.scope)) {
           verdict = 'approval';
           reasons.push(`scope "${input.scope}" is pinned Strict — ACT_REVERSIBLE never goes autonomous there`);
+        } else if ((trust?.overrideRate ?? 0) > 0.1 && (trust?.total ?? 0) >= 10) {
+          verdict = 'approval';
+          reasons.push(
+            `override rate ${(trust?.overrideRate ?? 0).toFixed(2)} exceeds 0.10 threshold — approval required`,
+          );
         } else {
           verdict = 'autonomous';
           reasons.push(`Trust Ledger grants it: ${trust?.cleanInstances} clean instances`);

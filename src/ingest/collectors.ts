@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   closeSync,
+  constants,
+  lstatSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -84,6 +87,23 @@ export interface Collector {
    * callers that predate the inbox omit it and stage under 'default'.
    */
   poll(db: AsyncDb, now: string, tenant?: string): RawEvent[] | Promise<RawEvent[]>;
+}
+
+const stagingReports = new AsyncLocalStorage<{
+  db: AsyncDb;
+  tenant: string;
+  collector: string;
+  report: { staged: number };
+}>();
+
+export async function pollWithStagingReport(
+  db: AsyncDb,
+  tenant: string,
+  collector: Collector,
+  now: string,
+  report: { staged: number },
+): Promise<RawEvent[]> {
+  return stagingReports.run({ db, tenant, collector: collector.name, report }, () => collector.poll(db, now, tenant));
 }
 
 const GROUND_TIERS: readonly SourceTier[] = ['SYSTEM_OF_RECORD', 'MEASURED'];
@@ -188,6 +208,10 @@ export async function stageToInbox(
       )
       .run(crypto.randomUUID(), tenant, collector, sourceEventId, revision, JSON.stringify(e), now);
     inserted += r.changes;
+    const local = stagingReports.getStore();
+    if (local?.db === db && local.tenant === tenant && local.collector === collector) {
+      local.report.staged += r.changes;
+    }
   }
   return inserted;
 }
@@ -598,11 +622,41 @@ export async function ingestEvents(
     const identityKey = `ingest:seen:${tenant}:${collector.name}:${sourceEventId}:${revision}`;
     const fingerprintKey = `ingest:seen:${tenant}:${collector.name}:${e.fingerprint}`;
     if (await metaGet(db, identityKey)) continue;
-    if (await metaGet(db, fingerprintKey)) continue;
-    if (await metaGet(db, `ingest:seen:${e.fingerprint}`)) {
+    const fingerprintReceipt = await metaGet(db, fingerprintKey);
+    if (fingerprintReceipt) {
+      await metaSet(db, identityKey, fingerprintReceipt);
+      continue;
+    }
+    const legacyFingerprint = serperLegacyFingerprint(collector, e);
+    if (
+      (await metaGet(db, `ingest:seen:${e.fingerprint}`)) ||
+      (legacyFingerprint && (await metaGet(db, `ingest:seen:${legacyFingerprint}`)))
+    ) {
       await metaSet(db, fingerprintKey, 'migrated');
       await metaSet(db, identityKey, 'migrated');
       continue;
+    }
+    if (legacyFingerprint) {
+      const legacyReceipt = await metaGet(db, `ingest:seen:${tenant}:${collector.name}:${legacyFingerprint}`);
+      const prior =
+        legacyReceipt && legacyReceipt !== 'migrated'
+          ? ((await db
+              .prepare("SELECT value_json FROM claims WHERE tenant = ? AND id = ? AND kind = 'OBSERVATION'")
+              .get(tenant, legacyReceipt)) as { value_json: string | null } | undefined)
+          : undefined;
+      let sameContent: boolean;
+      try {
+        const value = JSON.parse(prior?.value_json ?? 'null') as { title?: string; snippet?: string } | null;
+        const payload = e.payload as { title: string; snippet?: string };
+        sameContent = value?.title === payload.title && (value?.snippet ?? '') === (payload.snippet ?? '');
+      } catch {
+        sameContent = false;
+      }
+      if (legacyReceipt && (legacyReceipt === 'migrated' || sameContent)) {
+        await metaSet(db, fingerprintKey, legacyReceipt);
+        await metaSet(db, identityKey, legacyReceipt);
+        continue;
+      }
     }
     const ref = storeArtifact(db, e, opts.artifactDir);
     const claimId = await db.transaction(async () => {
@@ -637,6 +691,12 @@ export async function ingestEvents(
   return ids;
 }
 
+function serperLegacyFingerprint(collector: Collector, event: RawEvent): string | null {
+  if (collector.extractor !== 'serper-search' || !event.payload || typeof event.payload !== 'object') return null;
+  const title = (event.payload as { title?: unknown }).title;
+  return typeof title === 'string' ? fingerprintOf(`${event.uri}:${title}`) : null;
+}
+
 export interface FilePollLimits {
   maxEntries: number;
   maxFileBytes: number;
@@ -644,13 +704,16 @@ export interface FilePollLimits {
 }
 
 /** Read bounded, flat operator-controlled directories; symlinks are not inputs. */
-function boundedFiles(dir: string, limits: FilePollLimits): { name: string; body: string }[] {
+export function boundedFiles(dir: string, limits: FilePollLimits): { name: string; body: string; bytes: number }[] {
   for (const value of Object.values(limits)) {
     if (!Number.isSafeInteger(value) || value < 1)
       throw new RangeError('[ingest:BAD_LIMIT] positive integers required');
   }
+  const root = lstatSync(dir);
+  if (root.isSymbolicLink()) throw new Error('[ingest:SYMLINK] source symlinks are not supported');
+  if (!root.isDirectory()) throw new Error('[ingest:NOT_DIRECTORY] path is not a directory');
   const directory = opendirSync(dir);
-  const files: { name: string; body: string }[] = [];
+  const files: { name: string; body: string; bytes: number }[] = [];
   let entries = 0;
   let total = 0;
   try {
@@ -658,9 +721,21 @@ function boundedFiles(dir: string, limits: FilePollLimits): { name: string; body
       if (++entries > limits.maxEntries) throw new Error('[ingest:ENTRY_LIMIT] directory exceeds entry cap');
       if (entry.isSymbolicLink()) throw new Error('[ingest:SYMLINK] source symlinks are not supported');
       if (!entry.isFile()) continue;
-      const fd = openSync(join(dir, entry.name), 'r');
+      const path = join(dir, entry.name);
+      const before = lstatSync(path);
+      if (before.isSymbolicLink()) throw new Error('[ingest:SYMLINK] source symlinks are not supported');
+      const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       try {
         const stat = fstatSync(fd);
+        const after = lstatSync(path);
+        if (
+          after.isSymbolicLink() ||
+          stat.dev !== before.dev ||
+          stat.ino !== before.ino ||
+          after.dev !== stat.dev ||
+          after.ino !== stat.ino
+        )
+          throw new Error('[ingest:SYMLINK] source changed during open');
         if (!stat.isFile() || stat.size > limits.maxFileBytes || total + stat.size > limits.maxTotalBytes)
           throw new Error('[ingest:BYTE_LIMIT] source exceeds byte cap');
         const cap = Math.min(limits.maxFileBytes, limits.maxTotalBytes - total);
@@ -673,7 +748,7 @@ function boundedFiles(dir: string, limits: FilePollLimits): { name: string; body
         }
         if (size > cap) throw new Error('[ingest:BYTE_LIMIT] source grew beyond byte cap');
         total += size;
-        files.push({ name: entry.name, body: buffer.subarray(0, size).toString('utf8') });
+        files.push({ name: entry.name, body: buffer.subarray(0, size).toString('utf8'), bytes: size });
       } finally {
         closeSync(fd);
       }
@@ -939,7 +1014,7 @@ export function serperSearchCollector(
       const out = (body.organic ?? []).map((r) => ({
         source: name,
         uri: r.link,
-        fingerprint: fingerprintOf(`${r.link}:${r.title}`),
+        fingerprint: fingerprintOf(JSON.stringify([r.link, r.title, r.snippet ?? ''])),
         eventId: r.link,
         revision: fingerprintOf(`${r.title}:${r.snippet ?? ''}`),
         occurredAt: r.date ?? now,

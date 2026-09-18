@@ -8,11 +8,16 @@ import {
   acceptInvitation,
   changeUserRole,
   countOutstandingWork,
+  createAccountNotice,
   createInvitation,
+  disableConfirmation,
+  invitationNextSteps,
   inviteUser,
   listInvitations,
   listUsers,
+  membershipRoster,
   membershipStatus,
+  peekInvitationByToken,
   reactivateUser,
   resendInvitation,
   revokeInvitation,
@@ -1086,7 +1091,11 @@ T('the team page and invite/disable flows are role-gated and audited', async () 
     eq(invited.body.includes('Create account'), true);
     eq(invited.body.includes('out of band'), true);
     eq(invited.body.includes('/accept-invite?token='), true);
-    eq((await listUsers(db, TEN)).some((u) => u.email === 'newbie@acme.test'), false, 'no user row until acceptance:');
+    eq(
+      (await listUsers(db, TEN)).some((u) => u.email === 'newbie@acme.test'),
+      false,
+      'no user row until acceptance:',
+    );
     const pending = (await listInvitations(db, TEN, NOW)).find((i) => i.email === 'newbie@acme.test')!;
     const { token } = await resendInvitation(
       db,
@@ -1126,8 +1135,16 @@ T('the team page and invite/disable flows are role-gated and audited', async () 
     const audits = (await db
       .prepare("SELECT action, actor FROM audit_log WHERE action LIKE 'team.%' ORDER BY seq")
       .all()) as { action: string; actor: string }[];
-    eq(audits.some((a) => a.action === 'team.invite'), true, 'invite audited:');
-    eq(audits.some((a) => a.action === 'team.disable'), true, 'disable audited:');
+    eq(
+      audits.some((a) => a.action === 'team.invite'),
+      true,
+      'invite audited:',
+    );
+    eq(
+      audits.some((a) => a.action === 'team.disable'),
+      true,
+      'disable audited:',
+    );
   } finally {
     process.env.VITAL_EXPOSE_INVITE_LINK = prev;
     await s.close();
@@ -1248,21 +1265,13 @@ T('FLOW-008: claimTenantOwner claims an account-less tenant without reopening re
   eq(await tenantAccessState(db, 'initech'), 'ready');
   await rejects(
     () =>
-      claimTenantOwner(
-        db,
-        { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' },
-        NOW,
-      ),
+      claimTenantOwner(db, { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' }, NOW),
     'TENANT_CLAIMED',
   );
   await db.prepare('UPDATE users SET disabled = 1 WHERE id = ?').run(owner.id);
   await rejects(
     () =>
-      claimTenantOwner(
-        db,
-        { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' },
-        NOW,
-      ),
+      claimTenantOwner(db, { slug: 'initech', email: 'q@x.test', password: 'another-long-one', ownerName: 'Q' }, NOW),
     'RECOVERY_REQUIRED',
   );
 });
@@ -1352,7 +1361,7 @@ T('FLOW-008: account-less tenant claims through /signup instead of TENANT_EXISTS
     });
     eq(ok.status, 303);
     eq((await listUsers(ctx.db, 'initech')).length, 1);
-    eq((await tenantAccessState(ctx.db, 'initech')), 'ready');
+    eq(await tenantAccessState(ctx.db, 'initech'), 'ready');
   } finally {
     await s.close();
   }
@@ -1520,4 +1529,111 @@ T('FLOW-009: disable requires handoff for outstanding claims and requests', asyn
     owner: string;
   };
   eq(reassignedClaim.owner, owner.email);
+});
+
+T('FLOW-009: membership roster shows invited, active, and disabled', async () => {
+  const { db, owner } = await authed();
+  const { invitation } = await createInvitation(
+    db,
+    TEN,
+    { email: 'pending@acme.test', name: 'Pending', role: 'member' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const invited = await inviteUser(
+    db,
+    TEN,
+    { email: 'newbie@acme.test', name: 'Newbie', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await disableUser(db, TEN, invited.id, NOW);
+  const roster = membershipRoster(await listUsers(db, TEN), await listInvitations(db, TEN, NOW), NOW);
+  const byEmail = (email: string) => roster.find((r) => r.email === email)!;
+  eq(byEmail('pending@acme.test').kind, 'invited');
+  eq(byEmail('pending@acme.test').detail.includes(invitation.expiresAt.slice(0, 10)), true);
+  eq(byEmail('owner@acme.test').kind, 'active');
+  eq(byEmail('newbie@acme.test').kind, 'disabled');
+  eq(byEmail('newbie@acme.test').detail.includes('reactivate'), true);
+  await db
+    .prepare("UPDATE invitations SET status = 'expired', expires_at = ? WHERE id = ?")
+    .run(new Date(Date.parse(NOW) - 1000).toISOString(), invitation.id);
+  const relisted = membershipRoster(await listUsers(db, TEN), await listInvitations(db, TEN, NOW), NOW);
+  eq(relisted.find((r) => r.email === 'pending@acme.test')!.detail.includes('expired'), true);
+});
+
+T('FLOW-009: disable confirmation names the person, sessions, and handoff need', async () => {
+  const { db, owner } = await authed();
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'dev@acme.test', name: 'Dev Member', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await loginCookie(db, 'dev@acme.test', 'a-long-member-password');
+  const confirm = await disableConfirmation(db, TEN, member.id);
+  eq(confirm.person.email, 'dev@acme.test');
+  eq(confirm.person.name, 'Dev Member');
+  eq(confirm.liveSessions, 1);
+  eq(confirm.sessionConsequence.includes('revokes every live session'), true);
+  eq(confirm.needsHandoff, false);
+  eq(confirm.lastUsableOwner, false);
+  const ownerConfirm = await disableConfirmation(db, TEN, owner.id);
+  eq(ownerConfirm.lastUsableOwner, true);
+  await rejects(() => disableConfirmation(db, TEN, 'usr_missing'), 'UNKNOWN_USER');
+});
+
+T('FLOW-009: duplicate and disabled cases map to next steps', async () => {
+  eq(invitationNextSteps('pending_invitation', 'a@x.test').action.includes('Resend'), true);
+  eq(invitationNextSteps('expired_invitation', 'a@x.test').action.includes('Resend'), true);
+  eq(invitationNextSteps('revoked_invitation', 'a@x.test').action.includes('Create a new account'), true);
+  eq(invitationNextSteps('disabled_account', 'a@x.test').action.includes('Reactivate'), true);
+  eq(invitationNextSteps('active_account', 'a@x.test').action.includes('role'), true);
+  eq(invitationNextSteps('disabled_account', 'gone@acme.test').heading.includes('gone@acme.test'), true);
+});
+
+T('FLOW-009: create-account notice labels the out-of-band handoff', () => {
+  const notice = createAccountNotice();
+  eq(notice.heading, 'Create account');
+  eq(notice.button, 'Create account');
+  eq(notice.detail.includes('out of band'), true);
+  eq(notice.detail.includes('choose their own password'), true);
+});
+
+T('FLOW-009: reactivation restores sign-in without reviving revoked sessions', async () => {
+  const { db, owner } = await authed();
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'dev@acme.test', name: 'Dev', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const { token } = await loginCookie(db, 'dev@acme.test', 'a-long-member-password');
+  await disableUser(db, TEN, member.id, NOW);
+  await reactivateUser(db, TEN, member.id, { userId: owner.id, role: owner.role }, NOW);
+  await rejects(() => sessionUser(db, token, NOW), 'NO_SESSION', 'the pre-disable session stays dead:');
+  const { user } = await login(db, { tenant: TEN, email: 'dev@acme.test', password: 'a-long-member-password' }, NOW);
+  eq(user.id, member.id, 'a fresh sign-in works after reactivation:');
+});
+
+T('FLOW-009: invitations expire after 7 days and cannot be accepted late', async () => {
+  const { db, owner } = await authed();
+  const { invitation, token } = await createInvitation(
+    db,
+    TEN,
+    { email: 'late@acme.test', name: 'Late', role: 'member' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  eq((await peekInvitationByToken(db, token, NOW))?.status, 'pending');
+  const eightDays = new Date(Date.parse(NOW) + 8 * 24 * 60 * 60 * 1000).toISOString();
+  eq((await peekInvitationByToken(db, token, eightDays))?.status, 'expired', 'peek marks expiry:');
+  await rejects(() => acceptInvitation(db, token, 'a-late-member-password', eightDays), 'BAD_INVITATION');
+  eq(
+    (await listInvitations(db, TEN, eightDays)).find((i) => i.id === invitation.id)?.status,
+    'expired',
+    'the roster shows it expired rather than pending:',
+  );
 });

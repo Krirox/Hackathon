@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { listCases } from '../src/evals/runner.ts';
 import { rIn } from './helpers.ts';
-import { installAuthSchema, signupTenant, listUsers } from '../src/core/auth.ts';
+import { installAuthSchema, signupTenant, inviteUser, listUsers } from '../src/core/auth.ts';
 import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
 import { seedTrace, cardInput } from './helpers.ts';
 import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
@@ -23,6 +23,8 @@ import { buildWorkspaceView, loadWorkspaceOverlay } from '../src/console/release
 import { fanOutWorkflow } from '../src/wedge/ship.ts';
 import { persistDeliverableVersion } from '../src/wedge/deliverable-artifact.ts';
 import { runInNewContext } from 'node:vm';
+import { parseExecutionSpec } from '../src/coord/execution-spec.ts';
+import { recordTrustOutcome, setKill } from '../src/gov/trust.ts';
 
 console.log('\n\x1b[1mConsole — the ledger as a read model\x1b[0m');
 
@@ -301,8 +303,11 @@ T('F02: review client treats successful declines as success and restores control
     }
     let submit: ((event: unknown) => Promise<void>) | undefined;
     const root = {
-      querySelectorAll: (sel?: string) =>
-        !sel || sel === 'button[type="submit"]' ? [button] : sel === 'form[data-review-action]' ? [] : [],
+      querySelectorAll: (sel?: string) => {
+        if (!sel || sel === 'button[type="submit"]') return [button];
+        if (sel === 'form[data-review-action]') return [];
+        return [];
+      },
       querySelector: () => ({ addEventListener() {} }),
       addEventListener: (_event: string, listener: typeof submit) => {
         submit = listener;
@@ -569,7 +574,8 @@ T('digest composition: NOTICEs land here, grouped, never in the Feed', async () 
   eq(entries.length, 2, 'two NOTICE topics, one REQUEST excluded:');
   const shipped = entries.find((e) => e.goal === 'v1.2 shipped')!;
   eq(shipped.followOnCount, 1, 'the repeat NOTICE became a follow-on count:');
-  eq(shipped.requestId, 'n2', 'newest topic first:');
+  eq(shipped.requestId, 'n1', 'stable opening notice for equal timestamps:');
+  eq(shipped.requestIds, ['n1', 'n2'], 'both notice drilldowns remain available:');
   eq(entries.find((e) => e.goal === 'backup ran')!.requestId, 'n3');
 
   // Not-a-date guard: a NOTICE beyond the query instant is invisible.
@@ -1159,6 +1165,135 @@ T('HTTP approval audit failure rolls back both acceptance and the new decision',
   }
 });
 
+T('FLOW-001: HTTP approval records a versioned execution specification receipt', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const rq1 = (await coord.get(TEN, 'rq1'))!;
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestUpdatedAt: rq1.updatedAt }),
+    });
+    eq(response.status, 200);
+    const result = (await response.json()) as { decisionId: string; specFingerprint: string };
+    const decision = (await ledger.getDecision(TEN, result.decisionId))!;
+    const spec = parseExecutionSpec(decision.action);
+    eq(spec !== null, true, 'decision action stores execution spec:');
+    eq(spec!.fingerprint, result.specFingerprint);
+    eq(spec!.requestId, 'rq1');
+    eq(spec!.approvalStage, 'begin-work');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-002: stale approval page is rejected without changing the request', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const before = await coord.get(TEN, 'rq1');
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestUpdatedAt: '2020-01-01T00:00:00.000Z' }),
+    });
+    eq(response.status, 409);
+    const body = (await response.json()) as { ok: boolean; code?: string };
+    eq(body.ok, false);
+    eq(body.code, 'STALE_REVIEW');
+    eq(await coord.get(TEN, 'rq1'), before);
+    eq(await db.prepare('SELECT id FROM decisions WHERE tenant = ? AND request_id = ?').all(TEN, 'rq1'), []);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-002: stale approval returns a diff and requires re-review', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestUpdatedAt: '2020-01-01T00:00:00.000Z' }),
+    });
+    eq(response.status, 409);
+    const body = (await response.json()) as {
+      ok: boolean;
+      code?: string;
+      requiresReReview?: boolean;
+      diff?: unknown;
+    };
+    eq(body.ok, false);
+    eq(body.code, 'STALE_REVIEW');
+    eq(body.requiresReReview, true, 'stale approval must demand re-review:');
+    eq(Array.isArray(body.diff) && body.diff.length > 0, true, 'stale approval shows what changed:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-002: corrected evidence blocks approval with a before/after diff', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const rq1 = (await coord.get(TEN, 'rq1'))!;
+    const cited = rq1.claimRefs[0]!;
+    await ledger.correctClaim(TEN, cited, 'ships late', 'human:priya', NOW);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestUpdatedAt: rq1.updatedAt }),
+    });
+    eq(response.status, 409);
+    const body = (await response.json()) as { ok: boolean; code?: string; diff?: string[] };
+    eq(body.ok, false);
+    eq(body.code, 'STALE_EVIDENCE');
+    eq(
+      body.diff?.some((line) => line.includes('ships') && line.includes('ships late')),
+      true,
+      'diff carries the before/after statements:',
+    );
+    eq((await coord.get(TEN, 'rq1'))!.state, 'ADMITTED', 'no state change without re-review:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-002: stale decline preserves the reviewer explanation for resubmission', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/requests/rq1/decline`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'not now', requestUpdatedAt: '2020-01-01T00:00:00.000Z' }),
+    });
+    eq(response.status, 409);
+    const body = (await response.json()) as {
+      ok: boolean;
+      code?: string;
+      preservedDraft?: { reason?: string };
+    };
+    eq(body.ok, false);
+    eq(body.code, 'STALE_REVIEW');
+    eq(body.preservedDraft?.reason, 'not now', 'reviewer explanation survives the rejection:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('malformed ids and body bombs fail loud, never hang or crash the server', async () => {
   const { db, ledger, coord, comp } = await seeded();
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
@@ -1445,7 +1580,9 @@ T('FLOW-015: release workspace links fan-out, prereg, outcome, and replay', asyn
     eq(list.includes(run.id), true, 'workflow list includes run:');
     eq(list.includes('FLOW-015 workspace test'), true, 'workflow list shows summary:');
 
-    const detail = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    const detail = await (
+      await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })
+    ).text();
     eq(detail.includes('Source evidence'), true);
     eq(detail.includes(claim.id), true);
     eq(detail.includes('Fan-out legs'), true);
@@ -1470,9 +1607,42 @@ T('FLOW-015: release workspace links fan-out, prereg, outcome, and replay', asyn
     const overlay = await loadWorkspaceOverlay(db, TEN, run.id);
     eq(overlay?.preregId !== undefined, true, 'prereg persisted:');
 
+    const admittedLeg = run.legs.find((l) => l.requestId && l.status === 'ADMITTED');
+    eq(admittedLeg?.requestId !== undefined, true, 'fan-out admitted a reviewable leg:');
+    await ledger.recordDecision({
+      tenant: TEN,
+      goal: `approve ${admittedLeg!.key} leg`,
+      action: 'begin fan-out deliverable work',
+      actionClass: 'RECOMMEND',
+      claimIds: [claim.id],
+      decidedBy: 'human:owner',
+      approvedBy: 'owner (owner@acme.test)',
+      scope: admittedLeg!.key,
+      autonomy: 'approval',
+      requestId: admittedLeg!.requestId!,
+      now: NOW,
+    });
+
     const view = await buildWorkspaceView(db, ledger, coord, comp, TEN, run.id);
-    eq(view?.canCaptureOutcome, true, 'outcome capture enabled after prereg:');
-    eq(view?.measurementState, 'unknown');
+    eq(view?.canCaptureOutcome, true, 'outcome capture enabled after prereg and approval:');
+    eq((view?.replay?.length ?? 0) > 0, true, 'replay exposes frozen decision evidence:');
+
+    const outcome = await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}/outcome`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        decisionId: view!.replay[0]!.decisionId,
+        metric: 'ship_to_launch_hours',
+        actual: '12',
+        basis: 'pilot holdout measurement',
+      }),
+      redirect: 'manual',
+    });
+    eq(outcome.status, 303);
+    const measured = await buildWorkspaceView(db, ledger, coord, comp, TEN, run.id);
+    eq(measured?.lifecycle, 'OUTCOME_VERIFIED');
+    eq(measured?.outcomes.length, 1);
   } finally {
     await server.close();
     await db.close();
@@ -1517,7 +1687,9 @@ T('FLOW-015: workflow cancel and retry are exposed without re-executing replay',
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
-    const before = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    const before = await (
+      await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })
+    ).text();
     eq(before.includes('BLOCKED'), true);
     eq(before.includes('Retry eligible legs'), true);
 
@@ -1528,7 +1700,9 @@ T('FLOW-015: workflow cancel and retry are exposed without re-executing replay',
       redirect: 'manual',
     });
     eq(cancel.status, 303);
-    const after = await (await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })).text();
+    const after = await (
+      await fetch(`${base_}/console/workflows/${encodeURIComponent(run.id)}`, { headers: session.headers })
+    ).text();
     eq(after.includes('CANCELLED'), true);
     eq(after.includes('pilot paused'), true);
     eq(after.includes('Replay (frozen vs current)'), true);
@@ -1603,7 +1777,31 @@ T('FLOW-010: login CSRF mismatch preserves email on HTML recovery', async () => 
     const html = await res.text();
     eq(html.includes('form expired'), true);
     eq(html.includes('value="owner@acme.test"'), true);
-    eq((res.headers.getSetCookie?.() ?? []).some((c) => c.startsWith('vital_csrf=')), true);
+    eq(
+      (res.headers.getSetCookie?.() ?? []).some((c) => c.startsWith('vital_csrf=')),
+      true,
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-027: account and console documents carry viewport, landmark, and focus styles', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const login = await (await fetch(`http://127.0.0.1:${server.port}/login`)).text();
+    eq(login.includes('name="viewport"'), true, 'login page declares a viewport:');
+    eq(login.includes('<main>'), true, 'login page has a main landmark:');
+    eq(login.includes(':focus-visible'), true, 'keyboard focus stays visible:');
+    const session = await ownerSession(server.port);
+    const account = await (await fetch(`http://127.0.0.1:${server.port}/account`, { headers: session.headers })).text();
+    eq(account.includes('name="viewport"'), true, 'account page declares a viewport:');
+    const detail = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/requests/rq1`, { headers: session.headers })
+    ).text();
+    eq(detail.includes('name="viewport"'), true, 'request detail declares a viewport:');
   } finally {
     await server.close();
     await db.close();
@@ -1633,7 +1831,7 @@ T('FLOW-010: voluntary password change lives under account, forced activation un
 T('FLOW-012: sample walkthrough is labeled and separate from customer evidence', async () => {
   const { db, ledger, coord, comp } = await fresh();
   await installAuthSchema(db, NOW);
-  const owner = await signupTenant(
+  await signupTenant(
     db,
     { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
     NOW,
@@ -1656,10 +1854,687 @@ T('FLOW-012: sample walkthrough is labeled and separate from customer evidence',
       .prepare('SELECT scope FROM claims WHERE tenant = ? ORDER BY created_at DESC LIMIT 1')
       .get(TEN)) as { scope: string };
     eq(claim.scope, SAMPLE_SCOPE);
-    const request = (await db.prepare('SELECT id FROM requests WHERE tenant = ? ORDER BY created_at DESC LIMIT 1').get(TEN)) as {
+    const request = (await db
+      .prepare('SELECT id FROM requests WHERE tenant = ? ORDER BY created_at DESC LIMIT 1')
+      .get(TEN)) as {
       id: string;
     };
     eq(request.id.startsWith(SAMPLE_REQUEST_PREFIX), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+async function formSession(port: number, email: string, password: string) {
+  const base_ = `http://127.0.0.1:${port}`;
+  const loginOnce = async (pw: string): Promise<string> => {
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const res = await fetch(`${base_}/login`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&email=${encodeURIComponent(email)}&password=${encodeURIComponent(pw)}`,
+      redirect: 'manual',
+    });
+    return (res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+  };
+  let cookie = await loginOnce(password);
+  const gate = await fetch(`${base_}/change-password`, { headers: { cookie }, redirect: 'manual' });
+  if (gate.status === 200) {
+    const gateCsrf = (await gate.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const fresh = `${password}-second-settlement`;
+    await fetch(`${base_}/change-password`, {
+      method: 'POST',
+      headers: { cookie },
+      body: `csrf=${gateCsrf}&password=${encodeURIComponent(fresh)}`,
+      redirect: 'manual',
+    });
+    cookie = await loginOnce(fresh);
+  }
+  const home = await (await fetch(`${base_}/`, { headers: { cookie }, redirect: 'manual' })).text();
+  const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+  return { cookie, csrf, headers: { cookie, 'x-vital-csrf': csrf } as Record<string, string> };
+}
+
+T('FLOW-019: console header renders shared nav with account controls', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/`, { headers: session.headers })).text();
+    eq(html.includes('<nav aria-label="Console">'), true);
+    eq(html.includes('>Reviews</a>'), true);
+    eq(html.includes('href="/console/workflows">Workflows</a>'), true);
+    eq(html.includes('href="/console/digest">Digest</a>'), true);
+    eq(html.includes('href="/team">Team</a>'), true);
+    eq(html.includes('href="/account">Account</a>'), true);
+    eq(html.includes('signed in as owner@acme.test'), true);
+    eq(html.includes('action="/logout"'), true);
+    eq(html.includes('href="/console/requests/rq1"'), true, 'every needs-human item links to its task:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-019: detail navigation preserves the queue return destination', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const back = '/?reviewPage=2';
+    const detail = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/requests/rq1?return=${encodeURIComponent(back)}`, {
+        headers: session.headers,
+      })
+    ).text();
+    eq(detail.includes(`<a href="${back}">Back to console</a>`), true);
+    eq(detail.includes(`return=${encodeURIComponent(back)}`), true);
+    const bad = await fetch(`http://127.0.0.1:${server.port}/console/requests/rq1?page=-1`, {
+      headers: session.headers,
+    });
+    eq(bad.status, 400);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-020: dashboard filters by status, scope, date, and workflow', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  const parent = await coord.submit(
+    base({ id: 'flt-parent', goal: 'filter parent', claimRefs: [rel.id], bid: { humanMinutes: 1 } }),
+  );
+  await coord.submit(
+    base({
+      id: 'flt-child',
+      goal: 'filter child unique',
+      claimRefs: [rel.id],
+      parentRequestId: parent.request.id,
+      bid: { humanMinutes: 1 },
+    }),
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const get = (qs: string) => fetch(`${base_}/${qs}`, { headers: session.headers }).then((r) => r.text());
+    const form = await get('?q=filter');
+    eq(form.includes('name="state"'), true, 'status filter is offered:');
+    eq(form.includes('name="since"'), true, 'date filters are offered:');
+    eq(form.includes('name="workflow"'), true, 'workflow filter is offered:');
+    const byState = await get('?q=filter&state=ADMITTED');
+    eq(byState.includes('filter child unique'), true);
+    const byScope = await get('?q=filter&scope=engineering');
+    eq(byScope.includes('filter child unique'), true);
+    const byWorkflow = await get(`?q=filter&workflow=${parent.request.id}`);
+    eq(byWorkflow.includes('filter child unique'), true, 'workflow filter keeps the child:');
+    eq(byWorkflow.includes('1 matching request(s)'), true, 'workflow filter narrows to one request:');
+    const future = await get('?q=filter&since=2030-01-01');
+    eq(future.includes('No matching work'), true, 'future date bounds exclude everything:');
+    const dated = await get('?q=filter&since=2020-01-01&until=2030-01-01');
+    eq(dated.includes('filter child unique'), true, 'inclusive date bounds keep current work:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-020: dashboard search exposes matching work with totals, truncation, and clear-filter', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  await coord.submit(base({ id: 'searchable-1', goal: 'zephyr launch hyperdrive review', claimRefs: [rel.id] }));
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const found = await (await fetch(`http://127.0.0.1:${server.port}/?q=zephyr`, { headers: session.headers })).text();
+    eq(found.includes('zephyr launch hyperdrive review'), true);
+    eq(found.includes('matching request(s)'), true);
+    eq(found.includes('Pending decision'), true);
+    eq(found.includes('Clear search and filters'), true);
+    const missing = await (
+      await fetch(`http://127.0.0.1:${server.port}/?q=no-such-work-xyz`, { headers: session.headers })
+    ).text();
+    eq(missing.includes('No results'), true);
+    eq(missing.includes('No matching work for search'), true);
+    const truncated = await (
+      await fetch(`http://127.0.0.1:${server.port}/?q=a&limit=1`, { headers: session.headers })
+    ).text();
+    eq(truncated.includes('explicit truncation'), true);
+    const invalid = await fetch(`http://127.0.0.1:${server.port}/?state=BOGUS`, { headers: session.headers });
+    eq(invalid.status, 400);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-020: workflow list filters by query without changing the unfiltered page', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const plain = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/workflows`, { headers: session.headers })
+    ).text();
+    eq(plain.includes('No release workflows yet'), true);
+    const filtered = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/workflows?q=zzz-no-such-workflow`, {
+        headers: session.headers,
+      })
+    ).text();
+    eq(filtered.includes('No results'), true);
+    eq(filtered.includes('Clear search'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-021: digest route serves grouped notices with a time-window navigator', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  await coord.submit(
+    base({ id: 'notice-1', goal: 'overnight sync completed', messageClass: 'NOTICE', claimRefs: [rel.id] }),
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const digest = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/digest`, { headers: session.headers })
+    ).text();
+    eq(digest.includes('overnight sync completed'), true);
+    eq(digest.includes('Last 7 day(s)'), true);
+    eq(digest.includes('aria-current="page"'), true);
+    eq(digest.includes('/console/digest?days=1'), true);
+    eq(
+      (await fetch(`http://127.0.0.1:${server.port}/console/digest?days=bogus`, { headers: session.headers })).status,
+      400,
+    );
+    eq(
+      (await fetch(`http://127.0.0.1:${server.port}/console/digest`, { method: 'POST', headers: session.headers }))
+        .status,
+      405,
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-009: team page states disable consequences and invite errors guide next steps', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'M', role: 'member', password: 'a-members-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    eq(team.includes('Create account'), true);
+    eq(team.includes('out of band'), true);
+    eq(team.includes('Members ('), true);
+    eq(team.includes('Disabling revokes every live session immediately'), true);
+    eq(team.includes('never restores revoked sessions'), true);
+    const invite = (csrf: string, email: string) =>
+      fetch(`http://127.0.0.1:${server.port}/team/invite`, {
+        method: 'POST',
+        headers: { cookie: session.cookie },
+        body: `csrf=${csrf}&email=${encodeURIComponent(email)}&name=Dup&role=member`,
+        redirect: 'manual',
+      });
+    eq((await invite(session.csrf, 'dup@acme.test')).status, 200);
+    const repeat = await invite(session.csrf, 'dup@acme.test');
+    eq(repeat.status, 400);
+    eq((await repeat.text()).includes('Resend the link, or revoke it and create a new account.'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-009: invitation lifecycle over HTTP — invite, accept, resend rotates, revoke kills', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const prev = process.env.VITAL_EXPOSE_INVITE_LINK;
+  process.env.VITAL_EXPOSE_INVITE_LINK = '1';
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const invite = (email: string) =>
+      fetch(`${base_}/team/invite`, {
+        method: 'POST',
+        headers: { cookie: session.cookie },
+        body: `csrf=${session.csrf}&email=${encodeURIComponent(email)}&name=New&role=member`,
+        redirect: 'manual',
+      });
+    const tokenOf = (html: string): string => {
+      const m = html.match(/\/accept-invite\?token=([A-Za-z0-9_-]+)/);
+      if (!m) throw new Error(`no acceptance link in invite response: ${html.slice(0, 300)}`);
+      return decodeURIComponent(m[1]!);
+    };
+    // Invitation rows share one created_at timestamp, so row order is not a
+    // stable locator — bind each invitationId to its email row instead.
+    const invIdFor = (html: string, email: string): string => {
+      const m = html.match(
+        new RegExp(
+          `${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<\\/td>[\\s\\S]*?name="invitationId" value="([^"]+)"`,
+        ),
+      );
+      if (!m) throw new Error(`no invitation row for ${email}`);
+      return m[1]!;
+    };
+    const invited = await invite('new@acme.test');
+    eq(invited.status, 200);
+    const invitedHtml = await invited.text();
+    eq(invitedHtml.includes('invited as member'), true);
+    const token = tokenOf(invitedHtml);
+    const acceptPage = await fetch(`${base_}/accept-invite?token=${encodeURIComponent(token)}`, { redirect: 'manual' });
+    eq(acceptPage.status, 200);
+    const acceptHtml = await acceptPage.text();
+    eq(acceptHtml.includes('Join acme'), true);
+    const preCookie = (acceptPage.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = acceptHtml.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const accept = await fetch(`${base_}/accept-invite`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&token=${encodeURIComponent(token)}&password=${encodeURIComponent('a-new-member-password')}`,
+      redirect: 'manual',
+    });
+    eq(accept.status, 303, 'acceptance signs the member straight in:');
+    const memberCookie = (accept.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    eq(memberCookie.includes('vital_session='), true);
+    const home = await fetch(`${base_}/`, { headers: { cookie: memberCookie }, redirect: 'manual' });
+    eq(home.status, 200, 'the new account reaches the console:');
+    const replay = await fetch(`${base_}/accept-invite`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&token=${encodeURIComponent(token)}&password=${encodeURIComponent('a-new-member-password')}`,
+      redirect: 'manual',
+    });
+    eq(replay.status, 400, 'an accepted link cannot be reused:');
+    const second = await invite('second@acme.test');
+    const teamHtml = await second.text();
+    const secondToken = tokenOf(teamHtml);
+    const invId = invIdFor(teamHtml, 'second@acme.test');
+    const resend = await fetch(`${base_}/team/invitation/resend`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: `csrf=${session.csrf}&invitationId=${encodeURIComponent(invId)}`,
+      redirect: 'manual',
+    });
+    eq(resend.status, 200);
+    const rotated = tokenOf(await resend.text());
+    eq(rotated === secondToken, false, 'resend rotates the acceptance token:');
+    const stale = await fetch(`${base_}/accept-invite?token=${encodeURIComponent(secondToken)}`, {
+      redirect: 'manual',
+    });
+    eq(stale.status, 404, 'the superseded link is dead:');
+    const fresh = await fetch(`${base_}/accept-invite?token=${encodeURIComponent(rotated)}`, { redirect: 'manual' });
+    eq(fresh.status, 200, 'the rotated link opens the acceptance page:');
+    const third = await invite('third@acme.test');
+    const thirdHtml = await third.text();
+    const thirdToken = tokenOf(thirdHtml);
+    const thirdId = invIdFor(thirdHtml, 'third@acme.test');
+    const revoke = await fetch(`${base_}/team/invitation/revoke`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: `csrf=${session.csrf}&invitationId=${encodeURIComponent(thirdId)}`,
+      redirect: 'manual',
+    });
+    eq(revoke.status, 200);
+    eq((await revoke.text()).includes('revoked'), true);
+    const killed = await fetch(`${base_}/accept-invite?token=${encodeURIComponent(thirdToken)}`, {
+      redirect: 'manual',
+    });
+    eq(killed.status, 404, 'the revoked link is dead:');
+  } finally {
+    if (prev === undefined) delete process.env.VITAL_EXPOSE_INVITE_LINK;
+    else process.env.VITAL_EXPOSE_INVITE_LINK = prev;
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-009: role change, ownership succession, disable and reactivate over HTTP', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const admin2 = await inviteUser(
+    db,
+    TEN,
+    { email: 'admin2@acme.test', name: 'A2', role: 'admin', password: 'an-admin2-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'M', role: 'member', password: 'a-members-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const teamPost = (session: { cookie: string; csrf: string }, path: string, body: string) =>
+      fetch(`${base_}${path}`, {
+        method: 'POST',
+        headers: { cookie: session.cookie },
+        body: `csrf=${session.csrf}&${body}`,
+        redirect: 'manual',
+      });
+    const asMember = await formSession(server.port, 'member@acme.test', 'a-members-password');
+    // formSession settles forced activation, rotating the password.
+    const memberPassword = 'a-members-password-second-settlement';
+    const selfPromote = await teamPost(asMember, '/team/role', `userId=${member.id}&role=admin`);
+    eq(selfPromote.status, 403, 'members cannot change roles:');
+    const promote = await teamPost(owner, '/team/role', `userId=${member.id}&role=admin`);
+    eq(promote.status, 200);
+    eq((await promote.text()).includes('is now admin'), true);
+    const transfer = await teamPost(owner, '/team/transfer-ownership', `userId=${admin2.id}`);
+    eq(transfer.status, 200);
+    eq((await transfer.text()).includes(`Ownership transferred to ${admin2.email}`), true);
+    const secondTransfer = await teamPost(owner, '/team/transfer-ownership', `userId=${member.id}`);
+    eq(secondTransfer.status, 403, 'the demoted ex-owner cannot transfer again:');
+    const wrongConfirm = await teamPost(owner, '/team/disable', `userId=${member.id}&confirmEmail=wrong%40acme.test`);
+    eq(wrongConfirm.status, 400);
+    const disabled = await teamPost(owner, '/team/disable', `userId=${member.id}&confirmEmail=member%40acme.test`);
+    eq(disabled.status, 200);
+    eq((await disabled.text()).includes('every live session was revoked'), true);
+    const relogin = await formSession(server.port, 'member@acme.test', memberPassword).then(
+      () => 'signed-in',
+      () => 'refused',
+    );
+    eq(relogin, 'refused', 'disabled members cannot sign in:');
+    const reactivated = await teamPost(owner, '/team/reactivate', `userId=${member.id}`);
+    eq(reactivated.status, 200);
+    const back = await formSession(server.port, 'member@acme.test', memberPassword);
+    eq(typeof back.cookie, 'string', 'reactivation restores sign-in access:');
+    eq(
+      (await fetch(`${base_}/`, { headers: back.headers, redirect: 'manual' })).status,
+      200,
+      'the reactivated member reaches the console:',
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: expiry redirects carry a return path and the flood cap preserves safe context', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const expired = await fetch(`${base_}/login?reason=expired`, { redirect: 'manual' });
+    const expiredHtml = await expired.text();
+    eq(expiredHtml.includes('Sign in to continue'), true);
+    eq(expiredHtml.includes('never replayed'), true);
+    const stale = await fetch(`${base_}/console/requests/rq1`, {
+      headers: { cookie: 'vital_session=deadbeef' },
+      redirect: 'manual',
+    });
+    eq(stale.status, 303);
+    const location = stale.headers.get('location') ?? '';
+    eq(location.includes('reason=expired'), true);
+    eq(location.includes('next='), true);
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    let lastStatus = 0;
+    let lastBody = '';
+    for (let i = 0; i < 32; i++) {
+      const attempt = await fetch(`${base_}/login`, {
+        method: 'POST',
+        headers: { cookie: preCookie },
+        body: `csrf=${preToken}&email=${encodeURIComponent(`ghost${i}@acme.test`)}&password=wrong-password-here`,
+        redirect: 'manual',
+      });
+      lastStatus = attempt.status;
+      lastBody = await attempt.text();
+    }
+    eq(lastStatus, 429);
+    eq(lastBody.includes('wait before trying again'), true);
+    eq(lastBody.includes('value="ghost31@acme.test"'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-010: forced activation and voluntary change use distinct success copy', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'M', role: 'member', password: 'a-members-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const first = await fetch(`${base_}/login`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&email=${encodeURIComponent('member@acme.test')}&password=${encodeURIComponent('a-members-password')}`,
+      redirect: 'manual',
+    });
+    eq(first.status, 303);
+    const forcedCookie = (first.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const forced = await (
+      await fetch(`${base_}/change-password`, { headers: { cookie: forcedCookie }, redirect: 'manual' })
+    ).text();
+    eq(forced.includes('Account activated'), true);
+    eq(forced.includes('revoked every session'), true);
+    const session = await ownerSession(server.port);
+    const account = await (await fetch(`${base_}/account`, { headers: session.headers })).text();
+    eq(account.includes('Account and security'), true);
+    eq(account.includes('every other session'), true);
+    eq(account.includes('Back to console'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-022: stops display on the team page and recovery is role-gated and audited', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'M', role: 'member', password: 'a-members-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  await setKill(db, TEN, { scope: 'engineering', actionClass: 'ACT_REVERSIBLE' }, 'human:priya', NOW, {
+    reason: 'suspected bad deploy',
+  });
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const member = await formSession(server.port, 'member@acme.test', 'a-members-password');
+    const team = await (await fetch(`${base_}/team`, { headers: owner.headers })).text();
+    eq(team.includes('Emergency stops'), true);
+    eq(team.includes('scope engineering × class ACT_REVERSIBLE'), true);
+    eq(team.includes('suspected bad deploy'), true);
+    eq(team.includes('held at admission'), true);
+    eq(team.includes('Recover stop'), true);
+    const recover = (session: { cookie: string; csrf: string }, reason: string) =>
+      fetch(`${base_}/team/stops/recover`, {
+        method: 'POST',
+        headers: { cookie: session.cookie },
+        body: `csrf=${session.csrf}&scope=engineering&actionClass=ACT_REVERSIBLE&reason=${encodeURIComponent(reason)}`,
+        redirect: 'manual',
+      });
+    eq((await recover(member, 'member attempt')).status, 403);
+    const missing = await recover(owner, '');
+    eq(missing.status, 400);
+    eq((await missing.text()).includes('recorded reason'), true);
+    const done = await recover(owner, 'deploy verified healthy');
+    eq(done.status, 303);
+    const cleared = await (await fetch(`${base_}/team`, { headers: owner.headers })).text();
+    eq(cleared.includes('No active stops'), true);
+    const audits = (await db
+      .prepare("SELECT action FROM audit_log WHERE tenant = ? AND action IN ('KILL_RECOVERED','team.stops_recover')")
+      .all(TEN)) as { action: string }[];
+    eq(
+      audits.some((a) => a.action === 'KILL_RECOVERED'),
+      true,
+    );
+    eq(
+      audits.some((a) => a.action === 'team.stops_recover'),
+      true,
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-022: automation self-halts surface on the team page', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await recordTrustOutcome(db, TEN, 'engineering', 'ACT_REVERSIBLE', { honeyMiss: true, clean: false, now: NOW });
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    eq(team.includes('Recent automation self-halts'), true);
+    eq(team.includes('AUTOMATION_SELF_HALT'), true);
+    eq(team.includes('engineering/ACT_REVERSIBLE'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-023: metrics extend liveness with readiness while the public pill stays stable', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const metrics = (await (await fetch(`${base_}/api/metrics`, { headers: session.headers })).json()) as {
+      requests: number;
+      reportBuilds: number;
+      readiness: { ready: boolean; checks: { name: string; status: string }[] };
+    };
+    eq(metrics.requests > 0, true);
+    eq(metrics.reportBuilds > 0, true);
+    eq(metrics.readiness.ready, true);
+    eq(
+      metrics.readiness.checks.some((c) => c.name === 'database' && c.status === 'ok'),
+      true,
+    );
+    const healthz = (await (await fetch(`${base_}/healthz`)).json()) as { ok: boolean; alive: boolean };
+    eq(healthz.ok, true);
+    eq(healthz.alive, true);
+    const pill = (await (await fetch(`${base_}/api/health`)).json()) as Record<string, unknown>;
+    eq(pill.ok, true);
+    eq('readiness' in pill, false);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-024: ledger export downloads with a manifest; audit history is searchable and paginated', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    for (const path of ['/console/export', '/console/requests']) {
+      eq((await fetch(`${base_}${path}`, { headers: session.headers })).status, 404);
+    }
+    const anon = await fetch(`${base_}/api/ledger/export?kind=snapshot`);
+    eq(anon.status, 401, 'anonymous export is refused:');
+    const badKind = await fetch(`${base_}/api/ledger/export?kind=everything`, { headers: session.headers });
+    eq(badKind.status, 400);
+    const snap = await fetch(`${base_}/api/ledger/export?kind=snapshot`, { headers: session.headers });
+    eq(snap.status, 200);
+    eq(snap.headers.get('content-disposition')?.includes('attachment'), true, 'served as a download:');
+    const body = (await snap.json()) as {
+      ok: boolean;
+      manifest: {
+        kind: string;
+        tenant: string;
+        contents: string[];
+        omissions: string[];
+        counts: Record<string, number>;
+      };
+      export: { claims: unknown[] };
+    };
+    eq(body.ok, true);
+    eq(body.manifest.kind, 'snapshot');
+    eq(body.manifest.tenant, TEN);
+    eq(body.manifest.contents.includes('decisions'), true);
+    eq(body.manifest.omissions.length > 0, true, 'omissions are stated, not hidden:');
+    eq(typeof body.manifest.counts.claims, 'number');
+    const audit = (await (
+      await fetch(`${base_}/api/audit?action=console.approve&limit=5`, { headers: session.headers })
+    ).json()) as { ok: boolean; rows: { links: object }[]; total: number; limit: number; offset: number };
+    eq(audit.ok, true);
+    eq(audit.limit, 5);
+    eq(
+      audit.rows.every((r) => typeof r.links === 'object'),
+      true,
+      'rows link evidence/authorization/receipts:',
+    );
+    const anonAudit = await fetch(`${base_}/api/audit`);
+    eq(anonAudit.status, 401, 'anonymous audit history is refused:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-024: evidence-package export requires admin or owner', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'M', role: 'member', password: 'a-members-password' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const full = await fetch(`${base_}/api/ledger/export?kind=evidence-package`, { headers: owner.headers });
+    eq(full.status, 200, 'owners can pull the evidence package:');
+    const member = await formSession(server.port, 'member@acme.test', 'a-members-password');
+    const snap = await fetch(`${base_}/api/ledger/export?kind=snapshot`, { headers: member.headers });
+    eq(snap.status, 200, 'members can pull the snapshot:');
+    const denied = await fetch(`${base_}/api/ledger/export?kind=evidence-package`, { headers: member.headers });
+    eq(denied.status, 403, 'members cannot pull the full evidence package:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-025: team page shows the effective governance policy with sources and impact', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    eq(team.includes('Governance policy'), true);
+    eq(team.includes('approver-role'), true);
+    eq(team.includes('<code>member</code>'), true, 'default approver role is shown:');
+    eq(team.includes('startup'), true, 'startup-only settings name their source:');
+    eq(team.includes('does not change:'), true, 'impact states what a setting does not change:');
+    eq(team.includes('kill-switch'), true);
   } finally {
     await server.close();
     await db.close();
@@ -1684,29 +2559,178 @@ T('FLOW-014: request detail shows deliverable preview and final approval binds t
       artifactDir: artDir,
     });
     const session = await ownerSession(server.port);
-    const detail = await (await fetch(`http://127.0.0.1:${server.port}/console/requests/r1`, { headers: session.headers })).text();
+    const detail = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/requests/r1`, { headers: session.headers })
+    ).text();
     eq(detail.includes('Deliverable preview'), true);
     eq(detail.includes('Launch copy cites release'), true);
     eq(detail.includes('Finding'), true);
     eq(detail.includes('Approve deliverable'), true);
-    const approved = await fetch(`http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/approve`, {
-      method: 'POST',
-      headers: { ...session.headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ fingerprint: version.fingerprint }),
-    });
+    const approved = await fetch(
+      `http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/approve`,
+      {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ fingerprint: version.fingerprint }),
+      },
+    );
     eq(approved.status, 200);
     const body = (await approved.json()) as { decisionId: string };
-    const receipt = await (await fetch(`http://127.0.0.1:${server.port}/console/decisions/${encodeURIComponent(body.decisionId)}`, {
-      headers: session.headers,
-    })).text();
+    const receipt = await (
+      await fetch(`http://127.0.0.1:${server.port}/console/decisions/${encodeURIComponent(body.decisionId)}`, {
+        headers: session.headers,
+      })
+    ).text();
     eq(receipt.includes('final-deliverable'), true);
-    const download = await fetch(`http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/artifact`, {
-      headers: session.headers,
-    });
+    const download = await fetch(
+      `http://127.0.0.1:${server.port}/api/deliverables/${encodeURIComponent(version.id)}/artifact`,
+      {
+        headers: session.headers,
+      },
+    );
     eq(download.status, 200);
     eq((await download.text()).includes('Launch copy cites release'), true);
   } finally {
     delete process.env.ARTIFACT_DIR;
+    await server.close();
+    await db.close();
+  }
+});
+
+T('F23: authenticated learning review administration and streaming export API', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const urlBase = `http://127.0.0.1`;
+
+  // 1. Seed an unlabeled routing decision
+  await db
+    .prepare(
+      `INSERT INTO routing_decisions (tenant, task_type, scope, action_class, proposed, executed, policy_baseline, shadow, guards, importance, labeled, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(TEN, 'task_x', 'engineering', 'READ', 'CACHE', 'CACHE', 'CACHE', 0, '[]', 0.5, 0, NOW);
+
+  const decRow = (await db.prepare('SELECT id FROM routing_decisions WHERE tenant = ? AND labeled = 0').get(TEN)) as {
+    id: number;
+  };
+
+  // 2. Compile a card
+  await seedTrace(comp, db, 'tr_api', 'SUCCESS', 0.95);
+  const card = await comp.compile(cardInput(['tr_api']));
+
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+  });
+
+  try {
+    const port = server.port;
+
+    // Unauthenticated requests fail closed
+    const unauthQueue = await fetch(`${urlBase}:${port}/api/learning/labeling-queue`);
+    eq(unauthQueue.status, 401);
+
+    const session = await ownerSession(port);
+
+    // Authenticated GET labeling-queue
+    const qRes = await fetch(`${urlBase}:${port}/api/learning/labeling-queue`, {
+      headers: session.headers,
+    });
+    eq(qRes.status, 200);
+    const qBody = (await qRes.json()) as { ok: boolean; queue: { id: number }[] };
+    eq(qBody.ok, true);
+    eq(qBody.queue.length >= 1, true);
+    eq(
+      qBody.queue.some((item) => item.id === decRow.id),
+      true,
+    );
+
+    // POST label without CSRF fails
+    const noCsrfLabel = await fetch(`${urlBase}:${port}/api/learning/label`, {
+      method: 'POST',
+      headers: { cookie: session.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ decisionId: decRow.id, correctTier: 'MODEL' }),
+    });
+    eq(noCsrfLabel.status, 403);
+
+    // POST label with session & CSRF succeeds
+    const labelRes = await fetch(`${urlBase}:${port}/api/learning/label`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ decisionId: decRow.id, correctTier: 'MODEL' }),
+    });
+    eq(labelRes.status, 200);
+    const labelBody = (await labelRes.json()) as {
+      ok: boolean;
+      decisionId: number;
+      correctTier: string;
+      reviewer: string;
+    };
+    eq(labelBody.ok, true);
+    eq(labelBody.decisionId, decRow.id);
+    eq(labelBody.correctTier, 'MODEL');
+    eq(labelBody.reviewer.length > 0, true);
+
+    // Decision is now labeled in DB
+    const labeledCheck = (await db
+      .prepare('SELECT labeled, correct_tier FROM routing_decisions WHERE id = ?')
+      .get(decRow.id)) as { labeled: number; correct_tier: string };
+    eq(labeledCheck.labeled, 1);
+    eq(labeledCheck.correct_tier, 'MODEL');
+
+    // GET cards
+    const cardsRes = await fetch(`${urlBase}:${port}/api/learning/cards`, {
+      headers: session.headers,
+    });
+    eq(cardsRes.status, 200);
+    const cardsBody = (await cardsRes.json()) as { ok: boolean; cards: { id: string }[] };
+    eq(cardsBody.ok, true);
+    eq(
+      cardsBody.cards.some((c) => c.id === card.id),
+      true,
+    );
+
+    // GET card detail with revisions
+    const cardDetailRes = await fetch(`${urlBase}:${port}/api/learning/cards/${encodeURIComponent(card.id)}`, {
+      headers: session.headers,
+    });
+    eq(cardDetailRes.status, 200);
+    const detailBody = (await cardDetailRes.json()) as {
+      ok: boolean;
+      card: { id: string };
+      revisions: { version: number; action: string }[];
+    };
+    eq(detailBody.ok, true);
+    eq(detailBody.card.id, card.id);
+    eq(detailBody.revisions.length >= 1, true);
+
+    // POST advance card
+    const advRes = await fetch(`${urlBase}:${port}/api/learning/cards/${encodeURIComponent(card.id)}/advance`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'QUARANTINE' }),
+    });
+    eq(advRes.status, 200);
+    const advBody = (await advRes.json()) as { ok: boolean; card: { state: string; version: number } };
+    eq(advBody.ok, true);
+    eq(advBody.card.state, 'QUARANTINE');
+    eq(advBody.card.version, 2);
+
+    // GET streaming export
+    const streamExportRes = await fetch(`${urlBase}:${port}/api/ledger/export?stream=true&kind=snapshot`, {
+      headers: session.headers,
+    });
+    eq(streamExportRes.status, 200);
+    eq(streamExportRes.headers.get('transfer-encoding'), 'chunked');
+    const streamBody = (await streamExportRes.json()) as {
+      ok: boolean;
+      export: { tenant: string; claims: unknown[] };
+      manifest: { kind: string; counts: { claims: number } };
+    };
+    eq(streamBody.ok, true);
+    eq(streamBody.export.tenant, TEN);
+    eq(streamBody.manifest.kind, 'snapshot');
+    eq(streamBody.manifest.counts.claims >= 1, true);
+  } finally {
     await server.close();
     await db.close();
   }

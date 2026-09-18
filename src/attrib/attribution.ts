@@ -93,8 +93,10 @@ export interface DecisionCost {
   dollars: number;
   outcomes: { metric: string; predicted: number | null; actual: number; holdoutRef: string | null }[];
   goodDecisions: number;
-  /** Null when no good outcome exists yet — not zero, unknown. */
+  /** Null when no good outcome exists yet OR cost is unknown/malformed. */
   costPerGoodDecision: number | null;
+  /** True when any request or trace in the decision's hierarchy has corrupted/unparseable cost data. */
+  unknownCost?: boolean;
 }
 
 export async function costOfDecision(
@@ -112,10 +114,9 @@ export async function costOfDecision(
 }
 
 /**
- * Bulk cost roll-up: 3 bounded queries for N decisions instead of ~4N
- * sequential round trips (getDecision + request + traces + outcomes each).
- * The console cost curve is the driver — per-decision costing over a
- * lifetime of decisions is what made every dashboard GET history-sized.
+ * Bulk cost roll-up: bounded queries for N decisions.
+ * Decomposed child and sub-task requests roll up into their parent decision.
+ * Corrupted or unparseable cost payloads flag `unknownCost` rather than masquerading as $0.
  */
 export async function costsOfDecisions(
   db: AsyncDb,
@@ -133,37 +134,92 @@ export async function costsOfDecisions(
     .prepare(`SELECT id, request_id FROM decisions WHERE tenant = ? AND id IN (${inList})`)
     .all(tenant, ...ids)) as { id: string; request_id: string | null }[];
   const byId = new Map(decs.map((d) => [String(d.id), d.request_id === null ? null : String(d.request_id)]));
-  const reqIds = [...new Set([...byId.values()].filter((r): r is string => r !== null))];
-  const spentByReq = new Map<string, { humanMinutes: number; dollars: number }>();
-  if (reqIds.length > 0) {
-    const reqList = reqIds.map(() => '?').join(',');
+  const rootReqIds = [...new Set([...byId.values()].filter((r): r is string => r !== null))];
+
+  // Map each descendant request to its root decision request ID
+  const rootByDescendant = new Map<string, string>();
+  for (const r of rootReqIds) {
+    rootByDescendant.set(r, r);
+  }
+  let currentLayer = [...rootReqIds];
+  while (currentLayer.length > 0) {
+    const parentList = currentLayer.map(() => '?').join(',');
+    const children = (await db
+      .prepare(`SELECT id, parent_request FROM requests WHERE tenant = ? AND parent_request IN (${parentList})`)
+      .all(tenant, ...currentLayer)) as { id: string; parent_request: string }[];
+    currentLayer = [];
+    for (const ch of children) {
+      const parentRoot = rootByDescendant.get(ch.parent_request);
+      if (parentRoot && !rootByDescendant.has(ch.id)) {
+        rootByDescendant.set(ch.id, parentRoot);
+        currentLayer.push(ch.id);
+      }
+    }
+  }
+
+  const allReqIds = [...rootByDescendant.keys()];
+  const spentByRoot = new Map<string, { humanMinutes: number; dollars: number; unknownCost: boolean }>();
+  for (const r of rootReqIds) {
+    spentByRoot.set(r, { humanMinutes: 0, dollars: 0, unknownCost: false });
+  }
+
+  if (allReqIds.length > 0) {
+    const reqList = allReqIds.map(() => '?').join(',');
     const rows = (await db
       .prepare(`SELECT id, spent_json FROM requests WHERE tenant = ? AND id IN (${reqList})`)
-      .all(tenant, ...reqIds)) as { id: string; spent_json: string }[];
+      .all(tenant, ...allReqIds)) as { id: string; spent_json: string }[];
     for (const r of rows) {
+      const root = rootByDescendant.get(String(r.id));
+      if (!root) continue;
+      const acc = spentByRoot.get(root) ?? { humanMinutes: 0, dollars: 0, unknownCost: false };
       try {
         const s = JSON.parse(String(r.spent_json)) as { humanMinutes?: number; dollars?: number };
-        spentByReq.set(String(r.id), { humanMinutes: Number(s.humanMinutes ?? 0), dollars: Number(s.dollars ?? 0) });
+        const hm = Number(s.humanMinutes ?? 0);
+        const d = Number(s.dollars ?? 0);
+        if (!Number.isFinite(hm) || hm < 0 || !Number.isFinite(d) || d < 0) {
+          acc.unknownCost = true;
+        } else {
+          acc.humanMinutes += hm;
+          acc.dollars += d;
+        }
       } catch {
-        spentByReq.set(String(r.id), { humanMinutes: 0, dollars: 0 });
+        acc.unknownCost = true;
       }
+      spentByRoot.set(root, acc);
     }
   }
-  const tokensByReq = new Map<string, number>();
-  if (reqIds.length > 0) {
-    const reqList = reqIds.map(() => '?').join(',');
+
+  const tokensByRoot = new Map<string, { tokens: number; unknownCost: boolean }>();
+  for (const r of rootReqIds) {
+    tokensByRoot.set(r, { tokens: 0, unknownCost: false });
+  }
+
+  if (allReqIds.length > 0) {
+    const reqList = allReqIds.map(() => '?').join(',');
     const rows = (await db
       .prepare(`SELECT request_id, cost_json FROM traces WHERE tenant = ? AND request_id IN (${reqList})`)
-      .all(tenant, ...reqIds)) as { request_id: string; cost_json: string }[];
+      .all(tenant, ...allReqIds)) as { request_id: string; cost_json: string }[];
     for (const t of rows) {
+      const root = rootByDescendant.get(String(t.request_id));
+      if (!root) continue;
+      const acc = tokensByRoot.get(root) ?? { tokens: 0, unknownCost: false };
       try {
-        const n = Number((JSON.parse(String(t.cost_json)) as { tokens?: number }).tokens ?? 0);
-        tokensByReq.set(String(t.request_id), (tokensByReq.get(String(t.request_id)) ?? 0) + n);
+        const parsed = JSON.parse(String(t.cost_json)) as { tokens?: number };
+        if (parsed.tokens !== undefined) {
+          const n = Number(parsed.tokens);
+          if (!Number.isFinite(n) || n < 0) {
+            acc.unknownCost = true;
+          } else {
+            acc.tokens += n;
+          }
+        }
       } catch {
-        /* malformed cost blobs contribute nothing — same rule as the single path */
+        acc.unknownCost = true;
       }
+      tokensByRoot.set(root, acc);
     }
   }
+
   const outcomesByDec = new Map<string, DecisionCost['outcomes']>();
   const decList = ids.map(() => '?').join(',');
   const orows = (await db
@@ -187,16 +243,49 @@ export async function costsOfDecisions(
     });
     outcomesByDec.set(String(o.decision_id), list);
   }
+
+  // Pre-registrations associated with these decisions or the tenant
+  const preregRows = (await db.prepare("SELECT key, value FROM meta WHERE key LIKE 'prereg:%'").all()) as {
+    key: string;
+    value: string;
+  }[];
+  const preregByDec = new Map<string, PreregisteredMetric[]>();
+  for (const pr of preregRows) {
+    try {
+      const rec = JSON.parse(String(pr.value)) as Preregistration;
+      if (rec.tenant === tenant && rec.decisionId && rec.metrics) {
+        preregByDec.set(rec.decisionId, rec.metrics);
+      }
+    } catch {
+      /* ignore unparseable meta */
+    }
+  }
+
   void coord;
   void ledger;
   for (const id of ids) {
     if (!byId.has(id)) continue;
     const reqId = byId.get(id);
-    const spent = reqId ? (spentByReq.get(reqId) ?? { humanMinutes: 0, dollars: 0 }) : { humanMinutes: 0, dollars: 0 };
-    const tokens = reqId ? (tokensByReq.get(reqId) ?? 0) : 0;
+    const rootSpent = reqId
+      ? (spentByRoot.get(reqId) ?? { humanMinutes: 0, dollars: 0, unknownCost: false })
+      : { humanMinutes: 0, dollars: 0, unknownCost: false };
+    const rootTokens = reqId
+      ? (tokensByRoot.get(reqId) ?? { tokens: 0, unknownCost: false })
+      : { tokens: 0, unknownCost: false };
+    const unknownCost = rootSpent.unknownCost || rootTokens.unknownCost;
     const outcomes = outcomesByDec.get(id) ?? [];
-    // F21: Evaluate metric direction — lower is better for cost/latency/churn/error/defect.
+    const preregMetrics = preregByDec.get(id);
+
+    // Evaluate metric direction — use preregistered direction/threshold when available,
+    // otherwise infer lower-is-better for cost/latency/churn/error/defect.
     const isPassingOutcome = (o: DecisionCost['outcomes'][number]): boolean => {
+      const prereg = preregMetrics?.find((m) => m.name.toLowerCase() === o.metric.toLowerCase());
+      if (prereg) {
+        const lowerIsBetter =
+          prereg.direction === 'lower' ||
+          (!prereg.direction && /latency|error|churn|cost|time|defect|delay/i.test(o.metric));
+        return lowerIsBetter ? o.actual <= prereg.threshold : o.actual >= prereg.threshold;
+      }
       const lowerIsBetter = /latency|error|churn|cost|time|defect|delay/i.test(o.metric);
       if (o.predicted === null) return o.actual > 0 && !lowerIsBetter;
       return lowerIsBetter ? o.actual <= o.predicted : o.actual >= o.predicted;
@@ -207,16 +296,21 @@ export async function costsOfDecisions(
     // for the decision as a whole to be considered a "good decision".
     const isGoodDecision = outcomes.length > 0 && passingCount === outcomes.length;
     const good = isGoodDecision ? 1 : 0;
-    const dollars = spent.dollars + tokens * rates.dollarPerToken + spent.humanMinutes * rates.dollarPerHumanMinute;
+    const dollars =
+      rootSpent.dollars +
+      rootTokens.tokens * rates.dollarPerToken +
+      rootSpent.humanMinutes * rates.dollarPerHumanMinute;
+    const costPerGoodDecision = good === 0 || unknownCost ? null : dollars;
     out.set(id, {
       decisionId: id,
-      tokens,
-      humanMinutes: spent.humanMinutes,
-      requestDollars: spent.dollars,
+      tokens: rootTokens.tokens,
+      humanMinutes: rootSpent.humanMinutes,
+      requestDollars: rootSpent.dollars,
       dollars,
       outcomes,
       goodDecisions: good,
-      costPerGoodDecision: good === 0 ? null : dollars,
+      costPerGoodDecision,
+      ...(unknownCost ? { unknownCost: true } : {}),
     });
   }
   return out;
@@ -256,10 +350,38 @@ export async function preregister(
   if (input.metrics.length === 0)
     throw new AttributionError('EMPTY_PREREG', 'pre-registering no metrics promises nothing');
   if (!input.agreedBy) throw new AttributionError('NO_OWNER', 'a pre-registration without a named owner is theater');
+
+  // Prevent post-hoc pre-registration:
+  // If a decisionId is provided, verify no outcomes already exist for it
+  if (input.decisionId) {
+    const outcomeCount = (await db
+      .prepare('SELECT COUNT(*) AS n FROM outcomes WHERE tenant = ? AND decision_id = ?')
+      .get(tenant, input.decisionId)) as { n: number } | undefined;
+    if (Number(outcomeCount?.n ?? 0) > 0) {
+      throw new AttributionError(
+        'POST_HOC_PREREG',
+        `cannot pre-register metrics for decision ${input.decisionId}: outcomes already exist`,
+      );
+    }
+  }
+
   const id = `prereg_${createHash('sha256')
-    .update(`${tenant}:${at}:${JSON.stringify(input.metrics)}`)
+    .update(`${tenant}:${input.decisionId ?? ''}:${at}:${JSON.stringify(input.metrics)}`)
     .digest('hex')
     .slice(0, 16)}`;
+  const key = `prereg:${id}`;
+
+  // Immutability check:
+  const existingRow = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as
+    { value: string } | undefined;
+  if (existingRow) {
+    const existing = JSON.parse(existingRow.value) as Preregistration;
+    if (JSON.stringify(existing.metrics) !== JSON.stringify(input.metrics)) {
+      throw new AttributionError('PREREG_IMMUTABLE', 'pre-registration is immutable and cannot be updated');
+    }
+    return existing;
+  }
+
   const rec: Preregistration = {
     id,
     tenant,
@@ -268,9 +390,7 @@ export async function preregister(
     agreedBy: input.agreedBy,
     agreedAt: at,
   };
-  await db
-    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(`prereg:${id}`, JSON.stringify(rec));
+  await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(key, JSON.stringify(rec));
   await db
     .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
     .run(tenant, input.agreedBy, 'PREREGISTER', id, JSON.stringify(input.metrics), at);
@@ -335,4 +455,80 @@ export function attributionCaveats(input: {
   if (input.daysObserved < 14)
     caveats.push(`only ${input.daysObserved} day(s) observed: too short to separate signal from week-effects`);
   return caveats;
+}
+
+export interface TenantCaveatsReport {
+  caveats: string[];
+  metrics: {
+    daysObserved: number;
+    hasHoldout: boolean;
+    hasBaseline: boolean;
+    hasPrereg: boolean;
+  };
+}
+
+/**
+ * Inspects real tenant data (outcomes, holdouts, pre-registrations, observation window)
+ * and returns the active blocking caveats derived directly from the database.
+ */
+export async function evaluateTenantCaveats(db: AsyncDb, tenant: string, now?: string): Promise<TenantCaveatsReport> {
+  const at = now ?? new Date().toISOString();
+  // 1. Check preregistrations for tenant
+  const preregRows = (await db.prepare("SELECT value FROM meta WHERE key LIKE 'prereg:%'").all()) as {
+    value: string;
+  }[];
+  let hasPrereg = false;
+  for (const pr of preregRows) {
+    try {
+      const rec = JSON.parse(String(pr.value)) as Preregistration;
+      if (rec.tenant === tenant && Array.isArray(rec.metrics) && rec.metrics.length > 0) {
+        hasPrereg = true;
+        break;
+      }
+    } catch {
+      /* ignore unparseable */
+    }
+  }
+
+  // 2. Check holdout lane in outcomes
+  const holdoutRow = (await db
+    .prepare('SELECT COUNT(*) AS n FROM outcomes WHERE tenant = ? AND holdout_ref IS NOT NULL')
+    .get(tenant)) as { n: number } | undefined;
+  const hasHoldout = Number(holdoutRow?.n ?? 0) > 0;
+
+  // 3. Check baseline in meta overlays or outcomes
+  const baselineMeta = (await db
+    .prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE ? AND value LIKE '%baseline%'")
+    .get(`workspace_overlay:${tenant}:%`)) as { n: number } | undefined;
+  const baselineOutcomes = (await db
+    .prepare("SELECT COUNT(*) AS n FROM outcomes WHERE tenant = ? AND basis LIKE '%baseline%'")
+    .get(tenant)) as { n: number } | undefined;
+  const hasBaseline = Number(baselineMeta?.n ?? 0) > 0 || Number(baselineOutcomes?.n ?? 0) > 0;
+
+  // 4. Days observed from earliest decision or outcome
+  const earliestDecision = (await db
+    .prepare('SELECT MIN(signed_at) AS min_at FROM decisions WHERE tenant = ?')
+    .get(tenant)) as { min_at: string | null } | undefined;
+  const earliestOutcome = (await db
+    .prepare('SELECT MIN(created_at) AS min_at FROM outcomes WHERE tenant = ?')
+    .get(tenant)) as { min_at: string | null } | undefined;
+
+  const dates = [earliestDecision?.min_at, earliestOutcome?.min_at].filter(
+    (d): d is string => typeof d === 'string' && d.length > 0,
+  );
+  let daysObserved = 0;
+  if (dates.length > 0) {
+    dates.sort();
+    const earliestMs = new Date(dates[0]!).getTime();
+    const nowMs = new Date(at).getTime();
+    if (Number.isFinite(earliestMs) && Number.isFinite(nowMs) && nowMs > earliestMs) {
+      daysObserved = Math.max(1, Math.floor((nowMs - earliestMs) / (1000 * 60 * 60 * 24)));
+    }
+  }
+
+  const caveats = attributionCaveats({ daysObserved, hasHoldout, hasBaseline, hasPrereg });
+  return {
+    caveats,
+    metrics: { daysObserved, hasHoldout, hasBaseline, hasPrereg },
+  };
 }

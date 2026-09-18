@@ -1,16 +1,11 @@
 import { createLedger } from './ledger/ledger.ts';
 import { createCoordinator } from './coord/coordinator.ts';
-import { OrganizationalCompiler } from './compiler/compiler.ts';
+import { OrganizationalCompiler, mineCandidates } from './compiler/compiler.ts';
 import { buildReport } from './console/report.ts';
 import { renderHtml } from './console/render.ts';
 import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
-import {
-  installAuthSchema,
-  signupTenant,
-  operatorSetPassword,
-  tryPasswordReset,
-} from './core/auth.ts';
+import { installAuthSchema, signupTenant, operatorSetPassword, tryPasswordReset } from './core/auth.ts';
 import { eraseTenant, ERASURE_DONE_ACTION } from './core/erasure.ts';
 import {
   assertTenantExists,
@@ -27,6 +22,17 @@ import { writeFileSync, mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileDiffCollector } from './ingest/collectors.ts';
 import { getIntegrationHealth, testFileDirectory } from './ingest/health.ts';
+import {
+  changeImpact,
+  checkReadiness,
+  describeStops,
+  effectivePolicy,
+  recoverStop,
+  setKill,
+  SETTINGS_INVENTORY,
+  validatePolicyChange,
+} from './gov/trust.ts';
+import { exportLedgerWithManifest } from './ledger/export.ts';
 import { runIngestionWorker } from './ingest/worker.ts';
 import { runApplicationWorker } from './substrate/worker.ts';
 
@@ -34,13 +40,21 @@ import { runApplicationWorker } from './substrate/worker.ts';
  * Minimal dev CLI + instance verifier (TODO §§0.4, V2.1, FLOW-005).
  *
  *   tsx src/cli.ts status [--db path] [--tenant slug]   read-only inspection
+ *   tsx src/cli.ts status --stops --tenant slug           list emergency stops (read-only display)
+ *   tsx src/cli.ts status --policy [--db path]              governance settings inventory with defaults and entry points
+ *   tsx src/cli.ts status --readiness [--db path]         bounded readiness checks for required dependencies
  *   tsx src/cli.ts verify [--db path]                    migrate + smoke probe
+ *   tsx src/cli.ts verify --recover-stop <scope>/<class> --reason <text> --tenant slug
+ *   tsx src/cli.ts verify --policy-change <key>=<value> [--db <target>]   validate a governed setting without applying it
+ *   tsx src/cli.ts stop --engage <scope>/<action-class> --reason <text> --tenant slug [--recovery-requires <text>] [--db <target>]
  *   tsx src/cli.ts report [--db path] [--out report.html] [--tenant slug]
+ *   tsx src/cli.ts report --manifest <snapshot|evidence-package|backup-reference> --tenant slug
  *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme]
  *   tsx src/cli.ts ingest-files --tenant acme --scope engineering --source dir --artifacts dir --db path
  *   tsx src/cli.ts ingest-test --source dir [--db path] [--tenant slug]
  *   tsx src/cli.ts signup --tenant acme --email o@a.test --password '...'
  *   tsx src/cli.ts passwd --tenant acme --email o@a.test --password '...'
+ *   tsx src/cli.ts learn [--db path] [--tenant slug]     drift check, budget revert, candidate mining
  *   tsx src/cli.ts reset-link --tenant acme --email o@a.test [--base-url http://127.0.0.1:3100]
  *   tsx src/cli.ts erase --tenant acme --actor op@a.test [--export-to dir] [--yes]
  *
@@ -76,8 +90,49 @@ if (cmd === 'status') {
         migration_count: schema.migrationCount,
       };
       if (!schema.ready) {
-        console.log(JSON.stringify({ ...header, hint: 'run `tsx src/cli.ts verify --db <same-target>` to migrate' }, null, 2));
+        console.log(
+          JSON.stringify({ ...header, hint: 'run `tsx src/cli.ts verify --db <same-target>` to migrate' }, null, 2),
+        );
         process.exitCode = 1;
+      } else if (args.includes('--readiness')) {
+        const readiness = await checkReadiness(
+          [
+            {
+              name: 'database',
+              check: async () => {
+                await db.prepare('SELECT 1 AS ok').get();
+                return { ok: true as const, detail: `${target.engine} reachable` };
+              },
+            },
+          ],
+          { now: new Date().toISOString() },
+        );
+        console.log(JSON.stringify({ ...header, ...readiness }, null, 2));
+        if (!readiness.ready) process.exitCode = 1;
+      } else if (args.includes('--stops')) {
+        if (!tenant) throw new Error('usage: vital status --stops --tenant <slug> [--db <target>]');
+        await assertTenantExists(db, tenant);
+        const stops = await describeStops(db, tenant);
+        console.log(JSON.stringify({ ...header, stops }, null, 2));
+      } else if (args.includes('--policy')) {
+        // Effective values are fixed at serve startup (flags win); the CLI
+        // shows the inventory, defaults, and per-setting impact so an
+        // operator can see what a change would do before making it.
+        const { policy, sources } = effectivePolicy();
+        console.log(
+          JSON.stringify(
+            {
+              ...header,
+              policy,
+              sources,
+              inventory: SETTINGS_INVENTORY,
+              impact: Object.fromEntries(SETTINGS_INVENTORY.map((e) => [e.key, changeImpact(e.key)])),
+              note: 'effective values are fixed at serve startup; startup-only settings require a restart',
+            },
+            null,
+            2,
+          ),
+        );
       } else if (!tenant) {
         console.log(JSON.stringify(header, null, 2));
       } else {
@@ -105,8 +160,7 @@ if (cmd === 'status') {
               tierMix: Object.fromEntries(tierMix.map((t) => [String(t.tier), Number(t.n)])),
               costPerSignal: await new CognitiveRouter(db).costPerSignal(tenant),
               openRequests: (await coord.list(tenant)).filter(
-                (r) =>
-                  !['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'].includes(r.state),
+                (r) => !['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED'].includes(r.state),
               ).length,
             },
             null,
@@ -126,7 +180,126 @@ if (cmd === 'status') {
     const db = openDbTarget(target);
     try {
       const result = await verifyInstance(db);
-      console.log(JSON.stringify({ vital: '0.0.1', ok: true, ...formatTargetHeader(target), ...result }, null, 2));
+      const recoverArg = flag('--recover-stop');
+      const changeArg = flag('--policy-change');
+      if (changeArg) {
+        // Dry-run only: most governed settings are startup-only or code
+        // entry points, so the CLI validates and explains instead of
+        // pretending to mutate live policy. Runtime changes (kill
+        // switches, roles) keep their own audited commands.
+        const eqAt = changeArg.indexOf('=');
+        if (eqAt < 0) throw new Error('usage: vital verify --policy-change <key>=<value> [--db <target>]');
+        const key = changeArg.slice(0, eqAt).trim();
+        const value = changeArg.slice(eqAt + 1).trim();
+        if (!key) throw new Error('usage: vital verify --policy-change <key>=<value> [--db <target>]');
+        const checked = validatePolicyChange(key, value);
+        let impact: { changes: string; notChanges: string; requires: string } | null = null;
+        try {
+          impact = changeImpact(key);
+        } catch {
+          impact = null;
+        }
+        const { sources } = effectivePolicy();
+        const current = sources.find((s) => s.setting === key);
+        console.log(
+          JSON.stringify(
+            {
+              vital: '0.0.1',
+              ok: checked.ok,
+              ...formatTargetHeader(target),
+              ...result,
+              key,
+              value,
+              valid: checked.ok,
+              reasons: checked.reasons,
+              impact,
+              current,
+              applied: false,
+            },
+            null,
+            2,
+          ),
+        );
+        if (!checked.ok) process.exitCode = 1;
+      } else if (recoverArg) {
+        const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
+        const reason = flag('--reason');
+        if (!reason?.trim())
+          throw new Error(
+            'usage: vital verify --recover-stop <scope>/<action-class> --reason <text> --tenant <slug> [--db <target>]',
+          );
+        const slash = recoverArg.indexOf('/');
+        if (slash < 0) throw new Error('--recover-stop must look like <scope>/<action-class>');
+        const scope = recoverArg.slice(0, slash).trim();
+        const actionClass = recoverArg.slice(slash + 1).trim();
+        if (!scope || !actionClass) throw new Error('--recover-stop must look like <scope>/<action-class>');
+        await assertTenantExists(db, tenant, { strict: true });
+        const recovered = await recoverStop(db, tenant, { scope, actionClass }, 'cli:recover-stop', {
+          reason: reason.trim(),
+          now: new Date().toISOString(),
+        });
+        console.log(
+          JSON.stringify(
+            { vital: '0.0.1', ok: true, ...formatTargetHeader(target, tenant), ...result, recovered },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(JSON.stringify({ vital: '0.0.1', ok: true, ...formatTargetHeader(target), ...result }, null, 2));
+      }
+    } finally {
+      await db.close();
+    }
+  } catch (e) {
+    fail(e);
+  }
+} else if (cmd === 'learn') {
+  try {
+    const target = resolveDbTarget({ flag: flag('--db'), requirePersistent: true });
+    const db = openDbTarget(target);
+    const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
+    try {
+      await migrateDbTarget(db);
+      await assertTenantExists(db, tenant);
+      const comp = new OrganizationalCompiler(db);
+      const router = new CognitiveRouter(db);
+
+      const promotedCards = (await db
+        .prepare("SELECT id, intent FROM skill_cards WHERE tenant = ? AND state = 'PROMOTED'")
+        .all(tenant)) as { id: string; intent: string }[];
+      const driftResults: { cardId: string; intent: string; drifting: boolean; demoted: boolean; ewma: number }[] = [];
+      for (const c of promotedCards) {
+        const d = await comp.checkDrift(tenant, c.id);
+        driftResults.push({ cardId: c.id, intent: c.intent, drifting: d.drifting, demoted: d.demoted, ewma: d.ewma });
+      }
+
+      const revertedTiers = await router.revertBreachedTiers(tenant);
+      const candidates = await mineCandidates(db, tenant);
+
+      console.log(
+        JSON.stringify(
+          {
+            vital: '0.0.1',
+            ok: true,
+            ...formatTargetHeader(target, tenant),
+            drift: {
+              checked: driftResults.length,
+              demoted: driftResults.filter((r) => r.demoted).length,
+              details: driftResults,
+            },
+            router: {
+              revertedTiers,
+            },
+            candidates: {
+              mined: candidates.length,
+              details: candidates,
+            },
+          },
+          null,
+          2,
+        ),
+      );
     } finally {
       await db.close();
     }
@@ -148,19 +321,28 @@ if (cmd === 'status') {
     try {
       await migrateDbTarget(db);
       await assertTenantExists(db, tenant);
-      const now = new Date().toISOString();
-      const report = await buildReport(
-        db,
-        createLedger(db),
-        createCoordinator(db),
-        new OrganizationalCompiler(db),
-        tenant,
-        now,
-      );
-      writeFileSync(out, renderHtml(report));
-      console.log(
-        `wrote ${out} (${report.rooms.length} rooms, ${report.needsHuman.length} open approvals) [${target.display}, tenant ${tenant}]`,
-      );
+      const manifestKind = flag('--manifest');
+      if (manifestKind) {
+        const kind = manifestKind.trim();
+        if (kind !== 'snapshot' && kind !== 'evidence-package' && kind !== 'backup-reference')
+          throw new Error('--manifest must be snapshot | evidence-package | backup-reference');
+        const { manifest } = await exportLedgerWithManifest(db, tenant, kind, new Date().toISOString());
+        console.log(JSON.stringify(manifest, null, 2));
+      } else {
+        const now = new Date().toISOString();
+        const report = await buildReport(
+          db,
+          createLedger(db),
+          createCoordinator(db),
+          new OrganizationalCompiler(db),
+          tenant,
+          now,
+        );
+        writeFileSync(out, renderHtml(report));
+        console.log(
+          `wrote ${out} (${report.rooms.length} rooms, ${report.needsHuman.length} open approvals) [${target.display}, tenant ${tenant}]`,
+        );
+      }
     } finally {
       await db.close();
     }
@@ -328,7 +510,11 @@ if (cmd === 'status') {
     try {
       await migrateDbTarget(db);
       await installAuthSchema(db);
-      await signupTenant(db, { slug: tenant, name: tenant, email, password, ownerName: name }, new Date().toISOString());
+      await signupTenant(
+        db,
+        { slug: tenant, name: tenant, email, password, ownerName: name },
+        new Date().toISOString(),
+      );
       console.log(
         `tenant "${tenant}" created; owner ${email} can sign in at the console (${JSON.stringify(formatTargetHeader(target, tenant))})`,
       );
@@ -432,6 +618,62 @@ if (cmd === 'status') {
       }
       const retained = result.receipt.retained.filter((r) => r.items.length > 0).map((r) => r.category);
       if (retained.length > 0) console.log(`retained: ${retained.join(', ')}`);
+      const deferred = result.receipt.deferred.filter((r) => r.items.length > 0 || r.reason.length > 0);
+      for (const d of deferred) {
+        console.log(`deferred [${d.category}]: ${d.items.length > 0 ? d.items.join(', ') : d.reason}`);
+      }
+      for (const f of result.receipt.failed) {
+        console.error(`failed [${f.category}]: ${f.items.join(', ')} (${f.reason})`);
+      }
+      if (result.receipt.failed.length > 0) process.exitCode = 1;
+    } finally {
+      await db.close();
+    }
+  } catch (e) {
+    fail(e);
+  }
+} else if (cmd === 'stop') {
+  try {
+    const engageArg = flag('--engage');
+    if (!engageArg)
+      throw new Error(
+        'usage: vital stop --engage <scope>/<action-class> --reason <text> --tenant <slug> [--recovery-requires <text>] [--db <target>]',
+      );
+    const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
+    const reason = flag('--reason');
+    if (!reason?.trim())
+      throw new Error(
+        'usage: vital stop --engage <scope>/<action-class> --reason <text> --tenant <slug> [--recovery-requires <text>] [--db <target>]',
+      );
+    const slash = engageArg.indexOf('/');
+    if (slash < 0) throw new Error('--engage must look like <scope>/<action-class>');
+    const scope = engageArg.slice(0, slash).trim();
+    const actionClass = engageArg.slice(slash + 1).trim();
+    if (!scope || !actionClass) throw new Error('--engage must look like <scope>/<action-class>');
+    const target = resolveDbTarget({ flag: flag('--db') });
+    const db = openDbTarget(target);
+    try {
+      await assertTenantExists(db, tenant, { strict: true });
+      const now = new Date().toISOString();
+      const recoveryRequires = flag('--recovery-requires')?.trim() || undefined;
+      await setKill(db, tenant, { scope, actionClass }, 'cli:stop', now, {
+        reason: reason.trim(),
+        ...(recoveryRequires ? { recoveryRequires } : {}),
+      });
+      const stops = await describeStops(db, tenant);
+      console.log(
+        JSON.stringify(
+          {
+            vital: '0.0.1',
+            ok: true,
+            ...formatTargetHeader(target, tenant),
+            engaged: `${scope}/${actionClass}`,
+            stops,
+          },
+          null,
+          2,
+        ),
+      );
     } finally {
       await db.close();
     }
@@ -440,7 +682,7 @@ if (cmd === 'status') {
   }
 } else {
   console.error(
-    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | erase)`,
+    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | erase | stop)`,
   );
   process.exit(1);
 }

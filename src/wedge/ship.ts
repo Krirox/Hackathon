@@ -35,6 +35,7 @@ export class WedgeError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly detail?: unknown,
   ) {
     super(`[wedge:${code}] ${message}`);
   }
@@ -274,11 +275,7 @@ export async function resumeFanOutWorkflow(
   });
 }
 
-export async function getFanOutWorkflow(
-  db: AsyncDb,
-  tenant: string,
-  runId: string,
-): Promise<FanOutWorkflowRun | null> {
+export async function getFanOutWorkflow(db: AsyncDb, tenant: string, runId: string): Promise<FanOutWorkflowRun | null> {
   return loadFanOutRun(db, tenant, runId);
 }
 

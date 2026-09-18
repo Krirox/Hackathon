@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { groupConcat, type AsyncDb } from '../core/db.ts';
-import type { SkillCardRow, SkillTransferTestRow } from '../core/rows.ts';
+import type { SkillCardRevisionRow, SkillCardRow, SkillTransferTestRow } from '../core/rows.ts';
 import type { RoutingClass } from '../core/types.ts';
 
 /**
@@ -53,12 +53,16 @@ export const STATE_ORDER: Record<SkillState, number> = {
 };
 
 export interface TransferTest {
-  kind: 'cross_role' | 'cross_model' | 'data_regime' | 'regression';
+  kind: 'cross_role' | 'cross_model' | 'data_regime' | 'regression' | 'harness_smoke';
   /** Role/model/regime the test was run under. */
   variant: string;
   passed: boolean;
   score: number;
   ranAt: string;
+  cardVersion?: number;
+  evalRunId?: string | null;
+  evaluator?: string | null;
+  model?: string | null;
 }
 
 const cardSchema = z
@@ -107,6 +111,18 @@ export interface SkillCard {
   evalRef: string | null;
   owner: string;
   updatedAt: string;
+}
+
+export interface SkillCardRevision {
+  tenant: string;
+  cardId: string;
+  version: number;
+  state: SkillState;
+  scopeJson: string;
+  action: string;
+  actor: string;
+  detail: string | null;
+  recordedAt: string;
 }
 
 export class CompilerError extends Error {
@@ -273,37 +289,117 @@ export class OrganizationalCompiler {
         updatedAt: now,
       };
       await this.persist(card);
+      await this.recordRevision(
+        card.tenant,
+        card.id,
+        card.version,
+        card.state,
+        JSON.stringify({ originScope: card.originScope, originModels: card.originModels, roles: card.scopeRoles }),
+        'CARD_COMPILED',
+        'compiler',
+        `${card.intent} @ ${card.state}`,
+        now,
+      );
       await this.audit(card.tenant, 'compiler', 'CARD_COMPILED', card.id, `${card.intent} @ ${card.state}`);
       return card;
     });
   }
 
   async recordTransfer(card: SkillCard, test: TransferTest): Promise<void> {
+    const cardVersion = test.cardVersion ?? null;
     // Check persisted ownership in the write itself; a caller-supplied card is not proof.
     const out = await this.db
       .prepare(
-        `INSERT INTO skill_transfer_tests (card_id, kind, variant, passed, score, ran_at)
-         SELECT id, ?, ?, ?, ?, ? FROM skill_cards WHERE tenant = ? AND id = ?`,
+        `INSERT INTO skill_transfer_tests (tenant, card_id, card_version, kind, variant, passed, score, ran_at, eval_run_id, evaluator, model)
+         SELECT tenant, id, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM skill_cards WHERE tenant = ? AND id = ?`,
       )
-      .run(test.kind, test.variant, test.passed ? 1 : 0, test.score, test.ranAt, card.tenant, card.id);
+      .run(
+        cardVersion,
+        test.kind,
+        test.variant,
+        test.passed ? 1 : 0,
+        test.score,
+        test.ranAt,
+        test.evalRunId ?? null,
+        test.evaluator ?? null,
+        test.model ?? null,
+        card.tenant,
+        card.id,
+      );
     if (out.changes === 0) throw new CompilerError('UNKNOWN_CARD', `card ${card.id} not found`);
   }
 
-  async transferResults(tenant: string, cardId: string): Promise<TransferTest[]> {
+  async transferResults(tenant: string, cardId: string, opts: { cardVersion?: number } = {}): Promise<TransferTest[]> {
+    const where = ['t.tenant = ?', 't.card_id = ?'];
+    const args: unknown[] = [tenant, cardId];
+    if (opts.cardVersion !== undefined) {
+      where.push('t.card_version = ?');
+      args.push(opts.cardVersion);
+    }
     const rows = (await this.db
       .prepare(
-        `SELECT t.kind, t.variant, t.passed, t.score, t.ran_at
-         FROM skill_transfer_tests t JOIN skill_cards c ON c.id = t.card_id
-         WHERE c.tenant = ? AND c.id = ? ORDER BY t.ran_at DESC`,
+        `SELECT t.card_id, t.card_version, t.kind, t.variant, t.passed, t.score, t.ran_at, t.eval_run_id, t.evaluator, t.model
+         FROM skill_transfer_tests t JOIN skill_cards c ON c.id = t.card_id AND c.tenant = t.tenant
+         WHERE ${where.join(' AND ')} ORDER BY t.ran_at DESC`,
       )
-      .all(tenant, cardId)) as SkillTransferTestRow[];
+      .all(...args)) as SkillTransferTestRow[];
+    return rows.map((r) => {
+      const t: TransferTest = {
+        kind: String(r.kind) as TransferTest['kind'],
+        variant: String(r.variant),
+        passed: Number(r.passed) === 1,
+        score: Number(r.score),
+        ranAt: String(r.ran_at),
+      };
+      if (r.card_version != null) t.cardVersion = Number(r.card_version);
+      if (r.eval_run_id != null) t.evalRunId = String(r.eval_run_id);
+      if (r.evaluator != null) t.evaluator = String(r.evaluator);
+      if (r.model != null) t.model = String(r.model);
+      return t;
+    });
+  }
+
+  async cardRevisions(tenant: string, cardId: string): Promise<SkillCardRevision[]> {
+    const rows = (await this.db
+      .prepare(
+        `SELECT tenant, card_id, version, state, scope_json, action, actor, detail, recorded_at
+         FROM skill_card_revisions
+         WHERE tenant = ? AND card_id = ?
+         ORDER BY version ASC`,
+      )
+      .all(tenant, cardId)) as SkillCardRevisionRow[];
     return rows.map((r) => ({
-      kind: String(r.kind) as TransferTest['kind'],
-      variant: String(r.variant),
-      passed: Number(r.passed) === 1,
-      score: Number(r.score),
-      ranAt: String(r.ran_at),
+      tenant: String(r.tenant),
+      cardId: String(r.card_id),
+      version: Number(r.version),
+      state: String(r.state) as SkillState,
+      scopeJson: String(r.scope_json),
+      action: String(r.action),
+      actor: String(r.actor),
+      detail: r.detail ? String(r.detail) : null,
+      recordedAt: String(r.recorded_at),
     }));
+  }
+
+  private async recordRevision(
+    tenant: string,
+    cardId: string,
+    version: number,
+    state: SkillState,
+    scopeJson: string,
+    action: string,
+    actor: string,
+    detail?: string | null,
+    recordedAt?: string,
+  ): Promise<void> {
+    const now = recordedAt ?? new Date().toISOString();
+    await this.db
+      .prepare(
+        `INSERT INTO skill_card_revisions (tenant, card_id, version, state, scope_json, action, actor, detail, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (tenant, card_id, version) DO NOTHING`,
+      )
+      .run(tenant, cardId, version, state, scopeJson, action, actor, detail ?? null, now);
   }
 
   /**
@@ -315,7 +411,13 @@ export class OrganizationalCompiler {
     tenant: string,
     cardId: string,
     to: SkillState,
-    evidence: { shadowRuns?: number; shadowSuccessRate?: number; pilotRuns?: number; pilotSuccessRate?: number } = {},
+    evidence: {
+      shadowRuns?: number;
+      shadowSuccessRate?: number;
+      pilotRuns?: number;
+      pilotSuccessRate?: number;
+      evalRunId?: string;
+    } = {},
   ): Promise<{ ok: boolean; card: SkillCard | null; reasons: string[] }> {
     const card = await this.get(tenant, cardId);
     if (!card) return { ok: false, card: null, reasons: ['card not found'] };
@@ -337,6 +439,41 @@ export class OrganizationalCompiler {
       return matching.length > 0 && matching.every((t) => t.passed);
     };
 
+    if (evidence.evalRunId) {
+      const evalRun = (await this.db
+        .prepare('SELECT id, suite, passed, failed FROM eval_runs WHERE tenant = ? AND id = ?')
+        .get(tenant, evidence.evalRunId)) as { id: string; suite: string; passed: number; failed: number } | undefined;
+      if (!evalRun) {
+        reasons.push(`referenced eval run ${evidence.evalRunId} not found`);
+      } else if (card.evalRef && evalRun.suite !== card.evalRef) {
+        reasons.push(`eval run ${evidence.evalRunId} is for suite ${evalRun.suite}, expected ${card.evalRef}`);
+      } else if (evalRun.failed > 0 || evalRun.passed === 0) {
+        reasons.push(`eval run ${evidence.evalRunId} failed (${evalRun.passed} passed, ${evalRun.failed} failed)`);
+      }
+    }
+
+    let shadowRuns = evidence.shadowRuns;
+    let shadowSuccessRate = evidence.shadowSuccessRate;
+    if (shadowRuns === undefined && to === 'BOUNDED_PILOT') {
+      const traceRows = (await this.db
+        .prepare('SELECT outcome FROM traces WHERE tenant = ? AND skill_card = ?')
+        .all(tenant, card.id)) as { outcome: string }[];
+      shadowRuns = traceRows.length;
+      const successes = traceRows.filter((r) => r.outcome === 'SUCCESS').length;
+      shadowSuccessRate = shadowRuns > 0 ? successes / shadowRuns : 0;
+    }
+
+    let pilotRuns = evidence.pilotRuns;
+    let pilotSuccessRate = evidence.pilotSuccessRate;
+    if (pilotRuns === undefined && to === 'PROMOTED') {
+      const traceRows = (await this.db
+        .prepare('SELECT outcome FROM traces WHERE tenant = ? AND skill_card = ? AND tier = ?')
+        .all(tenant, card.id, 'WORKFLOW')) as { outcome: string }[];
+      pilotRuns = traceRows.length;
+      const successes = traceRows.filter((r) => r.outcome === 'SUCCESS').length;
+      pilotSuccessRate = pilotRuns > 0 ? successes / pilotRuns : 0;
+    }
+
     if (STATE_ORDER[to] !== STATE_ORDER[card.state] + 1 && to !== 'DEMOTED' && to !== 'RETIRED') {
       reasons.push(`illegal transition ${card.state} → ${to}; advance one step at a time`);
     }
@@ -351,17 +488,16 @@ export class OrganizationalCompiler {
       case 'BOUNDED_PILOT':
         if (!has('regression')) reasons.push('regression tests not passing');
         if (!has('cross_model')) reasons.push('cross-model transfer test required before pilot');
-        if ((evidence.shadowRuns ?? 0) < 20) reasons.push(`need ≥20 shadow runs, got ${evidence.shadowRuns ?? 0}`);
-        if ((evidence.shadowSuccessRate ?? 0) < 0.9)
-          reasons.push(`shadow success rate ${(evidence.shadowSuccessRate ?? 0).toFixed(2)} < 0.90`);
+        if ((shadowRuns ?? 0) < 20) reasons.push(`need ≥20 shadow runs, got ${shadowRuns ?? 0}`);
+        if ((shadowSuccessRate ?? 0) < 0.9)
+          reasons.push(`shadow success rate ${(shadowSuccessRate ?? 0).toFixed(2)} < 0.90`);
         break;
       case 'PROMOTED':
         // Origin-scope promotion: needs regression + cross-model + data-regime.
         if (!has('regression') || !has('cross_model') || !has('data_regime'))
           reasons.push('promotion requires passing regression, cross_model and data_regime tests');
-        if ((evidence.pilotRuns ?? 0) < 50) reasons.push(`need ≥50 pilot runs, got ${evidence.pilotRuns ?? 0}`);
-        if ((evidence.pilotSuccessRate ?? 0) < 0.95)
-          reasons.push(`pilot success ${(evidence.pilotSuccessRate ?? 0).toFixed(2)} < 0.95`);
+        if ((pilotRuns ?? 0) < 50) reasons.push(`need ≥50 pilot runs, got ${pilotRuns ?? 0}`);
+        if ((pilotSuccessRate ?? 0) < 0.95) reasons.push(`pilot success ${(pilotSuccessRate ?? 0).toFixed(2)} < 0.95`);
         break;
       case 'DEMOTED':
       case 'RETIRED':
@@ -388,6 +524,17 @@ export class OrganizationalCompiler {
       );
     }
     const next = (await this.get(tenant, cardId))!;
+    await this.recordRevision(
+      tenant,
+      cardId,
+      next.version,
+      next.state,
+      JSON.stringify({ originScope: next.originScope, originModels: next.originModels, roles: next.scopeRoles }),
+      `CARD_${to}`,
+      'compiler',
+      `v${next.version} (${card.state} -> ${to})`,
+      at,
+    );
     await this.audit(tenant, 'compiler', `CARD_${to}`, cardId, `v${next.version}`);
     return { ok: true, card: next, reasons: [] };
   }
@@ -452,6 +599,17 @@ export class OrganizationalCompiler {
           `card ${cardId} moved during scope expansion — re-read and gate again`,
         );
       }
+      await this.recordRevision(
+        tenant,
+        cardId,
+        next.version,
+        next.state,
+        JSON.stringify({ originScope: next.originScope, originModels: next.originModels, roles: next.scopeRoles }),
+        'CARD_SCOPE_EXPANDED',
+        'compiler',
+        role,
+        next.updatedAt,
+      );
       await this.audit(tenant, 'compiler', 'CARD_SCOPE_EXPANDED', cardId, role);
       return { ok: true, card: next, reasons: [] };
     });
@@ -505,6 +663,19 @@ export class OrganizationalCompiler {
         )
         .run(new Date().toISOString(), cardId);
       if (out.changes === 0) return { drifting, ewma, samples: rows.length, demoted: false };
+      const driftAt = new Date().toISOString();
+      const nextVersion = card.version + 1;
+      await this.recordRevision(
+        tenant,
+        cardId,
+        nextVersion,
+        'DEMOTED',
+        JSON.stringify({ originScope: card.originScope, originModels: card.originModels, roles: card.scopeRoles }),
+        'CARD_AUTO_DEMOTED',
+        'compiler',
+        `ewma ${ewma.toFixed(3)} < ${threshold}`,
+        driftAt,
+      );
       await this.audit(tenant, 'compiler', 'CARD_AUTO_DEMOTED', cardId, `ewma ${ewma.toFixed(3)} < ${threshold}`);
       demoted = true;
     }

@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
@@ -136,15 +136,51 @@ async function ingestClaimCount(db: AsyncDb, tenant: string): Promise<number> {
 }
 
 async function releaseWorkflowId(db: AsyncDb, tenant: string): Promise<string | null> {
-  const rows = (await db
-    .prepare('SELECT key FROM meta WHERE key LIKE ?')
-    .all(`wedge:fanout:${tenant}:%`)) as { key: string }[];
+  const rows = (await db.prepare('SELECT key FROM meta WHERE key LIKE ?').all(`wedge:fanout:${tenant}:%`)) as {
+    key: string;
+  }[];
   for (const row of rows) {
     const id = row.key.slice(`wedge:fanout:${tenant}:`.length);
     const run = await loadFanOutRun(db, tenant, id);
     if (run?.kind === 'ship') return id;
   }
   return null;
+}
+
+/** Checklist tri-state without nested ternaries: done beats pending beats blocked. */
+function stepStatus(done: boolean, ready: boolean): 'done' | 'pending' | 'blocked' {
+  if (done) return 'done';
+  if (ready) return 'pending';
+  return 'blocked';
+}
+
+function sourceSyncDetail(ingested: boolean, state: string): string {
+  if (ingested) return 'At least one source item became ledger evidence';
+  if (state === 'empty') return 'Source is empty — add a file, then sync';
+  if (state === 'failed') return 'Ingestion failed — inspect the source status below';
+  return 'Run ingestion after configuring a source';
+}
+
+function firstWorkflowDetail(workflowId: string | null, ingested: boolean): string {
+  if (workflowId) return `Ship-to-Result workflow ${workflowId} is running`;
+  if (ingested) return 'Start the governed release fan-out from your first evidence';
+  return 'Available after the first source receipt succeeds';
+}
+
+function firstWorkflowHref(workflowId: string | null, ingested: boolean): string | undefined {
+  if (workflowId) return `/console/workflows/${encodeURIComponent(workflowId)}`;
+  if (ingested) return '/setup#workflow';
+  return undefined;
+}
+
+function firstWorkflowLabel(workflowId: string | null, ingested: boolean): string | undefined {
+  if (workflowId) return 'Open workflow';
+  if (ingested) return 'Start release workflow';
+  return undefined;
+}
+
+function elapsedSince(from: string, to: string): number {
+  return Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 1000));
 }
 
 export async function buildActivationState(
@@ -194,7 +230,7 @@ export async function buildActivationState(
     {
       id: 'accountable',
       label: 'Accountable human',
-      status: accountable ? 'done' : ownerReady ? 'pending' : 'blocked',
+      status: stepStatus(accountable !== null, ownerReady),
       detail: accountable
         ? `${accountable.name} (${accountable.email}) owns incoming evidence`
         : 'Name the human responsible for reviewing ingested evidence',
@@ -204,7 +240,7 @@ export async function buildActivationState(
     {
       id: 'scope',
       label: 'Scope',
-      status: config?.scope ? 'done' : ownerReady ? 'pending' : 'blocked',
+      status: stepStatus(config?.scope !== undefined && config.scope !== '', ownerReady),
       detail: config?.scope
         ? `Release evidence will land in scope "${config.scope}"`
         : 'Pick the room/scope that owns release changes',
@@ -214,7 +250,7 @@ export async function buildActivationState(
     {
       id: 'source',
       label: 'Source directory',
-      status: config?.sourcePath ? 'done' : ownerReady ? 'pending' : 'blocked',
+      status: stepStatus(config?.sourcePath !== undefined && config.sourcePath !== '', ownerReady),
       detail: config?.sourcePath
         ? `Watching ${config.sourcePath}`
         : 'Point Vital at a changelog or release-notes directory',
@@ -224,7 +260,7 @@ export async function buildActivationState(
     {
       id: 'policy',
       label: 'Approval policy',
-      status: config ? 'done' : ownerReady ? 'pending' : 'blocked',
+      status: stepStatus(config !== null, ownerReady),
       detail: config
         ? `Reviews require the ${config.approverRole} role or higher`
         : `Default approver role: ${opts.approverRole ?? 'member'}`,
@@ -234,7 +270,7 @@ export async function buildActivationState(
     {
       id: 'budget',
       label: 'Attention budget',
-      status: config ? 'done' : ownerReady ? 'pending' : 'blocked',
+      status: stepStatus(config !== null, ownerReady),
       detail: config
         ? `$${config.dailyBudgetDollars}/day · ${config.humanMinutesBudget} human minutes/day`
         : 'Set daily spend and human-minute ceilings',
@@ -244,45 +280,31 @@ export async function buildActivationState(
     {
       id: 'ingested',
       label: 'First source receipt',
-      status: ingested ? 'done' : config ? 'pending' : 'blocked',
-      detail: ingested
-        ? 'At least one source item became ledger evidence'
-        : source.state === 'empty'
-          ? 'Source is empty — add a file, then sync'
-          : source.state === 'failed'
-            ? 'Ingestion failed — inspect the source status below'
-            : 'Run ingestion after configuring a source',
+      status: stepStatus(ingested, config !== null),
+      detail: sourceSyncDetail(ingested, source.state),
       actionHref: config && !ingested ? '/setup#sync' : undefined,
       actionLabel: config && !ingested ? 'Sync source' : undefined,
     },
     {
       id: 'workflow',
       label: 'First release workflow',
-      status: workflowId ? 'done' : ingested ? 'pending' : 'blocked',
-      detail: workflowId
-        ? `Ship-to-Result workflow ${workflowId} is running`
-        : ingested
-          ? 'Start the governed release fan-out from your first evidence'
-          : 'Available after the first source receipt succeeds',
-      actionHref: ingested && !workflowId ? '/setup#workflow' : workflowId ? `/console/workflows/${encodeURIComponent(workflowId)}` : undefined,
-      actionLabel: ingested && !workflowId ? 'Start release workflow' : workflowId ? 'Open workflow' : undefined,
+      status: stepStatus(workflowId !== null, ingested),
+      detail: firstWorkflowDetail(workflowId, ingested),
+      actionHref: firstWorkflowHref(workflowId, ingested),
+      actionLabel: firstWorkflowLabel(workflowId, ingested),
     },
   ];
 
   const checklistComplete = checklist.every((item) => item.status === 'done');
   const signupAt = await metaGet(db, signupKey(tenant));
   const firstReviewAt = await metaGet(db, firstReviewKey(tenant));
-  const timeToFirstReview =
-    signupAt
-      ? {
-          signupAt,
-          firstReviewAt,
-          elapsedSeconds:
-            firstReviewAt
-              ? Math.max(0, Math.round((Date.parse(firstReviewAt) - Date.parse(signupAt)) / 1000))
-              : Math.max(0, Math.round((Date.parse(now) - Date.parse(signupAt)) / 1000)),
-        }
-      : null;
+  const timeToFirstReview = signupAt
+    ? {
+        signupAt,
+        firstReviewAt,
+        elapsedSeconds: elapsedSince(signupAt, firstReviewAt ?? now),
+      }
+    : null;
 
   let nextAction: ActivationState['nextAction'] = null;
   const next = checklist.find((item) => item.status === 'pending');
@@ -508,9 +530,8 @@ export function renderActivationPanel(state: ActivationState, csrf: string, home
   if (!state.showPanel) return '';
   const items = state.checklist
     .map((item) => {
-      const action = item.actionHref && item.actionLabel
-        ? ` <a href="${esc(item.actionHref)}">${esc(item.actionLabel)}</a>`
-        : '';
+      const action =
+        item.actionHref && item.actionLabel ? ` <a href="${esc(item.actionHref)}">${esc(item.actionLabel)}</a>` : '';
       return `<li style="margin-bottom:10px">
 <span style="display:inline-block;background:${STATUS_COLOR[item.status]};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">${esc(item.status)}</span>
 <strong>${esc(item.label)}</strong> — ${esc(item.detail)}${action}

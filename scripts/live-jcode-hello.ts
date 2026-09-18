@@ -1,37 +1,40 @@
+/**
+ * Live-sibling probe (§0.6 gate): spawn the REAL jcode daemon AND the REAL
+ * jcode-harness-api-bridge (both built from the pinned upstream SHA — see
+ * docs/upstream.md), fully isolated (JCODE_HOME/JCODE_RUNTIME_DIR, telemetry/
+ * update/memory/swarm off), then run OUR client against the real chain:
+ *
+ *   JcodeClient -> bridge (api socket) -> daemon (legacy socket)
+ *
+ * Phases:
+ *   1. hello_ok from the real bridge; version negotiation against v1.
+ *   2. create_session returns a REAL session id minted by the real daemon
+ *      (the stub probe could never prove this — it faked the `state` reply).
+ *   3. Disconnect assertion: kill the daemon (OUR child, unambiguous), then
+ *      assert the client's socket closes (frame:close) and an inflight leg
+ *      rejects with [jcode:CLOSED] — a dead sibling surfaces as a rejection,
+ *      never a hang. Requests after disconnect fail NOT_CONNECTED.
+ *
+ * The daemon is started with --provider ollama --model llama3.2 (requires no
+ * credentials); session creation is daemon-side bookkeeping and makes no
+ * network call, so no Ollama server is needed for this probe to pass.
+ *
+ * Run:  npm run verify:jcode-live
+ * Env:  JCODE_BIN        (default .upstream/jcode-1jehuang/target/debug/jcode(.exe))
+ *       JCODE_BRIDGE_BIN (default .upstream/jcode-1jehuang/target/debug/jcode-harness-api-bridge(.exe))
+ *       JCODE_ISOLATION_ROOT (default a fresh OS temp dir per run)
+ *
+ * Exit 0 only if every phase above holds. Any crash or hang exits nonzero.
+ */
+
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { connect, createServer, type Socket, type Server } from 'node:net';
-import { JcodeClient, JcodeError } from '../src/jcode/client.ts';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { connect } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { JcodeClient } from '../src/jcode/client.ts';
 import { API_VERSION_MAJOR } from '../src/jcode/protocol.ts';
-
-/**
- * Live-sibling probe (§0.6 gate, partial): spawn the REAL
- * `jcode-harness-api-bridge` binary (built from the pinned upstream SHA —
- * see docs/upstream.md) on an isolated socket pair and run OUR client
- * against it over the real transport.
- *
- * What this proves: the wire contract holds against the actual sibling
- * (framing, hello handshake, version check, error replies), not just the
- * scripted FakeHarness. What it does NOT prove: session/turn work with a
- * real model behind the daemon (needs a provider key — TODO V2.1).
- *
- * The bridge dials the legacy daemon socket BEFORE sending hello_ok
- * (harness-api-server lib.rs: "Do not claim a usable connection before the
- * native daemon is reachable" — proven live 2026-09-17: hello with no
- * daemon is dropped with os error 232). So the probe stands a minimal
- * scripted daemon on the legacy socket — enough to accept the dial and
- * answer the first `state` frame — and hello_ok then comes from the real
- * bridge. The daemon here is OUR scripted stub, not jcode's daemon.
- *
- * Run:  tsx scripts/live-jcode-hello.ts
- * Env:  JCODE_BRIDGE_BIN (default: .upstream/jcode-1jehuang/target/debug/...)
- *       JCODE_API_SOCKET (default: a temp path under the OS temp dir)
- *
- * Exit 0: hello_ok from the live bridge + create_session fails CLEANLY
- * (rejection, no crash) once the stub daemon stops answering. Any crash or
- * hang exits nonzero.
- */
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -60,84 +63,103 @@ function pipeExists(pipe: string): Promise<boolean> {
   });
 }
 
-const bridgeBin = process.env.JCODE_BRIDGE_BIN ?? '.upstream/jcode-1jehuang/target/debug/jcode-harness-api-bridge.exe';
-const apiSock = process.env.JCODE_API_SOCKET ?? `${process.env.TEMP ?? '/tmp'}/vital-live-jcode-api.sock`;
-const legacySock = `${process.env.TEMP ?? '/tmp'}/vital-live-jcode-legacy.sock`;
+const repoRoot = process.cwd();
+const exe = process.platform === 'win32' ? '.exe' : '';
+const jcodeBin = process.env.JCODE_BIN ?? join(repoRoot, `.upstream/jcode-1jehuang/target/debug/jcode${exe}`);
+const bridgeBin =
+  process.env.JCODE_BRIDGE_BIN ??
+  join(repoRoot, `.upstream/jcode-1jehuang/target/debug/jcode-harness-api-bridge${exe}`);
+// Per-run isolation root: fresh JCODE_HOME/JCODE_RUNTIME_DIR per run, no
+// contact with any real ~/.jcode profile, no cross-run socket reuse.
+const isoRoot = process.env.JCODE_ISOLATION_ROOT ?? mkdtempSync(join(tmpdir(), 'vital-jcode-live-'));
+const home = join(isoRoot, 'home');
+const runDir = join(isoRoot, 'run');
+const apiSock = join(runDir, 'vital-api.sock');
+const legacySock = join(runDir, 'jcode.sock');
 const pipe = process.platform === 'win32' ? pipeNameFor(apiSock) : apiSock;
-const legacyPipe = process.platform === 'win32' ? pipeNameFor(legacySock) : legacySock;
 
+let daemon: ChildProcess | null = null;
 let bridge: ChildProcess | null = null;
-let legacyServer: Server | null = null;
 const fail = (msg: string): never => {
   console.error(`LIVE-JCODE FAIL: ${msg}`);
-  try {
-    bridge?.kill();
-  } catch {
-    /* already gone */
+  for (const p of [daemon, bridge]) {
+    try {
+      p?.kill();
+    } catch {
+      /* already gone */
+    }
   }
   try {
-    legacyServer?.close();
+    if (!process.env.JCODE_ISOLATION_ROOT) rmSync(isoRoot, { recursive: true, force: true });
   } catch {
-    /* already gone */
+    /* best effort */
   }
   process.exit(1);
 };
 
+console.log(`jcode  : ${jcodeBin}`);
 console.log(`bridge : ${bridgeBin}`);
-console.log(`socket : ${apiSock}`);
+console.log(`iso    : ${isoRoot}`);
 console.log(`pipe   : ${pipe}`);
-// .upstream/ is gitignored, so a fresh clone has no bridge binary — fail
-// loud with the rebuild path instead of a spawn-ENOENT crash or a 15 s
-// hang waiting on a pipe that will never appear.
-if (!existsSync(bridgeBin)) {
-  console.error(
-    `LIVE-JCODE FAIL: bridge binary not found at ${bridgeBin} — clone the pinned jcode (` +
-      `docs/upstream.md) to .upstream/jcode-1jehuang and build the harness-api bridge first, ` +
-      `or set JCODE_BRIDGE_BIN to a built binary.`,
-  );
-  process.exit(1);
+// .upstream/ is gitignored, so a fresh clone has neither binary — fail loud
+// with the rebuild path instead of a spawn-ENOENT crash or a 15 s hang.
+for (const [name, bin] of [
+  ['daemon', jcodeBin],
+  ['bridge', bridgeBin],
+] as const) {
+  if (!existsSync(bin)) {
+    console.error(
+      `LIVE-JCODE FAIL: ${name} binary not found at ${bin} — clone the pinned jcode ` +
+        `(docs/upstream.md) to .upstream/jcode-1jehuang and build both binaries, ` +
+        `or set JCODE_BIN / JCODE_BRIDGE_BIN.`,
+    );
+    process.exit(1);
+  }
 }
-// The bridge dials the legacy daemon socket before hello_ok, so a scripted
-// stub daemon must be listening first. It answers only the first `state`
-// frame (the attach handshake) with a stable fake session; anything else is
-// ignored — this stub exists so the bridge's hello gate opens, nothing more.
-legacyServer = createServer((sock: Socket) => {
-  console.log('[stub-daemon] bridge dialed the legacy socket');
-  let buf = '';
-  sock.setEncoding('utf8');
-  sock.on('data', (chunk: string) => {
-    buf += chunk;
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      let req: { type?: string; id?: number } | null = null;
-      try {
-        req = JSON.parse(line) as { type?: string; id?: number };
-      } catch {
-        continue;
-      }
-      if (req?.type === 'state' && typeof req.id === 'number') {
-        sock.write(JSON.stringify({ type: 'state', id: req.id, session_id: 'stub-session-1', status: 'idle' }) + '\n');
-        console.log('[stub-daemon] answered state frame');
-      }
-    }
-  });
-  sock.on('error', (e) => console.error(`[stub-daemon] connection error: ${e.message}`));
-});
-legacyServer.on('error', (e) => fail(`stub daemon could not listen on ${legacyPipe}: ${e.message}`));
-await new Promise<void>((res) => legacyServer!.listen(legacyPipe, res));
-console.log(`stub daemon listening on ${legacyPipe}`);
 
-bridge = spawn(bridgeBin, [apiSock, legacySock], { stdio: ['ignore', 'pipe', 'pipe'] });
+const isolationEnv: NodeJS.ProcessEnv = {
+  JCODE_HOME: home,
+  JCODE_RUNTIME_DIR: runDir,
+  JCODE_NO_TELEMETRY: '1',
+  JCODE_CHECK_UPDATES: '0',
+  JCODE_NO_MENUBAR: '1',
+  JCODE_MEMORY_ENABLED: '0',
+  JCODE_SWARM_ENABLED: '0',
+  JCODE_AMBIENT_ENABLED: '0',
+  JCODE_GATEWAY_ENABLED: '0',
+  JCODE_DISABLE_POWER_INHIBIT: '1',
+  JCODE_OPENROUTER_MODEL_CATALOG: '0',
+};
+
+// Phase 1: the real daemon. --provider ollama requires no credentials and
+// create_session is daemon-side bookkeeping (no model call), so the chain
+// below exercises the real sibling without any Ollama server or API key.
+mkdirSync(home, { recursive: true });
+mkdirSync(runDir, { recursive: true });
+daemon = spawn(
+  jcodeBin,
+  ['--no-update', '--no-selfdev', '--socket', legacySock, '--provider', 'ollama', '--model', 'llama3.2', 'serve'],
+  { env: { ...process.env, ...isolationEnv }, stdio: ['ignore', 'pipe', 'pipe'] },
+);
+daemon.stdout?.on('data', (d: Buffer) => process.stdout.write(`[daemon] ${d}`));
+daemon.stderr?.on('data', (d: Buffer) => process.stderr.write(`[daemon:err] ${d}`));
+daemon.on('exit', (code) => {
+  if (code !== 0 && code !== null) console.error(`[daemon] exited ${code}`);
+});
+
+// Phase 2: the real bridge. It dials the daemon socket BEFORE hello_ok
+// (harness-api-server lib.rs), so the daemon must already be listening.
+bridge = spawn(bridgeBin, [apiSock, legacySock], {
+  env: { ...process.env, ...isolationEnv },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
 bridge.stdout?.on('data', (d: Buffer) => process.stdout.write(`[bridge] ${d}`));
 bridge.stderr?.on('data', (d: Buffer) => process.stderr.write(`[bridge:err] ${d}`));
 bridge.on('exit', (code) => {
   if (code !== 0 && code !== null) console.error(`[bridge] exited ${code}`);
 });
 
-// Wait for the named pipe to appear (bounded — a hang here is a failure).
+// Wait for the api socket to appear (bounded — a hang here is a failure).
 let up = false;
 for (let i = 0; i < 150; i++) {
   if (await pipeExists(pipe)) {
@@ -146,8 +168,9 @@ for (let i = 0; i < 150; i++) {
   }
   await sleep(100);
 }
-if (!up) fail(`bridge never published ${pipe}`);
+if (!up) fail('bridge never published its api socket');
 
+// Phase 3: hello_ok from the real bridge over the real transport.
 const client = new JcodeClient({ socketPath: pipe, clientLabel: 'vital-live-probe/0.0.1' });
 try {
   await client.connect();
@@ -160,20 +183,65 @@ if (typeof info?.v === 'number' && info.v !== API_VERSION_MAJOR) {
   fail(`bridge speaks v${info.v}, Vital speaks v${API_VERSION_MAJOR}`);
 }
 
-// Boundary probe: the stub daemon answers only the attach handshake, and we
-// now close it — session work must then fail. The question is HOW: a
-// rejection is a governed boundary; a crash or hang is a bug in us or them.
-legacyServer.close(() => console.log('[stub-daemon] closed — the daemon boundary is now real'));
-await sleep(200);
+// Phase 4: a REAL session id minted by the REAL daemon (the stub probe faked
+// the attach handshake; this is the assertion it could never make).
+let sessionId: string;
 try {
-  const sid = await client.createSession({ timeoutMs: 5_000 });
-  fail(`UNEXPECTED: live bridge created session ${sid} with no daemon behind it`);
+  sessionId = await client.createSession();
 } catch (e) {
-  console.log(`create_session without daemon fails cleanly: ${(e as Error).message}`);
+  fail(`create_session against the real daemon failed: ${(e as Error).message}`);
+}
+if (!sessionId) fail('create_session returned no session id');
+console.log(`real daemon minted session: ${sessionId}`);
+
+// Phase 5: disconnect assertion. Kill OUR daemon child — the unambiguous
+// "sibling died" event — then assert both closure signals:
+//   (a) an inflight leg rejects with [jcode:CLOSED] (never hangs), and
+//   (b) the client emits 'close' (runner.ts relies on this to fail runs).
+// The probe request must be one the BRIDGE cannot answer locally:
+// list_sessions is answered locally from persisted metadata, so it resolves
+// even with the daemon gone. A legacy-forwarded request (daemon round trip)
+// is the real "dead sibling" signal.
+daemon?.kill();
+const started = Date.now();
+const inflight = client.request(
+  'soft_interrupt',
+  { session_id: sessionId, content: 'ping', urgent: true },
+  { timeoutMs: 30_000 },
+);
+let closedEvent = false;
+client.once('close', () => {
+  closedEvent = true;
+});
+try {
+  await inflight;
+  fail('UNEXPECTED: inflight request resolved after the daemon was killed');
+} catch (e) {
+  const msg = (e as Error).message;
+  if (!msg.includes('CLOSED')) fail(`inflight leg rejected with the wrong error: ${msg}`);
+}
+if (Date.now() - started > 10_000) fail('disconnect took too long to surface');
+if (!closedEvent) fail('client never emitted close after daemon death');
+console.log(`disconnect surfaced in ${Date.now() - started}ms: close event + [jcode:CLOSED] rejection`);
+
+// Phase 6: after disconnect, requests fail fast instead of hanging.
+try {
+  await client.request('list_sessions', {}, { timeoutMs: 5_000 });
+  fail('UNEXPECTED: request after disconnect succeeded');
+} catch (e) {
+  const msg = (e as Error).message;
+  if (!msg.includes('NOT_CONNECTED')) fail(`post-disconnect request failed with the wrong error: ${msg}`);
 }
 
 client.close();
-await sleep(200);
-bridge.kill();
-legacyServer.close();
-console.log('LIVE-JCODE OK: hello_ok from the real sibling; daemon boundary fails clean, no crash');
+try {
+  bridge?.kill();
+} catch {
+  /* already gone */
+}
+try {
+  if (!process.env.JCODE_ISOLATION_ROOT) rmSync(isoRoot, { recursive: true, force: true });
+} catch {
+  /* best effort */
+}
+console.log('LIVE-JCODE OK: real daemon + real bridge: hello_ok, real session, clean disconnect');

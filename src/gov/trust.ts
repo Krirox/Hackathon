@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
+import type { Coordinator } from '../coord/coordinator.ts';
+import type { HarnessAdapter } from '../substrate/harness.ts';
 import {
   authorize,
   REVERSIBLE_CLEAN_THRESHOLD,
@@ -47,9 +49,18 @@ async function audit(
 /** Read the Trust Ledger into the shape `authorize()` consumes. */
 export async function trustFor(db: AsyncDb, tenant: string, scope: string, actionClass: string): Promise<TrustState> {
   const r = (await db
-    .prepare('SELECT clean, frozen FROM trust_scores WHERE tenant = ? AND scope = ? AND action_class = ?')
-    .get(tenant, scope, actionClass)) as { clean: number; frozen: number } | undefined;
-  return { cleanInstances: Number(r?.clean ?? 0), frozen: Number(r?.frozen ?? 0) === 1 };
+    .prepare(
+      'SELECT clean, frozen, granted, override_rate, total FROM trust_scores WHERE tenant = ? AND scope = ? AND action_class = ?',
+    )
+    .get(tenant, scope, actionClass)) as
+    { clean: number; frozen: number; granted?: number; override_rate?: number; total?: number } | undefined;
+  return {
+    cleanInstances: Number(r?.clean ?? 0),
+    frozen: Number(r?.frozen ?? 0) === 1,
+    granted: Number(r?.granted ?? 0) === 1,
+    overrideRate: r?.override_rate !== undefined && r?.override_rate !== null ? Number(r.override_rate) : 0,
+    total: Number(r?.total ?? 0),
+  };
 }
 
 export interface TrustOutcome {
@@ -78,15 +89,23 @@ export async function recordTrustOutcome(
   await db.transaction(async () => {
     await db
       .prepare(
-        `INSERT INTO trust_scores (tenant, scope, action_class, clean, total, override_rate, honey_misses, granted, frozen, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO trust_scores (tenant, scope, action_class, clean, total, overrides, override_rate, honey_misses, granted, frozen, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(tenant, scope, action_class) DO NOTHING`,
       )
-      .run(tenant, scope, actionClass, 0, 0, 0, 0, 0, 0, now);
+      .run(tenant, scope, actionClass, 0, 0, 0, 0, 0, 0, 0, now);
     if (outcome.honeyMiss === true) {
       await db
         .prepare(
-          'UPDATE trust_scores SET honey_misses = honey_misses + 1, frozen = 1, clean = 0, total = total + 1, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+          `UPDATE trust_scores
+             SET honey_misses = honey_misses + 1,
+                 frozen = 1,
+                 clean = 0,
+                 granted = 0,
+                 total = total + 1,
+                 override_rate = (overrides * 1.0) / (total + 1),
+                 updated_at = ?
+           WHERE tenant = ? AND scope = ? AND action_class = ?`,
         )
         .run(now, tenant, scope, actionClass);
       await audit(
@@ -98,12 +117,23 @@ export async function recordTrustOutcome(
         'honeytask miss — automatic freeze',
         now,
       );
+      // FLOW-022: the operator is notified of every automation self-halt.
+      // The notification persists as an AUTOMATION_SELF_HALT audit row in
+      // the same transaction — the audit log is the delivery fallback.
+      await recordSelfHalt(db, tenant, scope, actionClass, 'honeytask miss — automatic freeze', 'trust', [], now);
       return;
     }
     if (outcome.override === true || !outcome.clean) {
       await db
         .prepare(
-          'UPDATE trust_scores SET clean = 0, total = total + 1, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+          `UPDATE trust_scores
+             SET overrides = overrides + 1,
+                 clean = 0,
+                 granted = 0,
+                 total = total + 1,
+                 override_rate = ((overrides + 1) * 1.0) / (total + 1),
+                 updated_at = ?
+           WHERE tenant = ? AND scope = ? AND action_class = ?`,
         )
         .run(now, tenant, scope, actionClass);
       return;
@@ -113,7 +143,13 @@ export async function recordTrustOutcome(
     // atomic move, never two writers racing past each other.
     await db
       .prepare(
-        'UPDATE trust_scores SET clean = clean + 1, total = total + 1, granted = CASE WHEN clean + 1 >= ? THEN 1 ELSE granted END, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+        `UPDATE trust_scores
+           SET clean = clean + 1,
+               total = total + 1,
+               granted = CASE WHEN clean + 1 >= ? AND frozen = 0 THEN 1 ELSE granted END,
+               override_rate = (overrides * 1.0) / (total + 1),
+               updated_at = ?
+         WHERE tenant = ? AND scope = ? AND action_class = ?`,
       )
       .run(REVERSIBLE_CLEAN_THRESHOLD, now, tenant, scope, actionClass);
   });
@@ -130,7 +166,7 @@ export async function clearFreeze(
   const at = now ?? new Date().toISOString();
   await db
     .prepare(
-      'UPDATE trust_scores SET frozen = 0, clean = 0, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+      'UPDATE trust_scores SET frozen = 0, clean = 0, granted = 0, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
     )
     .run(at, tenant, scope, actionClass);
   await audit(
@@ -215,12 +251,22 @@ const killKey = (tenant: string, scope: string, actionClass: string): string =>
   `kill:${tenant}:${scope}:${actionClass}`;
 
 /** Engage a kill switch at tenant (scope=*, class=*), scope, or action-class level. Audited. */
-export async function setKill(db: AsyncDb, tenant: string, kill: KillScope, by: string, now?: string): Promise<void> {
+export async function setKill(
+  db: AsyncDb,
+  tenant: string,
+  kill: KillScope,
+  by: string,
+  now?: string,
+  detail?: StopDetail,
+): Promise<void> {
   const at = now ?? new Date().toISOString();
+  const payload: StopPayload = { by, at };
+  if (detail?.reason !== undefined) payload.reason = detail.reason;
+  if (detail?.recoveryRequires !== undefined) payload.recoveryRequires = detail.recoveryRequires;
   await db
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(killKey(tenant, kill.scope, kill.actionClass), JSON.stringify({ by, at }));
-  await audit(db, tenant, by, 'KILL_ENGAGED', `${kill.scope}/${kill.actionClass}`, `halted at ${at}`, at);
+    .run(killKey(tenant, kill.scope, kill.actionClass), JSON.stringify(payload));
+  await audit(db, tenant, by, 'KILL_ENGAGED', `${kill.scope}/${kill.actionClass}`, JSON.stringify(payload), at);
 }
 
 export async function clearKill(db: AsyncDb, tenant: string, kill: KillScope, by: string, now?: string): Promise<void> {
@@ -244,16 +290,119 @@ export async function checkKill(db: AsyncDb, tenant: string, scope: string, acti
   return false;
 }
 
+export interface KillDrillOptions {
+  now?: string;
+  executor?: {
+    coord: Coordinator;
+    adapter: HarnessAdapter;
+    scope?: string;
+  };
+}
+
 export interface KillDrill {
-  mode: 'policy-only';
+  mode: 'policy-only' | 'policy-and-executor';
   levels: string[];
   checks: { level: string; halted: boolean; isolated: boolean; released: boolean }[];
+  executorHalt?: { halted: boolean; verified: boolean; adapter: string; detail?: string };
   allHalted: boolean;
   elapsedMs: number;
 }
 
-export async function killDrill(db: AsyncDb, tenant: string, by: string, now?: string): Promise<KillDrill> {
+export async function verifyExecutorHalt(
+  db: AsyncDb,
+  coord: Coordinator,
+  adapter: HarnessAdapter,
+  tenant: string,
+  scope = 'drill-executor-scope',
+  _actionClass = 'ACT_REVERSIBLE',
+  now?: string,
+): Promise<{ halted: boolean; verified: boolean; adapter: string; detail?: string }> {
   const at = now ?? new Date().toISOString();
+  const originScope = `${scope}-origin`;
+  const claimId = `clm_drill_${randomUUID()}`;
+  await db
+    .prepare(
+      `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor, extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, provisional, created_at, seq)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      claimId,
+      tenant,
+      'drill',
+      'OBSERVATION',
+      'kill drill grounding claim',
+      1,
+      'drill://grounding',
+      'PRIMARY_SOURCE',
+      'drill',
+      '1.0',
+      at,
+      at,
+      at,
+      'ACCEPTED',
+      'drill:system',
+      scope,
+      0,
+      at,
+      1,
+    );
+
+  const proposal = await coord.submit({
+    tenant,
+    messageClass: 'REQUEST',
+    originScope,
+    targetScope: scope,
+    goal: 'verify live executor halt during kill drill',
+    deliverableSchema: 'drill.verify',
+    claimRefs: [claimId],
+    bid: { dollars: 1, tokens: 100, humanMinutes: 5, maxRounds: 1 },
+    onBehalfOf: 'drill:system',
+  });
+  if (!proposal.admitted) {
+    return {
+      halted: false,
+      verified: false,
+      adapter: adapter.name,
+      detail: `failed to admit drill request: ${proposal.reason}`,
+    };
+  }
+  const requestId = proposal.request.id;
+  await setKill(db, tenant, { scope, actionClass: '*' }, 'drill:system', at);
+  try {
+    const outcome = await adapter.run(tenant, requestId, {
+      command: 'verify halt',
+      claimRefs: [claimId],
+      onBehalfOf: 'drill:system',
+      maxDollars: 1,
+      maxTokens: 100,
+      intent: 'test:kill',
+      tier: 'MODEL',
+    });
+    const halted = outcome.status === 'DENIED' || outcome.status === 'FAILED';
+    await audit(
+      db,
+      tenant,
+      'drill:system',
+      'EXECUTOR_KILL_DRILL',
+      `${scope}/*`,
+      JSON.stringify({ adapter: adapter.name, halted, status: outcome.status }),
+      at,
+    );
+    return { halted, verified: true, adapter: adapter.name, detail: `executor halt outcome: ${outcome.status}` };
+  } finally {
+    await clearKill(db, tenant, { scope, actionClass: '*' }, 'drill:system', at);
+  }
+}
+
+export async function killDrill(
+  db: AsyncDb,
+  tenant: string,
+  by: string,
+  nowOrOpts?: string | KillDrillOptions,
+  maybeOpts?: KillDrillOptions,
+): Promise<KillDrill> {
+  const opts: KillDrillOptions = typeof nowOrOpts === 'object' && nowOrOpts !== null ? nowOrOpts : (maybeOpts ?? {});
+  const at = typeof nowOrOpts === 'string' ? nowOrOpts : (opts.now ?? new Date().toISOString());
   const t0 = Date.now();
   const drillTenant = `drill-${randomUUID()}`;
   const levels: KillScope[] = [
@@ -288,7 +437,25 @@ export async function killDrill(db: AsyncDb, tenant: string, by: string, now?: s
       const released = !(await checkKill(db, drillTenant, 'engineering', 'ACT_REVERSIBLE'));
       checks.push({ level: `${level.scope}/${level.actionClass}`, halted, isolated, released });
     }
-    const allHalted = checks.every((check) => check.halted && check.isolated && check.released);
+
+    let executorHalt: { halted: boolean; verified: boolean; adapter: string; detail?: string } | undefined;
+    if (opts.executor) {
+      const { coord, adapter, scope } = opts.executor;
+      executorHalt = await verifyExecutorHalt(
+        db,
+        coord,
+        adapter,
+        drillTenant,
+        scope ?? 'drill-executor',
+        'ACT_REVERSIBLE',
+        at,
+      );
+    }
+
+    const mode = opts.executor ? 'policy-and-executor' : 'policy-only';
+    const allHalted =
+      checks.every((check) => check.halted && check.isolated && check.released) &&
+      (executorHalt ? executorHalt.halted : true);
     const elapsedMs = Date.now() - t0;
     await audit(
       db,
@@ -296,10 +463,17 @@ export async function killDrill(db: AsyncDb, tenant: string, by: string, now?: s
       by,
       'KILL_DRILL',
       tenant,
-      JSON.stringify({ mode: 'policy-only', allHalted, elapsedMs, checks }),
+      JSON.stringify({ mode, allHalted, elapsedMs, checks, ...(executorHalt ? { executorHalt } : {}) }),
       at,
     );
-    return { mode: 'policy-only', levels: checks.map((check) => check.level), checks, allHalted, elapsedMs };
+    return {
+      mode,
+      levels: checks.map((check) => check.level),
+      checks,
+      ...(executorHalt ? { executorHalt } : {}),
+      allHalted,
+      elapsedMs,
+    };
   });
 }
 
@@ -330,17 +504,18 @@ export async function setFreeze(
   await db.transaction(async () => {
     await db
       .prepare(
-        `INSERT INTO trust_scores (tenant, scope, action_class, clean, total, override_rate, honey_misses, granted, frozen, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO trust_scores (tenant, scope, action_class, clean, total, overrides, override_rate, honey_misses, granted, frozen, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(tenant, scope, action_class) DO NOTHING`,
       )
-      .run(tenant, scope, actionClass, 0, 0, 0, 0, 0, 0, at);
+      .run(tenant, scope, actionClass, 0, 0, 0, 0, 0, 0, 0, at);
     await db
       .prepare(
-        'UPDATE trust_scores SET frozen = 1, clean = 0, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
+        'UPDATE trust_scores SET frozen = 1, clean = 0, granted = 0, updated_at = ? WHERE tenant = ? AND scope = ? AND action_class = ?',
       )
       .run(at, tenant, scope, actionClass);
     await audit(db, tenant, by, 'TRUST_FROZEN', `${scope}/${actionClass}`, reason, at);
+    await recordSelfHalt(db, tenant, scope, actionClass, reason, by, [], at);
   });
 }
 
@@ -365,4 +540,601 @@ export async function evaluateFreeze(
   const reason = `human detection ${detectionRate} < ${threshold} — autonomy frozen until review`;
   await setFreeze(db, tenant, scope, actionClass, reason, by, now);
   return { frozen: true, reason };
+}
+
+export interface StopDetail {
+  reason?: string;
+  recoveryRequires?: string;
+}
+
+interface StopPayload {
+  by: string;
+  at: string;
+  reason?: string;
+  recoveryRequires?: string;
+}
+
+export interface StopRecord {
+  scope: string;
+  actionClass: string;
+  by: string;
+  at: string;
+  reason: string | null;
+  recoveryRequires: string | null;
+}
+
+export interface StopDisplay extends StopRecord {
+  affected: string;
+  recovery: string;
+}
+
+export interface HaltEffect {
+  effect: string;
+  detail: string;
+}
+
+export interface HaltEffectMatrix {
+  scope: string;
+  actionClass: string;
+  inFlight: HaltEffect;
+  queued: HaltEffect;
+  external: HaltEffect;
+}
+
+export interface SelfHaltNotification {
+  kind: 'self-halt';
+  tenant: string;
+  scope: string;
+  actionClass: string;
+  reason: string;
+  detectedAt: string;
+  affected: string[];
+  recovery: string;
+  fallback: string;
+}
+
+export interface HaltEvidence {
+  drills: { action: string; actor: string; target: string; detail: string | null; at: string }[];
+  real: { action: string; actor: string; target: string; detail: string | null; at: string }[];
+}
+
+export interface RuntimeHaltDrill {
+  mode: 'runtime-halt';
+  scope: string;
+  actionClass: string;
+  held: boolean;
+  released: boolean;
+  at: string;
+}
+
+function parseStopRow(tenant: string, key: string, value: string): StopRecord | null {
+  const prefix = `kill:${tenant}:`;
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length).split(':');
+  if (rest.length !== 2 || !rest[0] || !rest[1]) return null;
+  let payload: StopPayload;
+  try {
+    payload = JSON.parse(value) as StopPayload;
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload.by !== 'string' || typeof payload.at !== 'string') return null;
+  return {
+    scope: rest[0] as string,
+    actionClass: rest[1] as string,
+    by: payload.by,
+    at: payload.at,
+    reason: typeof payload.reason === 'string' ? payload.reason : null,
+    recoveryRequires: typeof payload.recoveryRequires === 'string' ? payload.recoveryRequires : null,
+  };
+}
+
+export async function listStops(db: AsyncDb, tenant: string): Promise<StopRecord[]> {
+  const rows = (await db
+    .prepare('SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key')
+    .all(`kill:${tenant}:%`)) as { key: string; value: string }[];
+  const out: StopRecord[] = [];
+  for (const row of rows) {
+    const parsed = parseStopRow(tenant, String(row.key), String(row.value));
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
+export async function describeStops(db: AsyncDb, tenant: string): Promise<StopDisplay[]> {
+  const stops = await listStops(db, tenant);
+  return stops.map((stop) => ({
+    ...stop,
+    affected:
+      `scope "${stop.scope}" × class "${stop.actionClass}" — new authorizations denied; ` +
+      `in-flight work is not force-terminated; queued work is held at admission`,
+    recovery:
+      stop.recoveryRequires ??
+      'authorized recovery with a recorded reason via recoverStop (audited; a restart does not clear this stop)',
+  }));
+}
+
+export async function recoveryRequired(db: AsyncDb, tenant: string): Promise<StopRecord[]> {
+  return listStops(db, tenant);
+}
+
+export async function recoverStop(
+  db: AsyncDb,
+  tenant: string,
+  kill: KillScope,
+  by: string,
+  evidence: { reason: string; approvedBy?: string; now?: string },
+): Promise<StopRecord> {
+  if (!evidence.reason) throw new TrustError('RECOVERY_REASON_REQUIRED', 'recovery needs a recorded reason');
+  const stops = await listStops(db, tenant);
+  const active = stops.find((stop) => stop.scope === kill.scope && stop.actionClass === kill.actionClass);
+  if (!active) throw new TrustError('NO_ACTIVE_STOP', `no active stop for ${kill.scope}/${kill.actionClass}`);
+  const at = evidence.now ?? new Date().toISOString();
+  await db.prepare('DELETE FROM meta WHERE key = ?').run(killKey(tenant, kill.scope, kill.actionClass));
+  await audit(
+    db,
+    tenant,
+    by,
+    'KILL_RECOVERED',
+    `${kill.scope}/${kill.actionClass}`,
+    JSON.stringify({ reason: evidence.reason, approvedBy: evidence.approvedBy ?? null, recoveredAt: at }),
+    at,
+  );
+  return active;
+}
+
+export function haltEffects(scope: string, actionClass: string): HaltEffectMatrix {
+  return {
+    scope,
+    actionClass,
+    inFlight: {
+      effect: 'not-force-terminated',
+      detail:
+        'the stop flag is enforced at authorization boundaries; work already executing is not killed by the flag and must be investigated before recovery',
+    },
+    queued: {
+      effect: 'held-at-admission',
+      detail: 'queued work stays queued; new admission and authorization are denied while the stop is active',
+    },
+    external: {
+      effect: 'human-command-only',
+      detail:
+        'external irreversible operations never start autonomously; reversible external work started before the halt needs explicit compensation review',
+    },
+  };
+}
+
+export function buildSelfHaltNotification(input: {
+  tenant: string;
+  scope: string;
+  actionClass: string;
+  reason: string;
+  detectedAt: string;
+  affected?: string[];
+  recovery?: string;
+}): SelfHaltNotification {
+  return {
+    kind: 'self-halt',
+    tenant: input.tenant,
+    scope: input.scope,
+    actionClass: input.actionClass,
+    reason: input.reason,
+    detectedAt: input.detectedAt,
+    affected: input.affected ?? [],
+    recovery: input.recovery ?? 'authorized recovery with a recorded reason via recoverStop',
+    fallback:
+      'audit-log AUTOMATION_SELF_HALT row — the notification payload is always persisted even if delivery fails',
+  };
+}
+
+export async function recordSelfHalt(
+  db: AsyncDb,
+  tenant: string,
+  scope: string,
+  actionClass: string,
+  reason: string,
+  by: string,
+  affected: string[],
+  now?: string,
+): Promise<SelfHaltNotification> {
+  const at = now ?? new Date().toISOString();
+  const notification = buildSelfHaltNotification({ tenant, scope, actionClass, reason, detectedAt: at, affected });
+  await audit(
+    db,
+    tenant,
+    by,
+    'AUTOMATION_SELF_HALT',
+    `${scope}/${actionClass}`,
+    JSON.stringify({ reason, affected, detectedAt: at }),
+    at,
+  );
+  return notification;
+}
+
+export async function listHaltEvidence(db: AsyncDb, tenant: string): Promise<HaltEvidence> {
+  const rows = (await db
+    .prepare(
+      `SELECT action, actor, target, detail, at FROM audit_log
+        WHERE tenant = ? AND action IN
+          ('KILL_DRILL','RUNTIME_HALT_DRILL','KILL_ENGAGED','KILL_CLEARED','KILL_RECOVERED','AUTOMATION_SELF_HALT','TRUST_FROZEN')
+        ORDER BY seq`,
+    )
+    .all(tenant)) as { action: string; actor: string; target: string; detail: string | null; at: string }[];
+  const drills: HaltEvidence['drills'] = [];
+  const real: HaltEvidence['real'] = [];
+  for (const row of rows) {
+    const entry = {
+      action: String(row.action),
+      actor: String(row.actor),
+      target: String(row.target),
+      detail: row.detail == null ? null : String(row.detail),
+      at: String(row.at),
+    };
+    if (entry.action === 'KILL_DRILL' || entry.action === 'RUNTIME_HALT_DRILL') drills.push(entry);
+    else real.push(entry);
+  }
+  return { drills, real };
+}
+
+export async function runtimeHaltDrill(
+  db: AsyncDb,
+  tenant: string,
+  kill: KillScope,
+  by: string,
+  now?: string,
+): Promise<RuntimeHaltDrill> {
+  const at = now ?? new Date().toISOString();
+  const key = killKey(tenant, kill.scope, kill.actionClass);
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(key, JSON.stringify({ by, at, reason: 'runtime halt drill — real engagement, released immediately' }));
+  const probeScope = kill.scope === '*' ? 'drill-probe' : kill.scope;
+  const probeClass = kill.actionClass === '*' ? 'READ' : kill.actionClass;
+  const held = await checkKill(db, tenant, probeScope, probeClass).finally(async () => {
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+  });
+  const released = !(await checkKill(db, tenant, probeScope, probeClass));
+  await audit(
+    db,
+    tenant,
+    by,
+    'RUNTIME_HALT_DRILL',
+    `${kill.scope}/${kill.actionClass}`,
+    JSON.stringify({ mode: 'runtime-halt', held, released }),
+    at,
+  );
+  return { mode: 'runtime-halt', scope: kill.scope, actionClass: kill.actionClass, held, released, at };
+}
+
+export function liveness(now?: string): { alive: true; at: string } {
+  return { alive: true, at: now ?? new Date().toISOString() };
+}
+
+export interface DependencyCheck {
+  name: string;
+  optional?: boolean;
+  check: () => Promise<{ ok: boolean; detail?: string; unconfigured?: boolean }>;
+}
+
+export interface ReadinessCheckResult {
+  name: string;
+  status: 'ok' | 'failing' | 'timeout' | 'unconfigured-optional' | 'unconfigured-required';
+  detail?: string;
+}
+
+export interface ReadinessReport {
+  ready: boolean;
+  at: string;
+  elapsedMs: number;
+  checks: ReadinessCheckResult[];
+}
+
+async function runBoundedCheck(dep: DependencyCheck, timeoutMs: number): Promise<ReadinessCheckResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      dep.check(),
+      new Promise<{ ok: boolean; detail?: string; unconfigured?: boolean }>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('READINESS_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+    if (outcome.ok) return { name: dep.name, status: 'ok', detail: outcome.detail };
+    if (outcome.unconfigured === true || /not configured|unconfigured|missing/i.test(outcome.detail ?? '')) {
+      if (dep.optional === true) return { name: dep.name, status: 'unconfigured-optional', detail: outcome.detail };
+      return { name: dep.name, status: 'unconfigured-required', detail: outcome.detail };
+    }
+    return { name: dep.name, status: 'failing', detail: outcome.detail };
+  } catch (err) {
+    if ((err as Error).message === 'READINESS_TIMEOUT') return { name: dep.name, status: 'timeout' };
+    const detail = (err as Error).message;
+    if (dep.optional === true && /not configured|unconfigured|missing/i.test(detail)) {
+      return { name: dep.name, status: 'unconfigured-optional', detail };
+    }
+    return { name: dep.name, status: 'failing', detail };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export async function checkReadiness(
+  deps: DependencyCheck[],
+  opts: { timeoutMs?: number; now?: string } = {},
+): Promise<ReadinessReport> {
+  const timeoutMs = opts.timeoutMs ?? 2000;
+  const t0 = Date.now();
+  const checks: ReadinessCheckResult[] = [];
+  for (const dep of deps) {
+    checks.push(await runBoundedCheck(dep, timeoutMs));
+  }
+  const ready = checks.every((check) => check.status === 'ok' || check.status === 'unconfigured-optional');
+  return { ready, at: opts.now ?? new Date().toISOString(), elapsedMs: Date.now() - t0, checks };
+}
+
+export function mintSupportRef(): string {
+  return `sup_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
+export function sanitizeDiagnostic(text: string): string {
+  return text
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted-key]')
+    .replace(/postgres(?:ql)?:\/\/[^\s'"]+/gi, '[redacted-url]')
+    .replace(/bearer\s+[A-Za-z0-9\-._~+/=]+/gi, 'bearer [redacted]')
+    .replace(/sk-[A-Za-z0-9\-_]{8,}/g, '[redacted]')
+    .replace(/(password|passwd|secret|api[_-]?key|token)\s*[:=]\s*\S+/gi, '$1=[redacted]');
+}
+
+export function correlateDiagnostic(input: {
+  detail: string;
+  tenant?: string;
+  action?: string;
+  supportRef?: string;
+  now?: string;
+}): { supportRef: string; sanitized: string; tenant: string | null; action: string | null; at: string } {
+  return {
+    supportRef: input.supportRef ?? mintSupportRef(),
+    sanitized: sanitizeDiagnostic(input.detail),
+    tenant: input.tenant ?? null,
+    action: input.action ?? null,
+    at: input.now ?? new Date().toISOString(),
+  };
+}
+
+export type FailureClass =
+  'rate-limit' | 'timeout-unknown' | 'dependency-outage' | 'validation' | 'conflict' | 'sensitive' | 'auth' | 'unknown';
+
+export interface RetryGuidance {
+  retryable: boolean;
+  strategy: string;
+  reason: string;
+}
+
+const RETRY_GUIDANCE: Record<FailureClass, RetryGuidance> = {
+  'rate-limit': {
+    retryable: true,
+    strategy: 'bounded-retry-with-backoff',
+    reason: 'rate limits clear with time; retry with backoff inside the same idempotency key',
+  },
+  'timeout-unknown': {
+    retryable: true,
+    strategy: 'reconcile-before-retry',
+    reason:
+      'an unknown result may have executed; reconcile server state first, never assume failure means nothing happened',
+  },
+  'dependency-outage': {
+    retryable: true,
+    strategy: 'wait-for-readiness-then-retry',
+    reason: 'retry only after readiness reports the dependency healthy again',
+  },
+  validation: {
+    retryable: false,
+    strategy: 'fix-and-resubmit',
+    reason: 'validation failures repeat deterministically; retrying identical input helps nothing',
+  },
+  conflict: {
+    retryable: false,
+    strategy: 're-read-then-resubmit',
+    reason: 'stale or conflicting state needs a fresh read and an explicit new submission',
+  },
+  sensitive: {
+    retryable: false,
+    strategy: 'explicit-resubmission-only',
+    reason:
+      'sensitive actions (approvals, spends, external effects) are never blindly replayed; a human resubmits explicitly',
+  },
+  auth: {
+    retryable: false,
+    strategy: 'reauthenticate-then-resubmit',
+    reason: 'authentication failures need fresh credentials and explicit resubmission, never silent replay',
+  },
+  unknown: {
+    retryable: false,
+    strategy: 'investigate-first',
+    reason: 'unknown failures fail closed; investigate before any retry',
+  },
+};
+
+export function retryGuidance(failureClass: FailureClass): RetryGuidance {
+  return RETRY_GUIDANCE[failureClass] ?? RETRY_GUIDANCE.unknown;
+}
+
+export interface SettingEntry {
+  key: string;
+  area: 'approval' | 'budget' | 'scope' | 'trust' | 'stop';
+  entryPoint: string;
+  startupOnly: boolean;
+  description: string;
+}
+
+export const SETTINGS_INVENTORY: SettingEntry[] = [
+  {
+    key: 'approver-role',
+    area: 'approval',
+    entryPoint: 'serve --approver-role flag (startup)',
+    startupOnly: true,
+    description: 'minimum membership role that may approve; default member',
+  },
+  {
+    key: 'reversible-clean-threshold',
+    area: 'trust',
+    entryPoint: 'authorize() cleanThreshold (default 200)',
+    startupOnly: false,
+    description: 'clean instances before ACT_REVERSIBLE may run autonomous',
+  },
+  {
+    key: 'pinned-scopes',
+    area: 'scope',
+    entryPoint: 'authorize() pinnedScopes (default money,customer,production,finance)',
+    startupOnly: false,
+    description: 'scopes where ACT_REVERSIBLE never goes autonomous',
+  },
+  {
+    key: 'request-bid-limits',
+    area: 'budget',
+    entryPoint: 'coord submit bid dollars/tokens per request',
+    startupOnly: false,
+    description: 'per-request spend reservation enforced at admission',
+  },
+  {
+    key: 'kill-switch',
+    area: 'stop',
+    entryPoint: 'setKill/clearKill/recoverStop (runtime, audited)',
+    startupOnly: false,
+    description: 'tenant/scope/action-class halt and audited recovery',
+  },
+  {
+    key: 'kill-drill-mode',
+    area: 'stop',
+    entryPoint: 'killDrill (policy-only) vs runtimeHaltDrill (real engage-and-release)',
+    startupOnly: false,
+    description: 'drill mode selector; drills never imply production readiness',
+  },
+];
+
+export interface PolicySource {
+  setting: string;
+  value: string;
+  source: 'startup' | 'runtime' | 'default';
+}
+
+const POLICY_DEFAULTS: Record<string, string> = {
+  'approver-role': 'member',
+  'reversible-clean-threshold': '200',
+  'pinned-scopes': 'money,customer,production,finance',
+  'request-bid-limits': 'per-request',
+  'kill-switch': 'none-active',
+  'kill-drill-mode': 'policy-only',
+};
+
+export function effectivePolicy(input: { values?: Record<string, string>; startupKeys?: string[] } = {}): {
+  policy: Record<string, string>;
+  sources: PolicySource[];
+} {
+  const values = input.values ?? {};
+  const startup = new Set(input.startupKeys ?? []);
+  const policy: Record<string, string> = {};
+  const sources: PolicySource[] = [];
+  for (const entry of SETTINGS_INVENTORY) {
+    const supplied = values[entry.key];
+    if (supplied !== undefined) {
+      policy[entry.key] = supplied;
+      sources.push({
+        setting: entry.key,
+        value: supplied,
+        source: startup.has(entry.key) || entry.startupOnly ? 'startup' : 'runtime',
+      });
+    } else {
+      policy[entry.key] = POLICY_DEFAULTS[entry.key] as string;
+      sources.push({ setting: entry.key, value: POLICY_DEFAULTS[entry.key] as string, source: 'default' });
+    }
+  }
+  return { policy, sources };
+}
+
+export function changeImpact(key: string): { changes: string; notChanges: string; requires: string } {
+  const impacts: Record<string, { changes: string; notChanges: string; requires: string }> = {
+    'approver-role': {
+      changes: 'who may approve requests from this boot forward',
+      notChanges: 'does not retroactively invalidate past approvals or grant agent autonomy',
+      requires: 'restart (startup-only); announce to approvers before changing',
+    },
+    'reversible-clean-threshold': {
+      changes: 'how many clean instances precede autonomous reversibles',
+      notChanges: 'does not unfreeze frozen trust or clear kill switches',
+      requires: 'review; lowering it weakens oversight and must be audited',
+    },
+    'pinned-scopes': {
+      changes: 'which scopes stay approval-only for reversibles',
+      notChanges: 'does not affect READ/ANALYZE/RECOMMEND ceilings or irreversible human-command',
+      requires: 'review; narrowing it needs an explicit re-review of affected scopes',
+    },
+    'request-bid-limits': {
+      changes: 'per-request spend admitted by the scheduler',
+      notChanges: 'does not change already-admitted reservations',
+      requires: 'no restart; applies to new submissions',
+    },
+    'kill-switch': {
+      changes: 'immediately halts matching new authorizations',
+      notChanges: 'does not force-terminate in-flight work or rewrite history',
+      requires: 'audited recovery via recoverStop; restart does not clear',
+    },
+    'kill-drill-mode': {
+      changes: 'whether drills engage real switches or check policy only',
+      notChanges: 'a passing drill never proves production readiness',
+      requires: 'no restart; drill evidence is labeled by mode',
+    },
+  };
+  const impact = impacts[key];
+  if (!impact) throw new TrustError('UNKNOWN_SETTING', `no governed setting "${key}"`);
+  return impact;
+}
+
+export function validatePolicyChange(key: string, value: string): { ok: boolean; reasons: string[] } {
+  if (key === 'approver-role') {
+    const ok = ['member', 'admin', 'owner'].includes(value);
+    return ok ? { ok: true, reasons: [] } : { ok: false, reasons: [`approver-role must be member, admin, or owner`] };
+  }
+  if (key === 'reversible-clean-threshold') {
+    const n = Number(value);
+    const ok = Number.isInteger(n) && n >= 1;
+    return ok
+      ? { ok: true, reasons: [] }
+      : { ok: false, reasons: ['reversible-clean-threshold must be an integer ≥ 1'] };
+  }
+  if (key === 'pinned-scopes') {
+    const ok = value
+      .split(',')
+      .map((part) => part.trim())
+      .some((part) => part.length > 0);
+    return ok ? { ok: true, reasons: [] } : { ok: false, reasons: ['pinned-scopes must name at least one scope'] };
+  }
+  if (key === 'request-bid-limits') {
+    return value.length > 0
+      ? { ok: true, reasons: [] }
+      : { ok: false, reasons: ['request-bid-limits must not be empty'] };
+  }
+  if (key === 'kill-switch') {
+    return { ok: false, reasons: ['kill switches change only through setKill/clearKill/recoverStop, never by value'] };
+  }
+  if (key === 'kill-drill-mode') {
+    const ok = ['policy-only', 'runtime-halt'].includes(value);
+    return ok
+      ? { ok: true, reasons: [] }
+      : { ok: false, reasons: ['kill-drill-mode must be policy-only or runtime-halt'] };
+  }
+  return { ok: false, reasons: [`no governed setting "${key}"`] };
+}
+
+export async function auditPolicyChange(
+  db: AsyncDb,
+  tenant: string,
+  by: string,
+  key: string,
+  from: string,
+  to: string,
+  now?: string,
+): Promise<void> {
+  const checked = validatePolicyChange(key, to);
+  if (!checked.ok) throw new TrustError('INVALID_POLICY_CHANGE', checked.reasons.join('; '));
+  const at = now ?? new Date().toISOString();
+  await audit(db, tenant, by, 'POLICY_CHANGED', key, JSON.stringify({ from, to }), at);
 }

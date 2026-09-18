@@ -47,6 +47,7 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
           .map((action) => {
             return `<form data-review-action="${action}" action="/api/requests/${esc(encodeURIComponent(r.id))}/${action}" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
 ${action === 'decline' ? '<label>Decline reason <textarea name="reason" required maxlength="2000"></textarea></label>' : ''}
 ${operatorFields(opts, r.id, action)}
 <label><input type="checkbox" name="confirmed" required> ${action === 'approve' ? 'I reviewed the evidence and approve beginning work on this request' : 'I confirm this request should be declined'}</label>
@@ -146,7 +147,10 @@ export const REVIEW_SCRIPT = `
                 } : action === 'refresh-evidence' ? {}
                 : action === 'approve-deliverable' ? { fingerprint: fields.get('fingerprint') || '' }
                 : action === 'request-changes' ? { notes: fields.get('notes') || '' }
-                : { reason: fields.get('reason') || '' }), signal: abort.signal,
+                : {
+                  reason: fields.get('reason') || '',
+                  requestUpdatedAt: fields.get('requestUpdatedAt') || undefined,
+                }), signal: abort.signal,
       });
       const result = await response.json();
       if (!response.ok) {
@@ -176,6 +180,21 @@ export const REVIEW_SCRIPT = `
           } else {
             status.textContent = parts.join(' ') + ' Your draft is preserved — refresh, then retry on the current claim.';
           }
+          return;
+        }
+        if (response.status === 409 && result.requiresReReview === true) {
+          saveDraft(form, fields);
+          const parts = [result.error || 'Changed since you loaded this review.'];
+          if (Array.isArray(result.diff)) {
+            for (const line of result.diff) {
+              if (typeof line === 'string' && line) parts.push(line);
+            }
+          }
+          if (result.preservedDraft && typeof result.preservedDraft.reason === 'string') {
+            const reason = form.querySelector('[name="reason"]');
+            if (reason) reason.value = result.preservedDraft.reason;
+          }
+          status.textContent = parts.join(' ') + ' Your input is preserved — refresh, review the changes, and submit again.';
           return;
         }
         throw new Error(result.error || 'Request failed (' + response.status + ')');

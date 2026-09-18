@@ -17,7 +17,8 @@ import { WedgeError } from './ship.ts';
  *   CANCELLED    — cancelled by a named actor; completed steps are preserved
  */
 
-export type ResearchStatus = 'PLANNED' | 'APPROVED' | 'RUNNING' | 'COMPLETED' | 'PAUSED_BUDGET' | 'CANCELLED';
+export type ResearchStatus =
+  'PLANNED' | 'APPROVED' | 'RUNNING' | 'COMPLETED' | 'PAUSED_BUDGET' | 'FAILED' | 'CANCELLED';
 
 export interface SearchHit {
   uri: string;
@@ -50,6 +51,9 @@ export interface RejectionCounts {
 
 export interface ResearchRun {
   id: string;
+  revision?: number;
+  executionToken?: string | null;
+  failure?: { code: string; subquestion: string | null } | null;
   tenant: string;
   question: string;
   subquestions: string[];
@@ -228,20 +232,29 @@ export function approveResearchPlan(run: ResearchRun, by: string): ResearchRun {
  * Async form: cancelResearchRun(run, by, { db, now }) — persists and returns Promise<ResearchRun>.
  */
 export function cancelResearchRun(run: ResearchRun, by: string): ResearchRun;
-export function cancelResearchRun(run: ResearchRun, by: string, opts: { db: AsyncDb; now: string }): Promise<ResearchRun>;
+export function cancelResearchRun(
+  run: ResearchRun,
+  by: string,
+  opts: { db: AsyncDb; now: string },
+): Promise<ResearchRun>;
 export function cancelResearchRun(
   run: ResearchRun,
   by: string,
   opts?: { db?: AsyncDb; now?: string },
 ): ResearchRun | Promise<ResearchRun> {
-  if (run.status === 'COMPLETED')
-    throw new WedgeError('BAD_PLAN_STATE', 'a completed run is history, not cancellable');
+  if (opts?.db && opts.now) return cancelPersistedResearchRun(opts.db, run, by, opts.now);
+  if (!by.trim()) throw new WedgeError('NO_CANCELLER', 'cancellation requires a named actor');
+  if (run.status === 'COMPLETED') throw new WedgeError('BAD_PLAN_STATE', 'a completed run is history, not cancellable');
   if (run.status === 'CANCELLED') return run;
-  const cancelled: ResearchRun = { ...run, status: 'CANCELLED', cancelledBy: by || null, updatedAt: opts?.now ?? null };
-  if (opts?.db && opts.now) {
-    return persistResearchRun(opts.db, cancelled).then(() => cancelled);
-  }
-  return cancelled;
+  return {
+    ...run,
+    status: 'CANCELLED',
+    cancelledBy: by,
+    executionOwner: null,
+    executionToken: null,
+    executionLeaseAt: null,
+    updatedAt: opts?.now ?? null,
+  };
 }
 
 export async function cancelPersistedResearchRun(
@@ -250,11 +263,17 @@ export async function cancelPersistedResearchRun(
   by: string,
   now: string,
 ): Promise<ResearchRun> {
-  const stored = await loadResearchRun(db, run.tenant, run.id);
-  if (stored?.status === 'CANCELLED') return stored;
-  const cancelled = { ...cancelResearchRun(stored ?? run, by), updatedAt: now };
-  await persistResearchRun(db, cancelled);
-  return cancelled;
+  for (;;) {
+    const stored = await loadResearchRun(db, run.tenant, run.id);
+    if (stored?.status === 'CANCELLED') return stored;
+    const cancelled = { ...cancelResearchRun(stored ?? run, by), updatedAt: now };
+    try {
+      await persistResearchRun(db, cancelled);
+      return cancelled;
+    } catch (error) {
+      if (!(error instanceof WedgeError) || !error.message.includes('REVISION_CONFLICT')) throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,35 +281,72 @@ export async function cancelPersistedResearchRun(
 // ---------------------------------------------------------------------------
 
 const runKeyOf = (tenant: string, id: string): string => `research:run:${tenant}:${id}`;
-const fingerprintKeyOf = (tenant: string, id: string): string => `research:plan-fp:${tenant}:${id}`;
 
 /** Persist a run to durable storage (upsert). */
 export async function persistResearchRun(db: AsyncDb, run: ResearchRun): Promise<void> {
-  await db
-    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(runKeyOf(run.tenant, run.id), JSON.stringify(run));
-  await db
-    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
-    .run(
+  const revision = (run.revision ?? 0) + 1;
+  await db.transaction(async () => {
+    const key = runKeyOf(run.tenant, run.id);
+    const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    const stored = row ? (JSON.parse(String(row.value)) as ResearchRun) : null;
+    if (stored && stored.status !== 'PLANNED' && approvedPlan(stored) !== approvedPlan(run))
+      throw new WedgeError('PLAN_MISMATCH', 'approved research plan is immutable');
+    if (stored?.status === 'CANCELLED' && run.status !== 'CANCELLED')
+      throw new WedgeError('RUN_CANCELLED', 'cancellation is terminal');
+    if (stored?.status === 'COMPLETED' && run.status !== 'COMPLETED')
+      throw new WedgeError('TERMINAL_CHECKPOINT', 'completed research is history');
+    if (stored && (stored.revision ?? 0) !== (run.revision ?? 0))
+      throw new WedgeError('REVISION_CONFLICT', 'research changed; reload before updating');
+    if (!stored && (run.revision ?? 0) !== 0) throw new WedgeError('RUN_NOT_FOUND', 'persisted research is missing');
+    const value = JSON.stringify({ ...run, revision });
+    const result = row
+      ? await db.prepare('UPDATE meta SET value = ? WHERE key = ? AND value = ?').run(value, key, row.value)
+      : await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value);
+    if (result.changes !== 1) throw new WedgeError('REVISION_CONFLICT', 'research changed; reload before updating');
+    await db.prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)').run(
       run.tenant,
-      'deep-research',
+      run.cancelledBy ?? run.executionOwner ?? run.approvedBy ?? 'deep-research',
       'RESEARCH_CHECKPOINT',
       run.id,
-      JSON.stringify({ status: run.status, stepsDone: run.completedSteps.length, totalSearches: run.totalSearches }),
+      JSON.stringify({
+        status: run.status,
+        revision,
+        stepsDone: run.completedSteps.length,
+        totalSearches: run.totalSearches,
+      }),
       run.updatedAt ?? run.createdAt,
     );
+  });
+  run.revision = revision;
+}
+
+function approvedPlan(run: ResearchRun): string {
+  return JSON.stringify([
+    run.question,
+    run.subquestions,
+    run.allowlist,
+    run.blocklist,
+    run.approvedBy,
+    run.approvedBudgets?.maxSearches ?? 20,
+    run.approvedBudgets?.maxResultsPerQuestion ?? 8,
+  ]);
+}
+
+function checkedBudgets(budgets?: Partial<ResearchBudgets>): ResearchBudgets {
+  const result = {
+    maxSearches: budgets?.maxSearches ?? 20,
+    maxResultsPerQuestion: budgets?.maxResultsPerQuestion ?? 8,
+  };
+  if (Object.values(result).some((n) => !Number.isSafeInteger(n) || n < 0))
+    throw new WedgeError('INVALID_BUDGET', 'research budgets must be nonnegative safe integers');
+  return result;
 }
 
 /** Load a run from durable storage. Returns null if not found. */
-export async function loadResearchRun(
-  db: AsyncDb,
-  tenant: string,
-  id: string,
-): Promise<ResearchRun | null> {
+export async function loadResearchRun(db: AsyncDb, tenant: string, id: string): Promise<ResearchRun | null> {
   try {
     const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(runKeyOf(tenant, id))) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!r) return null;
     const run = JSON.parse(String(r.value)) as ResearchRun;
     return {
@@ -301,11 +357,14 @@ export async function loadResearchRun(
       rejected: run.rejected ?? { blocklist: 0, corroborated: 0, allowlist: 0, capped: 0 },
       cancelledBy: run.cancelledBy ?? null,
       executionOwner: run.executionOwner ?? null,
+      executionToken: run.executionToken ?? null,
       executionLeaseAt: run.executionLeaseAt ?? null,
+      failure: run.failure ?? null,
       updatedAt: run.updatedAt ?? null,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new WedgeError('INVALID_CHECKPOINT', 'research checkpoint is malformed');
+    throw error;
   }
 }
 
@@ -320,13 +379,20 @@ export async function approveAndPersistResearchPlan(
   now: string,
   budgets?: Partial<ResearchBudgets>,
 ): Promise<ResearchRun> {
-  const approved = { ...approveResearchPlan(run, by), approvedBudgets: budgets, updatedAt: now };
-  // Persist the fingerprint so re-entry can detect plan drift.
-  await db
-    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(fingerprintKeyOf(run.tenant, run.id), planFingerprint(run.question, run.subquestions));
-  await persistResearchRun(db, approved);
-  return approved;
+  return db.transaction(async () => {
+    const stored = await loadResearchRun(db, run.tenant, run.id);
+    if (stored && stored.status !== 'PLANNED')
+      throw new WedgeError('BAD_PLAN_STATE', 'an existing approved run cannot be reconstructed or reapproved');
+    if (stored && (stored.revision ?? 0) !== (run.revision ?? 0))
+      throw new WedgeError('REVISION_CONFLICT', 'reload the plan before approval');
+    const approved = {
+      ...approveResearchPlan(stored ?? run, by),
+      approvedBudgets: checkedBudgets(budgets),
+      updatedAt: now,
+    };
+    await persistResearchRun(db, approved);
+    return approved;
+  });
 }
 
 /**
@@ -335,13 +401,36 @@ export async function approveAndPersistResearchPlan(
  * Throws RUN_CANCELLED if the run is CANCELLED.
  * Returns the run in APPROVED state so executeResearchRun can run it.
  */
-export async function resumeResearchRun(db: AsyncDb, tenant: string, id: string): Promise<ResearchRun> {
+export async function resumeResearchRun(
+  db: AsyncDb,
+  tenant: string,
+  id: string,
+  recovery?: { by: string; expectedRevision: number; now: string },
+): Promise<ResearchRun> {
   const stored = await loadResearchRun(db, tenant, id);
   if (!stored) throw new WedgeError('RUN_NOT_FOUND', `research run ${id} not found in durable storage`);
-  if (stored.status === 'CANCELLED') throw new WedgeError('RUN_CANCELLED', `run ${id} was cancelled by ${stored.cancelledBy ?? 'unknown'}`);
+  if (stored.status === 'CANCELLED')
+    throw new WedgeError('RUN_CANCELLED', `run ${id} was cancelled by ${stored.cancelledBy ?? 'unknown'}`);
+  if (recovery) {
+    if (!recovery.by.trim()) throw new WedgeError('NO_RECOVERER', 'recovery requires a named actor');
+    if (stored.revision !== recovery.expectedRevision)
+      throw new WedgeError('REVISION_CONFLICT', 'reload before recovering research');
+  }
   if (stored.status === 'COMPLETED') return stored;
-  // Re-enter as APPROVED so executeResearchRun accepts it.
-  return { ...stored, status: 'APPROVED', executionOwner: null, executionLeaseAt: null };
+  if (!stored.approvedBy || stored.status === 'PLANNED')
+    throw new WedgeError('UNAPPROVED_RESEARCH', 'approve the stored plan before resuming');
+  if ((stored.status === 'RUNNING' || stored.status === 'FAILED') && !recovery)
+    throw new WedgeError('EXECUTION_CONFLICT', 'explicit recovery is required for interrupted or failed research');
+  const resumed: ResearchRun = {
+    ...stored,
+    status: 'APPROVED',
+    executionOwner: null,
+    executionToken: null,
+    executionLeaseAt: null,
+    updatedAt: recovery?.now ?? stored.updatedAt,
+  };
+  await persistResearchRun(db, resumed);
+  return resumed;
 }
 
 export interface ResearchBudgets {
@@ -352,8 +441,6 @@ export interface ResearchBudgets {
 // ---------------------------------------------------------------------------
 // Stage 1 — execute
 // ---------------------------------------------------------------------------
-
-const NON_RESUMABLE_STATUSES: ResearchStatus[] = ['COMPLETED'];
 
 /**
  * Stage 1 — run. Each subquestion searches, filters allow/block lists,
@@ -384,6 +471,15 @@ export async function executeResearchRun(
     db?: AsyncDb;
   },
 ): Promise<ResearchRun> {
+  if (opts.db) {
+    const stored = await loadResearchRun(opts.db, run.tenant, run.id);
+    if (stored?.status === 'CANCELLED') return stored;
+    if (stored?.status === 'COMPLETED') throw new WedgeError('TERMINAL_CHECKPOINT', 'research already completed');
+    if (stored?.status === 'RUNNING') throw new WedgeError('EXECUTION_CONFLICT', 'research already has an executor');
+    if (stored && approvedPlan(stored) !== approvedPlan(run))
+      throw new WedgeError('PLAN_MISMATCH', 'caller differs from the approved plan');
+    if (stored) run = stored;
+  }
   if (run.status !== 'APPROVED' && run.status !== 'RUNNING') {
     throw new WedgeError('UNAPPROVED_RESEARCH', `run is ${run.status} — approve the plan before it executes`);
   }
@@ -407,178 +503,210 @@ export async function executeResearchRun(
     updatedAt: opts.now,
   };
 
+  const approved = checkedBudgets(next.approvedBudgets);
+  const requested = checkedBudgets({ ...approved, ...opts.budgets });
+  if (requested.maxSearches > approved.maxSearches || requested.maxResultsPerQuestion > approved.maxResultsPerQuestion)
+    throw new WedgeError('BUDGET_EXCEEDS_APPROVAL', 'execution may tighten but not increase approved budgets');
+  const budgets = requested;
+  next.executionToken = crypto.randomUUID();
+  next.failure = null;
   if (opts.db) {
-    const stored = await loadResearchRun(opts.db, run.tenant, run.id);
-    if (stored) {
-      if (stored.status === 'CANCELLED') return stored;
-      if (NON_RESUMABLE_STATUSES.includes(stored.status)) {
-        throw new WedgeError(
-          'TERMINAL_CHECKPOINT',
-          `run ${run.id} already reached terminal status '${stored.status}' — create a new run`,
-        );
-      }
-      // Concurrent execution ownership: reject if another owner holds the lease.
-      if (stored.executionOwner && stored.executionOwner !== (opts.owner ?? opts.by)) {
-        throw new WedgeError(
-          'EXECUTION_CONFLICT',
-          `run ${run.id} is already owned by '${stored.executionOwner}' — wait or reclaim the lease`,
-        );
-      }
-      // Plan fingerprint mismatch.
-      const storedFp = await (async () => {
-        try {
-          const r = (await opts.db!.prepare('SELECT value FROM meta WHERE key = ?').get(
-            fingerprintKeyOf(run.tenant, run.id),
-          )) as { value: string } | undefined;
-          return r ? String(r.value) : null;
-        } catch {
-          return null;
-        }
-      })();
-      if (storedFp && storedFp !== planFingerprint(run.question, run.subquestions)) {
-        throw new WedgeError(
-          'PLAN_MISMATCH',
-          `run ${run.id}: caller plan fingerprint differs from approved plan — create a new run`,
-        );
-      }
-      // Restore cumulative progress.
-      const union = (a: string[], b: string[]): string[] => [...a, ...b.filter((s) => !a.includes(s))];
-      const mergeRejected = (a: RejectionCounts, b: RejectionCounts): RejectionCounts => ({
-        blocklist: Math.max(a.blocklist, b.blocklist),
-        corroborated: Math.max(a.corroborated, b.corroborated),
-        allowlist: Math.max(a.allowlist, b.allowlist),
-        capped: Math.max(a.capped, b.capped),
-      });
-      const mergeCoverage = (a: SubquestionCoverage[], b: SubquestionCoverage[]): SubquestionCoverage[] => {
-        const map = new Map<string, SubquestionCoverage>();
-        for (const c of [...b, ...a]) map.set(c.subquestion, c); // a wins
-        return [...map.values()];
-      };
-      next = {
-        ...next,
-        approvedBy: next.approvedBy ?? stored.approvedBy,
-        approvedBudgets: next.approvedBudgets ?? stored.approvedBudgets,
-        completedSteps: union(stored.completedSteps, next.completedSteps),
-        findingIds: union(stored.findingIds, next.findingIds),
-        seenUris: union(stored.seenUris, next.seenUris),
-        corroboratedUris: union(stored.corroboratedUris, next.corroboratedUris),
-        uriSubquestions: { ...stored.uriSubquestions, ...next.uriSubquestions },
-        coverage: mergeCoverage(stored.coverage, next.coverage),
-        rejected: mergeRejected(stored.rejected, next.rejected),
-        totalSearches: Math.max(stored.totalSearches, next.totalSearches),
-      };
+    try {
+      await persistResearchRun(opts.db, next);
+    } catch (error) {
+      if (error instanceof WedgeError && error.message.includes('REVISION_CONFLICT'))
+        throw new WedgeError('EXECUTION_CONFLICT', 'another executor or state change won ownership');
+      throw error;
     }
-    await persistResearchRun(opts.db, next);
   }
-
-  // Effective budgets: prefer per-run approved budgets, then call-time overrides.
-  const budgets: ResearchBudgets = {
-    maxSearches: 20,
-    maxResultsPerQuestion: 8,
-    ...(next.approvedBudgets ?? {}),
-    ...(opts.budgets ?? {}),
+  let durableRevision = next.revision;
+  const checkOwnership = async (): Promise<ResearchRun | null> => {
+    if (!opts.db) return null;
+    const stored = await loadResearchRun(opts.db, run.tenant, run.id);
+    if (!stored) throw new WedgeError('RUN_NOT_FOUND', 'research checkpoint disappeared');
+    if (stored.status === 'CANCELLED') return stored;
+    if (
+      stored.status !== 'RUNNING' ||
+      stored.executionToken !== next.executionToken ||
+      stored.revision !== next.revision
+    )
+      throw new WedgeError('EXECUTION_CONFLICT', 'execution ownership changed; discard pending results');
+    return null;
   };
 
   const subject = `research:${slugOf(run.question)}`;
 
-  for (const sub of run.subquestions) {
-    if (next.completedSteps.includes(sub)) continue;
-    if (opts.cancelled?.() === true) {
-      const cancelled: ResearchRun = { ...next, status: 'CANCELLED', cancelledBy: opts.by, updatedAt: opts.now };
-      if (opts.db) await persistResearchRun(opts.db, cancelled);
-      return cancelled;
-    }
-    if (next.totalSearches >= budgets.maxSearches) {
-      const paused: ResearchRun = { ...next, status: 'PAUSED_BUDGET', executionOwner: null, executionLeaseAt: null, updatedAt: opts.now };
-      if (opts.db) await persistResearchRun(opts.db, paused);
-      return paused;
-    }
-    next = { ...next, totalSearches: next.totalSearches + 1 };
-    const hits = await search(sub);
-    let taken = 0;
-    let stepBlocklisted = 0;
-    let stepAllowlisted = 0;
-    let stepCapped = 0;
-    for (const h of hits) {
-      if (taken >= budgets.maxResultsPerQuestion) { stepCapped++; continue; }
-      const host = hostOf(h.uri);
-      if (run.blocklist.some((b) => host === b.toLowerCase() || host.endsWith(`.${b.toLowerCase()}`))) {
-        stepBlocklisted++;
-        next = { ...next, rejected: { ...next.rejected, blocklist: next.rejected.blocklist + 1 } };
-        continue;
+  let activeQuestion: string | null = null;
+  try {
+    for (const sub of run.subquestions) {
+      if (next.completedSteps.includes(sub)) continue;
+      activeQuestion = sub;
+      const stopped = await checkOwnership();
+      if (stopped) return stopped;
+      if (opts.cancelled?.() === true) {
+        const cancelled: ResearchRun = { ...cancelResearchRun(next, opts.by), updatedAt: opts.now };
+        if (opts.db) await persistResearchRun(opts.db, cancelled);
+        return cancelled;
       }
-      if (
-        run.allowlist.length > 0 &&
-        !run.allowlist.some((a) => host === a.toLowerCase() || host.endsWith(`.${a.toLowerCase()}`))
-      ) {
-        stepAllowlisted++;
-        next = { ...next, rejected: { ...next.rejected, allowlist: next.rejected.allowlist + 1 } };
-        continue;
+      if (next.totalSearches >= budgets.maxSearches) {
+        const paused: ResearchRun = {
+          ...next,
+          status: 'PAUSED_BUDGET',
+          executionOwner: null,
+          executionToken: null,
+          executionLeaseAt: null,
+          updatedAt: opts.now,
+        };
+        if (opts.db) await persistResearchRun(opts.db, paused);
+        return paused;
       }
-      if (next.seenUris.includes(h.uri)) {
-        // Corroborated: seen again — record it, track which subquestion corroborated it.
+      next = { ...next, totalSearches: next.totalSearches + 1 };
+      if (opts.db) {
+        await persistResearchRun(opts.db, next);
+        durableRevision = next.revision;
+      }
+      const hits = await search(sub);
+      const stoppedAfterSearch = await checkOwnership();
+      if (stoppedAfterSearch) return stoppedAfterSearch;
+      const acceptResults = async () => {
+        const stoppedBeforeBanking = await checkOwnership();
+        if (stoppedBeforeBanking) return stoppedBeforeBanking;
+        const acceptedUris = new Set<string>();
+        let taken = 0;
+        let stepCapped = 0;
+        for (const h of hits) {
+          if (taken >= budgets.maxResultsPerQuestion) {
+            stepCapped++;
+            continue;
+          }
+          const host = hostOf(h.uri);
+          if (run.blocklist.some((b) => host === b.toLowerCase() || host.endsWith(`.${b.toLowerCase()}`))) {
+            next = { ...next, rejected: { ...next.rejected, blocklist: next.rejected.blocklist + 1 } };
+            continue;
+          }
+          if (
+            run.allowlist.length > 0 &&
+            !run.allowlist.some((a) => host === a.toLowerCase() || host.endsWith(`.${a.toLowerCase()}`))
+          ) {
+            next = { ...next, rejected: { ...next.rejected, allowlist: next.rejected.allowlist + 1 } };
+            continue;
+          }
+          if (acceptedUris.has(h.uri)) continue;
+          acceptedUris.add(h.uri);
+          if (next.seenUris.includes(h.uri)) {
+            taken += 1;
+            // Corroborated: seen again — record it, track which subquestion corroborated it.
+            next = {
+              ...next,
+              rejected: { ...next.rejected, corroborated: next.rejected.corroborated + 1 },
+              corroboratedUris: next.corroboratedUris.includes(h.uri)
+                ? next.corroboratedUris
+                : [...next.corroboratedUris, h.uri],
+              uriSubquestions: {
+                ...next.uriSubquestions,
+                [h.uri]: [...new Set([...(next.uriSubquestions[h.uri] ?? []), sub])],
+              },
+            };
+            continue;
+          }
+          const claim = await ledger.append({
+            tenant: run.tenant,
+            subject,
+            kind: 'OBSERVATION',
+            statement: `${h.title} — ${h.snippet.slice(0, 500)}`,
+            confidence: 0.6,
+            owner: opts.by,
+            scope: opts.scope,
+            authorType: 'agent',
+            observedAt: opts.now,
+            validFrom: opts.now,
+            now: opts.now,
+            provenance: {
+              sourceUri: h.uri,
+              sourceTier: 'SINGLE_SOURCE',
+              extractor: 'deep-research',
+              extractorVersion: '1.0.0',
+              retrievedAt: opts.now,
+            },
+          });
+          next = {
+            ...next,
+            findingIds: [...next.findingIds, claim.id],
+            seenUris: [...next.seenUris, h.uri],
+            uriSubquestions: {
+              ...next.uriSubquestions,
+              [h.uri]: [...new Set([...(next.uriSubquestions[h.uri] ?? []), sub])],
+            },
+          };
+          taken += 1;
+        }
+        // Per-step rejection accumulation.
+        if (stepCapped > 0)
+          next = { ...next, rejected: { ...next.rejected, capped: next.rejected.capped + stepCapped } };
+
+        // Coverage: record zero-result steps.
+        const cov: SubquestionCoverage = { subquestion: sub, noResults: taken === 0, accepted: taken };
         next = {
           ...next,
-          rejected: { ...next.rejected, corroborated: next.rejected.corroborated + 1 },
-          corroboratedUris: next.corroboratedUris.includes(h.uri)
-            ? next.corroboratedUris
-            : [...next.corroboratedUris, h.uri],
-          uriSubquestions: {
-            ...next.uriSubquestions,
-            [h.uri]: [...(next.uriSubquestions[h.uri] ?? []), sub],
-          },
+          completedSteps: [...next.completedSteps, sub],
+          coverage: [...next.coverage.filter((c) => c.subquestion !== sub), cov],
+          updatedAt: opts.now,
         };
-        continue;
-      }
-      next = {
-        ...next,
-        seenUris: [...next.seenUris, h.uri],
-        uriSubquestions: {
-          ...next.uriSubquestions,
-          [h.uri]: [...(next.uriSubquestions[h.uri] ?? []), sub],
-        },
+        if (opts.db) await persistResearchRun(opts.db, next);
+        return null;
       };
-      const claim = await ledger.append({
-        tenant: run.tenant,
-        subject,
-        kind: 'OBSERVATION',
-        statement: `${h.title} — ${h.snippet.slice(0, 500)}`,
-        confidence: 0.6,
-        owner: opts.by,
-        scope: opts.scope,
-        authorType: 'agent',
-        observedAt: opts.now,
-        validFrom: opts.now,
-        now: opts.now,
-        provenance: {
-          sourceUri: h.uri,
-          sourceTier: 'SINGLE_SOURCE',
-          extractor: 'deep-research',
-          extractorVersion: '1.0.0',
-          retrievedAt: opts.now,
-        },
-      });
-      next = { ...next, findingIds: [...next.findingIds, claim.id] };
-      taken += 1;
+      const cancelled = opts.db ? await opts.db.transaction(acceptResults) : await acceptResults();
+      if (cancelled) return cancelled;
+      durableRevision = next.revision;
     }
-    // Per-step rejection accumulation.
-    if (stepCapped > 0)
-      next = { ...next, rejected: { ...next.rejected, capped: next.rejected.capped + stepCapped } };
-
-    // Coverage: record zero-result steps.
-    const cov: SubquestionCoverage = { subquestion: sub, noResults: taken === 0, accepted: taken };
-    next = {
+    const stopped = await checkOwnership();
+    if (stopped) return stopped;
+    activeQuestion = null;
+    const isCancelled = opts.cancelled?.() === true;
+    const done: ResearchRun = {
       ...next,
-      completedSteps: [...next.completedSteps, sub],
-      coverage: [...next.coverage.filter((c) => c.subquestion !== sub), cov],
+      status: isCancelled ? 'CANCELLED' : 'COMPLETED',
+      cancelledBy: isCancelled ? opts.by : null,
+      executionOwner: null,
+      executionToken: null,
+      executionLeaseAt: null,
       updatedAt: opts.now,
     };
-    if (opts.db) await persistResearchRun(opts.db, next);
+    if (opts.db) await persistResearchRun(opts.db, done);
+    return done;
+  } catch (error) {
+    if (opts.db) {
+      const stored = await loadResearchRun(opts.db, run.tenant, run.id);
+      if (stored?.status === 'CANCELLED') return stored;
+      if (
+        !stored ||
+        stored.executionToken !== next.executionToken ||
+        stored.status !== 'RUNNING' ||
+        stored.revision !== durableRevision
+      )
+        throw error;
+      next = stored;
+    }
+    const failed: ResearchRun = {
+      ...next,
+      status: 'FAILED',
+      executionOwner: null,
+      executionToken: null,
+      executionLeaseAt: null,
+      updatedAt: opts.now,
+      failure: { code: 'RESEARCH_STEP_FAILED', subquestion: activeQuestion },
+    };
+    if (opts.db) {
+      try {
+        await persistResearchRun(opts.db, failed);
+      } catch (checkpointError) {
+        const stored = await loadResearchRun(opts.db, run.tenant, run.id);
+        if (stored?.status === 'CANCELLED') return stored;
+        throw checkpointError;
+      }
+    }
+    return failed;
   }
-
-  const done: ResearchRun = { ...next, status: 'COMPLETED', executionOwner: null, executionLeaseAt: null, updatedAt: opts.now };
-  if (opts.db) await persistResearchRun(opts.db, done);
-  return done;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,24 +741,26 @@ export async function verifyResearchReport(
   sections: { heading: string; bullets: ReportBullet[] }[],
   now: string,
 ): Promise<ReportVerification> {
+  if (tenant !== run.tenant) throw new WedgeError('TENANT_MISMATCH', 'report tenant differs from research tenant');
   const unsupported: number[] = [];
   const contradictions: string[] = [];
   const GONE = ['STALE', 'SUPERSEDED', 'RETIRED'] as const;
   let n = 0;
   for (const s of sections) {
     for (const b of s.bullets) {
-      if (b.kind === 'inference') {
-        // Inference bullets are valid without citations — skip citation check.
-        n++;
-        continue;
-      }
       const cited = b.claimIds ?? [];
-      if (cited.length === 0) {
+      if (cited.length === 0 && b.kind !== 'inference') {
         unsupported.push(n);
       } else {
         for (const id of cited) {
           const c = await ledger.get(tenant, id);
-          if (!c || (GONE as readonly string[]).includes(c.status) || (c.validUntil && c.validUntil <= now)) {
+          if (
+            !c ||
+            !run.findingIds.includes(id) ||
+            (GONE as readonly string[]).includes(c.status) ||
+            c.validFrom > now ||
+            (c.validUntil && c.validUntil <= now)
+          ) {
             if (!unsupported.includes(n)) unsupported.push(n);
           } else if (c.status === 'DISPUTED') {
             if (!contradictions.includes(id)) contradictions.push(id);
@@ -680,7 +810,11 @@ export async function attachResearchReport(
   let n = 0;
   for (const s of sections) {
     for (const b of s.bullets) {
-      if (b.kind === 'inference') { inferences.push(n); n++; continue; }
+      if (b.kind === 'inference') {
+        inferences.push(n);
+        n++;
+        continue;
+      }
       for (const id of b.claimIds ?? []) citedIds.add(id);
       n++;
     }
@@ -752,6 +886,7 @@ export interface RunResearchSessionOpts {
   /** If set, resumes this run (no re-approval required). */
   id?: string;
   resume?: boolean;
+  recovery?: { by: string; expectedRevision: number; now: string };
   by: string;
   scope: string;
   now: string;
@@ -775,8 +910,9 @@ export async function runResearchSession(
   opts: RunResearchSessionOpts,
 ): Promise<RunResearchSessionResult> {
   let run: ResearchRun;
-  if (opts.resume && opts.id) {
-    run = await resumeResearchRun(db, opts.tenant, opts.id);
+  if (opts.resume) {
+    if (!opts.id) throw new WedgeError('RUN_NOT_FOUND', 'resume requires a durable run id');
+    run = await resumeResearchRun(db, opts.tenant, opts.id, opts.recovery);
   } else {
     const bare = createResearchRun(opts.tenant, opts.question, opts.subquestions, { now: opts.now, id: opts.id });
     run = await approveAndPersistResearchPlan(db, bare, opts.approvedBy ?? opts.by, opts.now, opts.budgets);
@@ -790,7 +926,7 @@ export async function runResearchSession(
       db,
     });
   }
-  let report: ResearchReport | undefined;
+  let report: ResearchReport | undefined = run.report ?? undefined;
   if (opts.sections && run.status === 'COMPLETED') {
     const updated = await attachResearchReport(ledger, opts.tenant, run, opts.sections, opts.now, { db });
     run = updated;

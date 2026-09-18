@@ -1,7 +1,9 @@
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
+import type { RoutingClass } from '../core/types.ts';
 import { JcodeRunner, type PermissionPolicy } from '../jcode/runner.ts';
+import { validateExecutionAgainstSpec } from '../coord/execution-spec.ts';
 import type { JcodeClientOptions } from '../jcode/client.ts';
 import { checkKill } from '../gov/trust.ts';
 import { verifyScopeToken } from './identity.ts';
@@ -38,6 +40,14 @@ export interface HarnessTask {
   /** Optional human approval metadata binding this execution to an approved decision. */
   approvedDecisionId?: string;
   approvedBy?: string;
+  /** FLOW-002: expected fingerprint of the approved execution specification. */
+  specFingerprint?: string;
+  /** F17: routing execution attributes for trace recording and drift/calibration loops */
+  taskType?: string;
+  tier?: RoutingClass;
+  intent?: string;
+  skillCardId?: string | null;
+  routerConfidence?: number;
 }
 
 export interface HarnessOutcome {
@@ -52,11 +62,17 @@ export interface HarnessOutcome {
 
 export interface HarnessAdapter {
   readonly name: string;
+  readonly category?: 'model' | 'test-baseline' | 'smoke';
+  readonly isTestBaseline?: boolean;
+  readonly model?: string;
   run(tenant: string, requestId: string, task: HarnessTask): Promise<HarnessOutcome>;
 }
 
 export class JcodeAdapter implements HarnessAdapter {
   readonly name = 'jcode';
+  readonly category = 'model' as const;
+  readonly isTestBaseline = false;
+  readonly model: string;
 
   constructor(
     private readonly db: AsyncDb,
@@ -64,7 +80,10 @@ export class JcodeAdapter implements HarnessAdapter {
     private readonly coord: Coordinator,
     private readonly clientOpts: JcodeClientOptions = {},
     private readonly policy?: PermissionPolicy,
-  ) {}
+    model = 'jcode-agent',
+  ) {
+    this.model = model;
+  }
 
   async run(tenant: string, requestId: string, task: HarnessTask): Promise<HarnessOutcome> {
     const runner = new JcodeRunner(this.db, this.ledger, this.coord, this.policy);
@@ -111,9 +130,55 @@ export class LocalEchoAdapter implements HarnessAdapter {
       throw new HarnessError('UNGROUNDED_TASK', 'a harness task must cite the claims it is grounded in');
     }
 
+    const now = new Date().toISOString();
+
+    const approvalDecision = await this.ledger.getDecisionByRequest(tenant, requestId);
+    if (req.state === 'ACCEPTED' && approvalDecision) {
+      await validateExecutionAgainstSpec(
+        this.ledger,
+        this.coord,
+        tenant,
+        requestId,
+        {
+          command: task.command,
+          claimRefs: task.claimRefs,
+          decisionId: approvalDecision.id,
+          specFingerprint: task.specFingerprint,
+        },
+        now,
+      );
+    }
+
+    const taskType = task.taskType ?? 'engineering.implement';
+    const tier = task.tier ?? 'MODEL';
+    const intent = task.intent ?? `code:${req.deliverableSchema}`;
+    const skillCardId = task.skillCardId ?? null;
+    const routerConfidence = task.routerConfidence ?? 0.9;
+
     // Pre-flight kill switch check
     if ((await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'))) {
-      await this.coord.fail(tenant, requestId, `kill switch engaged for scope "${req.targetScope}"`);
+      const reason = `kill switch engaged for scope "${req.targetScope}"`;
+      await this.coord.fail(tenant, requestId, reason);
+      await this.db
+        .prepare(
+          `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          `tr_${crypto.randomUUID()}`,
+          tenant,
+          requestId,
+          req.targetScope,
+          taskType,
+          intent,
+          JSON.stringify({ adapter: this.name, summary: reason }),
+          tier,
+          'FAILURE',
+          JSON.stringify({ tokens: 0 }),
+          skillCardId,
+          routerConfidence,
+          now,
+        );
       return {
         adapter: this.name,
         requestId,
@@ -124,8 +189,6 @@ export class LocalEchoAdapter implements HarnessAdapter {
         permissions: [{ tool: 'execute', decision: 'deny' }],
       };
     }
-
-    const now = new Date().toISOString();
 
     if (task.scopeToken) {
       const secret = task.coreSecret ?? process.env.VITAL_CORE_SECRET;
@@ -151,6 +214,26 @@ export class LocalEchoAdapter implements HarnessAdapter {
 
     if (task.command.length > task.maxTokens) {
       await this.coord.fail(tenant, requestId, 'token ceiling reached');
+      await this.db
+        .prepare(
+          `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          `tr_${crypto.randomUUID()}`,
+          tenant,
+          requestId,
+          req.targetScope,
+          taskType,
+          intent,
+          JSON.stringify({ adapter: this.name, summary: 'token ceiling reached' }),
+          tier,
+          'FAILURE',
+          JSON.stringify({ tokens: 0 }),
+          skillCardId,
+          routerConfidence,
+          now,
+        );
       return {
         adapter: this.name,
         requestId,
@@ -181,7 +264,9 @@ export class LocalEchoAdapter implements HarnessAdapter {
         retrievedAt: now,
       },
     });
-    await this.coord.accept(tenant, requestId);
+    if (req.state === 'ADMITTED' || req.state === 'ACCEPTED') {
+      await this.coord.claimExecution(tenant, requestId, `${this.name}:worker`, now);
+    }
     await this.coord.complete(tenant, requestId, { claims: [claim.id], cost: { tokens: transcript.length } });
     await this.db
       .prepare(
@@ -193,14 +278,14 @@ export class LocalEchoAdapter implements HarnessAdapter {
         tenant,
         requestId,
         req.targetScope,
-        'engineering.implement',
-        `code:${req.deliverableSchema}`,
+        taskType,
+        intent,
         JSON.stringify({ adapter: this.name, summary: transcript.slice(0, 500) }),
-        'MODEL',
+        tier,
         'SUCCESS',
         JSON.stringify({ tokens: transcript.length }),
-        null,
-        0.9,
+        skillCardId,
+        routerConfidence,
         now,
       );
     return {

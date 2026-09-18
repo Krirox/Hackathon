@@ -43,16 +43,30 @@ function renderChecks(version: DeliverableVersion): string {
   }
   const parts: string[] = [];
   if (draft.unverified.length > 0) {
-    parts.push(`<p><strong>Unverified citations:</strong> ${draft.unverified.map((id) => `<code>${esc(id)}</code>`).join(', ')}</p>`);
+    parts.push(
+      `<p><strong>Unverified citations:</strong> ${draft.unverified.map((id) => `<code>${esc(id)}</code>`).join(', ')}</p>`,
+    );
   }
   if (draft.deniedPhrases.length > 0) {
-    parts.push(`<p><strong>Denied phrases:</strong> ${draft.deniedPhrases.map((p) => `<code>${esc(p)}</code>`).join(', ')}</p>`);
+    parts.push(
+      `<p><strong>Denied phrases:</strong> ${draft.deniedPhrases.map((p) => `<code>${esc(p)}</code>`).join(', ')}</p>`,
+    );
   }
   const failed = version.items.filter((i) => i.checkFailed);
   if (failed.length > 0) {
     parts.push(`<p><strong>Item failures:</strong> ${failed.length} item(s) lack sufficient evidence.</p>`);
   }
   return parts.join('') || '<p>Checks did not pass.</p>';
+}
+
+function removedHtml(diff: { removed: string[] }): string {
+  if (diff.removed.length === 0) return '';
+  return `<p><strong>Removed</strong></p><ul>${diff.removed.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>`;
+}
+
+function addedHtml(diff: { added: string[] }): string {
+  if (diff.added.length === 0) return '';
+  return `<p><strong>Added</strong></p><ul>${diff.added.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>`;
 }
 
 export async function renderDeliverableSection(
@@ -67,7 +81,12 @@ export async function renderDeliverableSection(
   const version = await loadDeliverableVersion(db, opts.tenant, record.currentVersionId);
   if (!version) return '';
   const versions = await listDeliverableVersions(db, opts.tenant, record.id);
-  const content = readDeliverableArtifact(version, artifactDir);
+  let content: string;
+  try {
+    content = readDeliverableArtifact(version, artifactDir ?? process.env.ARTIFACT_DIR);
+  } catch {
+    content = '(artifact content unavailable)';
+  }
 
   const versionLinks = versions
     .map(
@@ -82,8 +101,8 @@ export async function renderDeliverableSection(
     try {
       const diff = await diffDeliverableVersions(db, opts.tenant, prev.id, version.id, artifactDir);
       diffHtml = `<details><summary>Diff from v${diff.from} → v${diff.to}</summary>
-${diff.removed.length > 0 ? `<p><strong>Removed</strong></p><ul>${diff.removed.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
-${diff.added.length > 0 ? `<p><strong>Added</strong></p><ul>${diff.added.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+${removedHtml(diff)}
+${addedHtml(diff)}
 </details>`;
     } catch {
       // Diff unavailable (e.g., artifact not found) — render without diff.
@@ -91,8 +110,9 @@ ${diff.added.length > 0 ? `<p><strong>Added</strong></p><ul>${diff.added.map((l)
   }
 
   const canReview = opts.canApprove && (version.status === 'pending_review' || version.status === 'revision_requested');
-  const reviewForms = canReview
-    ? `<form data-review-action="approve-deliverable" action="/api/deliverables/${esc(encodeURIComponent(version.id))}/approve" method="post">
+  let reviewForms: string;
+  if (canReview) {
+    reviewForms = `<form data-review-action="approve-deliverable" action="/api/deliverables/${esc(encodeURIComponent(version.id))}/approve" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input type="hidden" name="fingerprint" value="${esc(version.fingerprint)}">
 ${operatorFields(opts, version.id, 'approve-deliverable')}
@@ -105,10 +125,12 @@ ${operatorFields(opts, version.id, 'approve-deliverable')}
 ${operatorFields(opts, version.id, 'request-changes')}
 <label><input type="checkbox" name="confirmed" required> I reviewed this draft and it needs revision before approval</label>
 <button type="submit" disabled>Request changes</button>
-</form>`
-    : version.status === 'approved'
-      ? `<p>Final deliverable approved${version.decisionId ? ` — <a href="/console/decisions/${esc(encodeURIComponent(version.decisionId))}">view receipt</a>` : ''}.</p>`
-      : `<p>Deliverable review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
+</form>`;
+  } else if (version.status === 'approved') {
+    reviewForms = `<p>Final deliverable approved${version.decisionId ? ` — <a href="/console/decisions/${esc(encodeURIComponent(version.decisionId))}">view receipt</a>` : ''}.</p>`;
+  } else {
+    reviewForms = `<p>Deliverable review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
+  }
 
   const externalNote = version.externalPublish
     ? '<p><strong>External publish</strong> — irreversible action; approval records human-command authorization only.</p>'

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import type { CoordinationRequest } from '../core/types.ts';
+import type { CoordinationRequest, RoutingClass } from '../core/types.ts';
 import { JcodeClient, type JcodeClientOptions } from './client.ts';
 import type { PermissionDecision, ServerFrame } from './protocol.ts';
 import { isShellTool, screenShellCommand } from '../gov/shell.ts';
@@ -51,6 +51,12 @@ export interface CodingTask {
   /** Optional human approval metadata binding this execution to an approved decision. */
   approvedDecisionId?: string;
   approvedBy?: string;
+  /** F17: routing execution attributes for trace recording and drift/calibration loops */
+  taskType?: string;
+  tier?: RoutingClass;
+  intent?: string;
+  skillCardId?: string | null;
+  routerConfidence?: number;
 }
 
 export interface PermissionRequest {
@@ -309,6 +315,7 @@ export class JcodeRunner extends EventEmitter {
       } catch {
         /* already terminal */
       }
+      await this.recordTrace(tenant, req, '', reason, { input: 0, output: 0 }, 'FAILURE', task);
       return {
         requestId,
         sessionId: '',
@@ -348,6 +355,29 @@ export class JcodeRunner extends EventEmitter {
       }
     }
 
+    // Pre-flight kill switch check
+    if ((await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'))) {
+      const reason = `[jcode:HALTED] kill switch engaged for scope "${req.targetScope}"`;
+      await this.audit(tenant, 'jcode', 'EXECUTION_HALTED_KILL', requestId, reason);
+      try {
+        await this.coord.fail(tenant, requestId, reason);
+      } catch {
+        /* already terminal */
+      }
+      await this.recordTrace(tenant, req, '', reason, { input: 0, output: 0 }, 'FAILURE', task);
+      return {
+        requestId,
+        sessionId: '',
+        status: 'DENIED',
+        transcript: '',
+        toolCalls: [],
+        permissions: [],
+        usage: { input: 0, output: 0 },
+        claimIds: [],
+        refusalReason: reason,
+      };
+    }
+
     // Exclusive ownership BEFORE the harness: exactly one worker may run the
     // paid work. A lost claim throws CLAIM_LOST here — before connect() and
     // before createSession() — so the loser never touches the harness and
@@ -377,6 +407,7 @@ export class JcodeRunner extends EventEmitter {
         } catch {
           /* already terminal */
         }
+        await this.recordTrace(tenant, req, '', reason, { input: 0, output: 0 }, 'FAILURE', task);
         return {
           requestId,
           sessionId: '',
@@ -607,7 +638,6 @@ export class JcodeRunner extends EventEmitter {
       await client.connect();
       sessionId = await client.createSession(task.workingDir);
       await client.attach(sessionId);
-      await this.coord.accept(tenant, requestId);
 
       client.on('frame:error', onRunError);
       // A daemon-side disconnect is a turn failure, not a 60s wait: the
@@ -701,7 +731,7 @@ export class JcodeRunner extends EventEmitter {
             dollars: (usage.input + usage.output) * (rates.dollarPerToken ?? 0),
           },
         });
-        await this.recordTrace(tenant, req, sessionId, summary, usage);
+        await this.recordTrace(tenant, req, sessionId, summary, usage, 'SUCCESS', task);
       } else {
         // The request may already be TERMINATED_BUDGET — reportUsage can kill
         // it mid-run before the in-memory ceiling trips. Failing it again
@@ -714,6 +744,7 @@ export class JcodeRunner extends EventEmitter {
         } else {
           await this.coord.fail(tenant, requestId, refusalReason ?? 'unknown failure');
         }
+        await this.recordTrace(tenant, req, sessionId, refusalReason ?? summary, usage, 'FAILURE', task);
       }
       return {
         requestId,
@@ -734,6 +765,13 @@ export class JcodeRunner extends EventEmitter {
         await this.coord.fail(tenant, requestId, refusalReason);
       } catch {
         /* already terminal */
+      }
+      if (req) {
+        try {
+          await this.recordTrace(tenant, req, sessionId, msg, usage, 'FAILURE', task);
+        } catch {
+          /* ignore secondary trace failure */
+        }
       }
       return {
         requestId,
@@ -825,14 +863,27 @@ export class JcodeRunner extends EventEmitter {
     });
   }
 
-  /** A completed run becomes a TRACE eligible for compilation. */
+  /** A completed or failed run becomes a TRACE eligible for compilation or drift monitoring. */
   private async recordTrace(
     tenant: string,
     req: CoordinationRequest,
     sessionId: string,
     summary: string,
     usage: { input: number; output: number },
+    outcome: 'SUCCESS' | 'FAILURE' = 'SUCCESS',
+    meta: {
+      taskType?: string;
+      tier?: RoutingClass;
+      intent?: string;
+      skillCardId?: string | null;
+      routerConfidence?: number;
+    } = {},
   ): Promise<void> {
+    const taskType = meta.taskType ?? 'engineering.implement';
+    const tier = meta.tier ?? 'MODEL';
+    const intent = meta.intent ?? `code:${req.deliverableSchema}`;
+    const skillCardId = meta.skillCardId ?? null;
+    const routerConfidence = meta.routerConfidence ?? 0.9;
     await this.db
       .prepare(
         `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
@@ -843,14 +894,14 @@ export class JcodeRunner extends EventEmitter {
         tenant,
         req.id,
         req.targetScope,
-        'engineering.implement',
-        `code:${req.deliverableSchema}`,
+        taskType,
+        intent,
         JSON.stringify({ sessionId, summary: summary.slice(0, 500) }),
-        'MODEL',
-        'SUCCESS',
+        tier,
+        outcome,
         JSON.stringify({ tokens: usage.input + usage.output }),
-        null,
-        0.9,
+        skillCardId,
+        routerConfidence,
         new Date().toISOString(),
       );
   }

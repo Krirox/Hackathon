@@ -13,9 +13,17 @@ import {
   resumeFanOutWorkflow,
   summarizeRelease,
   type CustomerSegment,
+  WedgeError,
 } from '../src/wedge/ship.ts';
 import { churnRespond, churnRespondWorkflow, executeChurnPlay } from '../src/wedge/churn.ts';
-import { stableFanOutRunId } from '../src/wedge/fanout-workflow.ts';
+import {
+  churnLegIds,
+  isLegRefusal,
+  partialFanOutProgress,
+  reconcileFanOutAttention,
+  stableFanOutRunId,
+} from '../src/wedge/fanout-workflow.ts';
+import { DEFAULT_LIMITS } from '../src/coord/coordinator.ts';
 import { LocalEchoAdapter } from '../src/substrate/harness.ts';
 import type { Collector } from '../src/ingest/collectors.ts';
 
@@ -557,9 +565,13 @@ T('FLOW-013: churn retry reuses run and keeps one recommendation decision', asyn
   const r2 = await churnRespondWorkflow(db, coord, ledger, TEN, input);
   eq(r2.id, r1.id, 'churn retry reuses the same workflow run:');
   eq(r2.decisionId, r1.decisionId, 'churn retry does not mint a second recommendation decision:');
-  eq(r2.legs.every((l) => l.status === 'ADMITTED' || l.status === 'DEDUPED'), true);
-  const decisions = ((await db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE tenant = ?').get(TEN)) as { n: number })
-    .n;
+  eq(
+    r2.legs.every((l) => l.status === 'ADMITTED' || l.status === 'DEDUPED'),
+    true,
+  );
+  const decisions = (
+    (await db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE tenant = ?').get(TEN)) as { n: number }
+  ).n;
   eq(decisions, 1, 'only one churn recommendation decision exists:');
 });
 
@@ -587,6 +599,228 @@ T('FLOW-013: deduped legs are success, not refusal', async () => {
     5,
     'identical re-run marks every leg deduped, not refused:',
   );
+});
+
+T('FLOW-013: partial admission returns earlier ids and stays visible after a later refusal', async () => {
+  const { db, ledger, coord } = await fresh();
+  const a = await relClaim(ledger, 'release:v2.16', 'LATAM checkout ships');
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'v2.16',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'LATAM checkout',
+  });
+  eq(run.status, 'PARTIAL');
+  const progress = partialFanOutProgress(run);
+  eq(progress.runId, run.id);
+  eq(Object.keys(progress.createdIds).sort(), ['customer', 'finance', 'marketing', 'product', 'sales']);
+  const finance = progress.legs.find((l) => l.key === 'finance')!;
+  eq(finance.status, 'DENIED');
+  eq(finance.requestId === null, false);
+  const reloaded = await getFanOutWorkflow(db, TEN, run.id);
+  eq(partialFanOutProgress(reloaded!).createdIds, progress.createdIds);
+  let detail: unknown = null;
+  try {
+    await fanOut(
+      coord,
+      TEN,
+      {
+        release: 'v2.16',
+        claimIds: [a.id],
+        onBehalfOf: 'human:priya',
+        now: NOW,
+        summary: 'LATAM checkout',
+      },
+      db,
+    );
+  } catch (e) {
+    eq((e as Error).message.includes('FANOUT_REFUSED'), true);
+    detail = (e as WedgeError).detail;
+  }
+  if (detail === null) {
+    throw new Error('expected FANOUT_REFUSED to carry partial progress');
+  }
+  const carried = detail as { runId: string; progress: { createdIds: Record<string, string> } };
+  eq(carried.runId, run.id);
+  eq(carried.progress.createdIds, progress.createdIds);
+});
+
+T('FLOW-013: retry retains denied and declined legs and leaves completed legs completed', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 100,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 50,
+  });
+  const a = await relClaim(ledger, 'release:retry-legs', 'retry legs rollout');
+  const first = await fanOutWorkflow(db, coord, TEN, {
+    release: 'retry-legs',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'retry legs',
+  });
+  eq(first.status, 'COMPLETE');
+  const marketingId = first.legs.find((l) => l.key === 'marketing')!.requestId!;
+  const salesId = first.legs.find((l) => l.key === 'sales')!.requestId!;
+  await coord.decline(TEN, marketingId, 'no launch capacity this week');
+  await coord.complete(TEN, salesId, { claims: [], cost: {} });
+  const count = async () =>
+    ((await db.prepare('SELECT COUNT(*) AS n FROM requests WHERE tenant = ?').get(TEN)) as { n: number }).n;
+  const before = await count();
+  const second = await resumeFanOutWorkflow(db, coord, TEN, first.id);
+  eq(second.status, 'PARTIAL');
+  const marketing = second.legs.find((l) => l.key === 'marketing')!;
+  const sales = second.legs.find((l) => l.key === 'sales')!;
+  eq(marketing.status, 'DECLINED');
+  eq(marketing.requestId, marketingId);
+  eq(marketing.reason, 'no launch capacity this week');
+  eq(sales.status, 'COMPLETED');
+  eq(sales.requestId, salesId);
+  const third = await resumeFanOutWorkflow(db, coord, TEN, first.id);
+  eq(third.legs.find((l) => l.key === 'marketing')!.status, 'DECLINED');
+  eq(third.legs.find((l) => l.key === 'sales')!.status, 'COMPLETED');
+  eq(await count(), before);
+});
+
+T('FLOW-013: churn play retries reuse the parent run and link decisions to it', async () => {
+  const { db, ledger, coord } = await fresh({
+    maxConcurrentPerScope: 10,
+    maxDailyDollars: 200,
+    maxDailyTokens: 4_000_000,
+    maxHumanEscalationsPerDay: 50,
+  });
+  const adapter = new LocalEchoAdapter(db, ledger, coord);
+  const risk = await ledger.append({
+    tenant: TEN,
+    subject: 'churn:retry-link',
+    kind: 'BELIEF',
+    statement: 'Mid-market renewals wobbling',
+    confidence: 0.7,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:cs',
+    scope: 'customer',
+    authorType: 'agent',
+    provenance: { ...sor(), sourceTier: 'CORROBORATED' },
+  });
+  const input = {
+    segment: 'Mid-market renewals',
+    riskClaimIds: [risk.id],
+    onBehalfOf: 'human:founder',
+    approvedBy: 'human:priya',
+    savePlayDraftText: 'Dedicated onboarding review for mid-market renewals.',
+    offerCopyDraftText: 'Extended trial support for annual renewals.',
+    now: NOW,
+  };
+  const p1 = await executeChurnPlay(coord, ledger, adapter, TEN, input, { db });
+  const r2 = await churnRespondWorkflow(db, coord, ledger, TEN, {
+    segment: 'Mid-market renewals',
+    riskClaimIds: [risk.id],
+    onBehalfOf: 'human:founder',
+    now: NOW,
+  });
+  eq(p1.fanOutRunId === null, false);
+  eq(r2.id, p1.fanOutRunId);
+  eq(r2.decisionId, p1.recommendationDecisionId);
+  eq(churnLegIds(r2).outreachRequestId, p1.outreachRequestId);
+  const rec = await ledger.getDecision(TEN, p1.recommendationDecisionId!);
+  eq(JSON.parse(rec!.action).fanOutRunId, p1.fanOutRunId);
+  const ap1 = await ledger.getDecision(TEN, p1.decisionId);
+  eq(JSON.parse(ap1!.action).fanOutRunId, p1.fanOutRunId);
+  const recCount = (
+    (await db
+      .prepare('SELECT COUNT(*) AS n FROM decisions WHERE tenant = ? AND goal = ?')
+      .get(TEN, 'respond to churn risk in Mid-market renewals')) as { n: number }
+  ).n;
+  eq(recCount, 1);
+});
+
+T('FLOW-013: dedupe hits read as success while terminal refusals stay refused', async () => {
+  eq(isLegRefusal('DEDUPED'), false);
+  eq(isLegRefusal('DENIED'), true);
+  eq(isLegRefusal('DECLINED'), true);
+  const good = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 10,
+  });
+  const ga = await relClaim(good.ledger, 'release:dedupe-refusal', 'dedupe rollout');
+  const gInput = {
+    release: 'dedupe-refusal',
+    claimIds: [ga.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'dedupe',
+  };
+  const gFirst = await fanOutWorkflow(good.db, good.coord, TEN, gInput);
+  eq(gFirst.status, 'COMPLETE');
+  const gCount = async () =>
+    ((await good.db.prepare('SELECT COUNT(*) AS n FROM requests WHERE tenant = ?').get(TEN)) as { n: number }).n;
+  const gBefore = await gCount();
+  const gSecond = await fanOutWorkflow(good.db, good.coord, TEN, gInput);
+  eq(gSecond.status, 'COMPLETE');
+  eq(
+    gSecond.legs.every((l) => l.status === 'DEDUPED' && l.dedupedTo !== null),
+    true,
+  );
+  eq(await gCount(), gBefore);
+  const bad = await fresh({
+    maxConcurrentPerScope: 6,
+    maxDailyDollars: 40,
+    maxDailyTokens: 2_000_000,
+    maxHumanEscalationsPerDay: 0,
+  });
+  const ba = await relClaim(bad.ledger, 'release:refusal-stays', 'refused rollout');
+  const bFirst = await fanOutWorkflow(bad.db, bad.coord, TEN, {
+    release: 'refusal-stays',
+    claimIds: [ba.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'refused',
+  });
+  eq(bFirst.status, 'BLOCKED');
+  eq(bFirst.legs[0]!.status, 'DENIED');
+  eq(bFirst.legs[0]!.dedupedTo, null);
+  const bCount = async () =>
+    ((await bad.db.prepare('SELECT COUNT(*) AS n FROM requests WHERE tenant = ?').get(TEN)) as { n: number }).n;
+  const bBefore = await bCount();
+  const bSecond = await resumeFanOutWorkflow(bad.db, bad.coord, TEN, bFirst.id);
+  eq(bSecond.legs[0]!.status, 'DENIED');
+  eq(bSecond.legs[0]!.dedupedTo, null);
+  eq(await bCount(), bBefore);
+});
+
+T('FLOW-013: attention reconciliation surfaces need without raising limits or spending budget', async () => {
+  const { db, ledger, coord } = await fresh();
+  const a = await relClaim(ledger, 'release:attention', 'attention rollout');
+  const run = await fanOutWorkflow(db, coord, TEN, {
+    release: 'attention',
+    claimIds: [a.id],
+    onBehalfOf: 'human:priya',
+    now: NOW,
+    summary: 'attention',
+  });
+  eq(run.status, 'PARTIAL');
+  const limitsBefore = JSON.stringify(DEFAULT_LIMITS);
+  const rec = await reconcileFanOutAttention(coord, run);
+  eq(rec.runId, run.id);
+  eq(rec.cap, 3);
+  eq(rec.used, 3);
+  eq(rec.remaining, 0);
+  eq(rec.policyRaised, false);
+  eq(rec.blockedByPolicy, ['finance']);
+  eq(
+    rec.needsAttention.map((n) => n.key),
+    ['finance'],
+  );
+  eq(JSON.stringify(DEFAULT_LIMITS), limitsBefore);
+  const escBefore = await coord.dailyEscalations(TEN, NOW.slice(0, 10));
+  const after = await resumeFanOutWorkflow(db, coord, TEN, run.id);
+  eq(await coord.dailyEscalations(TEN, NOW.slice(0, 10)), escBefore);
+  eq(after.legs.find((l) => l.key === 'finance')!.status, 'DENIED');
 });
 
 console.log('\n\x1b[1mWedge — Ship-to-Result closed-loop and churn execution (F14)\x1b[0m');

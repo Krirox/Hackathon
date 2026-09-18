@@ -193,8 +193,16 @@ T('erasure leaves a surviving receipt: the deleted tenant is answerable for havi
   const detail = JSON.parse(receipt!.detail) as ErasureReceipt;
   eq(detail.exportedAt, NOW);
   eq((detail.deleted['claims'] ?? 0) >= 1, true, 'it carries row counts:');
-  eq(detail.retained.some((r) => r.category === 'erasure-receipt'), true, 'it lists retained categories:');
-  eq(detail.deferred.some((r) => r.category === 'backups'), true, 'it lists deferred categories:');
+  eq(
+    detail.retained.some((r) => r.category === 'erasure-receipt'),
+    true,
+    'it lists retained categories:',
+  );
+  eq(
+    detail.deferred.some((r) => r.category === 'backups'),
+    true,
+    'it lists deferred categories:',
+  );
   eq(r.receipt.exportedAt, NOW, 'the API receipt matches the audit row:');
   // The tenant's own audit rows (including the pre-delete marker) are gone;
   // only the receipt's tenant remains.
@@ -284,26 +292,26 @@ T('FLOW-004: durable export is written and verified before deletion commits', as
 
 T('FLOW-004: tenant-scoped meta keys (cursor, kill switch) are inventoried and removed', async () => {
   const { db } = await world();
-  await db
-    .prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
-    .run(`ingest:cursor:${TEN}:github`, 'sha-old');
+  await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(`ingest:cursor:${TEN}:github`, 'sha-old');
   await setKill(db, TEN, { scope: 'eng', actionClass: 'READ' }, 'op', NOW);
   await eraseTenant(db, TEN, 'op', NOW);
   eq(
-    ((await db.prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?").get(`ingest:cursor:${TEN}:%`)) as {
-      n: number;
-    }).n,
+    (
+      (await db.prepare('SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?').get(`ingest:cursor:${TEN}:%`)) as {
+        n: number;
+      }
+    ).n,
     0,
     'ingest cursors are gone:',
   );
   eq(
-    ((await db.prepare("SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?").get(`kill:${TEN}:%`)) as { n: number }).n,
+    ((await db.prepare('SELECT COUNT(*) AS n FROM meta WHERE key LIKE ?').get(`kill:${TEN}:%`)) as { n: number }).n,
     0,
     'kill switches are gone:',
   );
 });
 
-T('FLOW-004: unshared raw artifacts are deleted; shared artifacts are retained', async () => {
+T('FLOW-004: unshared raw artifacts are deferred; shared artifacts are retained', async () => {
   const { db } = await world();
   const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
   const event: RawEvent = {
@@ -338,7 +346,7 @@ T('FLOW-004: erased slug cannot be reused for a new organization', async () => {
   await rejects(() => signupTenant(db, SIGNUP, NOW), 'SLUG_RESERVED', 'erased slug reuse is refused:');
 });
 
-T('FLOW-004: exclusive artifact refs are deleted with the tenant', async () => {
+T('FLOW-004: exclusive artifact refs are planned for post-commit deletion', async () => {
   const { db } = await world();
   const artifactDir = mkdtempSync(join(tmpdir(), 'vital-artifacts-'));
   mkdirSync(artifactDir, { recursive: true });
@@ -353,6 +361,8 @@ T('FLOW-004: exclusive artifact refs are deleted with the tenant', async () => {
   const ref = storeArtifact(db, event, artifactDir);
   await db.prepare('UPDATE claims SET raw_ref = ? WHERE id = ?').run(ref, 'clm_e1');
   const r = await eraseTenant(db, TEN, 'op', NOW, { artifactDir });
-  eq(r.receipt.artifactsDeleted.includes(ref), true, 'exclusive artifact deleted:');
-  eq(existsSync(join(artifactDir, ref)), false, 'artifact file is gone:');
+  const deferredArtifacts = r.receipt.deferred.find((d) => d.category === 'artifacts');
+  eq(deferredArtifacts !== undefined, true, 'exclusive artifact is explicitly deferred:');
+  eq(deferredArtifacts?.items.includes(ref), true, 'the deferred receipt names the ref:');
+  eq(existsSync(join(artifactDir, ref)), true, 'the file is untouched pending the post-commit collector:');
 });

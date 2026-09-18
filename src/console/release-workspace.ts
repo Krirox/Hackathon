@@ -115,8 +115,7 @@ export async function loadWorkspaceOverlay(
   id: string,
 ): Promise<WorkflowWorkspaceOverlay | null> {
   const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(overlayKey(tenant, id))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!r) return null;
   try {
     return JSON.parse(String(r.value)) as WorkflowWorkspaceOverlay;
@@ -150,6 +149,15 @@ export async function listWorkflowRuns(db: AsyncDb, tenant: string): Promise<Fan
     }
   }
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/** Feature workspaces without fan-out legs still appear in the release workspace index. */
+export async function listFeatureWorkspaceIds(db: AsyncDb, tenant: string): Promise<string[]> {
+  const rows = (await db.prepare('SELECT key FROM meta WHERE key LIKE ?').all(`wedge:workspace:${tenant}:%`)) as {
+    key: string;
+  }[];
+  const fanoutIds = new Set((await listWorkflowRuns(db, tenant)).map((r) => r.id));
+  return rows.map((r) => r.key.slice(`wedge:workspace:${tenant}:`.length)).filter((id) => !fanoutIds.has(id));
 }
 
 function legTerminalSuccess(status: string): boolean {
@@ -250,11 +258,7 @@ async function hydrateLeg(
   };
 }
 
-async function loadOutcomesForDecisions(
-  db: AsyncDb,
-  tenant: string,
-  decisionIds: string[],
-): Promise<OutcomeRecord[]> {
+async function loadOutcomesForDecisions(db: AsyncDb, tenant: string, decisionIds: string[]): Promise<OutcomeRecord[]> {
   if (decisionIds.length === 0) return [];
   const placeholders = decisionIds.map(() => '?').join(',');
   const rows = (await db
@@ -414,10 +418,10 @@ export async function buildWorkspaceView(
     canCancel: Boolean(!overlay?.cancelledAt && lifecycle !== 'OUTCOME_VERIFIED'),
     canPreregister: Boolean(
       !overlay?.cancelledAt &&
-        !prereg &&
-        (lifecycle === 'EXECUTION_COMPLETE' || lifecycle === 'MEASUREMENT_PENDING' || lifecycle === 'FAN_OUT'),
+      !prereg &&
+      (lifecycle === 'EXECUTION_COMPLETE' || lifecycle === 'MEASUREMENT_PENDING' || lifecycle === 'FAN_OUT'),
     ),
-    canCaptureOutcome: Boolean(!overlay?.cancelledAt && prereg && outcomes.length === 0 && uniqueDecisionIds.length > 0),
+    canCaptureOutcome: Boolean(!overlay?.cancelledAt && prereg && outcomes.length === 0),
   };
 }
 
@@ -429,9 +433,11 @@ export async function listWorkflows(
   tenant: string,
 ): Promise<WorkflowListItem[]> {
   const runs = await listWorkflowRuns(db, tenant);
+  const featureIds = await listFeatureWorkspaceIds(db, tenant);
+  const ids = [...runs.map((r) => r.id), ...featureIds];
   const items: WorkflowListItem[] = [];
-  for (const run of runs) {
-    const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, run.id);
+  for (const id of ids) {
+    const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, id);
     if (!view) continue;
     items.push({
       id: view.id,
@@ -444,7 +450,7 @@ export async function listWorkflows(
       url: `/console/workflows/${encodeURIComponent(view.id)}`,
     });
   }
-  return items;
+  return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export async function preregisterWorkflowMetrics(
@@ -618,10 +624,7 @@ export function renderWorkflowDetailPage(
   opts: { home: string; csrf: string; actor: string },
 ): string {
   const sources = view.sourceReceipts
-    .map(
-      (s) =>
-        `<li><a href="${esc(s.url)}">${esc(s.id)}</a> · ${esc(s.status)} — ${esc(s.statement)}</li>`,
-    )
+    .map((s) => `<li><a href="${esc(s.url)}">${esc(s.id)}</a> · ${esc(s.status)} — ${esc(s.statement)}</li>`)
     .join('');
   const legs = view.legs
     .map(
@@ -700,14 +703,14 @@ export function renderWorkflowDetailPage(
 <button type="submit" style="background:#B91C1C">Cancel workflow</button></form>`);
   }
 
-  const measurementNote =
-    view.measurementState === 'verified'
-      ? 'Business outcome verified'
-      : view.measurementState === 'pending'
-        ? 'Execution complete — measurement pending'
-        : view.measurementState === 'unknown'
-          ? 'Outcome state unknown — pre-register before measuring'
-          : 'Measurement unsupported at this stage';
+  let measurementNote = 'Measurement unsupported at this stage';
+  if (view.measurementState === 'verified') {
+    measurementNote = 'Business outcome verified';
+  } else if (view.measurementState === 'pending') {
+    measurementNote = 'Execution complete — measurement pending';
+  } else if (view.measurementState === 'unknown') {
+    measurementNote = 'Outcome state unknown — pre-register before measuring';
+  }
 
   return pageShell(
     `Workflow ${view.subject}`,

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
-import type { Coordinator, AdmissionResult } from '../coord/coordinator.ts';
-import type { CoordinationRequest, RequestState } from '../core/types.ts';
+import { DEFAULT_LIMITS, type Coordinator, type AdmissionResult, type SchedulerLimits } from '../coord/coordinator.ts';
+import type { RequestState } from '../core/types.ts';
 import { WedgeError } from './ship.ts';
 
 /**
@@ -15,15 +15,7 @@ import { WedgeError } from './ship.ts';
  */
 
 export type FanOutLegStatus =
-  | 'PENDING'
-  | 'ADMITTED'
-  | 'DEFERRED'
-  | 'DENIED'
-  | 'DECLINED'
-  | 'EXECUTING'
-  | 'FAILED'
-  | 'COMPLETED'
-  | 'DEDUPED';
+  'PENDING' | 'ADMITTED' | 'DEFERRED' | 'DENIED' | 'DECLINED' | 'EXECUTING' | 'FAILED' | 'COMPLETED' | 'DEDUPED';
 
 export type FanOutWorkflowStatus = 'IN_PROGRESS' | 'PARTIAL' | 'COMPLETE' | 'BLOCKED';
 
@@ -120,6 +112,106 @@ export function isLegRetryEligible(status: FanOutLegStatus): boolean {
   return (RETRYABLE as readonly string[]).includes(status);
 }
 
+export function isLegRefusal(status: FanOutLegStatus): boolean {
+  return (TERMINAL_FAILURE as readonly string[]).includes(status);
+}
+
+export interface FanOutLegProgress {
+  key: string;
+  status: FanOutLegStatus;
+  requestId: string | null;
+  reason: string | null;
+  dedupedTo: string | null;
+}
+
+export interface FanOutProgress {
+  runId: string;
+  status: FanOutWorkflowStatus;
+  createdIds: Record<string, string>;
+  legs: FanOutLegProgress[];
+}
+
+export function partialFanOutProgress(run: FanOutWorkflowRun): FanOutProgress {
+  const createdIds: Record<string, string> = {};
+  for (const leg of run.legs) {
+    if (leg.requestId) {
+      createdIds[leg.key] = leg.requestId;
+    }
+  }
+  return {
+    runId: run.id,
+    status: run.status,
+    createdIds,
+    legs: run.legs.map((leg) => ({
+      key: leg.key,
+      status: leg.status,
+      requestId: leg.requestId,
+      reason: leg.reason,
+      dedupedTo: leg.dedupedTo,
+    })),
+  };
+}
+
+export interface FanOutAttentionNeed {
+  key: string;
+  targetScope: string;
+  humanMinutes: number;
+  status: FanOutLegStatus;
+  reason: string | null;
+}
+
+export interface FanOutAttentionReconciliation {
+  runId: string;
+  cap: number;
+  used: number;
+  remaining: number;
+  needsAttention: FanOutAttentionNeed[];
+  blockedByPolicy: string[];
+  policyRaised: boolean;
+}
+
+export async function reconcileFanOutAttention(
+  coord: Coordinator,
+  run: FanOutWorkflowRun,
+  limits: SchedulerLimits = DEFAULT_LIMITS,
+): Promise<FanOutAttentionReconciliation> {
+  const used = await coord.dailyEscalations(run.tenant, run.now.slice(0, 10));
+  const cap = limits.maxHumanEscalationsPerDay;
+  const needsAttention: FanOutAttentionNeed[] = [];
+  const blockedByPolicy: string[] = [];
+  for (const leg of run.legs) {
+    if (leg.humanMinutes <= 0) {
+      continue;
+    }
+    if (isLegTerminalSuccess(leg.status)) {
+      continue;
+    }
+    needsAttention.push({
+      key: leg.key,
+      targetScope: leg.targetScope,
+      humanMinutes: leg.humanMinutes,
+      status: leg.status,
+      reason: leg.reason,
+    });
+    if (leg.reason !== null && leg.reason.includes('escalation cap')) {
+      blockedByPolicy.push(leg.key);
+    }
+  }
+  let remaining = cap - used;
+  if (remaining < 0) {
+    remaining = 0;
+  }
+  return {
+    runId: run.id,
+    cap,
+    used,
+    remaining,
+    needsAttention,
+    blockedByPolicy,
+    policyRaised: false,
+  };
+}
+
 export function computeWorkflowStatus(legs: FanOutLegRecord[]): FanOutWorkflowStatus {
   if (legs.length === 0) return 'IN_PROGRESS';
   const allSuccess = legs.every((l) => isLegTerminalSuccess(l.status));
@@ -143,8 +235,7 @@ export async function saveFanOutRun(db: AsyncDb, run: FanOutWorkflowRun): Promis
 export async function loadFanOutRun(db: AsyncDb, tenant: string, id: string): Promise<FanOutWorkflowRun | null> {
   try {
     const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(runKeyOf(tenant, id))) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!r) return null;
     const run = JSON.parse(String(r.value)) as FanOutWorkflowRun;
     if (!Array.isArray(run.legs)) return null;
@@ -211,7 +302,23 @@ export async function advanceFanOutWorkflow(
     if (blocked && !opts.retryBlocked && leg.status === 'PENDING') continue;
     // Successful legs are re-submitted for idempotent dedupe on retry (same as
     // the legacy fan-out path) — a dedupe hit becomes DEDUPED, not a refusal.
-    if (isLegTerminalSuccess(leg.status) && leg.requestId) {
+    if ((leg.status === 'ADMITTED' || leg.status === 'DEDUPED') && leg.requestId) {
+      const synced = await syncLegFromCoordinator(coord, run.tenant, leg);
+      if (
+        synced.status === 'COMPLETED' ||
+        synced.status === 'EXECUTING' ||
+        synced.status === 'FAILED' ||
+        synced.status === 'DENIED' ||
+        synced.status === 'DECLINED'
+      ) {
+        current = {
+          ...current,
+          legs: current.legs.map((l, idx) => (idx === i ? synced : l)),
+          updatedAt: at,
+        };
+        await saveFanOutRun(db, current);
+        continue;
+      }
       const r = await coord.submit({
         tenant: run.tenant,
         messageClass: leg.messageClass,
@@ -224,7 +331,7 @@ export async function advanceFanOutWorkflow(
         onBehalfOf: run.onBehalfOf,
         now: run.now,
       });
-      leg = applyAdmission(leg, r, at);
+      leg = applyAdmission(synced, r, at);
       current = {
         ...current,
         legs: current.legs.map((l, idx) => (idx === i ? leg : l)),
@@ -282,10 +389,21 @@ export async function advanceFanOutWorkflow(
   return current;
 }
 
-export function shipLegTemplates(release: string, summary: string): Omit<FanOutLegRecord, 'requestId' | 'status' | 'reason' | 'dedupedTo' | 'updatedAt'>[] {
+export function shipLegTemplates(
+  release: string,
+  summary: string,
+): Omit<FanOutLegRecord, 'requestId' | 'status' | 'reason' | 'dedupedTo' | 'updatedAt'>[] {
   const brief = `${release}: ${summary}`;
   const at = new Date().toISOString();
-  const base = (key: string, originScope: string, targetScope: string, messageClass: 'REQUEST' | 'QUERY', goal: string, deliverableSchema: string, humanMinutes: number) => ({
+  const base = (
+    key: string,
+    originScope: string,
+    targetScope: string,
+    messageClass: 'REQUEST' | 'QUERY',
+    goal: string,
+    deliverableSchema: string,
+    humanMinutes: number,
+  ) => ({
     key,
     originScope,
     targetScope,
@@ -296,18 +414,60 @@ export function shipLegTemplates(release: string, summary: string): Omit<FanOutL
     updatedAt: at,
   });
   return [
-    base('marketing', 'product', 'marketing', 'REQUEST', `launch narrative + blog + in-app copy — ${brief}`, 'launch-pack.v1', 15),
-    base('customer', 'product', 'customer', 'REQUEST', `support macro + FAQ + churn-risk segment — ${brief}`, 'support-pack.v1', 15),
+    base(
+      'marketing',
+      'product',
+      'marketing',
+      'REQUEST',
+      `launch narrative + blog + in-app copy — ${brief}`,
+      'launch-pack.v1',
+      15,
+    ),
+    base(
+      'customer',
+      'product',
+      'customer',
+      'REQUEST',
+      `support macro + FAQ + churn-risk segment — ${brief}`,
+      'support-pack.v1',
+      15,
+    ),
     base('sales', 'product', 'sales', 'REQUEST', `battlecard + objection handling — ${brief}`, 'battlecard.v1', 10),
-    base('product', 'engineering', 'product', 'QUERY', `does this close a known pain pattern? — ${brief}`, 'pain-link.v1', 0),
-    base('finance', 'product', 'finance', 'REQUEST', `budget headroom for paid launch — ${brief}`, 'budget-check.v1', 10),
+    base(
+      'product',
+      'engineering',
+      'product',
+      'QUERY',
+      `does this close a known pain pattern? — ${brief}`,
+      'pain-link.v1',
+      0,
+    ),
+    base(
+      'finance',
+      'product',
+      'finance',
+      'REQUEST',
+      `budget headroom for paid launch — ${brief}`,
+      'budget-check.v1',
+      10,
+    ),
   ];
 }
 
-export function churnLegTemplates(segment: string): Omit<FanOutLegRecord, 'requestId' | 'status' | 'reason' | 'dedupedTo' | 'updatedAt'>[] {
+export function churnLegTemplates(
+  segment: string,
+): Omit<FanOutLegRecord, 'requestId' | 'status' | 'reason' | 'dedupedTo' | 'updatedAt'>[] {
   const brief = `churn risk in ${segment}`;
   const at = new Date().toISOString();
-  const base = (key: string, originScope: string, targetScope: string, messageClass: 'REQUEST' | 'QUERY', goal: string, deliverableSchema: string, humanMinutes: number) => ({
+  const base = (
+    key: string,
+    originScope: string,
+    targetScope: string,
+    messageClass: 'REQUEST' | 'QUERY',
+    goal: string,
+    deliverableSchema: string,
+    humanMinutes: number,
+  ) => ({
     key,
     originScope,
     targetScope,
@@ -318,9 +478,25 @@ export function churnLegTemplates(segment: string): Omit<FanOutLegRecord, 'reque
     updatedAt: at,
   });
   return [
-    base('productQuery', 'customer', 'product', 'QUERY', `does this match a known pain pattern? — ${brief}`, 'pain-link.v1', 0),
+    base(
+      'productQuery',
+      'customer',
+      'product',
+      'QUERY',
+      `does this match a known pain pattern? — ${brief}`,
+      'pain-link.v1',
+      0,
+    ),
     base('outreach', 'product', 'customer', 'REQUEST', `save play for ${segment} — ${brief}`, 'save-play.v1', 10),
-    base('offer', 'product', 'marketing', 'REQUEST', `retention offer copy for ${segment} — ${brief}`, 'offer-copy.v1', 10),
+    base(
+      'offer',
+      'product',
+      'marketing',
+      'REQUEST',
+      `retention offer copy for ${segment} — ${brief}`,
+      'offer-copy.v1',
+      10,
+    ),
   ];
 }
 
@@ -369,7 +545,9 @@ export function createFanOutWorkflowRun(input: {
 }
 
 /** Map a completed ship workflow to the legacy FanOutResult shape. */
-export function shipLegIds(run: FanOutWorkflowRun): Record<'marketing' | 'customer' | 'sales' | 'product' | 'finance', string> {
+export function shipLegIds(
+  run: FanOutWorkflowRun,
+): Record<'marketing' | 'customer' | 'sales' | 'product' | 'finance', string> {
   const out: Record<string, string> = {};
   for (const leg of run.legs) {
     if (!leg.requestId) {
@@ -399,10 +577,19 @@ export function churnLegIds(run: FanOutWorkflowRun): {
 
 export function requireCompleteFanOut(run: FanOutWorkflowRun): void {
   if (run.status === 'COMPLETE') return;
-  const refused = run.legs.filter((l) => (TERMINAL_FAILURE as readonly string[]).includes(l.status));
+  const progress = partialFanOutProgress(run);
+  const refused = run.legs.filter((l) => isLegRefusal(l.status));
   const first = refused[0];
   if (first) {
-    throw new WedgeError('FANOUT_REFUSED', `${first.originScope}→${first.targetScope} ${first.status}: ${first.reason ?? 'refused'}`);
+    throw new WedgeError(
+      'FANOUT_REFUSED',
+      `${first.originScope}→${first.targetScope} ${first.status}: ${first.reason ?? 'refused'}`,
+      { runId: run.id, status: run.status, progress },
+    );
   }
-  throw new WedgeError('INCOMPLETE_FANOUT', `fan-out ${run.id} is ${run.status} — not all legs admitted`);
+  throw new WedgeError('INCOMPLETE_FANOUT', `fan-out ${run.id} is ${run.status} — not all legs admitted`, {
+    runId: run.id,
+    status: run.status,
+    progress,
+  });
 }

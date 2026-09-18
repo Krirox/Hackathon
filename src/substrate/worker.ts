@@ -5,7 +5,11 @@ import type { Coordinator } from '../coord/coordinator.ts';
 import type { CoordinationRequest } from '../core/types.ts';
 import { claimOutbox, settleOutbox, type OutboxRow } from './scheduler.ts';
 import { JcodeAdapter, LocalEchoAdapter, type HarnessAdapter } from './harness.ts';
+import { requiresHumanApproval, validateExecutionAgainstSpec, type ExecutionSpec } from '../coord/execution-spec.ts';
 import { runJob, type ExecutorJob } from '../aws/executor.ts';
+import { CognitiveRouter } from '../router/router.ts';
+import { OrganizationalCompiler, mineCandidates } from '../compiler/compiler.ts';
+import type { RoutingClass } from '../core/types.ts';
 
 export interface ApplicationWorkerOptions {
   tenant: string;
@@ -23,6 +27,9 @@ export interface ApplicationWorkerOptions {
     req: CoordinationRequest,
   ) => Promise<{ claims?: string[]; cost?: Partial<CoordinationRequest['spent']> }>;
   sqsSender?: (job: ExecutorJob) => Promise<void>;
+  router?: CognitiveRouter;
+  compiler?: OrganizationalCompiler;
+  enableLearningLoop?: boolean;
 }
 
 export interface WorkerStatus {
@@ -42,6 +49,10 @@ export interface WorkerStatus {
     requestsDispatched: number;
     requestsCompleted: number;
     requestsFailed: number;
+    driftChecks: number;
+    cardsDemoted: number;
+    tiersReverted: number;
+    candidatesMined: number;
   };
 }
 
@@ -50,6 +61,12 @@ export interface WorkerTickResult {
     readmitted: number;
     reclaimed: number;
     expired: number;
+  };
+  learning?: {
+    driftChecks: number;
+    cardsDemoted: number;
+    tiersReverted: RoutingClass[];
+    candidatesMined: number;
   };
   outboxProcessed: number;
   outboxFailed: number;
@@ -82,6 +99,9 @@ export class ApplicationWorker {
     req: CoordinationRequest,
   ) => Promise<{ claims?: string[]; cost?: Partial<CoordinationRequest['spent']> }>;
   private readonly sqsSender?: (job: ExecutorJob) => Promise<void>;
+  readonly router: CognitiveRouter;
+  readonly compiler: OrganizationalCompiler;
+  private readonly enableLearningLoop: boolean;
 
   private stopped = false;
   private startedAt: number | null = null;
@@ -101,6 +121,10 @@ export class ApplicationWorker {
     requestsDispatched: 0,
     requestsCompleted: 0,
     requestsFailed: 0,
+    driftChecks: 0,
+    cardsDemoted: 0,
+    tiersReverted: 0,
+    candidatesMined: 0,
   };
 
   constructor(
@@ -126,6 +150,9 @@ export class ApplicationWorker {
     this.outboxHandler = options.outboxHandler;
     this.requestExecutor = options.requestExecutor;
     this.sqsSender = options.sqsSender;
+    this.router = options.router ?? new CognitiveRouter(this.db);
+    this.compiler = options.compiler ?? new OrganizationalCompiler(this.db);
+    this.enableLearningLoop = options.enableLearningLoop ?? true;
 
     if (options.adapter) {
       this.adapter = options.adapter;
@@ -186,6 +213,33 @@ export class ApplicationWorker {
         result.swept.readmitted = readmitted.length;
         result.swept.reclaimed = reclaimed.length;
         result.swept.expired = expired.length;
+
+        // F17: Operating learning loop: drift checks, budget reversions, and candidate mining
+        if (this.enableLearningLoop) {
+          const promotedCards = (await this.db
+            .prepare("SELECT id FROM skill_cards WHERE tenant = ? AND state = 'PROMOTED'")
+            .all(this.tenant)) as { id: string }[];
+          let demotedCount = 0;
+          for (const card of promotedCards) {
+            const driftRes = await this.compiler.checkDrift(this.tenant, card.id);
+            if (driftRes.demoted) demotedCount += 1;
+          }
+
+          const revertedTiers = await this.router.revertBreachedTiers(this.tenant);
+          const candidates = await mineCandidates(this.db, this.tenant);
+
+          this.counters.driftChecks += promotedCards.length;
+          this.counters.cardsDemoted += demotedCount;
+          this.counters.tiersReverted += revertedTiers.length;
+          this.counters.candidatesMined += candidates.length;
+
+          result.learning = {
+            driftChecks: promotedCards.length,
+            cardsDemoted: demotedCount,
+            tiersReverted: revertedTiers,
+            candidatesMined: candidates.length,
+          };
+        }
       } catch (err) {
         const msg = `[worker:SWEEP_FAILED] ${String(err)}`;
         this.lastError = msg;
@@ -250,13 +304,40 @@ export class ApplicationWorker {
         for (const r of rows) {
           if (this.stopped || this.signal?.aborted) break;
           const reqId = String(r['id']);
+          const state = String(r['state']);
           const targetScope = String(r['target_scope']);
           const goal = String(r['goal']);
           const onBehalfOf = String(r['on_behalf_of'] || 'agent:worker');
           const claimRefs = JSON.parse(String(r['claim_refs'] || '[]')) as string[];
-          const bid = JSON.parse(String(r['bid_json'] || '{}')) as { dollars?: number; tokens?: number };
+          const bid = JSON.parse(String(r['bid_json'] || '{}')) as {
+            dollars?: number;
+            tokens?: number;
+            humanMinutes?: number;
+          };
 
+          const request = await this.coord.get(this.tenant, reqId);
+          if (!request) continue;
+          if (state === 'ADMITTED' && requiresHumanApproval(request)) continue;
+
+          let command = goal;
           let groundedClaimRefs = [...claimRefs];
+          let approvedSpec: ExecutionSpec | undefined;
+          const approvalDecision = await this.ledger.getDecisionByRequest(this.tenant, reqId);
+          if (state === 'ACCEPTED' && approvalDecision) {
+            const bound = await validateExecutionAgainstSpec(
+              this.ledger,
+              this.coord,
+              this.tenant,
+              reqId,
+              { command: goal, claimRefs: groundedClaimRefs, decisionId: approvalDecision.id },
+              nowIso,
+            );
+            approvedSpec = bound.spec;
+            command = bound.spec.command;
+            groundedClaimRefs = bound.spec.evidence.map((e) => e.id);
+          } else if (state === 'ACCEPTED' && requiresHumanApproval(request)) {
+            continue;
+          }
           if (groundedClaimRefs.length === 0) {
             const clm = await this.ledger.append({
               tenant: this.tenant,
@@ -280,27 +361,114 @@ export class ApplicationWorker {
             groundedClaimRefs = [clm.id];
           }
 
+          // F17: Query compiler for executable card and cognitive router for dispatch tier
+          const taskType = 'engineering.implement';
+          const intent = `code:${request.deliverableSchema}`;
+          const candidateCard = await this.compiler.executableFor(this.tenant, intent, targetScope, this.adapter.name);
+          const routeDecision = await this.router.route({
+            tenant: this.tenant,
+            taskType,
+            scope: targetScope,
+            actionClass: 'ACT_REVERSIBLE',
+            importance: 0.3,
+            reversible: true,
+            skillCard: candidateCard
+              ? {
+                  id: candidateCard.id,
+                  state: candidateCard.state,
+                  validatedAtTier: candidateCard.validatedAtTier,
+                  scopeRoles: candidateCard.scopeRoles,
+                  scopeModels: candidateCard.originModels,
+                }
+              : null,
+            model: this.adapter.name,
+            now: nowIso,
+          });
+
+          // Conservative fail-up: if router decided HUMAN, and request lacks approval, do not execute autonomously
+          if (routeDecision.tier === 'HUMAN' && state === 'ADMITTED') {
+            continue;
+          }
+
           result.requestsDispatched += 1;
           this.counters.requestsDispatched += 1;
 
           try {
             if (this.requestExecutor) {
               const claimed = await this.coord.claimExecution(this.tenant, reqId, this.workerId, nowIso);
-              const execRes = await this.requestExecutor(claimed);
-              await this.coord.complete(this.tenant, reqId, {
-                claims: execRes.claims ?? [],
-                cost: execRes.cost ?? {},
-              });
-              this.counters.requestsCompleted += 1;
-              result.requestsCompleted += 1;
+              let execSuccess = false;
+              try {
+                const execRes = await this.requestExecutor(claimed);
+                await this.coord.complete(this.tenant, reqId, {
+                  claims: execRes.claims ?? [],
+                  cost: execRes.cost ?? {},
+                });
+                execSuccess = true;
+                this.counters.requestsCompleted += 1;
+                result.requestsCompleted += 1;
+              } finally {
+                await this.router.recordCalibrationSample(
+                  this.tenant,
+                  taskType,
+                  routeDecision.tier,
+                  this.adapter.name,
+                  execSuccess,
+                  nowIso,
+                );
+                // Ensure balanced trace exists for custom executor
+                const existingTr = (await this.db
+                  .prepare('SELECT id FROM traces WHERE tenant = ? AND request_id = ?')
+                  .get(this.tenant, reqId)) as { id: string } | undefined;
+                if (!existingTr) {
+                  await this.db
+                    .prepare(
+                      `INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                    )
+                    .run(
+                      `tr_${randomUUID()}`,
+                      this.tenant,
+                      reqId,
+                      targetScope,
+                      taskType,
+                      intent,
+                      JSON.stringify({ executor: 'requestExecutor' }),
+                      routeDecision.tier,
+                      execSuccess ? 'SUCCESS' : 'FAILURE',
+                      '{}',
+                      routeDecision.tier === 'WORKFLOW' ? (candidateCard?.id ?? null) : null,
+                      routeDecision.shadow ? 0.5 : 0.9,
+                      nowIso,
+                    );
+                }
+              }
             } else {
+              const boundSkillCardId = routeDecision.tier === 'WORKFLOW' ? (candidateCard?.id ?? null) : null;
               const outcome = await this.adapter.run(this.tenant, reqId, {
-                command: goal,
+                command,
                 claimRefs: groundedClaimRefs,
                 onBehalfOf,
                 maxDollars: bid.dollars ?? 1,
                 maxTokens: bid.tokens ?? 10_000,
+                ...(approvedSpec && approvalDecision
+                  ? { approvedDecisionId: approvalDecision.id, specFingerprint: approvedSpec.fingerprint }
+                  : {}),
+                taskType,
+                tier: routeDecision.tier,
+                intent,
+                skillCardId: boundSkillCardId,
+                routerConfidence: routeDecision.shadow ? 0.5 : 0.9,
               });
+
+              await this.router.recordCalibrationSample(
+                this.tenant,
+                taskType,
+                routeDecision.tier,
+                this.adapter.name,
+                outcome.status === 'COMPLETED',
+                nowIso,
+              );
+
               if (outcome.status === 'COMPLETED') {
                 this.counters.requestsCompleted += 1;
                 result.requestsCompleted += 1;
@@ -310,6 +478,14 @@ export class ApplicationWorker {
               }
             }
           } catch (err) {
+            await this.router.recordCalibrationSample(
+              this.tenant,
+              taskType,
+              routeDecision.tier,
+              this.adapter.name,
+              false,
+              nowIso,
+            );
             this.counters.requestsFailed += 1;
             result.requestsFailed += 1;
             const msg = `[worker:REQUEST_EXECUTION_FAILED] req=${reqId} ${String(err)}`;

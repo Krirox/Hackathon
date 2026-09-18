@@ -168,6 +168,28 @@ CREATE INDEX IF NOT EXISTS ix_invitations_tenant_email ON invitations(tenant, em
 `,
     down: `DROP TABLE IF EXISTS invitations;`,
   },
+  {
+    name: '0003_mfa_email_verification',
+    up: `
+ALTER TABLE users ADD COLUMN email_verified_at TEXT;
+CREATE TABLE IF NOT EXISTS mfa_factors (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  kind          TEXT NOT NULL CHECK (kind IN ('totp', 'webauthn')),
+  secret        TEXT,
+  credential_id TEXT,
+  public_key    TEXT,
+  verified_at   TEXT NOT NULL,
+  last_used_at  TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_mfa_factors_user ON mfa_factors(user_id);
+`,
+    down: `
+ALTER TABLE users DROP COLUMN email_verified_at;
+DROP TABLE IF EXISTS mfa_factors;
+`,
+  },
 ];
 
 /** Idle session lifetime. Rolling: each successful touch re-arms the full window. */
@@ -460,8 +482,7 @@ function rowToInvitation(r: Row): Invitation {
     status: String(r.status) as InvitationStatus,
     expiresAt: String(r.expires_at),
     acceptedAt: r.accepted_at === null || r.accepted_at === undefined ? null : String(r.accepted_at),
-    acceptedUserId:
-      r.accepted_user_id === null || r.accepted_user_id === undefined ? null : String(r.accepted_user_id),
+    acceptedUserId: r.accepted_user_id === null || r.accepted_user_id === undefined ? null : String(r.accepted_user_id),
     revokedAt: r.revoked_at === null || r.revoked_at === undefined ? null : String(r.revoked_at),
     createdAt: String(r.created_at),
   };
@@ -483,9 +504,9 @@ async function countActiveOwners(db: AsyncDb, tenant: string): Promise<number> {
 
 async function assertEmailAvailable(db: AsyncDb, tenant: string, email: string, now: string): Promise<void> {
   const normalized = email.trim().toLowerCase();
-  const existing = (await db.prepare('SELECT id, disabled FROM users WHERE tenant = ? AND email = ?').get(tenant, normalized)) as
-    | { id: string; disabled: number }
-    | undefined;
+  const existing = (await db
+    .prepare('SELECT id, disabled FROM users WHERE tenant = ? AND email = ?')
+    .get(tenant, normalized)) as { id: string; disabled: number } | undefined;
   if (existing) {
     if (Number(existing.disabled) === 1)
       throw new AuthError('DISABLED_USER_EXISTS', `${normalized} is disabled — reactivate the account instead`);
@@ -495,7 +516,8 @@ async function assertEmailAvailable(db: AsyncDb, tenant: string, email: string, 
   const pending = (await db
     .prepare("SELECT id FROM invitations WHERE tenant = ? AND email = ? AND status = 'pending'")
     .get(tenant, normalized)) as { id: string } | undefined;
-  if (pending) throw new AuthError('INVITATION_PENDING', `${normalized} already has a pending invitation — resend or revoke it`);
+  if (pending)
+    throw new AuthError('INVITATION_PENDING', `${normalized} already has a pending invitation — resend or revoke it`);
 }
 
 /** Mark expired pending invitations so the team page stays truthful. */
@@ -579,13 +601,15 @@ export async function createInvitation(
 
 export async function listInvitations(db: AsyncDb, tenant: string, now: string): Promise<Invitation[]> {
   await sweepInvitations(db, tenant, now);
-  const rows = await db
-    .prepare('SELECT * FROM invitations WHERE tenant = ? ORDER BY created_at DESC')
-    .all(tenant);
+  const rows = await db.prepare('SELECT * FROM invitations WHERE tenant = ? ORDER BY created_at DESC').all(tenant);
   return rows.map(rowToInvitation);
 }
 
-export async function getInvitation(db: AsyncDb, tenant: string, invitationId: string): Promise<Invitation | undefined> {
+export async function getInvitation(
+  db: AsyncDb,
+  tenant: string,
+  invitationId: string,
+): Promise<Invitation | undefined> {
   const r = await db.prepare('SELECT * FROM invitations WHERE tenant = ? AND id = ?').get(tenant, invitationId);
   return r ? rowToInvitation(r) : undefined;
 }
@@ -631,7 +655,8 @@ export async function resendInvitation(
   const inv = await getInvitation(db, tenant, invitationId);
   if (!inv) throw new AuthError('UNKNOWN_INVITATION', `no invitation ${invitationId}`);
   if (inv.status === 'accepted') throw new AuthError('INVITATION_ACCEPTED', 'accepted invitations cannot be resent');
-  if (inv.status === 'revoked') throw new AuthError('INVITATION_REVOKED', 'revoked invitations cannot be resent — create a new account');
+  if (inv.status === 'revoked')
+    throw new AuthError('INVITATION_REVOKED', 'revoked invitations cannot be resent — create a new account');
   const token = newToken();
   const expiresAt = new Date(Date.parse(now) + INVITATION_TTL_MS).toISOString();
   await db
@@ -655,11 +680,10 @@ export async function acceptInvitation(
   if (!inv) throw new AuthError('BAD_INVITATION', 'unknown or invalid invitation');
   if (inv.status === 'revoked') throw new AuthError('BAD_INVITATION', 'this invitation was revoked');
   if (inv.status === 'accepted') throw new AuthError('BAD_INVITATION', 'this invitation was already accepted');
-  if (inv.status === 'expired') throw new AuthError('BAD_INVITATION', 'this invitation expired — ask your admin for a new one');
+  if (inv.status === 'expired')
+    throw new AuthError('BAD_INVITATION', 'this invitation expired — ask your admin for a new one');
   return db.transaction(async () => {
-    const existing = await db
-      .prepare('SELECT id FROM users WHERE tenant = ? AND email = ?')
-      .get(inv.tenant, inv.email);
+    const existing = await db.prepare('SELECT id FROM users WHERE tenant = ? AND email = ?').get(inv.tenant, inv.email);
     if (existing) throw new AuthError('DUPLICATE_USER', `${inv.email} already has an account`);
     const user = await insertUser(db, inv.tenant, {
       email: inv.email,
@@ -700,8 +724,7 @@ export async function flagMustChangePassword(db: AsyncDb, tenant: string, userId
 }
 
 const ACTIVE_CLAIM_STATUSES = "('RETIRED','SUPERSEDED','STALE')";
-const OPEN_REQUEST_STATES =
-  "('PROPOSED','QUEUED','ADMITTED','DEFERRED','IN_FLIGHT','ACCEPTED')";
+const OPEN_REQUEST_STATES = "('PROPOSED','QUEUED','ADMITTED','DEFERRED','IN_FLIGHT','ACCEPTED')";
 
 /** Claims and open requests accountable to this human (by email, name, or id). */
 export async function countOutstandingWork(db: AsyncDb, tenant: string, user: User): Promise<OutstandingWork> {
@@ -867,6 +890,136 @@ export async function transferOwnership(
     const next = (await getUser(db, tenant, toUserId))!;
     return { from, to: next };
   });
+}
+
+export type MembershipKind = 'invited' | 'active' | 'disabled';
+
+export interface MembershipRow {
+  kind: MembershipKind;
+  email: string;
+  name: string;
+  role: Role;
+  detail: string;
+}
+
+export function membershipRoster(users: User[], invitations: Invitation[], now: string): MembershipRow[] {
+  const rows: MembershipRow[] = [];
+  for (const inv of invitations) {
+    if (inv.status === 'accepted' || inv.status === 'revoked') continue;
+    let detail = `invited — acceptance link expires ${inv.expiresAt.slice(0, 10)}`;
+    if (inv.status === 'expired' || (inv.status === 'pending' && inv.expiresAt <= now))
+      detail = 'invitation expired — resend it or create a new account';
+    rows.push({ kind: 'invited', email: inv.email, name: inv.name, role: inv.role, detail });
+  }
+  for (const u of users) {
+    if (u.disabled) {
+      rows.push({
+        kind: 'disabled',
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        detail: 'sign-in revoked — reactivate to restore access without restoring old sessions',
+      });
+    } else if (membershipStatus(u) === 'pending_activation') {
+      rows.push({
+        kind: 'active',
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        detail: 'pending activation — a password change is required before continuing',
+      });
+    } else {
+      rows.push({ kind: 'active', email: u.email, name: u.name, role: u.role, detail: 'active — can sign in' });
+    }
+  }
+  return rows;
+}
+
+export interface CreateAccountNotice {
+  heading: string;
+  detail: string;
+  button: string;
+}
+
+export function createAccountNotice(): CreateAccountNotice {
+  return {
+    heading: 'Create account',
+    detail:
+      'Creates a pending invitation. Deliver the acceptance link to this person out of band (email, chat, ticket). They choose their own password when accepting — you never set it here.',
+    button: 'Create account',
+  };
+}
+
+export type DuplicateCase =
+  'pending_invitation' | 'expired_invitation' | 'revoked_invitation' | 'disabled_account' | 'active_account';
+
+export interface InvitationNextStep {
+  heading: string;
+  detail: string;
+  action: string;
+}
+
+export function invitationNextSteps(kind: DuplicateCase, email: string): InvitationNextStep {
+  if (kind === 'pending_invitation')
+    return {
+      heading: `${email} already has a pending invitation`,
+      detail: 'The acceptance link is still valid until expiry.',
+      action: 'Resend the link, or revoke it and create a new account.',
+    };
+  if (kind === 'expired_invitation')
+    return {
+      heading: `${email} has an expired invitation`,
+      detail: 'Expired links cannot be accepted.',
+      action: 'Resend the invitation for a fresh acceptance link.',
+    };
+  if (kind === 'revoked_invitation')
+    return {
+      heading: `${email} has a revoked invitation`,
+      detail: 'Revoked invitations cannot be resent.',
+      action: 'Create a new account to invite them again.',
+    };
+  if (kind === 'disabled_account')
+    return {
+      heading: `${email} is disabled`,
+      detail: 'Disabled accounts keep their history but cannot sign in.',
+      action: 'Reactivate the account instead of inviting again.',
+    };
+  return {
+    heading: `${email} already has an active account`,
+    detail: 'This person can already sign in.',
+    action: 'Change their role on the team page if their access is wrong.',
+  };
+}
+
+export interface DisableConfirmation {
+  person: { id: string; email: string; name: string; role: Role };
+  liveSessions: number;
+  sessionConsequence: string;
+  accessConsequence: string;
+  work: OutstandingWork;
+  needsHandoff: boolean;
+  lastUsableOwner: boolean;
+}
+
+export async function disableConfirmation(db: AsyncDb, tenant: string, userId: string): Promise<DisableConfirmation> {
+  const target = await getUser(db, tenant, userId);
+  if (!target) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  const sessions = (await db
+    .prepare('SELECT COUNT(*) AS n FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL')
+    .get(userId)) as { n: number };
+  const work = await countOutstandingWork(db, tenant, target);
+  let lastUsableOwner = false;
+  if (target.role === 'owner') lastUsableOwner = (await countActiveOwners(db, tenant)) <= 1;
+  return {
+    person: { id: target.id, email: target.email, name: target.name, role: target.role },
+    liveSessions: Number(sessions.n),
+    sessionConsequence: 'Disabling revokes every live session immediately.',
+    accessConsequence:
+      'They cannot sign in again until reactivated. Reactivation restores sign-in access but never restores revoked sessions.',
+    work,
+    needsHandoff: work.claimCount + work.requestCount > 0,
+    lastUsableOwner,
+  };
 }
 
 // ------------------------------------------------------------------- login ----
@@ -1096,6 +1249,49 @@ export async function confirmPasswordReset(
 
 const RANK: Record<Role, number> = { member: 0, admin: 1, owner: 2 };
 
+export const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+export const MFA_RECENT_AUTH_WINDOW_MS = 15 * 60 * 1000; // 15 min for sensitive ops
+
+/** FLOW-007: email verification before relying on it as recovery channel. */
+export async function verifyEmailBeforeRecovery(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  now: string,
+): Promise<boolean> {
+  const user = (await db
+    .prepare('SELECT email_verified_at FROM users WHERE tenant = ? AND id = ?')
+    .get(tenant, userId)) as { email_verified_at: string | null } | undefined;
+  return (
+    !!user?.email_verified_at &&
+    new Date(user.email_verified_at).getTime() > new Date(now).getTime() - EMAIL_VERIFICATION_TTL_MS
+  );
+}
+
+/** FLOW-007: MFA-capable identity strategy — enforcement, recovery, recent-auth policy. */
+export interface MfaFactor {
+  id: string;
+  userId: string;
+  kind: 'totp' | 'webauthn';
+  verifiedAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function assertRecentAuthForSensitiveOp(
+  db: AsyncDb,
+  userId: string,
+  now: string,
+  windowMs = MFA_RECENT_AUTH_WINDOW_MS,
+): Promise<void> {
+  const session = (await db
+    .prepare('SELECT created_at FROM auth_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1')
+    .get(userId)) as { created_at: string } | undefined;
+  if (!session) throw new AuthError('REAUTH_REQUIRED', 'recent authentication required for sensitive operation');
+  if (new Date(now).getTime() - new Date(session.created_at).getTime() > windowMs) {
+    throw new AuthError('REAUTH_REQUIRED', 'session too old; re-authenticate to proceed');
+  }
+}
+
 export function atLeast(role: Role, min: Role): boolean {
   return RANK[role] >= RANK[min];
 }
@@ -1115,14 +1311,12 @@ export function canGrantRole(granter: Role, granted: Role): boolean {
 }
 
 export function assertGrantRole(granter: Role, granted: Role): void {
-  if (!canGrantRole(granter, granted))
-    throw new AuthError('FORBIDDEN', `${granter} cannot grant the ${granted} role`);
+  if (!canGrantRole(granter, granted)) throw new AuthError('FORBIDDEN', `${granter} cannot grant the ${granted} role`);
 }
 
 /** Invited/bootstrap users must finish password change before other mutations. */
 export function assertAccountActivated(user: User): void {
-  if (user.mustChangePassword)
-    throw new AuthError('ACTIVATION_REQUIRED', 'change your password before continuing');
+  if (user.mustChangePassword) throw new AuthError('ACTIVATION_REQUIRED', 'change your password before continuing');
 }
 
 /** Roles an inviter may offer in UI or API — mirrors {@link canGrantRole}. */

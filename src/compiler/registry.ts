@@ -1,6 +1,7 @@
 import type { AsyncDb } from '../core/db.ts';
+import type { EvalRunRow } from '../core/rows.ts';
 import { runSuite, type EvalTarget, type SuiteRun } from '../evals/runner.ts';
-import type { OrganizationalCompiler, SkillCard, SkillState, TransferTest } from './compiler.ts';
+import type { OrganizationalCompiler, SkillCard, SkillCardRevision, SkillState, TransferTest } from './compiler.ts';
 
 /**
  * Procedure registry, read side (TODO §5): card, state, scope, tests
@@ -21,6 +22,7 @@ export interface CardDescription {
   card: SkillCard;
   transfers: TransferTest[];
   drift: { drifting: boolean; demoted: boolean; ewma: number; samples: number } | null;
+  revisions?: SkillCardRevision[];
   /** Empty means: nothing blocks the next step that evidence can show. */
   trustGaps: string[];
 }
@@ -104,8 +106,9 @@ export async function describeCardReadOnly(
   const card = await comp.get(tenant, id);
   if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
   const transfers = await comp.transferResults(tenant, card.id);
+  const revisions = await comp.cardRevisions(tenant, card.id);
   const drift = await peekDrift(db, tenant, card);
-  return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
+  return { card, transfers, drift, revisions, trustGaps: trustGapsFor(card, transfers, drift) };
 }
 
 /**
@@ -119,8 +122,9 @@ export async function describeCard(comp: OrganizationalCompiler, tenant: string,
   const card = await comp.get(tenant, id);
   if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${id}`);
   const transfers = await comp.transferResults(tenant, card.id);
+  const revisions = await comp.cardRevisions(tenant, card.id);
   const drift = card.state === 'PROMOTED' ? await comp.checkDrift(tenant, card.id) : null;
-  return { card, transfers, drift, trustGaps: trustGapsFor(card, transfers, drift) };
+  return { card, transfers, drift, revisions, trustGaps: trustGapsFor(card, transfers, drift) };
 }
 
 /**
@@ -142,5 +146,62 @@ export async function runCardSuite(
   if (!card) throw new Error(`[registry:MISSING_CARD] unknown card ${cardId}`);
   if (!card.evalRef)
     throw new Error(`[registry:NO_EVAL_REF] card ${cardId} has no eval suite reference (evals are the spec)`);
-  return runSuite(db, tenant, card.evalRef, targetName, target, { now });
+  const run = await runSuite(db, tenant, card.evalRef, targetName, target, { now });
+  const passed = run.failed === 0 && run.passed > 0;
+  const score = run.passed + run.failed > 0 ? run.passed / (run.passed + run.failed) : 0;
+  await comp.recordTransfer(card, {
+    kind: 'regression',
+    variant: card.evalRef,
+    passed,
+    score,
+    ranAt: run.ranAt,
+    cardVersion: card.version,
+    evalRunId: run.id,
+    evaluator: targetName,
+  });
+  return run;
+}
+
+export interface CardEvaluationEvidence {
+  card: SkillCard;
+  transfers: TransferTest[];
+  trustGaps: string[];
+  evalRef: string | null;
+  runs: { id: string; suite: string; passed: number; failed: number; ranAt: string }[];
+  latest: { id: string; suite: string; passed: number; failed: number; ranAt: string } | null;
+  evidenceOnly: string;
+}
+
+export async function cardEvaluationEvidence(
+  db: AsyncDb,
+  comp: OrganizationalCompiler,
+  tenant: string,
+  cardId: string,
+): Promise<CardEvaluationEvidence> {
+  const described = await describeCardReadOnly(db, comp, tenant, cardId);
+  const runs =
+    described.card.evalRef == null
+      ? []
+      : (
+          (await db
+            .prepare(
+              'SELECT id, suite, passed, failed, ran_at FROM eval_runs WHERE tenant = ? AND suite = ? ORDER BY ran_at DESC LIMIT 5',
+            )
+            .all(tenant, described.card.evalRef)) as EvalRunRow[]
+        ).map((row) => ({
+          id: String(row.id),
+          suite: String(row.suite),
+          passed: Number(row.passed),
+          failed: Number(row.failed),
+          ranAt: String(row.ran_at),
+        }));
+  return {
+    card: described.card,
+    transfers: described.transfers,
+    trustGaps: described.trustGaps,
+    evalRef: described.card.evalRef,
+    runs,
+    latest: runs.length > 0 ? (runs[0] as CardEvaluationEvidence['latest']) : null,
+    evidenceOnly: 'evidence only — linking a gap to its eval runs never promotes the card',
+  };
 }

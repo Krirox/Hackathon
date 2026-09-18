@@ -1,7 +1,8 @@
-import { existsSync, opendirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 import {
+  boundedFiles,
+  pollWithStagingReport,
   cursorGet,
   ensureInboxTable,
   type Collector,
@@ -16,15 +17,7 @@ import {
  */
 
 export type IntegrationState =
-  | 'unconfigured'
-  | 'disabled'
-  | 'empty'
-  | 'delayed'
-  | 'rate_limited'
-  | 'syncing'
-  | 'failed'
-  | 'ready'
-  | 'rejected';
+  'unconfigured' | 'disabled' | 'empty' | 'delayed' | 'rate_limited' | 'syncing' | 'failed' | 'ready' | 'rejected';
 
 export interface InboxStats {
   pending: number;
@@ -112,13 +105,13 @@ async function metaSet(db: AsyncDb, key: string, value: string): Promise<void> {
 /** Parse a poll/ingest error into a stable code safe for operators. */
 export function ingestErrorCode(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  const bracket = msg.match(/\[(?:ingest|ingest-worker):([A-Z0-9_]+)\]/);
-  if (bracket) return bracket[1]!;
   if (/\b429\b/.test(msg) || /rate.?limit/i.test(msg)) return 'RATE_LIMITED';
   if (/SERPER_KEY|API key missing/i.test(msg)) return 'UNCONFIGURED';
-  if (/GITHUB_FETCH|SERPER_FETCH/i.test(msg)) return 'PROVIDER_ERROR';
-  if (/BYTE_LIMIT|ENTRY_LIMIT|SYMLINK/i.test(msg)) return 'SOURCE_REJECTED';
   if (/INGEST_TIER/i.test(msg)) return 'TIER_REJECTED';
+  if (/BYTE_LIMIT|ENTRY_LIMIT|SYMLINK/i.test(msg)) return 'SOURCE_REJECTED';
+  if (/GITHUB_FETCH|SERPER_FETCH/i.test(msg)) return 'PROVIDER_ERROR';
+  const bracket = msg.match(/\[(?:ingest|ingest-worker):([A-Z0-9_]+)\]/);
+  if (bracket) return bracket[1]!;
   return 'POLL_FAILED';
 }
 
@@ -162,8 +155,10 @@ export async function recordPollHealth(
   record: PollHealthRecord,
 ): Promise<void> {
   await metaSet(db, healthKey(tenant, collector, 'lastPoll'), JSON.stringify(record));
-  if (record.ok) await metaSet(db, healthKey(tenant, collector, 'lastSuccess'), record.at);
-  else if (record.errorCode) {
+  if (record.ok) {
+    await metaSet(db, healthKey(tenant, collector, 'lastSuccess'), record.at);
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(healthKey(tenant, collector, 'lastError'));
+  } else if (record.errorCode) {
     await metaSet(
       db,
       healthKey(tenant, collector, 'lastError'),
@@ -201,10 +196,19 @@ export async function lastInboxReceipt(
 ): Promise<ReceiptPreview | null> {
   const row = (await db
     .prepare(
-      `SELECT id, status, created_at, payload_json FROM ingest_inbox
-       WHERE tenant = ? AND collector = ? ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, status, created_at, payload_json, source_event_id, revision FROM ingest_inbox
+       WHERE tenant = ? AND collector = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
     )
-    .get(tenant, collector)) as { id: string; status: string; created_at: string; payload_json: string } | undefined;
+    .get(tenant, collector)) as
+    | {
+        id: string;
+        status: string;
+        created_at: string;
+        payload_json: string;
+        source_event_id: string;
+        revision: string;
+      }
+    | undefined;
   if (!row) return null;
   let summary = 'source event';
   try {
@@ -213,14 +217,17 @@ export async function lastInboxReceipt(
   } catch {
     /* keep default */
   }
+  const mappedId =
+    row.status === 'DONE'
+      ? await metaGet(db, `ingest:seen:${tenant}:${collector}:${row.source_event_id}:${row.revision}`)
+      : null;
   const claim =
-    scope
+    mappedId && mappedId !== 'migrated'
       ? ((await db
           .prepare(
-            `SELECT id FROM claims WHERE tenant = ? AND scope = ? AND kind = 'OBSERVATION'
-             ORDER BY created_at DESC LIMIT 1`,
+            `SELECT id FROM claims WHERE tenant = ? AND id = ? AND kind = 'OBSERVATION'${scope ? ' AND scope = ?' : ''}`,
           )
-          .get(tenant, scope)) as { id: string } | undefined)
+          .get(...(scope ? [tenant, mappedId, scope] : [tenant, mappedId]))) as { id: string } | undefined)
       : undefined;
   return {
     id: String(row.id),
@@ -252,21 +259,28 @@ export function deriveIntegrationState(input: {
       detail: 'provider rate limit — checkpoint preserved; retry after the window resets',
     };
   }
+  const preservedSuccesses =
+    input.stats.done > 0
+      ? `; ${input.stats.done} source item${input.stats.done === 1 ? '' : 's'} already ingested into the ledger — preserved`
+      : '';
+  if (input.lastPoll && !input.lastPoll.ok) {
+    const code = input.lastPoll.errorCode ?? 'POLL_FAILED';
+    let state: IntegrationState = 'failed';
+    if (code === 'UNCONFIGURED') state = 'unconfigured';
+    else if (code === 'SOURCE_REJECTED' || code === 'TIER_REJECTED') state = 'rejected';
+    return { state, detail: `${ingestErrorDetail(code)}${preservedSuccesses}` };
+  }
   if (input.stats.pending > 0 || input.stats.claimed > 0) {
     return {
       state: 'syncing',
       detail: `${input.stats.pending} pending · ${input.stats.claimed} in progress — worker is settling receipts`,
     };
   }
-  if (input.stats.failed > 0 && input.stats.done === 0) {
+  if (input.stats.failed > 0) {
     return {
       state: 'failed',
-      detail: `${input.stats.failed} receipt${input.stats.failed === 1 ? '' : 's'} failed — fix the source and retry sync`,
+      detail: `${input.stats.failed} receipt${input.stats.failed === 1 ? '' : 's'} failed — fix the source and retry sync${preservedSuccesses}`,
     };
-  }
-  if (input.lastPoll && !input.lastPoll.ok && input.stats.total === 0) {
-    const code = input.lastPoll.errorCode ?? 'POLL_FAILED';
-    return { state: 'failed', detail: ingestErrorDetail(code) };
   }
   if (input.stats.done > 0) {
     if (
@@ -278,7 +292,7 @@ export function deriveIntegrationState(input: {
     ) {
       return {
         state: 'delayed',
-        detail: `last successful sync was ${Math.round((input.nowMs - Date.parse(input.lastSuccessAt)) / 3600)}h ago — source may need a refresh`,
+        detail: `last successful sync was ${Math.round((input.nowMs - Date.parse(input.lastSuccessAt)) / 3_600_000)}h ago — source may need a refresh`,
       };
     }
     return {
@@ -362,41 +376,30 @@ export function testFileDirectory(
   sourcePath: string,
   limits: FilePollLimits = { maxEntries: 20, maxFileBytes: 1_000_000, maxTotalBytes: 5_000_000 },
 ): ConnectionTestResult {
-  const dir = resolve(sourcePath);
-  if (!existsSync(dir)) {
-    return { ok: false, code: 'NOT_FOUND', detail: `directory does not exist: ${dir}` };
-  }
+  let samples: Array<{ name: string; summary: string }>;
   try {
-    const stat = statSync(dir);
-    if (!stat.isDirectory()) return { ok: false, code: 'NOT_DIRECTORY', detail: 'path is not a directory' };
-  } catch {
-    return { ok: false, code: 'NOT_READABLE', detail: 'directory is not readable with the console process identity' };
-  }
-  const samples: Array<{ name: string; summary: string }> = [];
-  let entries = 0;
-  const directory = opendirSync(dir);
-  try {
-    for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
-      if (++entries > limits.maxEntries) {
-        return {
-          ok: false,
-          code: 'ENTRY_LIMIT',
-          detail: `directory exceeds the ${limits.maxEntries}-entry preview cap`,
-        };
-      }
-      if (!entry.isFile()) continue;
-      const size = statSync(join(dir, entry.name)).size;
-      if (size > limits.maxFileBytes) {
-        return {
-          ok: false,
-          code: 'BYTE_LIMIT',
-          detail: `file "${entry.name}" exceeds the ${limits.maxFileBytes}-byte cap`,
-        };
-      }
-      samples.push({ name: entry.name, summary: `${entry.name} (${size} bytes)` });
+    const files = boundedFiles(resolve(sourcePath), limits);
+    samples = files.map((file) => ({ name: file.name, summary: `${file.name} (${file.bytes} bytes)` }));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    const nativeCode = (err as NodeJS.ErrnoException | null)?.code;
+    let code = message.match(/\[ingest:([A-Z_]+)\]/)?.[1];
+    if (!code) {
+      code = 'NOT_READABLE';
+      if (nativeCode === 'ENOENT') code = 'NOT_FOUND';
+      else if (nativeCode === 'ENOTDIR') code = 'NOT_DIRECTORY';
+      else if (nativeCode === 'ELOOP') code = 'SYMLINK';
     }
-  } finally {
-    directory.closeSync();
+    const details: Record<string, string> = {
+      NOT_FOUND: 'source directory or file no longer exists',
+      NOT_DIRECTORY: 'path is not a directory',
+      NOT_READABLE: 'source is not readable with the console process identity',
+      ENTRY_LIMIT: 'directory exceeds the configured entry cap',
+      BYTE_LIMIT: 'source exceeds the configured per-file or total byte cap',
+      SYMLINK: 'source symlinks or changing file identities are not supported',
+      BAD_LIMIT: 'source limits must be positive safe integers',
+    };
+    return { ok: false, code, detail: details[code] ?? 'source could not be read safely' };
   }
   if (samples.length === 0) {
     return {
@@ -438,9 +441,10 @@ export async function pollCollectorWithHealth(
     });
     throw new Error('[ingest:DISABLED] collector is disabled');
   }
+  const report = { staged: 0 };
   try {
-    const events = await collector.poll(db, now, tenant);
-    const staged = events.length;
+    const events = await pollWithStagingReport(db, tenant, collector, now, report);
+    const staged = report.staged;
     await recordPollHealth(db, tenant, collector.name, {
       at: now,
       ok: true,
@@ -455,7 +459,7 @@ export async function pollCollectorWithHealth(
       at: now,
       ok: false,
       eventsFetched: 0,
-      staged: 0,
+      staged: report.staged,
       errorCode: code,
     });
     throw err;

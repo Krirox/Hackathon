@@ -1445,7 +1445,13 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     await db
       .prepare('UPDATE requests SET claim_refs = ?, chain_claims = ?, updated_at = ? WHERE id = ? AND tenant = ?')
       .run(JSON.stringify(claimRefs), JSON.stringify(chainClaimIds), at, requestId, tenant);
-    await audit('console', 'EVIDENCE_REFRESHED', requestId, tenant, JSON.stringify({ from: r.claimRefs, to: claimRefs }));
+    await audit(
+      'console',
+      'EVIDENCE_REFRESHED',
+      requestId,
+      tenant,
+      JSON.stringify({ from: r.claimRefs, to: claimRefs }),
+    );
     const next = (await load(tenant, requestId))!;
     return next;
   }

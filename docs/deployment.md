@@ -151,3 +151,73 @@ First-time bootstrap:
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
 2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`).
 3. Run the `deploy-aws` workflow or run `terraform apply` directly (safe local image fallbacks allow initial infrastructure bootstrap without chicken-and-egg failure).
+
+## Status: liveness vs readiness
+
+Process reachability is not workflow readiness. A cheap liveness answer
+("the process responds") must never be worded as proof that ingestion,
+database access, execution, and measurement are operational.
+
+- `liveness()` in `src/gov/trust.ts` is the cheap check: no I/O, no
+  dependencies. Serve wiring: answer the liveness probe from this only.
+- `checkReadiness(deps, { timeoutMs })` in `src/gov/trust.ts` is the bounded
+  check: each dependency gets its own timeout, required failures fail the
+  report, and optional-but-unconfigured integrations report
+  `unconfigured-optional` without failing it. Serve wiring: pass one entry
+  per required dependency (database, worker, execution runtime) plus one
+  `optional: true` entry per optional integration, and word the status page
+  from the report — per-check status, never a bare green.
+- Retry guidance (`retryGuidance` / `actRetryGuidance`) is per failure
+  class: rate limits back off, unknown results reconcile before retry, and
+  sensitive actions (approvals, spends, external effects) are
+  explicit-resubmission-only — never blindly replayed.
+
+## Support contact and diagnostics
+
+Support contact is direct: report to the repo owner (see `SECURITY.md`
+Reporting), the same channel as security issues. Include the support
+reference from the failure surface.
+
+- `mintSupportRef()` issues the opaque user-facing reference;
+  `correlateDiagnostic({ detail, tenant, action })` pairs it with a
+  sanitized log excerpt. Sanitization (`sanitizeDiagnostic`) redacts bearer
+  tokens, passwords, secrets, API keys, private-key blocks, and database
+  URLs before the excerpt is stored or shown.
+- Triage information to include: the support reference, the tenant slug,
+  the action being attempted, and the readiness report at the time of the
+  failure. Escalation is the repo owner directly; there is no hosted
+  support tier. Supported topology is the one in this file only.
+
+## Backup/restore vs ledger-history import
+
+These are separate operations with separate tests. Do not confuse them.
+
+- Backup/restore: RDS automated backups (7-day minimum PITR window) plus a
+  quarterly restore drill to a scratch instance. The restore drill is the
+  proof; bucket or snapshot provisioning alone is not delivery proof, and
+  no S3 archival delivery is claimed.
+- Ledger export: `exportLedgerWithManifest(db, tenant, kind)` in
+  `src/ledger/export.ts` is read-only (SELECT only, verified by test) and
+  ships a manifest per kind — `snapshot` (point-in-time view, not a
+  backup), `evidence-package` (full portable record with artifact ownership
+  refs), `backup-reference` (manifest describing what backup covers versus
+  what export covers). Download over HTTP at `GET /api/ledger/export?kind=`
+  (session-gated; `evidence-package` requires admin or owner) and audit
+  history at `GET /api/audit` (actor/action/date/request/decision filters,
+  tenant-isolated, paginated). Omissions are listed in the manifest: users,
+  sessions, credentials, raw artifact bytes, external stores, other
+  tenants.
+- Ledger-history import is unsupported: history is append-only and merging
+  two histories is not offered. Audit investigation uses `queryAudit` (actor,
+  action, date, request, decision; tenant-isolated, paginated) and
+  `auditLinks` (evidence / authorization / receipt / outcome) in the same
+  module. Export progress and partial failure surface through
+  `createExportTracker` (in-progress / partial-failure / failed / completed
+  / expired).
+
+## Pilot and contact path
+
+Engagement is a direct pilot scoped to the Ship-to-Result wedge in
+`idea.md` §15, with pre-registered metrics and kill criteria agreed before
+the pilot starts. Contact is the repo owner directly. There is no hosted
+subscription, invoice, or billing flow — do not present the pilot as one.

@@ -47,7 +47,7 @@ export const erasedTenantOf = (slug: string): string => `erased:${slug}`;
  * Tables that carry no `tenant` column. Each one is either deleted here as
  * an explicit child of a tenant-scoped parent, or holds no user data.
  */
-const ORPHAN_TABLES = new Set(['schema_migrations', 'meta', 'claim_links', 'skill_transfer_tests', 'ledger_seq']);
+const ORPHAN_TABLES = new Set(['schema_migrations', 'meta', 'claim_links', 'ledger_seq']);
 
 export interface ErasureRetention {
   category: string;
@@ -103,47 +103,59 @@ export async function eraseTenant(
   const artifactDir = resolve(opts.artifactDir ?? process.env.ARTIFACT_DIR ?? join('data', 'artifacts'));
 
   return db.transaction(async (): Promise<ErasureResult> => {
-  const tables = await tenantScopedTables(db);
-  if (db.engine === 'postgres') {
-    const locked = [...new Set([...tables, 'tenants', 'meta', 'claim_links', 'skill_transfer_tests', 'ledger_seq'])];
-    await db.exec(`LOCK TABLE ${locked.map(quoteIdentifier).join(', ')} IN SHARE ROW EXCLUSIVE MODE`);
-  }
-  const exists = (await db.prepare('SELECT slug FROM tenants WHERE slug = ?').get(tenant)) as
-    | { slug: string }
-    | undefined;
-  if (!exists) throw new Error(`[erasure:UNKNOWN_TENANT] no tenant "${tenant}"`);
+    const tables = await tenantScopedTables(db);
+    if (db.engine === 'postgres') {
+      const locked = [
+        ...new Set([
+          ...tables,
+          'tenants',
+          'meta',
+          'claim_links',
+          'skill_transfer_tests',
+          'ledger_seq',
+          'login_attempts',
+          'password_resets',
+          'auth_sessions',
+        ]),
+      ].sort();
+      await db.exec("SET LOCAL lock_timeout = '5s'");
+      await db.exec(`LOCK TABLE ${locked.map(quoteIdentifier).join(', ')} IN SHARE ROW EXCLUSIVE MODE`);
+    }
+    const exists = (await db.prepare('SELECT slug FROM tenants WHERE slug = ?').get(tenant)) as
+      { slug: string } | undefined;
+    if (!exists) throw new Error(`[erasure:UNKNOWN_TENANT] no tenant "${tenant}"`);
 
-  const artifactRefs = await tenantArtifactRefs(db, tenant);
-  const sharedArtifacts = await sharedArtifactRefs(db, tenant, artifactRefs);
-  const metaKeys = await tenantMetaKeys(db, tenant);
+    const artifactRefs = await tenantArtifactRefs(db, tenant);
+    const sharedArtifacts = await sharedArtifactRefs(db, tenant, artifactRefs);
+    const metaKeys = await tenantMetaKeys(db, tenant);
 
-  const deferred: ErasureRetention[] = [
-    {
-      category: 'backups',
-      reason: 'operator-managed backups and external replicas are outside this command',
-      items: [],
-    },
-    {
-      category: 'external-storage',
-      reason: 'configured object stores (e.g. S3) are not purged by tenant erasure',
-      items: [],
-    },
-  ];
+    const deferred: ErasureRetention[] = [
+      {
+        category: 'backups',
+        reason: 'operator-managed backups and external replicas are outside this command',
+        items: [],
+      },
+      {
+        category: 'external-storage',
+        reason: 'configured object stores (e.g. S3) are not purged by tenant erasure',
+        items: [],
+      },
+    ];
 
-  const retained: ErasureRetention[] = [
-    {
-      category: 'erasure-receipt',
-      reason: 'audit evidence that erasure occurred',
-      items: [erasedTenantOf(tenant)],
-    },
-  ];
-  if (sharedArtifacts.length > 0) {
-    retained.push({
-      category: 'shared-artifacts',
-      reason: 'content-addressed blob still referenced by another tenant',
-      items: sharedArtifacts,
-    });
-  }
+    const retained: ErasureRetention[] = [
+      {
+        category: 'erasure-receipt',
+        reason: 'audit evidence that erasure occurred',
+        items: [erasedTenantOf(tenant)],
+      },
+    ];
+    if (sharedArtifacts.length > 0) {
+      retained.push({
+        category: 'shared-artifacts',
+        reason: 'content-addressed blob still referenced by another tenant',
+        items: sharedArtifacts,
+      });
+    }
 
     await db
       .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?, ?, ?, ?, ?, ?)')
@@ -155,6 +167,12 @@ export async function eraseTenant(
     const exportPolicy = opts.exportTo ? 'durable-file' : 'in-memory';
     if (opts.exportTo) {
       exportFile = writeErasureExport(opts.exportTo, tenant, at, exported);
+      retained.push({
+        category: 'ledger-export',
+        reason:
+          'operator-managed retained evidence; no automatic expiry; not a full backup and contains no artifact bytes',
+        items: [exportFile],
+      });
     }
 
     const deleted: Record<string, number> = {};
@@ -178,16 +196,13 @@ export async function eraseTenant(
       tenant,
       tenant,
     );
-    deleted['skill_transfer_tests'] = await del(
-      'DELETE FROM skill_transfer_tests WHERE card_id IN (SELECT id FROM skill_cards WHERE tenant = ?)',
-      tenant,
-    );
+    deleted['skill_transfer_tests'] = await del('DELETE FROM skill_transfer_tests WHERE tenant = ?', tenant);
     deleted['ledger_seq'] = await del('DELETE FROM ledger_seq WHERE tenant = ?', tenant);
     deleted['outcomes'] = await del('DELETE FROM outcomes WHERE tenant = ?', tenant);
 
-    for (const t of await tenantScopedTables(db)) {
+    for (const t of tables) {
       if (t in deleted) continue;
-      deleted[t] = await del(`DELETE FROM ${t} WHERE tenant = ?`, tenant);
+      deleted[t] = await del(`DELETE FROM ${quoteIdentifier(t)} WHERE tenant = ?`, tenant);
     }
 
     const metaKeysDeleted: string[] = [];
@@ -199,20 +214,35 @@ export async function eraseTenant(
 
     deleted['tenants'] = await del('DELETE FROM tenants WHERE slug = ?', tenant);
 
-    const deletableArtifacts = artifactRefs.filter((ref) => !sharedArtifacts.includes(ref));
+    const pendingArtifacts = artifactRefs.filter((ref) => !sharedArtifacts.includes(ref));
     const artifactsDeleted: string[] = [];
     const failed: ErasureRetention[] = [];
-    for (const ref of deletableArtifacts) {
+    const plannedArtifacts = pendingArtifacts.filter((ref) => {
       try {
-        unlinkSync(join(artifactDir, ref));
-        artifactsDeleted.push(ref);
+        verifyArtifactRef(ref, artifactDir);
+        return true;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const bucket = failed.find((f) => f.category === 'artifacts');
-        if (bucket) bucket.items.push(ref);
-        else failed.push({ category: 'artifacts', reason: msg, items: [ref] });
+        failed.push({
+          category: 'artifacts',
+          reason: e instanceof Error ? e.message : String(e),
+          items: [ref],
+        });
+        return false;
       }
+    });
+    if (plannedArtifacts.length > 0) {
+      deferred.push({
+        category: 'artifacts',
+        reason: `exclusive refs verified but files are not deleted inside the transaction: a post-commit ownership-aware collector must remove ${plannedArtifacts.length} file(s) under ${artifactDir}`,
+        items: plannedArtifacts,
+      });
     }
+    deferred.push({
+      category: 'unindexed-artifacts',
+      reason:
+        'only claims.raw_ref is inventoried; transcript, deliverable, orphaned and other configured artifact stores require separate inventory and cleanup',
+      items: [],
+    });
 
     const receipt: ErasureReceipt = {
       deleted,
@@ -245,10 +275,35 @@ export async function isErasedSlugReserved(db: AsyncDb, slug: string): Promise<b
 /** Write and verify a durable export file; throws on failure (rolls back caller's transaction). */
 export function writeErasureExport(dir: string, tenant: string, erasedAt: string, exported: LedgerExport): string {
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${tenant}-erasure-export-${erasedAt.replace(/[:.]/g, '-')}.json`);
-  const body = JSON.stringify(exported, null, 2);
-  writeFileSync(file, body, 'utf8');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(tenant) || !Number.isFinite(Date.parse(erasedAt))) {
+    throw new Error('[erasure:EXPORT_TARGET] invalid tenant or export timestamp');
+  }
+  const file = resolve(
+    dir,
+    `${tenant}-ledger-export-${new Date(erasedAt).toISOString().replace(/[:.]/g, '-')}-${randomUUID()}.json`,
+  );
+  const fd = openSync(file, 'wx', 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(exported, null, 2), 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   verifyErasureExportFile(file, exported);
+  if (process.platform !== 'win32') {
+    let directory = dirname(file);
+    for (;;) {
+      const handle = openSync(directory, 'r');
+      try {
+        fsyncSync(handle);
+      } finally {
+        closeSync(handle);
+      }
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
   return file;
 }
 
@@ -259,18 +314,26 @@ export function verifyErasureExportFile(file: string, expected: LedgerExport): v
     parsed = JSON.parse(readFileSync(file, 'utf8')) as LedgerExport;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`[erasure:EXPORT_VERIFY] could not read export file "${file}": ${msg}`);
+    throw new Error(`[erasure:EXPORT_VERIFY] could not read export file "${file}": ${msg}`, { cause: e });
   }
-  if (parsed.version !== expected.version || parsed.tenant !== expected.tenant || parsed.exportedAt !== expected.exportedAt) {
-    throw new Error(`[erasure:EXPORT_VERIFY] export file "${file}" does not match the in-transaction export`);
-  }
-  if (parsed.claims.length !== expected.claims.length || parsed.audit.length !== expected.audit.length) {
-    throw new Error(`[erasure:EXPORT_VERIFY] export file "${file}" is missing records from the in-transaction export`);
+  if (!isDeepStrictEqual(parsed, JSON.parse(JSON.stringify(expected)))) {
+    throw new Error(`[erasure:EXPORT_VERIFY] export file "${file}" does not match the complete export`);
   }
 }
 
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
 function isTenantMetaKey(key: string, tenant: string): boolean {
-  if (key === `rates:${tenant}` || key === `operatorkeys:${tenant}`) return true;
+  if (
+    [
+      `rates:${tenant}`,
+      `operatorkeys:${tenant}`,
+      ...['config', 'signupAt', 'firstReviewAt', 'sample'].map((kind) => `activation:${kind}:${tenant}`),
+    ].includes(key)
+  )
+    return true;
   const prefixes = [
     `ingest:cursor:${tenant}:`,
     `ingest:seen:${tenant}:`,
@@ -289,7 +352,10 @@ function isTenantMetaKey(key: string, tenant: string): boolean {
 
 async function tenantMetaKeys(db: AsyncDb, tenant: string): Promise<string[]> {
   const rows = (await db.prepare('SELECT key FROM meta').all()) as { key: string }[];
-  return rows.map((r) => String(r.key)).filter((key) => isTenantMetaKey(key, tenant)).sort();
+  return rows
+    .map((r) => String(r.key))
+    .filter((key) => isTenantMetaKey(key, tenant))
+    .sort();
 }
 
 async function tenantArtifactRefs(db: AsyncDb, tenant: string): Promise<string[]> {
@@ -308,6 +374,15 @@ async function sharedArtifactRefs(db: AsyncDb, tenant: string, refs: string[]): 
     if (Number(row.n) > 0) shared.push(ref);
   }
   return shared;
+}
+
+function verifyArtifactRef(ref: string, artifactDir: string): string {
+  if (!/^[0-9a-f]{64}$/.test(ref)) throw new Error(`[erasure:UNSAFE_ARTIFACT] refusing ref "${ref}"`);
+  const full = resolve(artifactDir, ref);
+  if (full !== artifactDir && !full.startsWith(artifactDir + (artifactDir.endsWith('\\') ? '' : '\\'))) {
+    throw new Error(`[erasure:UNSAFE_ARTIFACT] ref "${ref}" escapes "${artifactDir}"`);
+  }
+  return full;
 }
 
 async function tenantScopedTables(db: AsyncDb): Promise<string[]> {
@@ -342,6 +417,6 @@ async function columnsOf(db: AsyncDb, table: string): Promise<string[]> {
       .all(table)) as { column_name: string }[];
     return rows.map((r) => String(r.column_name));
   }
-  const rows = (await db.prepare(`PRAGMA table_info(${table})`).all()) as { name: string }[];
+  const rows = (await db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all()) as { name: string }[];
   return rows.map((r) => String(r.name));
 }

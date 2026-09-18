@@ -139,8 +139,14 @@ T('FLOW-014: request-changes and revision create a new version with diff', async
   });
   eq(v2.version, 2);
   const diff = await diffDeliverableVersions(db, TEN, v1.id, v2.id, artDir);
-  eq(diff.added.some((l) => l.includes('Professional')), true);
-  eq(diff.removed.some((l) => l.includes('casual')), true);
+  eq(
+    diff.added.some((l) => l.includes('Professional')),
+    true,
+  );
+  eq(
+    diff.removed.some((l) => l.includes('casual')),
+    true,
+  );
 });
 
 T('FLOW-014: final approval binds to reviewed asset fingerprint', async () => {

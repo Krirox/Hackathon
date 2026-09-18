@@ -40,6 +40,10 @@ import './aws.test.ts';
 import './s3store.test.ts';
 import './artifact.test.ts';
 import './worker.test.ts';
+import './digest.test.ts';
+import './site-accessibility.test.ts';
+import './export-audit.test.ts';
+import './learning.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();
