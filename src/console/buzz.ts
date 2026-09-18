@@ -123,16 +123,28 @@ export async function loadRoomThread(
   return { messages: local, source: 'local' };
 }
 
-export async function getReactions(db: AsyncDb, tenant: string, messageIds: string[]): Promise<Map<string, { emoji: string; count: number; me: boolean }[]>> {
+export async function getReactions(
+  db: AsyncDb,
+  tenant: string,
+  messageIds: string[],
+  currentUserId?: string,
+): Promise<Map<string, { emoji: string; count: number; me: boolean }[]>> {
   if (messageIds.length === 0) return new Map();
   const ph = messageIds.map(() => '?').join(',');
   const rows = (await db
     .prepare(`SELECT message_id, emoji, COUNT(*) as c FROM buzz_reactions WHERE tenant = ? AND message_id IN (${ph}) GROUP BY message_id, emoji`)
     .all(tenant, ...messageIds)) as { message_id: string; emoji: string; c: number }[];
+  const meRows = currentUserId
+    ? ((await db
+        .prepare(`SELECT message_id, emoji FROM buzz_reactions WHERE tenant = ? AND user_id = ? AND message_id IN (${ph})`)
+        .all(tenant, currentUserId, ...messageIds)) as { message_id: string; emoji: string }[])
+    : [];
+  const meSet = new Set(meRows.map((r) => `${String(r.message_id)}::${String(r.emoji)}`));
   const out = new Map<string, { emoji: string; count: number; me: boolean }[]>();
   for (const r of rows) {
+    const key = `${String(r.message_id)}::${String(r.emoji)}`;
     const arr = out.get(String(r.message_id)) ?? [];
-    arr.push({ emoji: String(r.emoji), count: Number(r.c), me: false });
+    arr.push({ emoji: String(r.emoji), count: Number(r.c), me: meSet.has(key) });
     out.set(String(r.message_id), arr);
   }
   return out;
@@ -307,6 +319,7 @@ export async function renderBuzzRoom(
   csrf: string,
   surface?: BuzzSurface | null,
   notice?: string,
+  currentUserId?: string,
 ): Promise<string | null> {
   const scope = normalizeScope(rawScope);
   const def = roomForScope(scope);
@@ -359,8 +372,40 @@ export async function renderBuzzRoom(
     db,
     tenant,
     thread.messages.map((m) => m.id),
+    currentUserId,
   );
-  const messages = thread.messages
+  // Thread pagination: group replies under their root, cap visible to 3 + collapse
+  const all = thread.messages;
+  const byRoot = new Map<string, typeof all>();
+  const tops: typeof all = [];
+  for (const m of all) {
+    if (m.threadRoot) {
+      const arr = byRoot.get(m.threadRoot) ?? [];
+      arr.push(m);
+      byRoot.set(m.threadRoot, arr);
+    } else {
+      tops.push(m);
+    }
+  }
+  // Orphan replies (parent is an audit stub like local_0) — synthesize a thread
+  // header so the 5 replies still collapse under one group instead of 5 tops.
+  for (const [root, replies] of [...byRoot]) {
+    if (!all.some((m) => m.id === root)) {
+      const first = replies[0]!;
+      const synth = {
+        id: root,
+        author: 'system',
+        content: `Thread ${root}`,
+        createdAt: first.createdAt - 1,
+        isReviewCard: false,
+        requestId: null,
+        threadRoot: null,
+      };
+      tops.unshift(synth as (typeof all)[number]);
+      // keep replies grouped under the synthetic root
+    }
+  }
+  const messages = tops
     .map((m) => {
       const who = displayName(m.author, config.agentName);
       const isCard = m.isReviewCard;
@@ -374,10 +419,10 @@ export async function renderBuzzRoom(
       const stored = reactionMap.get(m.id) ?? [];
       const picker = ['✅', '🚀', '❤️'];
       const reactionForms = stored
-        .map(
-          (r) =>
-            `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" style="border:1px solid #E5E7EB;border-radius:999px;padding:2px 7px;font-size:11px;background:#F9FAFB;cursor:pointer;">${esc(r.emoji)} ${r.count}</button></form>`,
-        )
+        .map((r) => {
+          const mine = r.me ? 'background:#0F5C57;color:#fff;border-color:#0F5C57;' : 'background:#F9FAFB;color:#111827;border-color:#E5E7EB;';
+          return `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:999px;padding:2px 7px;font-size:11px;cursor:pointer;${mine}">${esc(r.emoji)} ${r.count}${r.me ? ' · you' : ''}</button></form>`;
+        })
         .join('');
       const addPickers = picker
         .map(
@@ -388,16 +433,43 @@ export async function renderBuzzRoom(
       const reactions = isCard
         ? ''
         : `<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center;">${reactionForms}${addPickers}<span style="font-size:11px;color:#9CA3AF;margin-left:4px;">· <a href="#reply-${esc(m.id)}" style="color:#6B7280;text-decoration:none;">Reply</a></span></div>`;
-      const isReply = Boolean(m.threadRoot);
       const bubble = isCard
         ? `<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:10px;padding:10px 12px;"><div style="white-space:pre-wrap;font-size:13px;line-height:1.5;">${linkify(m.content.slice(0, 700))}</div>${cardExtra}</div>`
         : `<div style="white-space:pre-wrap;font-size:13.5px;line-height:1.5;color:#111827;">${linkify(m.content.slice(0, 700))}</div>`;
-      return `<li id="msg-${esc(m.id)}" style="display:flex;gap:10px;padding:10px 0 10px ${isReply ? '28px' : '0'};border-bottom:1px solid #F3F4F6;list-style:none;${isReply ? 'background:#F9FAFB;margin-left:32px;border-left:2px solid #E5E7EB;padding-left:10px;border-radius:6px;' : ''}">
+      const replies = byRoot.get(m.id) ?? [];
+      const visibleReplies = replies.slice(0, 3);
+      const hiddenCount = replies.length - visibleReplies.length;
+      const replyHtml =
+        replies.length === 0
+          ? ''
+          : `<div style="margin-top:8px;border-top:1px solid #F3F4F6;padding-top:8px;">
+  ${visibleReplies
+    .map((r) => {
+      const rw = displayName(r.author, config.agentName);
+      return `<div style="display:flex;gap:8px;padding:6px 0 6px 28px;border-left:2px solid #E5E7EB;margin-left:4px;">
+    <div style="width:24px;height:24px;border-radius:999px;background:${avatarColor(rw)};display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials(rw))}</div>
+    <div style="flex:1;"><span style="font-weight:600;font-size:12px;">${esc(rw)}</span> <span style="font-size:11px;color:#6B7280;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 500))}</div></div>
+  </div>`;
+    })
+    .join('')}
+  ${hiddenCount > 0 ? `<details style="margin:6px 0 0 28px;"><summary style="font-size:11px;color:#0F5C57;cursor:pointer;">Show ${hiddenCount} more repl${hiddenCount === 1 ? 'y' : 'ies'}</summary>${replies
+    .slice(3)
+    .map((r) => {
+      const rw = displayName(r.author, config.agentName);
+      return `<div style="display:flex;gap:8px;padding:6px 0 6px 28px;border-left:2px solid #E5E7EB;margin-left:4px;">
+    <div style="width:24px;height:24px;border-radius:999px;background:${avatarColor(rw)};display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials(rw))}</div>
+    <div style="flex:1;"><span style="font-weight:600;font-size:12px;">${esc(rw)}</span> <span style="font-size:11px;color:#6B7280;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 500))}</div></div>
+  </div>`;
+    })
+    .join('')}</details>` : ''}
+</div>`;
+      return `<li id="msg-${esc(m.id)}" style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #F3F4F6;list-style:none;">
   <div style="width:32px;height:32px;border-radius:999px;background:${avatarColor(who)};display:grid;place-items:center;font-size:11px;font-weight:700;color:#374151;flex-shrink:0;">${esc(initials(who))}</div>
   <div style="flex:1;min-width:0;">
     <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;"><span style="font-weight:600;font-size:13px;">${esc(who)}</span><span style="font-size:11px;color:#6B7280;">${esc(time)}</span>${m.requestId ? `<span style="font-size:11px;color:#6B7280;">· <code>${esc(m.requestId.slice(0, 10))}</code></span>` : ''}</div>
     <div style="margin-top:3px;">${bubble}</div>
     ${reactions}
+    ${replyHtml}
     <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:8px;">
       <input type="hidden" name="csrf" value="${esc(csrf)}">
       <input type="hidden" name="parentId" value="${esc(m.id)}">

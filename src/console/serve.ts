@@ -197,6 +197,7 @@ import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
+import { renderWorkspaceShell } from './workspace-shell.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import { loadRoomConfig, saveRoomConfig } from '../talk/rooms.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
@@ -2712,7 +2713,7 @@ export function startConsoleServer(
           res.end(detailDocument('Learning review', body, detailOpts));
           return;
         }
-        // ------------------------------------------------------------ Buzz workspace
+        // ------------------------------------------------------------ Workspace (internal: buzz)
         // The human-facing room console: roster + per-room thread view.
         // Authenticated, admin-gated pages over the same evaluators the APIs
         // expose — the first UI that consumes any of it.
@@ -2734,8 +2735,8 @@ export function startConsoleServer(
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               detailDocument(
-                'Buzz Workspace',
-                '<p class="sub">The Buzz workspace requires the admin or owner role.</p>',
+                'Workspace',
+                '<p class="sub">The workspace requires the admin or owner role.</p>',
                 detailOpts,
               ),
             );
@@ -2746,7 +2747,7 @@ export function startConsoleServer(
             const roster = await buildBuzzRoster(db, tenant, surface);
             const body = renderBuzzRoster(roster, home, auth.session.csrfToken);
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(detailDocument('Buzz Workspace', body, detailOpts));
+            res.end(detailDocument('Workspace', body, detailOpts));
           } finally {
             // The surface holds no pooled connections of its own; the health
             // probe is one fetch. Nothing to close — this block documents that.
@@ -2772,8 +2773,8 @@ export function startConsoleServer(
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               detailDocument(
-                'Buzz room',
-                '<p class="sub">The Buzz workspace requires the admin or owner role.</p>',
+                'Room',
+                '<p class="sub">The workspace requires the admin or owner role.</p>',
                 detailOpts,
               ),
             );
@@ -2790,12 +2791,13 @@ export function startConsoleServer(
             auth.session.csrfToken,
             surface,
             notice ?? undefined,
+            auth.user.id,
           );
           if (!body) {
             res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               detailDocument(
-                'Buzz room',
+                'Room',
                 '<p class="sub">No such room. <a href="' + esc(home) + 'console/buzz">Back to the workspace</a>.</p>',
                 detailOpts,
               ),
@@ -2803,7 +2805,7 @@ export function startConsoleServer(
             return;
           }
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument(`Buzz room: ${scope}`, body, detailOpts));
+          res.end(detailDocument(`Room: ${scope}`, body, detailOpts));
           return;
         }
         const buzzRoomCommand = path.match(/^\/console\/buzz\/([^/]+)\/command$/);
@@ -3639,9 +3641,16 @@ export function startConsoleServer(
           );
           const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
           const skip = `<a class="skip-link" href="#main">Skip to main content</a>`;
-          const withUser = withCsrf
-            .replace('<body>', `<body>${skip}<main id="main">`)
-            .replace('</body>', `</main>${consoleNav}${accountCluster}</body>`);
+          // Chat-centric shell: every console page lives inside Workspace
+          const shellRooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
+            scope: h.scope,
+            roomName: h.roomName,
+            badge: h.badge,
+            pending: h.pendingApprovals,
+          }));
+          const inner = withCsrf.slice(withCsrf.indexOf('<body>') + 6, withCsrf.indexOf('</body>'));
+          const shelled = skip + renderWorkspaceShell({ rooms: shellRooms, home, consoleNav, accountCluster, innerHtml: inner });
+          const withUser = withCsrf.slice(0, withCsrf.indexOf('<body>') + 6) + shelled + withCsrf.slice(withCsrf.indexOf('</body>'));
           // FLOW-010: the browser cookie tracks the slid DB row — every
           // verified page view re-arms both the idle window (DB) and the
           // cookie Max-Age, so idle and absolute lifetimes stay aligned.
@@ -3977,8 +3986,34 @@ export function startConsoleServer(
             compilerGaps,
             filter: { q, role, status, page: pageNum },
           });
+          // Chat-centric: Team lives inside Workspace shell
+          const isAdmin = atLeast(auth.user.role, 'admin');
+          const teamNav = renderConsoleNav(
+            buildConsoleNav(home, {
+              requests: true,
+              claims: true,
+              rooms: true,
+              humanWork: true,
+              settings: isAdmin,
+              learning: isAdmin,
+              audit: isAdmin,
+              data: isAdmin,
+              buzz: isAdmin,
+            }),
+            'team',
+          );
+          const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+          const teamRooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
+            scope: h.scope,
+            roomName: h.roomName,
+            badge: h.badge,
+            pending: h.pendingApprovals,
+          }));
+          const teamInner = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
+          const teamShelled = renderWorkspaceShell({ rooms: teamRooms, home, consoleNav: teamNav, accountCluster: teamCluster, innerHtml: teamInner });
+          const teamWithShell = html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(html);
+          res.end(teamWithShell);
           return;
         }
         if (path === '/team/invite' && method === 'POST') {

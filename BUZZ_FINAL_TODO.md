@@ -70,12 +70,18 @@ Goal: Image 2 (table + `□□□□`) → Image 1 (avatar stream + reactions + 
 - [x] Fix mojibake gauges: `renderProgressBar` `■/□` renders correctly with web-font (verified on Docker)
 - [x] Acceptance: room view no longer a table — verified `has-new-layout` + `has-composer` on Postgres live
 
-## Phase 3 — Real chat transport (1 day)
+## Phase 3 — Real chat transport (1 day) — ✅ done (ElastiCache rediss://)
 
-- [ ] Keep `buzz-surface.ts` contract: `POST /events` bare bare event, NIP-98 per request, `BUZZ_CHAT_KIND=9`, `tags: [h, channelId]` resolved via `channelIdFor`
-- [ ] Provisioning stays: `scripts/seed-buzz-rooms.ts` → channel UUID from kind-39000 `d` tag, persisted per room
-- [ ] Fallback: `loadRoomThread` stays — relay → `200` with messages, else `localRoomActivity` audit tail with `Local activity` note (already works on current Docker)
-- [ ] Whitelist: only kinds `9`, `30315`, `30023` — do not retry `30024` (huddle) — relay rejects it
+- [x] Keep `buzz-surface.ts` contract: `POST /events` bare event, NIP-98 per request, `BUZZ_CHAT_KIND=9`, `tags: [h, channelId]` resolved via `channelIdFor`
+- [x] Provisioning stays: `scripts/seed-buzz-rooms.ts` → channel UUID from kind-39000 `d` tag, persisted per room
+- [x] Fallback: `loadRoomThread` stays — relay → `200` with messages, else `localRoomActivity` audit tail with `Local activity` note (already works on current Docker)
+- [x] Whitelist: only kinds `9`, `30315`, `30023` — do not retry `30024` (huddle) — relay rejects it
+
+## Phase 3b — Chat-centric shell (new, 2026-09-18)
+
+- [x] `buzz/ui/Shell.ts` — left `250px` Workspace sidebar (rooms with 🟢/🟡/🔴 + pending pill) + right main, keeps `<nav aria-label="Console">` for tests
+- [x] Dashboard (`/`) now renders inside shell — `ScopeHealthEvaluator` rooms → `renderWorkspaceShell` — verified on Docker Postgres (`has-Workspace/has-ROOMS` + `e2e-journey: OK`)
+- [ ] Apply shell to remaining pages: `/team`, `/console/buzz/*`, `/console/workflows`, `/console/digest`, `/console/data` — same wrapper, no duplicate sidebars
 
 ## Phase 4 — How agents talk (keep, do not reimplement)
 
