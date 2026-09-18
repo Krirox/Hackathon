@@ -486,12 +486,22 @@ export class ApplicationWorker {
               }
             } else {
               const boundSkillCardId = routeDecision.tier === 'WORKFLOW' ? (candidateCard?.id ?? null) : null;
+              // Team microVM: one isolated workspace per scope, many jcode
+              // sessions multiplex inside. Snapshot on completion, destroy on
+              // kill/error. Test-baseline adapters skip VM lifecycle.
+              const needsVm = !this.adapter.isTestBaseline;
+              let vm: { workingDir: string } | null = null;
+              if (needsVm) {
+                const { provisionTeamVm } = await import('./vm.ts');
+                vm = await provisionTeamVm(this.db, this.tenant, targetScope, nowIso);
+              }
               const outcome = await this.adapter.run(this.tenant, reqId, {
                 command,
                 claimRefs: groundedClaimRefs,
                 onBehalfOf,
                 maxDollars: bid.dollars ?? 1,
                 maxTokens: bid.tokens ?? 10_000,
+                ...(vm ? { workingDir: vm.workingDir } : {}),
                 ...(approvedSpec && approvalDecision
                   ? { approvedDecisionId: approvalDecision.id, specFingerprint: approvedSpec.fingerprint }
                   : {}),
@@ -501,6 +511,11 @@ export class ApplicationWorker {
                 skillCardId: boundSkillCardId,
                 routerConfidence: routeDecision.shadow ? 0.5 : 0.9,
               });
+              if (needsVm && vm) {
+                const { snapshotTeamVm } = await import('./vm.ts');
+                const art = (outcome as { artifactRef?: string }).artifactRef ?? null;
+                await snapshotTeamVm(this.db, this.tenant, targetScope, reqId, art, nowIso);
+              }
 
               // F25: Post terminal Buzz summary. Skip test-baseline adapters
               // (no operator-visible thread noise from CI runs). Relay

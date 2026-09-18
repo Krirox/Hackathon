@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+
 /**
  * Wire types for the jcode harness API (protocol v1).
  *
@@ -87,14 +89,35 @@ export interface SessionInfo {
   [k: string]: unknown;
 }
 
+/**
+ * Resolve the harness API socket path, mirroring upstream resolution
+ * (verified against crates/jcode-harness-api/src/sockets.rs, not docs):
+ * JCODE_API_SOCKET wins; otherwise the runtime dir holds jcode-api.sock,
+ * resolved from JCODE_RUNTIME_DIR, then XDG_RUNTIME_DIR, then a temp fallback
+ * namespaced per user (jcode-<user>) so two users on one box never share a
+ * bridge. A client that resolves a different directory than the bridge cannot
+ * connect at all — the exact bug upstream's sockets.rs exists to prevent.
+ *
+ * Windows branch is ours, not upstream's: Node cannot dial a Unix-socket
+ * filesystem path on win32, so we use a named pipe there.
+ */
+export function runtimeDirFrom(
+  env: NodeJS.ProcessEnv = process.env,
+  tmpdir = '/tmp',
+): string {
+  if (env.JCODE_RUNTIME_DIR) return env.JCODE_RUNTIME_DIR;
+  if (env.XDG_RUNTIME_DIR) return env.XDG_RUNTIME_DIR;
+  const who = env.USER ?? env.USERNAME ?? 'user';
+  const discriminator = who.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'user';
+  return `${tmpdir.replace(/[\\/]+$/, '')}/jcode-${discriminator}`;
+}
+
 export function socketPathFrom(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (env.JCODE_API_SOCKET) return env.JCODE_API_SOCKET;
-  // jcode's bridge listens on $XDG_RUNTIME_DIR/jcode-api.sock and, on Windows,
-  // on a named pipe. Node cannot bind a filesystem path to a Unix socket there.
   if (platform === 'win32') return '\\\\.\\pipe\\jcode-api';
-  const xdg = env.XDG_RUNTIME_DIR ?? env.TMPDIR ?? '/tmp';
-  return `${xdg.replace(/[\\/]+$/, '')}/jcode-api.sock`;
+  const base = runtimeDirFrom(env, env.TMPDIR ?? tmpdir());
+  return `${base.replace(/[\\/]+$/, '')}/jcode-api.sock`;
 }

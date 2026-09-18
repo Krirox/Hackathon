@@ -62,12 +62,23 @@ export interface HarnessOutcome {
    *  or mock harnesses). Downstream consumers (worker dispatch, transfer gates)
    *  must not treat test-baseline completions as cross-model quality evidence. */
   isTestBaseline: boolean;
+  /** Artifact-store ref of the persisted transcript, when the harness wrote
+   *  one. The worker snapshots the team VM against it — a snapshot without a
+   *  ref cannot resume the next provision from real state. */
+  artifactRef?: string;
+  /** Harness-supplied refusal detail (kill switch, content screen, budget).
+   *  The worker uses it to decide teardown: a tainted workspace is destroyed,
+   *  never snapshotted as good state. */
+  refusalReason?: string;
 }
 
 export interface HarnessAdapter {
   readonly name: string;
   readonly category?: 'model' | 'test-baseline' | 'smoke';
-  readonly isTestBaseline?: boolean;
+  /** Required and explicit: the worker provisions a real team-VM workspace for
+   *  any adapter that is not declared test-baseline, so a mock that forgets
+   *  this flag would create real directories in unit tests. Say what you are. */
+  readonly isTestBaseline: boolean;
   readonly model?: string;
   run(tenant: string, requestId: string, task: HarnessTask): Promise<HarnessOutcome>;
 }
@@ -101,6 +112,8 @@ export class JcodeAdapter implements HarnessAdapter {
       usage: out.usage,
       permissions: out.permissions.map((p) => ({ tool: p.toolName, decision: p.decision })),
       isTestBaseline: false,
+      artifactRef: out.artifactRef,
+      refusalReason: out.refusalReason,
     };
   }
 }

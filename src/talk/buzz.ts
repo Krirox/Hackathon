@@ -52,6 +52,10 @@ export interface WatchTerminalSummary {
   step: number;
   tokens: number;
   toolName?: string;
+  deliverableId?: string;
+  deliverableVersion?: number;
+  deliverableFingerprint?: string;
+  prUrl?: string;
   text?: string;
 }
 
@@ -111,6 +115,11 @@ export function watchRun(
     return p;
   };
   async function terminal(state: string, summary: WatchTerminalSummary): Promise<BuzzNostrEvent | null> {
+    const tags: string[] = [];
+    if (summary.deliverableId) tags.push(`[deliverable:${summary.deliverableId}]`);
+    const head = state === 'COMPLETED' && summary.deliverableVersion !== undefined
+      ? `Work done — v${summary.deliverableVersion}${summary.prUrl ? ` · ${summary.prUrl}` : ''}`
+      : undefined;
     return fire({
       channel: opts.channel,
       threadRoot: opts.threadRoot,
@@ -119,7 +128,7 @@ export function watchRun(
       toolName: summary.toolName,
       tokens: summary.tokens,
       state,
-      text: summary.text,
+      text: [head, summary.text, ...tags].filter(Boolean).join('\n'),
     });
   }
   async function close(timeoutMs = 5000): Promise<void> {

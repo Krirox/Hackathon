@@ -3,7 +3,7 @@ import type { AsyncDb } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { type BuzzSurface } from './buzz.ts';
-import { roomForScope, normalizeScope, agentForScope, CANONICAL_ROOMS } from './rooms.ts';
+import { roomForScope, normalizeScope, agentForScope, CANONICAL_ROOMS, resolveRoomByToken } from './rooms.ts';
 
 export interface CrossRoomDispatch {
   targetAgent: string;
@@ -33,6 +33,20 @@ export interface SwarmChain {
   settled: boolean;
 }
 
+/** Resolve an @token against canonical rooms + stored aliases + custom rooms. */
+export async function resolveDispatchTarget(
+  db: import('../core/db.ts').AsyncDb,
+  tenant: string,
+  token: string,
+): Promise<{ agentName: string; targetScope: string; targetRoom: string } | null> {
+  const t = token.trim().toLowerCase();
+  if (t === 'eng' || t === 'eng-agent' || t === 'engineering') {
+    const infra = CANONICAL_ROOMS.find((r) => r.scope === 'infra')!;
+    return { agentName: 'eng-agent', targetScope: infra.scope, targetRoom: infra.name };
+  }
+  return resolveRoomByToken(db, tenant, t);
+}
+
 /** Parses cross-room dispatches like "@finance-agent assess churn impact of [clm_market_42]" */
 export function parseCrossRoomDispatch(text: string): CrossRoomDispatch | null {
   const match = /@([a-zA-Z0-9_-]+)\s+(.+)/i.exec(text.trim());
@@ -46,7 +60,8 @@ export function parseCrossRoomDispatch(text: string): CrossRoomDispatch | null {
       r.agentName.toLowerCase() === targetToken ||
       r.id.toLowerCase() === targetToken ||
       r.scope.toLowerCase() === targetToken ||
-      r.name.toLowerCase() === targetToken,
+      r.name.toLowerCase() === targetToken ||
+      ((targetToken === 'marketing' || targetToken === 'marketing-agent' || targetToken === 'business-agent') && r.scope === 'business'),
   );
   if (!targetRoomDef) return null;
 
@@ -111,10 +126,15 @@ export class InterAgentSwarmCoordinator {
     // name still identifies the speaker in the log.
     const originAgent = input.originAgent ?? agentForScope(originScope)?.name ?? roomForScope(originScope).agentName;
 
-    const dispatch = parseCrossRoomDispatch(input.dispatchText);
-    if (!dispatch) {
+    const parsed = parseCrossRoomDispatch(input.dispatchText);
+    if (!parsed) {
       throw new Error(`[swarm] unable to parse cross-room dispatch from "${input.dispatchText}"`);
     }
+    const token = /^@([a-zA-Z0-9_-]+)/i.exec(input.dispatchText.trim())?.[1] ?? '';
+    const resolved = await resolveDispatchTarget(this.db, input.tenant, token);
+    const dispatch = resolved
+      ? { targetAgent: resolved.agentName, targetScope: resolved.targetScope, targetRoom: resolved.targetRoom, action: parsed.action, claimRefs: parsed.claimRefs }
+      : parsed;
 
     const events: SwarmDeliberationEvent[] = [];
 
@@ -129,6 +149,34 @@ export class InterAgentSwarmCoordinator {
       timestamp: at,
     });
 
+    const claimRefs = [...dispatch.claimRefs];
+    if (claimRefs.length === 0) {
+      try {
+        const grounding = await this.ledger.append({
+          tenant: input.tenant,
+          subject: `chat:${originScope}:dispatch`,
+          kind: 'OBSERVATION',
+          statement: dispatch.action.slice(0, 200),
+          confidence: 1.0,
+          observedAt: at,
+          validFrom: at,
+          owner: originAgent,
+          scope: originScope,
+          authorType: 'agent',
+          provenance: {
+            sourceUri: `buzz://chat/${originScope}`,
+            sourceTier: 'PRIMARY',
+            extractor: 'buzz:mention',
+            extractorVersion: '1.0.0',
+            retrievedAt: at,
+          },
+        });
+        claimRefs.push(grounding.id);
+      } catch {
+        // If append fails, proceed
+      }
+    }
+
     // Step 2: Submit Coordination Proposal to targetScope
     const proposal = await this.coord.submit({
       tenant: input.tenant,
@@ -136,7 +184,7 @@ export class InterAgentSwarmCoordinator {
       originScope,
       targetScope: dispatch.targetScope,
       goal: dispatch.action,
-      claimRefs: dispatch.claimRefs,
+      claimRefs,
       deliverableSchema: 'swarm.deliberation',
       bid: {
         dollars: 50,

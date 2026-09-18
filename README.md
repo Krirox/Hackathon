@@ -85,6 +85,29 @@ Vital's core moat is not the LLM or the harness; it is the **accumulated, immuta
 
 ---
 
+## Why not just Grok Bot + Slack? — What chat alone cannot guarantee
+
+**What Grok Bot is (per [x.ai/bot](https://x.ai/bot), [docs.x.ai/grok-bot/overview](https://docs.x.ai/grok-bot/overview), [Introducing Grok Bot](https://x.ai/news/introducing-grok-bot)):**
+a persistent, named teammate on its own cloud computer (browser, filesystem, terminal). It signs into your tools and uses them like you do — connectors/MCP where available, computer-use where there is no API — keeps memory/files/browser sessions across turns, and multiple Bots on one account share that computer so they can message each other, share context in threads/group chats and hand off tasks. You message it like a teammate, it finishes jobs end-to-end and comes back for approval. Requires SuperGrok / Cursor plan (separate Bot usage), beta as of Aug 2026.
+
+Slack (or Buzz/Nostr) is the *talk layer* — where humans and agents coordinate visibly. Grok Bot's threads are the system of record in that design.
+
+Vital is the **governance layer above any harness** (jcode, QM, Grok Bot) **and any talk surface** (Buzz, Slack). You can run Grok Bot *as* the harness under Vital — Vital still enforces what Grok Bot alone does not document.
+
+| Capability | Grok Bot + Slack (as documented) | Vital (this repo, enforced in code) |
+| :--- | :--- | :--- |
+| **Who can mint truth?** | Any Bot output can be posted to Slack; no documented invariant prevents a model generation from becoming a `FACT` in your store. | **I1 hard invariant** (`src/ledger/ledger.ts`): model output can *never* mint `FACT`/`MEASUREMENT`/`OUTCOME`; only `SYSTEM_OF_RECORD`/`MEASURED` provenance can. Proven by `test/ledger.test.ts` adversarial 11-kinds. |
+| **Can a runaway loop bankrupt you?** | Bots run until done; they share a computer and can trigger each other in threads. No documented hard hop limit, dollar/token cap, or daily escalation cap. | **Attention Scheduler** (`src/coord/coordinator.ts`): every `REQUEST` carries a `CostBid` ($, tokens, human-minutes, deadline, **max hops = 3**, cycle detection, daily caps, **escalation cap 3/day that blocks**). Budget death is loud, not silent. |
+| **Does “learning” rot?** | “Bots keep memory and learn from each other” — no documented quarantine or cross-model/role transfer test before reuse. | **Organizational Compiler** (`src/compiler/compiler.ts`): `QUARANTINE → SHADOW → BOUNDED_PILOT → PROMOTED` with **cross-model + cross-role transfer tests + EWMA drift auto-demotion**. Imported `SKILL.md` packs enter at `QUARANTINE` by design. |
+| **Who approved what, on what basis, at what second?** | Chat thread is the audit trail; approvals are messages. No frozen claim-hashes at decision time documented. | **Context Bundles** (`src/ledger/ledger.ts`) freeze exact claim IDs/versions/hashes at decision seconds; `decisionId` replays years later. `R/A/I` matrix (`src/gov/trust.ts`) + **honeytasks** catch rubber-stamping; freezes autonomy. |
+| **Reversible vs irreversible?** | Bots “use your apps just like you do” including irreversible tools; approval is a chat reply. | **R/A/I Autonomy Matrix** (`READ | ANALYZE | RECOMMEND | ACT_REVERSIBLE | ACT_IRREVERSIBLE` where `ACT_IRREVERSIBLE` is *never autonomous in Year 1*). Scoped sandboxes + egress proxy (`src/substrate/`). |
+| **If the harness changes, does truth survive?** | Harness and chat are the system. Swap Grok Bot for another harness and history is chat logs. | **Ledger is the only store** (`src/talk/surface.ts` HMAC/Buzz binding, `idea.md` §3): swap Buzz→Slack or jcode→Grok Bot with **zero ledger change** — proven by `src/talk/surface.ts` `TalkSurface` swappability spike. |
+| **Chat itself** | Polished chat (threads, group chats, @-mentions, shared computer). | **Same chat UX** (`buzz/` → Image 1: avatar stream, Linear card, ✅ 1 🚀 2, `@` autocomplete, `Message #engineering` composer) but every message is **grounded**: claim chips, `derived_from` links, and `[HUMAN ATTENTION REQUIRED]` cards that cannot be approved by reacting. |
+
+> **Bottom line:** Grok Bot is the best *hands* (persistent computer + multi-tool use + bot-to-bot handoffs). Slack is the best *mouth* (threads). Vital is the **memory + conscience + budget office** that makes hands and mouth safe for production: without it, chat *is* the ledger, loops are unbounded, and learning is a vector-store append.
+
+---
+
 ## How It Works: End-to-End Architecture
 
 ```mermaid

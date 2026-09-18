@@ -11,9 +11,12 @@ import {
   TIER_RANK,
   type Claim,
   type ClaimKind,
+  type ClaimStatus,
   type LinkType,
   type SourceTier,
 } from '../core/types.ts';
+
+export type { Claim, ClaimKind, ClaimStatus, LinkType, SourceTier };
 
 /**
  * Reality Ledger — append-only, bi-temporal, typed claims.
@@ -132,9 +135,18 @@ export interface CorrectionConflict {
   preservedDraft?: { statement: string; by: string; at: string };
 }
 
+export interface LedgerSearchOptions {
+  q?: string;
+  scopes?: string[];
+  kinds?: ClaimKind[];
+  status?: ClaimStatus | ClaimStatus[];
+  limit?: number;
+}
+
 export interface Ledger {
   append(input: NewClaimInput): Promise<Claim>;
   get(tenant: string, id: string): Promise<Claim | null>;
+  search(tenant: string, opts?: LedgerSearchOptions): Promise<Claim[]>;
   bySubject(tenant: string, subject: string, opts?: { includeStale?: boolean }): Promise<Claim[]>;
   link(tenant: string, fromId: string, toId: string, link: LinkType): Promise<void>;
   contradictions(tenant: string, claimId: string): Promise<Claim[]>;
@@ -542,6 +554,39 @@ export function createLedger(db: AsyncDb): Ledger {
       await audit(tenant, 'ledger', 'CONTEXT_DROPPED_UNUSABLE', ids.join(','), `${dropped} claim(s) not usable`);
     }
     return rows;
+  }
+
+  async function search(tenant: string, opts: LedgerSearchOptions = {}): Promise<Claim[]> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 20, 100));
+    const where: string[] = ['tenant = ?'];
+    const args: unknown[] = [tenant];
+    if (opts.q && opts.q.trim()) {
+      const escaped = opts.q.trim().replace(/([%_\\])/g, '\\$1');
+      const like = `%${escaped}%`;
+      where.push("(subject LIKE ? ESCAPE '\\' OR statement LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\')");
+      args.push(like, like, like);
+    }
+    if (opts.scopes && opts.scopes.length > 0) {
+      where.push(`scope IN (${opts.scopes.map(() => '?').join(',')})`);
+      args.push(...opts.scopes);
+    }
+    if (opts.kinds && opts.kinds.length > 0) {
+      where.push(`kind IN (${opts.kinds.map(() => '?').join(',')})`);
+      args.push(...opts.kinds);
+    }
+    if (opts.status) {
+      const statuses = Array.isArray(opts.status) ? opts.status : [opts.status];
+      if (statuses.length > 0) {
+        where.push(`status IN (${statuses.map(() => '?').join(',')})`);
+        args.push(...statuses);
+      }
+    } else {
+      where.push("status NOT IN ('RETIRED', 'SUPERSEDED')");
+    }
+    const sql = `SELECT * FROM claims WHERE ${where.join(' AND ')} ORDER BY seq DESC LIMIT ?`;
+    args.push(limit);
+    const rows = (await db.prepare(sql).all(...args)) as ClaimRow[];
+    return rows.map((r) => rowToClaim(r as ClaimRow));
   }
 
   /** I5 — staleness is computed on a sweep, not felt. */
@@ -1390,6 +1435,7 @@ export function createLedger(db: AsyncDb): Ledger {
   return {
     append,
     get,
+    search,
     bySubject,
     link,
     contradictions,

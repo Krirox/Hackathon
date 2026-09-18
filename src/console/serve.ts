@@ -197,9 +197,10 @@ import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
-import { renderWorkspaceShell } from './workspace-shell.ts';
+import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
-import { loadRoomConfig, saveRoomConfig } from '../talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
+import { renderCompilerView } from './compiler-view.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
 import { executeRoomCommand } from '../talk/commands.ts';
 import { TimeTravelForkEngine } from '../talk/fork.ts';
@@ -413,7 +414,15 @@ async function wrapInWorkspaceShell(
   home: string,
   auth: { user: import('../core/auth.ts').User; session: { csrfToken: string } },
   navKey?: import('./render.ts').NavKey,
+  activeScope?: string | null,
+  isDrawer?: boolean,
 ): Promise<string> {
+  const innerHtml = html.includes('<body>')
+    ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
+    : html;
+  if (isDrawer) {
+    return innerHtml;
+  }
   const rooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
     scope: h.scope,
     roomName: h.roomName,
@@ -424,7 +433,7 @@ async function wrapInWorkspaceShell(
   const avail: Record<string, boolean> = { requests: true, claims: true, rooms: true, humanWork: true, buzz: isAdmin, settings: isAdmin, learning: isAdmin, audit: isAdmin, data: isAdmin };
   const nav = (await import('./render.ts')).renderConsoleNav((await import('./render.ts')).buildConsoleNav(home, avail), navKey);
   const cluster = (await import('./render.ts')).renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-  const shell = renderWorkspaceShell({ rooms, home, consoleNav: nav, accountCluster: cluster, innerHtml: html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) });
+  const shell = renderWorkspaceShell({ rooms, activeScope, home, consoleNav: nav, accountCluster: cluster, innerHtml });
   return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
 }
 
@@ -1539,6 +1548,85 @@ async function auditConsole(
     .run(tenant, actor, action, target, detail ?? null, at);
 }
 
+async function defaultRoomForUser(
+  db: AsyncDb,
+  tenant: string,
+  user: import('../core/auth.ts').User,
+): Promise<string> {
+  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(`user:defaultRoom:${tenant}:${user.id}`)) as
+    | { value: string }
+    | undefined;
+  if (row?.value) {
+    return normalizeScope(row.value);
+  }
+  const emailOrRole = `${user.email} ${user.role}`.toLowerCase();
+  if (emailOrRole.includes('marketing')) {
+    return 'business';
+  }
+  return 'general';
+}
+
+async function triggerMentionHandoffs(
+  text: string,
+  opts: {
+    db: AsyncDb;
+    ledger: Ledger;
+    coord: Coordinator;
+    tenant: string;
+    originScope: string;
+    authorName: string;
+    threadRoot?: string | null;
+    at: string;
+  },
+) {
+  const mentions = Array.from(text.matchAll(/@([a-zA-Z0-9_-]+)/g));
+  if (mentions.length === 0) return;
+  const surface = await maybeBuzzSurface(opts.db, opts.tenant);
+  const { InterAgentSwarmCoordinator } = await import('../talk/swarm.ts');
+  const swarm = new InterAgentSwarmCoordinator({
+    db: opts.db,
+    ledger: opts.ledger,
+    coord: opts.coord,
+    surface: surface ?? undefined,
+    now: () => opts.at,
+  });
+
+  const handledTokens = new Set<string>();
+  const { resolveDispatchTarget } = await import('../talk/swarm.ts');
+  for (const match of mentions) {
+    const token = match[1]!.toLowerCase();
+    if (handledTokens.has(token)) continue;
+    handledTokens.add(token);
+
+    const resolved = await resolveDispatchTarget(opts.db, opts.tenant, token);
+    if (!resolved) continue;
+    const targetRoomDef = { agentName: resolved.agentName, scope: resolved.targetScope, name: resolved.targetRoom };
+
+    const dispatchText = text.trim().startsWith('@') ? text.trim() : `@${targetRoomDef.agentName} ${text.trim()}`;
+    try {
+      const handoff = await swarm.executeHandoff({
+        tenant: opts.tenant,
+        originScope: opts.originScope,
+        originAgent: opts.authorName,
+        dispatchText,
+        threadRoot: opts.threadRoot ?? undefined,
+      });
+      await auditConsole(
+        opts.db,
+        opts.tenant,
+        `user:${opts.authorName}`,
+        'buzz.dispatch',
+        `req:${handoff.downstreamRequestId}`,
+        opts.at,
+        `Handoff to @${targetRoomDef.agentName} in #${targetRoomDef.name}: chain ${handoff.chainId}`,
+      );
+    } catch (err) {
+      // Non-fatal if swarm dispatch refused or already admitted
+      // console.error('HANDOFF ERROR:', err);
+    }
+  }
+}
+
 export function startConsoleServer(
   db: AsyncDb,
   ledger: Ledger,
@@ -1786,6 +1874,8 @@ export function startConsoleServer(
             '/account/email/request',
             '/verify-email',
             '/login/mfa',
+            '/console/dashboard',
+            '/console/compiler',
             '/console/audit',
             '/console/data',
             '/console/data/export',
@@ -1868,7 +1958,11 @@ export function startConsoleServer(
         // ---------------------------------------------------------- auth pages
         if (path === '/login' && method === 'GET') {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
-          if (await sessionOf()) return redirect(res, home);
+          const existingAuth = await sessionOf();
+          if (existingAuth) {
+            const defRoom = await defaultRoomForUser(db, tenant, existingAuth.user);
+            return redirect(res, `${home}console/buzz/${encodeURIComponent(defRoom)}`);
+          }
           const csrf = randomBytes(32).toString('hex');
           const next = safeReturnPath(url.searchParams.get('next'));
           const expired = url.searchParams.get('reason') === 'expired';
@@ -1983,7 +2077,8 @@ export function startConsoleServer(
             const { session, token } = await startSessionForUser(db, tenant, user.id, at);
             const cookie = sessionCookie(token, at, secure, session);
             if (user.mustChangePassword) return redirect(res, '/change-password', cookie);
-            return redirect(res, next ?? home, cookie);
+            const defRoom = await defaultRoomForUser(db, tenant, user);
+            return redirect(res, next ?? `${home}console/buzz/${encodeURIComponent(defRoom)}`, cookie);
           } catch (e) {
             // One message for every credential failure — no user enumeration —
             // EXCEPT lockout, which the user must see to know it is not their
@@ -2073,7 +2168,8 @@ export function startConsoleServer(
           const { user, session, token } = await startSessionForUser(db, tenant, entry.userId, at);
           const sessionCk = sessionCookie(token, at, secure, session);
           const clearMfa = `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
-          const target = user.mustChangePassword ? '/change-password' : (next ?? home);
+          const defRoom = await defaultRoomForUser(db, tenant, user);
+          const target = user.mustChangePassword ? '/change-password' : (next ?? `${home}console/buzz/${encodeURIComponent(defRoom)}`);
           res.writeHead(303, { location: target, 'set-cookie': [sessionCk, clearMfa] });
           res.end();
           return;
@@ -2635,6 +2731,23 @@ export function startConsoleServer(
           res.end(JSON.stringify({ ok: true, engine: db.engine, at }));
           return;
         }
+        const deliverableByRequest = path.match(/^\/console\/deliverables\/by-request\/([^/]+)$/);
+        if (method === 'GET' && deliverableByRequest) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          let requestId: string;
+          try {
+            requestId = decodeURIComponent(deliverableByRequest[1]!);
+          } catch {
+            return json(res, 400, { ok: false, error: 'malformed request id' });
+          }
+          const { loadDeliverableByRequest } = await import('../wedge/deliverable-artifact.ts');
+          const record = await loadDeliverableByRequest(db, tenant, requestId);
+          if (!record) return json(res, 404, { ok: false, error: 'no deliverable for request' });
+          return redirect(res, `/console/deliverables/${encodeURIComponent(record.id)}`);
+        }
         const deliverablePage = path.match(/^\/console\/deliverables\/([^/]+)$/);
         if (method === 'GET' && deliverablePage) {
           const auth = await sessionOf();
@@ -2739,6 +2852,33 @@ export function startConsoleServer(
           );
           return;
         }
+        if (method === 'GET' && path === '/console/compiler') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const isDrawer = url.searchParams.get('drawer') === '1';
+          const content = await renderCompilerView(db, comp, tenant);
+          if (isDrawer) {
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(content);
+            return;
+          }
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(
+            await wrapInWorkspaceShell(detailDocument('Compiler — Why Not Trusted Yet', content, detailOpts), db, tenant, home, auth),
+          );
+          return;
+        }
         // ------------------------------------------------------------ Workspace (internal: buzz)
         // The human-facing room console: roster + per-room thread view.
         // Authenticated, admin-gated pages over the same evaluators the APIs
@@ -2773,7 +2913,7 @@ export function startConsoleServer(
             const roster = await buildBuzzRoster(db, tenant, surface);
             const body = renderBuzzRoster(roster, home, auth.session.csrfToken);
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(detailDocument('Workspace', body, detailOpts));
+            res.end(await wrapInWorkspaceShell(buzzDocument('Workspace', body), db, tenant, home, auth, 'buzz'));
           } finally {
             // The surface holds no pooled connections of its own; the health
             // probe is one fetch. Nothing to close — this block documents that.
@@ -2832,7 +2972,7 @@ export function startConsoleServer(
             return;
           }
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument(`Room: ${scope}`, body, detailOpts));
+          res.end(await wrapInWorkspaceShell(buzzDocument(`#${scope}`, body), db, tenant, home, auth, 'buzz', scope));
           return;
         }
         const buzzRoomCommand = path.match(/^\/console\/buzz\/([^/]+)\/command$/);
@@ -2862,10 +3002,26 @@ export function startConsoleServer(
             ledger,
             evaluator,
           });
+          if (!result.handled) {
+            // Treat unhandled input as a conversation message with @mention dispatch
+            const { createLocalReply } = await import('./buzz.ts');
+            const byName = auth.user.email.split('@')[0] ?? auth.user.email;
+            const newId = await createLocalReply(db, tenant, scope, null, byName, command, at);
+            await triggerMentionHandoffs(command, {
+              db,
+              ledger,
+              coord,
+              tenant,
+              originScope: scope,
+              authorName: byName,
+              threadRoot: null,
+              at,
+            });
+            await auditConsole(db, tenant, by(auth.user), 'buzz.chat', `room:${scope}`, at, command.slice(0, 200));
+            return redirect(res, `${back}#msg-${encodeURIComponent(newId)}`);
+          }
           await auditConsole(db, tenant, by(auth.user), 'buzz.command', `room:${scope}`, at, command.slice(0, 200));
-          const notice = result.handled
-            ? `Command ${result.command} executed.`
-            : `Not a room command: ${command.slice(0, 60)}`;
+          const notice = `Command ${result.command} executed.`;
           return redirect(res, `${back}?notice=${encodeURIComponent(notice.slice(0, 200))}`);
         }
         const buzzReact = path.match(/^\/console\/buzz\/([^/]+)\/react$/);
@@ -2900,6 +3056,16 @@ export function startConsoleServer(
           const { createLocalReply } = await import('./buzz.ts');
           const byName = auth.user.email.split('@')[0] ?? auth.user.email;
           const newId = await createLocalReply(db, tenant, scope, parentId, byName, content, at);
+          await triggerMentionHandoffs(content, {
+            db,
+            ledger,
+            coord,
+            tenant,
+            originScope: scope,
+            authorName: byName,
+            threadRoot: parentId,
+            at,
+          });
           await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
           return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(newId)}`);
         }
@@ -3150,7 +3316,7 @@ export function startConsoleServer(
             ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
             : listHtml;
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows'));
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows', undefined, url.searchParams.get('drawer') === '1'));
           return;
         }
         const workflowDetail = path.match(/^\/console\/workflows\/([^/]+)$/);
@@ -3333,7 +3499,7 @@ export function startConsoleServer(
                 detailOpts,
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'requests'));
+              res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'requests', undefined, url.searchParams.get('drawer') === '1'));
               return;
             }
             const pageResult = await searchClaims(db, tenant, {
@@ -3385,7 +3551,7 @@ export function startConsoleServer(
               detailOpts,
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'claims'));
+            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'claims', undefined, url.searchParams.get('drawer') === '1'));
             return;
           } catch (e) {
             return json(res, 400, { ok: false, error: (e as Error).message });
@@ -3622,7 +3788,7 @@ export function startConsoleServer(
 
           return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
         }
-        if (method === 'GET' && path === home) {
+        if (method === 'GET' && (path === home || path === '/console/dashboard')) {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
           if (accessState === 'recovery') {
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -3633,6 +3799,32 @@ export function startConsoleServer(
           if (!auth) return redirectLogin();
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+          const users = await listUsers(db, tenant);
+          const activationState = await buildActivationState(db, ledger, coord, tenant, at, users, {
+            approverRole: approverMin,
+          });
+
+          if (
+            path === home &&
+            path !== '/console/dashboard' &&
+            url.searchParams.get('view') !== 'dashboard' &&
+            !activationState.showPanel &&
+            !activationState.sampleActive
+          ) {
+            const defRoom = await defaultRoomForUser(db, tenant, auth.user);
+            const loc = `${home}console/buzz/${encodeURIComponent(defRoom)}`;
+            const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
+            res.writeHead(302, {
+              location: loc,
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': refreshed,
+            });
+            res.end(
+              `<!DOCTYPE html><html><head><meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head><body><p>Redirecting to <a href="${esc(loc)}">workspace chat</a>...</p></body></html>`,
+            );
+            return;
+          }
           const reviewPage = Number(url.searchParams.get('reviewPage') ?? '0');
           if (!Number.isSafeInteger(reviewPage) || reviewPage < 0)
             return json(res, 400, { ok: false, error: 'reviewPage must be a nonnegative integer' });
@@ -3643,10 +3835,6 @@ export function startConsoleServer(
           } catch (e) {
             return json(res, 400, { ok: false, error: (e as Error).message });
           }
-          const users = await listUsers(db, tenant);
-          const activationState = await buildActivationState(db, ledger, coord, tenant, at, users, {
-            approverRole: approverMin,
-          });
           const report = await reportHtml(tenant, at);
           const fallbackMode = operatorSecret ? 'secret' : 'session';
           const readiness = await renderSystemReadiness(at);
@@ -3925,6 +4113,26 @@ export function startConsoleServer(
           }
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
           try {
+            const wantsCreate = ['newRoomId', 'newRoomName', 'newRoomScope', 'newRoomAgent', 'newRoomMission'].some(
+              (k) => (call.fields[k] ?? '').trim() !== '',
+            );
+            if (wantsCreate) {
+              const { createCustomRoom } = await import('../talk/rooms.ts');
+              const created = await createCustomRoom(
+                db,
+                tenant,
+                {
+                  id: String(call.fields.newRoomId ?? ''),
+                  name: String(call.fields.newRoomName ?? ''),
+                  scope: String(call.fields.newRoomScope ?? ''),
+                  agentName: String(call.fields.newRoomAgent ?? ''),
+                  mission: String(call.fields.newRoomMission ?? ''),
+                },
+                by(auth.user),
+              );
+              await auditConsole(db, tenant, by(auth.user), 'setup.rooms_create', `room:${created.scope}`, at);
+              return redirect(res, '/setup/rooms?saved=ok');
+            }
             await handleRoomsSetupPost(db, tenant, call.fields, by(auth.user));
             await auditConsole(db, tenant, by(auth.user), 'setup.rooms', `tenant:${tenant}`, at);
             return redirect(res, '/setup/rooms?saved=ok');

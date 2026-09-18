@@ -85,6 +85,9 @@ export interface RunResult {
   usage: { input: number; output: number };
   claimIds: string[];
   refusalReason?: string;
+  /** Artifact-store ref of the persisted transcript. Absent when the store
+   *  write failed (disclosed via progressError) or the run never reached it. */
+  artifactRef?: string;
 }
 
 /**
@@ -127,7 +130,7 @@ export const createGovernedPermissionPolicy =
       }
     }
 
-    const allow = opts.allow ?? new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think']);
+    const allow = opts.allow ?? new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think', 'ledgerSearch', 'ledger_search']);
     const reversible = opts.reversibleTools ?? new Set(['write_file', 'edit_file', 'delete_file', 'apply_patch']);
     const irreversible = opts.irreversibleTools ?? new Set(['bash']);
 
@@ -390,11 +393,29 @@ export class JcodeRunner extends EventEmitter {
 
     const rates = await getRates(this.db, tenant);
     const contextClaims = await this.ledger.contextFor(tenant, task.claimRefs, new Date().toISOString());
-    let prompt = task.command;
-    if (contextClaims.length > 0) {
-      const contextLines = contextClaims.map((c) => `- [${c.kind}] (${c.subject}): ${c.statement}`).join('\n');
-      prompt = `[Grounded Context]\n${contextLines}\n\n[Instruction]\n${task.command}`;
+    let crossRoomClaims: import('../ledger/ledger.ts').Claim[] = [];
+    try {
+      crossRoomClaims = await this.ledger.search(tenant, {
+        q: task.command.slice(0, 100),
+        limit: 8,
+      });
+      const directIds = new Set(contextClaims.map((c) => c.id));
+      crossRoomClaims = crossRoomClaims.filter((c) => !directIds.has(c.id));
+    } catch {
+      // non-fatal
     }
+
+    const blocks: string[] = [];
+    if (contextClaims.length > 0) {
+      const contextLines = contextClaims.map((c) => `- [${c.kind}] (${c.subject}) [${c.id}]: ${c.statement}`).join('\n');
+      blocks.push(`[Grounded Context]\n${contextLines}`);
+    }
+    if (crossRoomClaims.length > 0) {
+      const crossLines = crossRoomClaims.map((c) => `- [${c.kind}] (${c.scope}) (${c.subject}) [${c.id}]: ${c.statement}`).join('\n');
+      blocks.push(`[Cross-Room Evidence]\n${crossLines}`);
+    }
+    blocks.push(`[Instruction]\n${task.command}`);
+    let prompt = blocks.join('\n\n');
 
     // Content screening on input prompt
     if (this.contentScreen) {
@@ -756,6 +777,7 @@ export class JcodeRunner extends EventEmitter {
         usage,
         claimIds,
         refusalReason,
+        artifactRef,
       };
     } catch (e) {
       const msg = (e as Error).message;

@@ -294,6 +294,55 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
     };
   }
 
+  // ----------------------------------------------------------- /compiler
+  if (cmd === 'compiler') {
+    const scope = ctx.currentScope ?? 'core';
+    const cardQuery = args[0];
+    return {
+      handled: true,
+      command: 'compiler',
+      scope,
+      output: `📊 **Compiler Pipeline**: Opening compiler drawer${cardQuery ? ` for \`${cardQuery}\`` : ''}... View status at \`/console/compiler\`.`,
+    };
+  }
+
+  // ----------------------------------------------------------- /ledger
+  if (cmd === 'ledger') {
+    const scope = ctx.currentScope ?? 'core';
+    const q = args.join(' ');
+    let count = 0;
+    if (ctx.ledger && q) {
+      try {
+        const found = await ctx.ledger.search(ctx.tenant, { q, limit: 5 });
+        count = found.length;
+      } catch {}
+    }
+    return {
+      handled: true,
+      command: 'ledger',
+      scope,
+      output: `📜 **Ledger Search**: Found ${count} claim(s) matching "${q}". Opening ledger drawer...`,
+    };
+  }
+
+  // ----------------------------------------------------------- /requests
+  if (cmd === 'requests') {
+    const scope = ctx.currentScope ?? 'core';
+    let pendingCount = 0;
+    if (ctx.coord) {
+      try {
+        const list = await ctx.coord.list(ctx.tenant, { state: 'ADMITTED' });
+        pendingCount = list.filter((r) => r.bid.humanMinutes > 0).length;
+      } catch {}
+    }
+    return {
+      handled: true,
+      command: 'requests',
+      scope,
+      output: `📋 **Pending Reviews**: ${pendingCount} request(s) awaiting human approval. Opening reviews drawer...`,
+    };
+  }
+
   return {
     handled: false,
     command: cmd,

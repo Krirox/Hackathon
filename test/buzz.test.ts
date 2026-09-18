@@ -89,11 +89,12 @@ const surfaceFor = (relayUrl: string) =>
   });
 
 // ------------------------------------------------------------------ Phase 1 Tests
-T('Phase 1: 12 Canonical Rooms and cryptographic agent identities are properly initialized', async () => {
+T('Phase 1: 13 Canonical Rooms and cryptographic agent identities are properly initialized', async () => {
   const { db } = await fresh();
-  eq(CANONICAL_ROOMS.length, 12, 'exactly 12 canonical rooms:');
+  eq(CANONICAL_ROOMS.length, 13, 'exactly 13 canonical rooms:');
 
   const expectedRooms = [
+    'general',
     'reality-core',
     'fact-check',
     'market-intel',
@@ -472,9 +473,9 @@ T('Feature 4: Ambient Morning Voice Briefing synthesizes 60-second WAV audio', a
 
   const briefing = await huddle.synthesizeBriefing({ durationSeconds: 60 });
   eq(briefing.durationSeconds, 60);
-  eq(briefing.stats.roomsCovered, 12);
+  eq(briefing.stats.roomsCovered, CANONICAL_ROOMS.length);
   eq(briefing.transcript.includes('Overnight'), true);
-  eq(briefing.transcript.includes('12 rooms'), true);
+  eq(briefing.transcript.includes(`${CANONICAL_ROOMS.length} rooms`), true);
   eq(Boolean(briefing.audioWavBase64), true);
 
   // Validate audio buffer structure

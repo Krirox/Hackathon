@@ -57,6 +57,9 @@ T('merged console keeps operator secret checks in addition to session authentica
       200,
     );
     eq((await fetch(`${url}/api/metrics`)).status, 401);
+    // Home is chat-first (302 to the default room); render the dashboard
+    // explicitly so reportBuilds reflects a real dashboard build.
+    await (await fetch(`${url}/?view=dashboard`, { headers: { cookie: session.cookie } })).text();
     const metrics = (await (await fetch(`${url}/api/metrics`, { headers: session.headers })).json()) as {
       requests: number;
       reportBuilds: number;
@@ -815,7 +818,7 @@ T('the served console is session-gated: login, then approve through the coordina
     eq(cookie.includes('vital_session='), true);
     // One session for the whole flow — the CSRF token is per-session, so the
     // page and the API call must carry the SAME cookie.
-    const home: string = await (await fetch(`${base_}/`, { headers: { cookie }, redirect: 'manual' })).text();
+    const home: string = await (await fetch(`${base_}/?view=dashboard`, { headers: { cookie }, redirect: 'manual' })).text();
     eq(home.includes('Reality health'), true, 'serves the report:');
     const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
     // CSRF required even with a valid session.
@@ -1976,7 +1979,7 @@ T('FLOW-019: console header renders shared nav with account controls', async () 
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const html = await (await fetch(`http://127.0.0.1:${server.port}/`, { headers: session.headers })).text();
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })).text();
     eq(html.includes('<nav aria-label="Console">'), true);
     eq(html.includes('>Reviews</a>'), true);
     eq(html.includes('href="/console/workflows"'), true);
@@ -2142,7 +2145,7 @@ T('FINAL-005: enrolling a second factor gates login behind a TOTP challenge', as
     eq(ok.status, 303);
     const sessionCk = (ok.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('vital_session='));
     eq(Boolean(sessionCk), true, 'session issued after the second factor:');
-    const homeRes = await fetch(`${base_}/`, {
+    const homeRes = await fetch(`${base_}/?view=dashboard`, {
       headers: { cookie: sessionCk!.split(';')[0]! },
       redirect: 'manual',
     });
@@ -2257,7 +2260,9 @@ T('FLOW-020: dashboard filters by status, scope, date, and workflow', async () =
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
-    const get = (qs: string) => fetch(`${base_}/${qs}`, { headers: session.headers }).then((r) => r.text());
+    // Home is chat-first; dashboard filters live under ?view=dashboard.
+    const get = (qs: string) =>
+      fetch(`${base_}/?view=dashboard&${qs.replace(/^\?/, '')}`, { headers: session.headers }).then((r) => r.text());
     const form = await get('?q=filter');
     eq(form.includes('name="state"'), true, 'status filter is offered:');
     eq(form.includes('name="since"'), true, 'date filters are offered:');
@@ -2285,21 +2290,21 @@ T('FLOW-020: dashboard search exposes matching work with totals, truncation, and
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const found = await (await fetch(`http://127.0.0.1:${server.port}/?q=zephyr`, { headers: session.headers })).text();
+    const found = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=zephyr`, { headers: session.headers })).text();
     eq(found.includes('zephyr launch hyperdrive review'), true);
     eq(found.includes('matching request(s)'), true);
     eq(found.includes('Pending decision'), true);
     eq(found.includes('Clear search and filters'), true);
     const missing = await (
-      await fetch(`http://127.0.0.1:${server.port}/?q=no-such-work-xyz`, { headers: session.headers })
+      await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=no-such-work-xyz`, { headers: session.headers })
     ).text();
     eq(missing.includes('No results'), true);
     eq(missing.includes('No matching work for search'), true);
     const truncated = await (
-      await fetch(`http://127.0.0.1:${server.port}/?q=a&limit=1`, { headers: session.headers })
+      await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=a&limit=1`, { headers: session.headers })
     ).text();
     eq(truncated.includes('explicit truncation'), true);
-    const invalid = await fetch(`http://127.0.0.1:${server.port}/?state=BOGUS`, { headers: session.headers });
+    const invalid = await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&state=BOGUS`, { headers: session.headers });
     eq(invalid.status, 400);
   } finally {
     await server.close();
@@ -2445,7 +2450,7 @@ T('FLOW-009: invitation lifecycle over HTTP — invite, accept, resend rotates, 
     eq(accept.status, 303, 'acceptance signs the member straight in:');
     const memberCookie = (accept.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
     eq(memberCookie.includes('vital_session='), true);
-    const home = await fetch(`${base_}/`, { headers: { cookie: memberCookie }, redirect: 'manual' });
+    const home = await fetch(`${base_}/?view=dashboard`, { headers: { cookie: memberCookie }, redirect: 'manual' });
     eq(home.status, 200, 'the new account reaches the console:');
     const replay = await fetch(`${base_}/accept-invite`, {
       method: 'POST',
@@ -2552,7 +2557,7 @@ T('FLOW-009: role change, ownership succession, disable and reactivate over HTTP
     const back = await formSession(server.port, 'member@acme.test', memberPassword);
     eq(typeof back.cookie, 'string', 'reactivation restores sign-in access:');
     eq(
-      (await fetch(`${base_}/`, { headers: back.headers, redirect: 'manual' })).status,
+      (await fetch(`${base_}/?view=dashboard`, { headers: back.headers, redirect: 'manual' })).status,
       200,
       'the reactivated member reaches the console:',
     );
@@ -2719,6 +2724,8 @@ T('FLOW-023: metrics extend liveness with readiness while the public pill stays 
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
+    // Home is chat-first; visit the dashboard so reportBuilds is nonzero.
+    await (await fetch(`${base_}/?view=dashboard`, { headers: session.headers })).text();
     const metrics = (await (await fetch(`${base_}/api/metrics`, { headers: session.headers })).json()) as {
       requests: number;
       reportBuilds: number;
@@ -2827,7 +2834,7 @@ T('FLOW-013: home renders the system-readiness strip with tri-state pills', asyn
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
-    const html = await (await fetch(`${base_}/`, { headers: session.headers })).text();
+    const html = await (await fetch(`${base_}/?view=dashboard`, { headers: session.headers })).text();
     eq(html.includes('id="system-readiness"'), true, 'readiness strip rendered on home:');
     eq(html.includes('>database</strong>'), true, 'database check surfaced:');
     eq(html.includes('not configured'), true, 'unconfigured dependencies read as grey, not red:');
@@ -3286,7 +3293,7 @@ T('FLOW-019: shared nav supports skip link and roving-tabindex arrow keys', asyn
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const html = await (await fetch(`http://127.0.0.1:${server.port}/`, { headers: session.headers })).text();
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })).text();
     eq(html.includes('Skip to main content'), true);
     eq(html.includes('data-console-nav-link'), true);
     eq(html.includes('ArrowRight') || html.includes('console-nav-link'), true);
@@ -3819,7 +3826,7 @@ T('FINAL-011: no-JS fallback for approval, decline, and evidence refresh', async
     const detail = await (await fetch(`${baseUrl}/console/requests/r1`, { headers: owner.headers })).text();
     eq(detail.includes('<button type="submit" disabled>'), false);
 
-    const home = await (await fetch(`${baseUrl}/`, { headers: owner.headers })).text();
+    const home = await (await fetch(`${baseUrl}/?view=dashboard`, { headers: owner.headers })).text();
     eq(home.includes('<button type="submit" disabled>'), false);
     eq(home.includes('JavaScript disabled: standard full-page form submission is active.'), true);
 

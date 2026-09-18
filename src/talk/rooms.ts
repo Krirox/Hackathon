@@ -23,6 +23,23 @@ export interface CanonicalRoomDefinition {
 
 export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
   {
+    id: 'general',
+    name: 'general',
+    scope: 'general',
+    channel: 'chan-general',
+    agentName: 'general-agent',
+    duties: 'Company-wide communication, cross-department synthesis, announcements, and global triage.',
+    triggers: 'Cross-functional announcements; company-level questions; untargeted inquiries.',
+    healthMetric: 'Broadcast latency < 10s',
+    defaultMission:
+      'Facilitate company-wide communications, orchestrate cross-room handoffs, and triage unassigned requests.',
+    defaultAutonomy: 'autonomous',
+    defaultBudgetDollars: 1000,
+    defaultBudgetTokens: 5_000_000,
+    defaultSoRs: ['warehouse', 'news', 'slack'],
+    recommendedModel: 'Claude 3.5 Sonnet / Gemini Flash',
+  },
+  {
     id: 'reality-core',
     name: 'reality-core',
     scope: 'core',
@@ -305,6 +322,8 @@ export function normalizeScope(raw: string): string {
   let clean = raw.trim().toLowerCase();
   if (clean.startsWith('scope:')) clean = clean.slice(6);
   if (clean.startsWith('chan-')) clean = clean.slice(5);
+  if (clean === 'marketing' || clean === 'marketing-agent') return 'business';
+  if (clean === 'eng' || clean === 'eng-agent' || clean === 'engineering') return 'infra';
   // Also map room IDs, channels, and names to scopes
   const match = CANONICAL_ROOMS.find(
     (r) => r.id === clean || r.name === clean || r.scope === clean || r.channel === clean || r.channel === raw,
@@ -360,6 +379,9 @@ export interface RoomConfig {
 
 const configKey = (tenant: string, scope: string): string => `room:config:${tenant}:${normalizeScope(scope)}`;
 
+/** Scopes active out-of-box: general + marketing (business) + eng (infra). Rest are user-made. */
+export const SEED_DEFAULT_SCOPES: readonly string[] = ['general', 'business', 'infra'];
+
 export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: string): Promise<RoomConfig> {
   const def = roomForScope(rawScope);
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(configKey(tenant, def.scope))) as
@@ -384,12 +406,15 @@ export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: stri
   }
   try {
     const parsed = JSON.parse(row.value) as Partial<RoomConfig>;
+    const storedAlias = typeof parsed.agentName === 'string' && /^[a-z0-9_-]+-agent$/i.test(parsed.agentName.trim())
+      ? parsed.agentName.trim()
+      : undefined;
     return {
       id: def.id,
       name: def.name,
       scope: def.scope,
       channel: def.channel,
-      agentName: def.agentName,
+      agentName: storedAlias ?? def.agentName,
       mission: parsed.mission ?? def.defaultMission,
       autonomy: parsed.autonomy ?? def.defaultAutonomy,
       budgetCeilingDollars: parsed.budgetCeilingDollars ?? def.defaultBudgetDollars,
@@ -409,6 +434,100 @@ export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: stri
   }
 }
 
+/** A custom room definition created by users (not in CANONICAL_ROOMS). */
+export interface CustomRoomDefinition {
+  id: string;
+  name: string;
+  scope: string;
+  channel: string;
+  agentName: string;
+  mission: string;
+}
+
+const customKey = (tenant: string, scope: string): string => `room:custom:${tenant}:${normalizeScope(scope)}`;
+
+export async function listCustomRooms(db: AsyncDb, tenant: string): Promise<CustomRoomDefinition[]> {
+  const rows = (await db
+    .prepare(`SELECT value FROM meta WHERE key LIKE ?`)
+    .all(`room:custom:${tenant}:%`)) as { value: string }[];
+  const out: CustomRoomDefinition[] = [];
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(String(r.value)) as CustomRoomDefinition;
+      if (p && typeof p.scope === 'string' && typeof p.agentName === 'string') out.push(p);
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+export async function createCustomRoom(
+  db: AsyncDb,
+  tenant: string,
+  input: { id: string; name: string; scope: string; agentName: string; mission: string },
+  by = 'system',
+): Promise<CustomRoomDefinition> {
+  const scope = normalizeScope(input.scope);
+  if (!/^[a-z0-9-]{2,32}$/.test(scope)) throw new Error('[rooms:BAD_SCOPE] scope must match ^[a-z0-9-]{2,32}$');
+  if (!/^[a-z0-9_-]+-agent$/i.test(input.agentName.trim())) {
+    throw new Error('[rooms:BAD_AGENT] agentName must look like *-agent');
+  }
+  if (CANONICAL_ROOMS.some((r) => r.scope === scope || r.id === scope)) {
+    throw new Error(`[rooms:SCOPE_TAKEN] ${scope} is a built-in room`);
+  }
+  const existing = await db.prepare('SELECT value FROM meta WHERE key = ?').get(customKey(tenant, scope));
+  if (existing) throw new Error(`[rooms:SCOPE_TAKEN] ${scope} already exists`);
+  const def: CustomRoomDefinition = {
+    id: input.id.trim().slice(0, 32),
+    name: input.name.trim().slice(0, 48),
+    scope,
+    channel: `chan-${scope}`,
+    agentName: input.agentName.trim().toLowerCase(),
+    mission: input.mission.trim().slice(0, 500),
+  };
+  const now = new Date().toISOString();
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(customKey(tenant, scope), JSON.stringify({ ...def, createdAt: now }));
+  await db.prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)').run(
+    tenant,
+    by,
+    'POLICY_MUTATE',
+    `room:${scope}`,
+    JSON.stringify({ created: true, agentName: def.agentName }),
+    now,
+  );
+  return def;
+}
+
+/** Resolve any @token: canonical agentName/id/scope/name, stored alias, or custom room agent. */
+export async function resolveRoomByToken(
+  db: AsyncDb,
+  tenant: string,
+  token: string,
+): Promise<{ agentName: string; targetScope: string; targetRoom: string } | null> {
+  const t = token.trim().toLowerCase();
+  if (t === 'business-agent' || t === 'marketing' || t === 'marketing-agent') {
+    const biz = CANONICAL_ROOMS.find((r) => r.scope === 'business')!;
+    return { agentName: biz.agentName, targetScope: biz.scope, targetRoom: biz.name };
+  }
+  const direct = CANONICAL_ROOMS.find(
+    (r) => r.agentName.toLowerCase() === t || r.id.toLowerCase() === t || r.scope.toLowerCase() === t || r.name.toLowerCase() === t,
+  );
+  if (direct) return { agentName: direct.agentName, targetScope: direct.scope, targetRoom: direct.name };
+  for (const def of CANONICAL_ROOMS) {
+    const cfg = await loadRoomConfig(db, tenant, def.scope);
+    if (cfg.agentName.toLowerCase() === t) {
+      return { agentName: cfg.agentName, targetScope: def.scope, targetRoom: def.name };
+    }
+  }
+  const customs = await listCustomRooms(db, tenant);
+  const custom = customs.find((c) => c.agentName.toLowerCase() === t || c.scope === t || c.id.toLowerCase() === t);
+  if (custom) return { agentName: custom.agentName, targetScope: custom.scope, targetRoom: custom.name };
+  return null;
+}
+
 export async function saveRoomConfig(
   db: AsyncDb,
   tenant: string,
@@ -417,6 +536,12 @@ export async function saveRoomConfig(
 ): Promise<RoomConfig> {
   const current = await loadRoomConfig(db, tenant, cfg.scope);
   const now = new Date().toISOString();
+  if (cfg.agentName !== undefined) {
+    const alias = String(cfg.agentName).trim();
+    if (!/^[a-z0-9_-]+-agent$/i.test(alias)) throw new Error('[rooms:BAD_AGENT] agentName must look like *-agent');
+    const taken = CANONICAL_ROOMS.some((r) => r.agentName.toLowerCase() === alias.toLowerCase() && r.scope !== current.scope);
+    if (taken) throw new Error(`[rooms:AGENT_TAKEN] ${alias} is already a built-in agent`);
+  }
   const updated: RoomConfig = {
     ...current,
     ...cfg,

@@ -531,6 +531,8 @@ T('F18: adapter exceptions bank negative transfer results instead of aborting', 
   // Create a failing adapter that throws an error
   const crashingAdapter: HarnessAdapter = {
     name: 'crashing-model',
+    category: 'test-baseline',
+    isTestBaseline: true,
     async run() {
       throw new Error('connection refused: model unavailable');
     },

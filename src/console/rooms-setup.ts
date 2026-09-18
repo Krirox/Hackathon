@@ -36,6 +36,12 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
     scopes: ['core'],
   },
   {
+    id: 'starter',
+    name: 'Starter (General + Marketing + Eng)',
+    description: 'Default chat-first setup: general discussion, marketing (growth), and eng (infra). Add more rooms later.',
+    scopes: ['general', 'business', 'infra'],
+  },
+  {
     id: 'all',
     name: 'Complete Autonomous Enterprise (All 12 Rooms)',
     description: 'Full multi-agent swarm across all 12 operational enterprise departments.',
@@ -97,7 +103,9 @@ export async function renderRoomsSetupPage(
             </label>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <span style="background:#E4E4E1;color:#4B5563;font-size:12px;padding:3px 8px;border-radius:4px;">🤖 ${esc(cfg.agentName)}</span>
+            <label style="font-size:11px;color:#4B5563;">🤖 alias
+              <input type="text" name="agentName_${esc(cfg.scope)}" value="${esc(cfg.agentName)}" pattern="[a-z0-9_-]+-agent" title="lowercase, must end in -agent" style="font-size:12px;padding:3px 8px;border:1px solid #B7B7B1;border-radius:4px;background:#FFFFFF;">
+            </label>
           </div>
         </div>
 
@@ -229,6 +237,18 @@ export async function renderRoomsSetupPage(
 
       ${roomCardsHtml}
 
+      <div style="border:1px dashed #B7B7B1;border-radius:8px;padding:16px;margin-top:8px;">
+        <h4 style="margin:0 0 8px 0;font-size:14px;color:#0A0F14;">＋ Create custom room</h4>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:8px;">
+          <input type="text" name="newRoomId" placeholder="id (e.g. design)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+          <input type="text" name="newRoomName" placeholder="Display name" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+          <input type="text" name="newRoomScope" placeholder="scope ^[a-z0-9-]{2,32}$" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+          <input type="text" name="newRoomAgent" placeholder="agent (*-agent)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+          <input type="text" name="newRoomMission" placeholder="mission (optional)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+        </div>
+        <div style="font-size:11px;color:#6B7280;margin-top:6px;">Leave all five blank to skip. Fill all five to create the room on save.</div>
+      </div>
+
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:32px;padding-top:20px;border-top:1px solid #E4E4E1;">
         <a href="${esc(home)}" style="color:#6B7280;text-decoration:none;font-size:14px;">← Back to the console</a>
         <button type="submit" class="submit-btn">Save & Deploy Configured Rooms</button>
@@ -272,6 +292,8 @@ export async function handleRoomsSetupPost(
     const selectedSors = AVAILABLE_SORS.filter((s) => formData[`sor_${def.scope}_${s.id}`] === '1').map((s) => s.id);
 
     const updates: Partial<RoomConfig> = { active };
+    const alias = (formData[`agentName_${def.scope}`] ?? '').trim().toLowerCase();
+    if (alias && /^[a-z0-9_-]+-agent$/.test(alias)) updates.agentName = alias;
     if (mission) updates.mission = mission;
     if (autonomy && ['autonomous', 'guarded', 'supervised'].includes(autonomy)) updates.autonomy = autonomy;
     if (budget > 0) updates.budgetCeilingDollars = budget;
