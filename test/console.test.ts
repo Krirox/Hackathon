@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { listCases } from '../src/evals/runner.ts';
 import { rIn } from './helpers.ts';
-import { installAuthSchema, signupTenant, inviteUser, listUsers } from '../src/core/auth.ts';
+import { installAuthSchema, signupTenant, inviteUser, listUsers, totpCode } from '../src/core/auth.ts';
 import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
 import { seedTrace, cardInput } from './helpers.ts';
 import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
@@ -141,7 +141,11 @@ T('merged report preserves local bounded chart and room windows', async () => {
     );
     // F26: bounded sections disclose what the window omits — never silently.
     eq(report.omitted.decisions, 500 - COST_CURVE_BUDGET, 'decisions beyond the chart window are counted:');
-    eq(report.omitted.rooms, 62 - MAX_ROOMS, 'rooms beyond the room window are counted (60 window scopes + engineering + marketing):');
+    eq(
+      report.omitted.rooms,
+      62 - MAX_ROOMS,
+      'rooms beyond the room window are counted (60 window scopes + engineering + marketing):',
+    );
     eq(report.omitted.needsHuman, 0, 'queue within the window shows zero omitted:');
     const html = renderHtml(report);
     eq(html.includes('beyond this view'), true, 'rendered report discloses omitted rows:');
@@ -1979,13 +1983,233 @@ T('FLOW-019: console header renders shared nav with account controls', async () 
     eq(html.includes('>Workflows</a>'), true);
     eq(html.includes('href="/console/digest"'), true);
     eq(html.includes('>Digest</a>'), true);
+    eq(html.includes('href="/setup"'), true);
+    eq(html.includes('>Settings</a>'), true);
     eq(html.includes('href="/team"'), true);
     eq(html.includes('>Team</a>'), true);
     eq(html.includes('href="/account"'), true);
     eq(html.includes('>Account</a>'), true);
-    eq(html.includes('signed in as owner@acme.test'), true);
+    // Markup-tolerant: the account cluster may style the email, so assert the
+    // phrase and the address independently rather than one literal string.
+    eq(html.includes('signed in as'), true);
+    eq(html.includes('owner@acme.test'), true);
     eq(html.includes('action="/logout"'), true);
     eq(html.includes('href="/console/requests/rq1"'), true, 'every needs-human item links to its task:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-002: Settings nav entry is admin-gated and the setup page stays reachable', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member-nav@acme.test', name: 'M', role: 'member', password: 'a-members-password-long' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const ownerHome = await (await fetch(`${base_}/`, { headers: owner.headers })).text();
+    eq(ownerHome.includes('href="/setup"'), true, 'owner sees Settings in the nav:');
+    const member = await formSession(server.port, 'member-nav@acme.test', 'a-members-password-long');
+    const memberHome = await (await fetch(`${base_}/`, { headers: member.headers })).text();
+    eq(memberHome.includes('>Settings</a>'), false, 'member does not see Settings:');
+    // The setup page still renders for an owner (reachable after activation)
+    // and links the previously-orphaned Rooms wizard.
+    const setup = await fetch(`${base_}/setup`, { headers: owner.headers });
+    eq(setup.status, 200);
+    const setupHtml = await setup.text();
+    eq(setupHtml.includes('Guided setup'), true);
+    eq(setupHtml.includes('href="/setup/rooms"'), true, 'setup links room provisioning:');
+    eq(setupHtml.includes('Open room provisioning'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-004: learning review page renders and labels decisions without JSON links', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await db
+    .prepare(
+      'INSERT INTO routing_decisions (tenant,task_type,scope,action_class,proposed,executed,policy_baseline,shadow,guards,importance,labeled,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,?)',
+    )
+    .run(TEN, 'launch.copy.draft', 'marketing', 'ANALYZE', 'MODEL', 'MODEL', 'MODEL', 0, '[]', 0.4, NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const page = await (await fetch(`${base_}/console/learning`, { headers: owner.headers })).text();
+    eq(page.includes('Learning review'), true);
+    eq(page.includes('Labeling queue (1)'), true);
+    eq(page.includes('/api/learning/'), false, 'learning page never links the JSON API:');
+    const team = await (await fetch(`${base_}/team`, { headers: owner.headers })).text();
+    eq(team.includes('/api/learning/'), false, 'team page never links the JSON API:');
+    // Label the decision through the page form.
+    const labeled = await fetch(`${base_}/console/learning/label`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&decisionId=1&correctTier=WORKFLOW`,
+      redirect: 'manual',
+    });
+    eq(labeled.status, 303);
+    eq(labeled.headers.get('location'), '/console/learning?labeled=ok');
+    // Members are refused (admin/owner surface).
+    await inviteUser(
+      db,
+      TEN,
+      { email: 'member-learn@acme.test', name: 'M', role: 'member', password: 'a-members-password-long' },
+      { userId: 'seed', role: 'owner' },
+      NOW,
+    );
+    const member = await formSession(server.port, 'member-learn@acme.test', 'a-members-password-long');
+    const forbidden = await fetch(`${base_}/console/learning`, { headers: member.headers });
+    eq(forbidden.status, 403);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-005: enrolling a second factor gates login behind a TOTP challenge', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const clock = NOW;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => clock });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port); // pre-MFA session
+    // Enroll an authenticator.
+    const setup = await (await fetch(`${base_}/account/mfa/setup`, { headers: owner.headers })).text();
+    const secret = setup.match(/<strong>Secret:<\/strong> <code>([A-Z2-7]+)<\/code>/)![1]!;
+    eq(setup.includes('otpauth://totp/'), true, 'setup shows the otpauth URI:');
+    const enable = await fetch(`${base_}/account/mfa/enable`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&secret=${encodeURIComponent(secret)}&code=${totpCode(secret, Date.parse(clock))}`,
+    });
+    eq(enable.status, 200);
+    const enableHtml = await enable.text();
+    eq(enableHtml.includes('Save your recovery codes'), true);
+    const recovery = [...enableHtml.matchAll(/<li><code>([^<]+)<\/code><\/li>/g)].map((m) => m[1]!);
+    eq(recovery.length >= 1, true, 'recovery codes issued:');
+    const account = await (await fetch(`${base_}/account`, { headers: owner.headers })).text();
+    eq(account.includes('Two-factor authentication'), true);
+    eq(account.includes('unused recovery code'), true, 'account reports live recovery codes:');
+    // A fresh password login now stops at the challenge, minting no session.
+    const pre = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const login1 = await fetch(`${base_}/login`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&email=${encodeURIComponent(OWNER.email)}&password=${encodeURIComponent(OWNER.password)}`,
+      redirect: 'manual',
+    });
+    eq(login1.status, 303);
+    eq(login1.headers.get('location'), '/login/mfa');
+    const mfaCookieHeader = (login1.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    eq(mfaCookieHeader.includes('vital_mfa='), true, 'challenge cookie set:');
+    eq(
+      (login1.headers.getSetCookie?.() ?? []).some((c) => c.startsWith('vital_session=')),
+      false,
+      'no session is minted before the second factor:',
+    );
+    // Wrong code is refused.
+    const pageRes = await fetch(`${base_}/login/mfa`, { headers: { cookie: mfaCookieHeader } });
+    const pageHtml = await pageRes.text();
+    const pageCookies = (pageRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const mfaPostCookie = `${mfaCookieHeader}; ${pageCookies}`;
+    const mfaCsrf = pageHtml.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const wrong = await fetch(`${base_}/login/mfa`, {
+      method: 'POST',
+      headers: { cookie: mfaPostCookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${mfaCsrf}&code=000000`,
+      redirect: 'manual',
+    });
+    eq(wrong.status, 401);
+    // Correct code completes the login.
+    const ok = await fetch(`${base_}/login/mfa`, {
+      method: 'POST',
+      headers: { cookie: mfaPostCookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${mfaCsrf}&code=${totpCode(secret, Date.parse(clock))}`,
+      redirect: 'manual',
+    });
+    eq(ok.status, 303);
+    const sessionCk = (ok.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('vital_session='));
+    eq(Boolean(sessionCk), true, 'session issued after the second factor:');
+    const homeRes = await fetch(`${base_}/`, {
+      headers: { cookie: sessionCk!.split(';')[0]! },
+      redirect: 'manual',
+    });
+    eq(homeRes.status, 200);
+    // A recovery code signs in a fresh challenge exactly once.
+    const pre2 = await fetch(`${base_}/login`, { redirect: 'manual' });
+    const pre2Cookie = (pre2.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const pre2Token = (await pre2.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const login2 = await fetch(`${base_}/login`, {
+      method: 'POST',
+      headers: { cookie: pre2Cookie },
+      body: `csrf=${pre2Token}&email=${encodeURIComponent(OWNER.email)}&password=${encodeURIComponent(OWNER.password)}`,
+      redirect: 'manual',
+    });
+    const mfaCookie2 = (login2.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const page2Res = await fetch(`${base_}/login/mfa`, { headers: { cookie: mfaCookie2 } });
+    const page2 = await page2Res.text();
+    const page2Cookies = (page2Res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const mfaCsrf2 = page2.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const rec = await fetch(`${base_}/login/mfa`, {
+      method: 'POST',
+      headers: { cookie: `${mfaCookie2}; ${page2Cookies}`, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${mfaCsrf2}&mode=recovery&code=${encodeURIComponent(recovery[0]!)}`,
+      redirect: 'manual',
+    });
+    eq(rec.status, 303);
+    eq(
+      (rec.headers.getSetCookie?.() ?? []).some((c) => c.startsWith('vital_session=')),
+      true,
+      'recovery code signs in:',
+    );
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-006: admin audit-log page filters, links, and is admin-gated', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await db
+    .prepare('INSERT INTO audit_log (tenant,actor,action,target,detail,at) VALUES (?,?,?,?,?,?)')
+    .run(TEN, 'human:ada', 'console.approve', 'request:rq1', 'role=member', NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const page = await (await fetch(`${base_}/console/audit`, { headers: owner.headers })).text();
+    eq(page.includes('Audit log'), true);
+    eq(page.includes('auth.login') || page.includes('auth.tenant_created'), true, 'auth events listed:');
+    eq(page.includes('/api/audit'), false, 'page is HTML, not a link to JSON:');
+    // Filtering by action narrows the result and links the referenced request.
+    const filtered = await (
+      await fetch(`${base_}/console/audit?action=console.approve`, { headers: owner.headers })
+    ).text();
+    eq(filtered.includes('console.approve'), true, 'matching action shown:');
+    eq(filtered.includes('/console/requests/rq1'), true, 'referenced request is linked:');
+    eq(filtered.includes('auth.tenant_created'), false, 'filter excludes other actions:');
+    // Members are refused.
+    await inviteUser(
+      db,
+      TEN,
+      { email: 'member-audit@acme.test', name: 'M', role: 'member', password: 'a-members-password-long' },
+      { userId: 'seed', role: 'owner' },
+      NOW,
+    );
+    const member = await formSession(server.port, 'member-audit@acme.test', 'a-members-password-long');
+    eq((await fetch(`${base_}/console/audit`, { headers: member.headers })).status, 403);
   } finally {
     await server.close();
     await db.close();
@@ -2526,9 +2750,7 @@ T('FLOW-023: metrics expose worker and integration status with optional-unconfig
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
     const read = async () =>
-      (await (
-        await fetch(`${base_}/api/metrics`, { headers: session.headers })
-      ).json()) as {
+      (await (await fetch(`${base_}/api/metrics`, { headers: session.headers })).json()) as {
         readiness: { ready: boolean; checks: { name: string; status: string; detail?: string }[] };
       };
     const before = await read();
@@ -2582,6 +2804,36 @@ T('FLOW-023/E2E-17: liveness survives dependency loss while readiness stops repo
     } catch {
       /* already closed to simulate the outage */
     }
+  }
+});
+
+T('FLOW-013: server.ready() classifies a healthy console as ready, not just bound', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const probe = await server.ready();
+    eq(probe.ok, true, 'a healthy console answers readiness:');
+    eq(probe.status, 'ready');
+    eq(typeof server.address === 'string' && server.address.includes('127.0.0.1'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-013: home renders the system-readiness strip with tri-state pills', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const html = await (await fetch(`${base_}/`, { headers: session.headers })).text();
+    eq(html.includes('id="system-readiness"'), true, 'readiness strip rendered on home:');
+    eq(html.includes('>database</strong>'), true, 'database check surfaced:');
+    eq(html.includes('not configured'), true, 'unconfigured dependencies read as grey, not red:');
+  } finally {
+    await server.close();
+    await db.close();
   }
 });
 
@@ -2691,7 +2943,7 @@ T('FLOW-025: team page surfaces compiler trust gaps with eval-evidence links and
     const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
     eq(team.includes('Compiler trust gaps'), true, 'trust-gaps section renders:');
     eq(team.includes('no passing regression test'), true, 'actionable gap is named:');
-    eq(team.includes(`/api/learning/cards/${card.id}/evidence`), true, 'gap links to required evaluation evidence:');
+    eq(team.includes(`/console/learning/${card.id}`), true, 'gap links to required evaluation evidence:');
     eq(team.includes('never promotes a card'), true, 'evidence-only disclaimer shown:');
     eq(team.includes('Engagement and billing scope'), true, 'billing scope renders:');
     eq(team.includes('no hosted subscription'), true, 'pilot/contact path is explicit, no hosted billing:');
@@ -2743,12 +2995,25 @@ T('FLOW-004: browser receipt verification shows deleted/retained/deferred/failed
       await fetch(`${base_}/api/erasure/receipt?slug=doomed`, { headers: session.headers })
     ).json()) as {
       ok: boolean;
-      receipt: { deleted: Record<string, number>; retained: { category: string }[]; deferred: { category: string }[]; failed: unknown[] };
+      receipt: {
+        deleted: Record<string, number>;
+        retained: { category: string }[];
+        deferred: { category: string }[];
+        failed: unknown[];
+      };
     };
     eq(receipt.ok, true);
     eq((receipt.receipt.deleted['claims'] ?? 0) >= 1, true, 'deleted bucket names claims:');
-    eq(receipt.receipt.retained.some((r) => r.category === 'erasure-receipt'), true, 'retained bucket shown:');
-    eq(receipt.receipt.deferred.some((r) => r.category === 'backups'), true, 'deferred bucket shown:');
+    eq(
+      receipt.receipt.retained.some((r) => r.category === 'erasure-receipt'),
+      true,
+      'retained bucket shown:',
+    );
+    eq(
+      receipt.receipt.deferred.some((r) => r.category === 'backups'),
+      true,
+      'deferred bucket shown:',
+    );
     eq(Array.isArray(receipt.receipt.failed), true, 'failed bucket present:');
     const unknown = await fetch(`${base_}/api/erasure/receipt?slug=ghost`, { headers: session.headers });
     eq(unknown.status, 404, 'unknown slug is not-found, not success:');
@@ -2956,9 +3221,7 @@ T('F23: authenticated learning review administration and streaming export API', 
 });
 
 T('FLOW-019: shared nav supports skip link and roving-tabindex arrow keys', async () => {
-  const { buildConsoleNav, renderConsoleNav, CONSOLE_NAV_SCRIPT } = await import(
-    '../src/console/render.ts'
-  );
+  const { buildConsoleNav, renderConsoleNav, CONSOLE_NAV_SCRIPT } = await import('../src/console/render.ts');
   const nav = renderConsoleNav(buildConsoleNav('/'));
   eq(nav.includes('<nav aria-label="Console">'), true);
   eq(nav.includes('data-console-nav-link'), true);
@@ -3002,13 +3265,9 @@ T('FLOW-020: view-all routes expose requests, claims, rooms, and human work with
     const reqs = await (await fetch(`${base_}/console/requests?q=viewall`, { headers: session.headers })).text();
     eq(reqs.includes('viewall alpha item'), true);
     eq(reqs.includes('1 total'), true);
-    const missing = await (
-      await fetch(`${base_}/console/requests?q=no-such-xyz`, { headers: session.headers })
-    ).text();
+    const missing = await (await fetch(`${base_}/console/requests?q=no-such-xyz`, { headers: session.headers })).text();
     eq(missing.includes('No results'), true);
-    const trunc = await (
-      await fetch(`${base_}/console/requests?q=a&limit=1`, { headers: session.headers })
-    ).text();
+    const trunc = await (await fetch(`${base_}/console/requests?q=a&limit=1`, { headers: session.headers })).text();
     eq(truncs(trunc), true);
     const bad = await fetch(`${base_}/console/requests?state=BOGUS`, { headers: session.headers });
     eq(bad.status, 400);
@@ -3132,9 +3391,7 @@ T('FLOW-027: narrow-screen CSS, error association, and consistent action labels'
     const team = await (await fetch(`${base_}/team`, { headers: session.headers })).text();
     eq(team.includes('Create account'), true);
     eq(team.includes('@media (max-width:600px)'), true);
-    const detail = await (
-      await fetch(`${base_}/console/requests/rq1`, { headers: session.headers })
-    ).text();
+    const detail = await (await fetch(`${base_}/console/requests/rq1`, { headers: session.headers })).text();
     eq(detail.includes('Skip to main content'), true);
     eq(detail.includes('<main id="main">'), true);
     const { ACTION_LABELS, errorSummary, successReceipt, forbiddenBlock, timeoutBlock, destructiveConfirm } =
@@ -3153,7 +3410,9 @@ T('FLOW-027: narrow-screen CSS, error association, and consistent action labels'
 
 T('E2E-10: session expiry during review preserves safe draft and requires explicit resubmission', async () => {
   const { db, ledger, coord, comp, rel } = await seeded();
-  await coord.submit(base({ id: 'e2e10-r', goal: 'expiry review item', claimRefs: [rel.id], bid: { humanMinutes: 5 } }));
+  await coord.submit(
+    base({ id: 'e2e10-r', goal: 'expiry review item', claimRefs: [rel.id], bid: { humanMinutes: 5 } }),
+  );
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const base_ = `http://127.0.0.1:${server.port}`;
@@ -3189,12 +3448,18 @@ T('Cross-cutting: loading, success, empty, error, 403, partial, timeout, refresh
   const mod = await import('../src/console/states.ts');
   eq(mod.loadingNote('Approve').includes('aria-busy'), true);
   eq(mod.loadingNote('Approve').includes('prevent a duplicate'), true);
-  eq(mod.successReceipt('Approved to begin work', { href: '/r', label: 'View receipt' }).includes('View receipt'), true);
+  eq(
+    mod.successReceipt('Approved to begin work', { href: '/r', label: 'View receipt' }).includes('View receipt'),
+    true,
+  );
   eq(mod.emptyState('unconfigured', { body: 'no source' }).includes('Not configured'), true);
   eq(mod.emptyState('no-data').includes('No data yet'), true);
   eq(mod.emptyState('no-match', { clearUrl: '/c' }).includes('Clear search'), true);
   eq(mod.errorBlock('approval', 'draft preserved', 'refresh and retry').includes('Failed at approval'), true);
-  eq(mod.partialBlock({ succeeded: ['a'], failed: [{ item: 'b', reason: 'denied' }] }).includes('Partial completion'), true);
+  eq(
+    mod.partialBlock({ succeeded: ['a'], failed: [{ item: 'b', reason: 'denied' }] }).includes('Partial completion'),
+    true,
+  );
   eq(mod.refreshBlock('Progress saved.').includes('authoritative cancellation'), true);
   eq(REVIEW_SCRIPT.includes('aria-busy'), true);
   eq(REVIEW_SCRIPT.includes('Timed out'), true);
@@ -3223,6 +3488,425 @@ T('Cross-cutting: loading, success, empty, error, 403, partial, timeout, refresh
     });
     eq(res.status, 403);
     eq((await res.text()).includes('requires admin'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-007: self-serve data export, typed erasure, and public erasure receipt verification', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  await inviteUser(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'Member', role: 'member', password: 'member-password-123' },
+    { userId: 'seed', role: 'owner' },
+    NOW,
+  );
+  await db.prepare('UPDATE users SET must_change_password = 0 WHERE email = ?').run('member@acme.test');
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+  });
+  try {
+    const owner = await ownerSession(server.port);
+    const member = await formSession(server.port, 'member@acme.test', 'member-password-123');
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+
+    // 1. Gating: member gets 403 on /console/data and /console/data/export
+    const memberData = await fetch(`${baseUrl}/console/data`, { headers: member.headers });
+    eq(memberData.status, 403);
+    const memberExport = await fetch(`${baseUrl}/console/data/export`, { headers: member.headers });
+    eq(memberExport.status, 403);
+
+    // 2. Owner can reach /console/data
+    const ownerData = await fetch(`${baseUrl}/console/data`, { headers: owner.headers });
+    eq(ownerData.status, 200);
+    const ownerDataHtml = await ownerData.text();
+    eq(ownerDataHtml.includes('Data &amp; retention'), true);
+    eq(ownerDataHtml.includes('Export Reality Ledger'), true);
+    eq(ownerDataHtml.includes('Danger Zone — Permanent Tenant Erasure'), true);
+    // FLOW-013: backup scope is stated plainly so operators are not surprised.
+    eq(ownerDataHtml.includes('Backup &amp; restore'), true, 'data page documents backup scope:');
+    eq(ownerDataHtml.includes('not a backup'), true, 'export explicitly disclaims restore-by-import:');
+
+    // 3. Owner can download JSON export bundle
+    const ownerExport = await fetch(`${baseUrl}/console/data/export`, { headers: owner.headers });
+    eq(ownerExport.status, 200);
+    eq(ownerExport.headers.get('content-type')?.includes('application/json'), true);
+    eq(ownerExport.headers.get('content-disposition')?.includes('acme-ledger-export.json'), true);
+    const exportedJson = (await ownerExport.json()) as any;
+    eq(exportedJson.tenant, TEN);
+    eq(Array.isArray(exportedJson.claims), true);
+
+    // 4. Mismatched slug confirmation rejects erasure
+    const badForm = new URLSearchParams({
+      csrf: owner.csrf,
+      confirmSlug: 'wrong-slug',
+      confirmed: 'on',
+    });
+    const badErase = await fetch(`${baseUrl}/console/data/erase`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: badForm.toString(),
+      redirect: 'manual',
+    });
+    eq(badErase.status, 303);
+    eq(badErase.headers.get('location')?.includes('error='), true);
+
+    // 5. Correct typed confirmation erases tenant and redirects to public receipt
+    const goodForm = new URLSearchParams({
+      csrf: owner.csrf,
+      confirmSlug: TEN,
+      confirmed: 'on',
+    });
+    const goodErase = await fetch(`${baseUrl}/console/data/erase`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: goodForm.toString(),
+      redirect: 'manual',
+    });
+    eq(goodErase.status, 303);
+    const redirectUrl = goodErase.headers.get('location');
+    eq(redirectUrl, `/receipts/erasure/${TEN}`);
+
+    // 6. Public receipt verification displays verified deletion summary
+    const receiptRes = await fetch(`${baseUrl}/receipts/erasure/${TEN}`);
+    eq(receiptRes.status, 200);
+    const receiptHtml = await receiptRes.text();
+    eq(receiptHtml.includes('Erasure verification receipt'), true);
+    eq(receiptHtml.includes('Organization <code>acme</code> was erased'), true);
+    eq(receiptHtml.includes('Deletion summary'), true);
+
+    // 7. Unknown slug returns 404 with not found receipt
+    const notFoundRes = await fetch(`${baseUrl}/receipts/erasure/nonexistent-org`);
+    eq(notFoundRes.status, 404);
+    const notFoundHtml = await notFoundRes.text();
+    eq(notFoundHtml.includes('No erasure receipt found'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-008: truthful password reset & email verification copy and operator assistance', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+  });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // 1. Without mailer: forgot password shows operator-assisted copy & turnaround
+    const forgotRes = await fetch(`${baseUrl}/forgot-password`);
+    const cookie = forgotRes.headers.get('set-cookie')?.split(';')[0] ?? '';
+    const forgotGet = await forgotRes.text();
+    eq(forgotGet.includes('Operator-assisted password recovery'), true);
+    eq(forgotGet.includes('Expected turnaround:</strong> typically under 1 hour'), true);
+    eq(forgotGet.includes('Request operator reset link'), true);
+
+    // 2. Without mailer: POST /forgot-password explains operator assistance
+    const csrfMatch = forgotGet.match(/name="csrf" value="([0-9a-f]+)"/);
+    const csrf = csrfMatch ? csrfMatch[1] : '';
+    const forgotPost = await (
+      await fetch(`${baseUrl}/forgot-password`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
+        body: `csrf=${csrf}&email=owner%40acme.test`,
+      })
+    ).text();
+    eq(forgotPost.includes('Automatic email delivery is not configured on this host'), true);
+    eq(forgotPost.includes('vital reset-link'), true);
+    eq(forgotPost.includes('turnaround: under 1 hour'), true);
+
+    // 3. Without mailer: account page relabels button and explains turnaround
+    const accountGet = await (await fetch(`${baseUrl}/account`, { headers: owner.headers })).text();
+    eq(accountGet.includes('Request operator verification'), true);
+    eq(accountGet.includes('turnaround: typically same-day'), true);
+    eq(accountGet.includes('vital verify-link'), true);
+
+    // 4. Without mailer: POST /account/email/request explains operator turnaround
+    const emailReq = await (
+      await fetch(`${baseUrl}/account/email/request`, {
+        method: 'POST',
+        headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+        body: `csrf=${owner.csrf}`,
+      })
+    ).text();
+    eq(emailReq.includes('Outbound email is not configured'), true);
+    eq(emailReq.includes('vital verify-link'), true);
+
+    // 5. With mailer configured: relabels to transactional mail delivery
+    process.env.VITAL_MAILER_ENABLED = '1';
+    try {
+      const forgotWithMailer = await (await fetch(`${baseUrl}/forgot-password`)).text();
+      eq(forgotWithMailer.includes('Send reset email'), true);
+
+      const accountWithMailer = await (await fetch(`${baseUrl}/account`, { headers: owner.headers })).text();
+      eq(accountWithMailer.includes('Send verification link'), true);
+    } finally {
+      delete process.env.VITAL_MAILER_ENABLED;
+    }
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-009: visible deliverable authoring path on approved requests with grounding checks', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  const artDir = join(tmpdir(), `vital-final009-${Date.now()}`);
+  mkdirSync(artDir, { recursive: true });
+  process.env.ARTIFACT_DIR = artDir;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // 1. Initially request r1 is admitted/pending approval to begin work
+    const beforeApproval = await (await fetch(`${baseUrl}/console/requests/r1`, { headers: owner.headers })).text();
+    eq(beforeApproval.includes('Deliverable'), true);
+    eq(beforeApproval.includes('Pending deliverable draft from worker or agent'), true);
+    eq(beforeApproval.includes('Draft deliverable in-product'), true);
+
+    // 2. Draft deliverable in-product
+    const draftRes = await fetch(`${baseUrl}/console/requests/r1/deliverable`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&deliverableSchema=launch-pack.v1&content=${encodeURIComponent(`- Launch notes citing release [claim:${rel.id}]`)}`,
+      redirect: 'manual',
+    });
+    eq(draftRes.status, 303);
+    eq(draftRes.headers.get('location'), '/console/requests/r1');
+
+    // 3. After drafting, request detail renders deliverable preview with grounding checks
+    const afterDraft = await (await fetch(`${baseUrl}/console/requests/r1`, { headers: owner.headers })).text();
+    eq(afterDraft.includes('Deliverable preview'), true);
+    eq(afterDraft.includes('Launch notes citing release'), true);
+    eq(afterDraft.includes('Finding'), true);
+    eq(afterDraft.includes('All grounding checks passed.'), true);
+    eq(afterDraft.includes('Approve deliverable'), true);
+
+    // 4. Approve deliverable
+    const verMatch = afterDraft.match(/\/api\/deliverables\/([^/]+)\/approve/);
+    eq(Boolean(verMatch), true);
+    const verId = verMatch![1]!;
+    const fpMatch = afterDraft.match(/name="fingerprint" value="([0-9a-f]+)"/);
+    const fp = fpMatch ? fpMatch[1] : '';
+
+    const approveRes = await fetch(`${baseUrl}/api/deliverables/${verId}/approve`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ fingerprint: fp }),
+    });
+    eq(approveRes.status, 200);
+    const approveJson = (await approveRes.json()) as { ok: boolean; status: string; decisionUrl: string };
+    eq(approveJson.ok, true);
+    eq(approveJson.status, 'approved');
+
+    // Receipt page confirms final-deliverable decision
+    const decisionHtml = await (await fetch(`${baseUrl}${approveJson.decisionUrl}`, { headers: owner.headers })).text();
+    eq(decisionHtml.includes('final-deliverable'), true);
+  } finally {
+    delete process.env.ARTIFACT_DIR;
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-010: team roster search, role/status filters, pagination, and multi-address invite', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  process.env.VITAL_EXPOSE_INVITE_LINK = '1';
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // 1. Bulk invite multiple addresses via comma/newline separation
+    const bulkInvite = await fetch(`${baseUrl}/team/invite`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&email=bulk1%40acme.test%2C+bulk2%40acme.test%0Abulk3%40acme.test&role=member`,
+    });
+    eq(bulkInvite.status, 200);
+    const bulkHtml = await bulkInvite.text();
+    eq(bulkHtml.includes('3 members invited as member'), true);
+    eq(bulkHtml.includes('bulk1@acme.test'), true);
+    eq(bulkHtml.includes('bulk2@acme.test'), true);
+    eq(bulkHtml.includes('bulk3@acme.test'), true);
+
+    // 2. Roster search by email
+    const searchRes = await (await fetch(`${baseUrl}/team?q=owner`, { headers: owner.headers })).text();
+    eq(searchRes.includes('owner@acme.test'), true);
+
+    // 3. Roster role filter
+    const roleRes = await (await fetch(`${baseUrl}/team?role=owner`, { headers: owner.headers })).text();
+    eq(roleRes.includes('owner@acme.test'), true);
+
+    // 4. Roster status filter
+    const statusRes = await (await fetch(`${baseUrl}/team?status=active`, { headers: owner.headers })).text();
+    eq(statusRes.includes('owner@acme.test'), true);
+
+    // 5. Clear filters link present when filter active
+    eq(searchRes.includes('Clear filters'), true);
+  } finally {
+    delete process.env.VITAL_EXPOSE_INVITE_LINK;
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-011: no-JS fallback for approval, decline, and evidence refresh', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // 1. Request detail does not ship disabled submit buttons
+    const detail = await (await fetch(`${baseUrl}/console/requests/r1`, { headers: owner.headers })).text();
+    eq(detail.includes('<button type="submit" disabled>'), false);
+
+    const home = await (await fetch(`${baseUrl}/`, { headers: owner.headers })).text();
+    eq(home.includes('<button type="submit" disabled>'), false);
+    eq(home.includes('JavaScript disabled: standard full-page form submission is active.'), true);
+
+    // 2. Full-page POST approval redirects browser back to request
+    const approvePost = await fetch(`${baseUrl}/api/requests/r1/approve`, {
+      method: 'POST',
+      headers: {
+        ...owner.headers,
+        accept: 'text/html,application/xhtml+xml',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: `csrf=${owner.csrf}&confirmed=on`,
+      redirect: 'manual',
+    });
+    eq(approvePost.status, 303);
+    eq(approvePost.headers.get('location'), '/console/requests/r1');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-012: irreversible actions enforce destructiveConfirm and typed confirmation', async () => {
+  const { db, ledger, coord, comp, rel } = await seeded();
+  const artDir = join(tmpdir(), `vital-final012-${Date.now()}`);
+  mkdirSync(artDir, { recursive: true });
+  process.env.ARTIFACT_DIR = artDir;
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // Draft deliverable with externalPublish
+    const v = await persistDeliverableVersion(db, ledger, {
+      tenant: TEN,
+      requestId: 'r1',
+      deliverableSchema: 'launch-pack.v1',
+      content: `- External asset cites [claim:${rel.id}]`,
+      claimIds: [rel.id],
+      createdBy: 'agent:ext',
+      now: NOW,
+      artifactDir: artDir,
+      externalPublish: true,
+    });
+
+    const detail = await (await fetch(`${baseUrl}/console/requests/r1`, { headers: owner.headers })).text();
+    eq(detail.includes('Destructive action: External publication.'), true);
+    eq(detail.includes('Type <code>PUBLISH</code> to confirm'), true);
+
+    // Attempt approval without typed PUBLISH confirmation
+    const badApprove = await fetch(`${baseUrl}/api/deliverables/${v.id}/approve`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ fingerprint: v.fingerprint, confirmText: 'WRONG' }),
+    });
+    eq(badApprove.status, 400);
+    eq((await badApprove.text()).includes('type PUBLISH to confirm external publication'), true);
+
+    // Attempt approval with typed PUBLISH confirmation
+    const goodApprove = await fetch(`${baseUrl}/api/deliverables/${v.id}/approve`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ fingerprint: v.fingerprint, confirmText: 'PUBLISH' }),
+    });
+    eq(goodApprove.status, 200);
+    eq(((await goodApprove.json()) as { ok: boolean }).ok, true);
+  } finally {
+    delete process.env.ARTIFACT_DIR;
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-013: HTML error pages for browser GET validation failures', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // Browser request with Accept: text/html gets HTML error page with status 400
+    const htmlErr = await fetch(`${baseUrl}/console/requests/rq1?page=-1`, {
+      headers: { ...owner.headers, accept: 'text/html,application/xhtml+xml' },
+    });
+    eq(htmlErr.status, 400);
+    eq(htmlErr.headers.get('content-type')?.includes('text/html'), true);
+    const htmlBody = await htmlErr.text();
+    eq(htmlBody.includes('Error 400'), true);
+    eq(htmlBody.includes('page must be a nonnegative integer'), true);
+
+    // API request without Accept: text/html gets JSON error with status 400
+    const jsonErr = await fetch(`${baseUrl}/console/requests/rq1?page=-1`, {
+      headers: { ...owner.headers },
+    });
+    eq(jsonErr.status, 400);
+    eq(jsonErr.headers.get('content-type')?.includes('application/json'), true);
+    const jsonBody = (await jsonErr.json()) as { ok: boolean; error: string };
+    eq(jsonBody.ok, false);
+    eq(jsonBody.error, 'page must be a nonnegative integer');
+
+    // Digest invalid days parameter in browser gets HTML error page
+    const digestHtmlErr = await fetch(`${baseUrl}/console/digest?days=bogus`, {
+      headers: { ...owner.headers, accept: 'text/html,application/xhtml+xml' },
+    });
+    eq(digestHtmlErr.status, 400);
+    eq(digestHtmlErr.headers.get('content-type')?.includes('text/html'), true);
+    eq((await digestHtmlErr.text()).includes('days must be 1, 7, 30 or all'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FINAL-014: shared nav across authenticated pages and unified terminology', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+
+    // Nav includes top-level entries for Reviews, Requests, Claims, Rooms, Human work, Workflows, Digest, Team, Account
+    const home = await (await fetch(`${baseUrl}/`, { headers: owner.headers })).text();
+    eq(home.includes('>Reviews</a>'), true);
+    eq(home.includes('>Requests</a>'), true);
+    eq(home.includes('>Claims</a>'), true);
+    eq(home.includes('>Rooms</a>'), true);
+    eq(home.includes('>Human work</a>'), true);
+    eq(home.includes('>Workflows</a>'), true);
+    eq(home.includes('>Digest</a>'), true);
+    eq(home.includes('>Team</a>'), true);
+    eq(home.includes('>Account</a>'), true);
+
+    // Verify view-all destinations are reachable
+    for (const path of ['/console/requests', '/console/claims', '/console/rooms', '/console/human-work']) {
+      const res = await fetch(`${baseUrl}${path}`, { headers: owner.headers });
+      eq(res.status, 200, `${path} reachable`);
+    }
   } finally {
     await server.close();
     await db.close();

@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve as resolvePath, sep as pathSep } from 'node:path';
@@ -55,9 +55,24 @@ import {
   type TenantAccessState,
   type User,
 } from '../core/auth.ts';
+import {
+  confirmMfaEnrollment,
+  consumeMfaRecoveryCode,
+  countLiveRecoveryCodes,
+  generateMfaRecoveryCodes,
+  isMfaEnabled,
+  listMfaFactors,
+  newTotpSecret,
+  removeMfaFactor,
+  startSessionForUser,
+  verifyLoginCredentials,
+  verifyMfaCode,
+  type MfaFactor,
+} from '../core/auth.ts';
 import { LedgerError, type Ledger } from '../ledger/ledger.ts';
 import {
   auditLinks,
+  exportLedger,
   exportLedgerWithManifest,
   streamExportLedger,
   queryAudit,
@@ -74,7 +89,7 @@ import {
 } from '../coord/execution-spec.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { cardEvaluationEvidence, describeCardReadOnly } from '../compiler/registry.ts';
-import { verifyErasureReceipt } from '../core/erasure.ts';
+import { eraseTenant, verifyErasureReceipt } from '../core/erasure.ts';
 import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verifyApproval } from '../gov/operator.ts';
 import { buildReport } from './report.ts';
 import {
@@ -105,6 +120,9 @@ import {
 } from './render.ts';
 import { renderDigest, digestWindowSince, type DigestDays } from './digest.ts';
 import { renderReview } from './review.ts';
+import { renderLearningPage, renderLearningCardPage } from './learning.ts';
+import { renderAuditPage } from './audit.ts';
+import { renderDataPage, renderErasureReceiptPage } from './data.ts';
 import {
   buildActivationState,
   loadActivationConfig,
@@ -143,6 +161,7 @@ import { deliverableDetailPage } from './deliverable.ts';
 import {
   approveDeliverableVersion,
   loadDeliverableVersion,
+  persistDeliverableVersion,
   readDeliverableArtifact,
   requestDeliverableRevision,
 } from '../wedge/deliverable-artifact.ts';
@@ -176,7 +195,9 @@ import {
 } from '../gov/trust.ts';
 import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
-import { verifyReviewToken } from '../talk/review-card.ts';
+import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
+import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
+import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import { loadRoomConfig, saveRoomConfig } from '../talk/rooms.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
 import { executeRoomCommand } from '../talk/commands.ts';
@@ -208,6 +229,14 @@ export interface ConsoleServer {
   port: number;
   /** Bound listen target (`host:port`). */
   address: string;
+  /**
+   * Loopback readiness probe (FLOW-013 / activation-ready). Issues an HTTP
+   * request to the console and classifies activation into `ready` (the
+   * console answers), `blocked` (activation is not yet usable/denied) or
+   * `failed` (the probe itself errored). Lets `vital serve` surface a
+   * *useful* result instead of only a bound address.
+   */
+  ready(): Promise<{ ok: boolean; status: 'ready' | 'blocked' | 'failed'; detail: string }>;
   close(): Promise<void>;
 }
 
@@ -378,18 +407,54 @@ const esc = (s: string): string =>
 
 function page(title: string, body: string): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
-<style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0;padding:24px}
-form{max-width:360px;display:grid;gap:10px}input{padding:8px;border:1px solid #E4E4E1;border-radius:6px}
-button{padding:8px 14px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;min-height:44px}
-.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:12px}
-.error-summary{border:2px solid #B91C1C;border-radius:8px;padding:12px;margin:12px 0;background:#FEF2F2}
-.success{border:2px solid #0F7A3D;border-radius:8px;padding:12px;margin:12px 0;background:#F0FDF4}
-a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100}a.skip-link:focus{left:0}
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:880px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+h1{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin:0 0 16px 0;color:#0A0F14}
+h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:24px 0 12px;color:#111827}
+a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
+form:not([style*="display:inline"]){max-width:400px;display:grid;gap:12px;background:#fff;border:1px solid #E4E4E1;border-radius:10px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+form[style*="display:inline"]{display:inline!important;border:none!important;padding:0!important;background:none!important;box-shadow:none!important}
+input,textarea,select{padding:10px 12px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:14px;color:#0A0F14;background:#fff;transition:border-color .15s,box-shadow .15s}
+input:focus,textarea:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}
+label{font-size:13px;font-weight:500;color:#374151;display:grid;gap:4px}
+button{padding:10px 18px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;min-height:44px;font-family:inherit;font-size:14px;transition:background .15s ease,transform .1s ease}
+button:hover{background:#0B4A45}
+button:active{transform:translateY(1px)}
+button:disabled{opacity:0.6;cursor:not-allowed}
+.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03);margin-bottom:16px}
+.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:13px;line-height:1.4}
+.error-summary{border:1px solid #FCA5A5;border-radius:8px;padding:14px 16px;margin:12px 0;background:#FEF2F2;color:#991B1B}
+.success{border:1px solid #86EFAC;border-radius:8px;padding:14px 16px;margin:12px 0;background:#F0FDF4;color:#166534}
+a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100;border-radius:0 0 6px 0;font-size:13px;font-weight:500}a.skip-link:focus{left:0}
 button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}
-table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto}.table-wrap{overflow-x:auto;max-width:100%}
-table.stacked thead{}@media (max-width:640px){body{padding:12px}form{max-width:100%}input,textarea,select,button{min-height:44px}}
-@media (max-width:600px){table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid #E4E4E1;border-radius:8px;margin-bottom:8px}table.stacked td{display:block;border:0}}</style>
+table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto;background:#fff;border:1px solid #E4E4E1;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.02)}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #E4E4E1}
+th{background:#F9F9F8;font-size:12px;font-weight:600;color:#4B5563;text-transform:uppercase;letter-spacing:0.04em}
+.table-wrap{overflow-x:auto;max-width:100%}
+table.stacked thead{}
+@media (max-width:640px){body{padding:16px}form{max-width:100%}input,textarea,select,button{min-height:44px}}
+@media (max-width:600px){table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid #E4E4E1;border-radius:8px;margin-bottom:8px}table.stacked td{display:block;border:0}}
+</style>
 </head><body><a class="skip-link" href="#main">Skip to main content</a><main id="main">${body}</main></body></html>`;
+}
+
+function prefersHtml(req: IncomingMessage): boolean {
+  const accept = req.headers['accept'] || '';
+  return accept.includes('text/html') && !accept.includes('application/json') && !accept.includes('*/*');
+}
+
+function respondGetError(req: IncomingMessage, res: ServerResponse, status: number, error: string): void {
+  if (prefersHtml(req)) {
+    const html = page(
+      `Vital Console — ${status}`,
+      `<h1>Error ${status}</h1><p class="err">${esc(error)}</p><p class="sub"><a href="javascript:history.back()">← Go back</a> · <a href="/">Console home</a></p>`,
+    );
+    res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(html);
+  } else {
+    json(res, status, { ok: false, error });
+  }
 }
 
 // ---------------------------------------------------------------- pre-session CSRF --
@@ -428,12 +493,7 @@ function preCsrfOk(req: IncomingMessage, presented: string | null): boolean {
  * the route may proceed; otherwise answers 403 REAUTH_REQUIRED and returns
  * false. Never weakens the role/activation/CSRF checks — it runs after them.
  */
-async function recentAuthGate(
-  db: AsyncDb,
-  res: ServerResponse,
-  userId: string,
-  at: string,
-): Promise<boolean> {
+async function recentAuthGate(db: AsyncDb, res: ServerResponse, userId: string, at: string): Promise<boolean> {
   try {
     await assertRecentAuthForSensitiveOp(db, userId, at);
     return true;
@@ -531,22 +591,32 @@ ${
   );
 }
 
+export function hasMailerConfigured(): boolean {
+  return Boolean(process.env.SMTP_URL || process.env.VITAL_MAILER_ENABLED === '1');
+}
+
 function forgotPasswordPage(csrf: string, opts: { error?: string; notice?: string; next?: string } = {}): string {
   const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
+  const mailerNote = hasMailerConfigured()
+    ? `<p class="sub">Enter your account email. If an account exists, a single-use password reset link will be sent to your inbox.</p>`
+    : `<div class="card" style="background:#F9FAFB;margin:12px 0 16px 0;padding:14px 16px;">
+<p class="sub" style="margin:0 0 6px 0;font-weight:600;color:#374151;">Operator-assisted password recovery</p>
+<p class="sub" style="margin:0;">Transactional outbound email is not configured for this self-hosted installation. Submitting this form records an audited reset token in the ledger.</p>
+<p class="sub" style="margin:6px 0 0 0;color:#4B5563;"><strong>Next steps:</strong> Ask your system operator to deliver your link using <code>vital reset-link</code>, or contact your team owner. <strong>Expected turnaround:</strong> typically under 1 hour during business hours.</p>
+</div>`;
+
   return page(
     'Vital Console — reset password',
     `<h1>Reset your password</h1>
-<p class="sub">Enter the email for your account. If it exists, a single-use reset link is issued.
-There is no outbound mailer yet — your operator can deliver the link with <code>vital reset-link</code>,
-or set a temporary password with <code>vital passwd</code>.</p>
-${opts.notice ? `<p class="sub">${esc(opts.notice)}</p>` : ''}
-${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
+${mailerNote}
+${opts.notice ? `<div class="success" role="status"><p class="sub"><strong>${esc(opts.notice)}</strong></p></div>` : ''}
+${opts.error ? `<div class="error-summary" role="alert"><p class="err">${esc(opts.error)}</p></div>` : ''}
 <form method="post" action="/forgot-password">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
   ${nextField}
   <label class="sub" for="email">work email</label>
   <input id="email" name="email" type="email" autocomplete="username" required>
-  <button type="submit">Request reset link</button>
+  <button type="submit">${hasMailerConfigured() ? 'Send reset email' : 'Request operator reset link'}</button>
 </form>
 <p class="sub"><a href="/login">Back to sign in</a></p>`,
   );
@@ -644,7 +714,11 @@ function accountPage(
   error?: string,
   notice?: string,
   homeRef = '/',
-  extra: { emailVerified?: boolean; mfaHint?: string } = {},
+  extra: {
+    emailVerified?: boolean;
+    mfaHint?: string;
+    mfa?: { enabled: boolean; factors: MfaFactor[]; recoveryCount: number };
+  } = {},
 ): string {
   const result = passwordChangeResult('voluntary');
   const nav = accountNav('account')
@@ -658,9 +732,30 @@ function accountPage(
   const emailBlock = ((): string => {
     if (extra.emailVerified === undefined) return '';
     if (extra.emailVerified) return '<p class="sub">Email verified — this address may be used for recovery.</p>';
-    return `<p class="sub">Email not yet verified — recovery links are not trusted until verification completes. <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Send verification link</button></form></p>`;
+    if (hasMailerConfigured()) {
+      return `<p class="sub">Email not yet verified — recovery links are not trusted until verification completes. <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Send verification link</button></form></p>`;
+    }
+    return `<p class="sub">Email not yet verified — automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code>vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day). <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#4B5563;">Request operator verification</button></form></p>`;
   })();
   const mfaBlock = extra.mfaHint ? `<p class="sub">${esc(extra.mfaHint)}</p>` : '';
+  // FINAL-005: authenticator enrollment, factor list, and recovery codes.
+  const mfaSection = ((): string => {
+    if (!extra.mfa) return '';
+    if (extra.mfa.enabled) {
+      const factors = extra.mfa.factors
+        .map(
+          (f) =>
+            `<form method="post" action="/account/mfa/remove" style="display:inline;margin-left:8px"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="factorId" value="${esc(f.id)}"><button type="submit" style="background:#6B7280">Remove ${esc(f.kind)} factor</button></form>`,
+        )
+        .join('');
+      return `<h2>Two-factor authentication</h2>
+<p class="sub">Enabled — ${extra.mfa.factors.length} authenticator factor(s); ${extra.mfa.recoveryCount} unused recovery code(s).</p>
+<form method="post" action="/account/mfa/recovery" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Regenerate recovery codes</button></form>${factors}`;
+    }
+    return `<h2>Two-factor authentication</h2>
+<p class="sub">Not enabled. Add an authenticator app so a stolen password alone cannot sign in.</p>
+<p><a href="/account/mfa/setup">Set up two-factor authentication</a></p>`;
+  })();
   return page(
     'Vital Console — account and security',
     `<h1>Account and security</h1>
@@ -668,6 +763,7 @@ function accountPage(
 ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 ${emailBlock}${mfaBlock}
+${mfaSection}
 <h2>Change password</h2>
 <p class="sub">${esc(result.sessionNote)} — ${esc(result.nextStep)}</p>
 <form method="post" action="/account/password">
@@ -677,6 +773,68 @@ ${emailBlock}${mfaBlock}
   <button type="submit">Save new password</button>
 </form>
 <p class="sub"><a href="${esc(homeRef)}">Back to console</a> · ${nav}</p>`,
+  );
+}
+
+/** FINAL-005: otpauth URI for authenticator apps (no dependency). */
+export function otpauthUri(email: string, secret: string): string {
+  const label = encodeURIComponent(`Vital:${email}`);
+  const issuer = encodeURIComponent('Vital');
+  return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+}
+
+function mfaChallengePage(csrf: string, opts: { error?: string; next?: string; recovery?: boolean } = {}): string {
+  const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
+  const modeField = opts.recovery ? '<input type="hidden" name="mode" value="recovery">' : '';
+  const label = opts.recovery ? 'recovery code' : 'authentication code';
+  const hint = opts.recovery
+    ? 'Enter one of the single-use recovery codes you saved when you enabled two-factor authentication.'
+    : 'Enter the 6-digit code from your authenticator app.';
+  const switchLink = opts.recovery
+    ? '<a href="/login/mfa">Use an authenticator code instead</a>'
+    : '<a href="/login/mfa?mode=recovery">Use a recovery code</a>';
+  return page(
+    'Vital Console — two-factor verification',
+    `<h1>Two-factor verification</h1>
+<p class="sub">${hint}</p>
+${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
+<form method="post" action="/login/mfa">
+  <input type="hidden" name="csrf" value="${esc(csrf)}">
+  ${nextField}${modeField}
+  <label class="sub" for="code">${label}</label>
+  <input id="code" name="code" autocomplete="one-time-code" required>
+  <button type="submit">Verify</button>
+</form>
+<p class="sub">${switchLink} · <a href="/login">Back to sign in</a></p>`,
+  );
+}
+
+function mfaSetupPage(csrf: string, secret: string, email: string, opts: { error?: string } = {}): string {
+  const uri = otpauthUri(email, secret);
+  return page(
+    'Vital Console — enable two-factor authentication',
+    `<h1>Enable two-factor authentication</h1>
+<p class="sub">Add this secret to your authenticator app (Google Authenticator, 1Password, Authy), then enter the 6-digit code it shows.</p>
+${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
+<div class="success"><p><strong>Secret:</strong> <code>${esc(secret)}</code></p><p class="sub">Setup URI: <code>${esc(uri)}</code></p></div>
+<form method="post" action="/account/mfa/enable">
+  <input type="hidden" name="csrf" value="${esc(csrf)}">
+  <input type="hidden" name="secret" value="${esc(secret)}">
+  <label class="sub" for="code">6-digit code</label>
+  <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+  <button type="submit">Confirm and enable</button>
+</form>
+<p class="sub"><a href="/account">Cancel</a></p>`,
+  );
+}
+
+function mfaRecoveryCodesPage(codes: string[], home: string): string {
+  return page(
+    'Vital Console — recovery codes',
+    `<h1>Save your recovery codes</h1>
+<p class="sub">These single-use codes are shown once. Store them somewhere safe — each signs you in once if you lose your authenticator.</p>
+<div class="success"><ul>${codes.map((c) => `<li><code>${esc(c)}</code></li>`).join('')}</ul></div>
+<p class="sub"><a href="${esc(home)}">Continue to the console</a></p>`,
   );
 }
 
@@ -890,6 +1048,7 @@ function teamPage(
   invitations: Invitation[],
   notice?: string,
   extra?: {
+    home?: string;
     now?: string;
     confirmations?: Map<string, DisableConfirmation>;
     stops?: StopDisplay[];
@@ -903,6 +1062,13 @@ function teamPage(
     }[];
     policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
     compilerGaps?: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[];
+    filter?: {
+      q?: string;
+      role?: string;
+      status?: string;
+      page?: number;
+      pageSize?: number;
+    };
   },
 ): string {
   const canManage = atLeast(viewer.role, 'admin') && !viewer.mustChangePassword;
@@ -946,7 +1112,31 @@ function teamPage(
 </tr>`;
     })
     .join('');
-  const rows = users
+
+  const q = (extra?.filter?.q ?? '').trim().toLowerCase();
+  const roleFilter = (extra?.filter?.role ?? '').trim().toLowerCase();
+  const statusFilter = (extra?.filter?.status ?? '').trim().toLowerCase();
+
+  let filteredUsers = users;
+  if (q) {
+    filteredUsers = filteredUsers.filter((u) => u.email.toLowerCase().includes(q) || u.name.toLowerCase().includes(q));
+  }
+  if (roleFilter) {
+    filteredUsers = filteredUsers.filter((u) => u.role.toLowerCase() === roleFilter);
+  }
+  if (statusFilter) {
+    filteredUsers = filteredUsers.filter((u) => {
+      return statusFilter === 'disabled' ? u.disabled : !u.disabled;
+    });
+  }
+
+  const pageNum = Math.max(1, extra?.filter?.page ?? 1);
+  const pageSize = Math.max(1, extra?.filter?.pageSize ?? 20);
+  const totalCount = filteredUsers.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const pagedUsers = filteredUsers.slice((pageNum - 1) * pageSize, pageNum * pageSize);
+
+  const rows = pagedUsers
     .map((u) => {
       const actions: string[] = [];
       if (canChangeRole(viewer, u)) actions.push(roleForm(csrf, viewer, u));
@@ -972,16 +1162,47 @@ function teamPage(
 </tr>`;
     })
     .join('');
+
+  const filterForm = `<form method="get" action="/team" style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+  <input type="search" name="q" value="${esc(extra?.filter?.q ?? '')}" placeholder="Search email or name…" style="padding:8px 10px;font-size:13px">
+  <select name="role" style="padding:8px 10px;font-size:13px">
+    <option value="">All roles</option>
+    <option value="owner" ${roleFilter === 'owner' ? 'selected' : ''}>owner</option>
+    <option value="admin" ${roleFilter === 'admin' ? 'selected' : ''}>admin</option>
+    <option value="operator" ${roleFilter === 'operator' ? 'selected' : ''}>operator</option>
+    <option value="member" ${roleFilter === 'member' ? 'selected' : ''}>member</option>
+    <option value="viewer" ${roleFilter === 'viewer' ? 'selected' : ''}>viewer</option>
+  </select>
+  <select name="status" style="padding:8px 10px;font-size:13px">
+    <option value="">All statuses</option>
+    <option value="active" ${statusFilter === 'active' ? 'selected' : ''}>active</option>
+    <option value="disabled" ${statusFilter === 'disabled' ? 'selected' : ''}>disabled</option>
+  </select>
+  <button type="submit" style="min-height:36px;padding:8px 14px;font-size:13px">Filter roster</button>
+  ${q || roleFilter || statusFilter ? '<a href="/team" class="sub" style="margin-left:8px">Clear filters</a>' : ''}
+</form>`;
+
+  const paginationBar =
+    totalPages > 1
+      ? `<nav aria-label="Roster pagination" style="margin-top:12px;display:flex;gap:14px;align-items:center">
+  ${pageNum > 1 ? `<a href="/team?page=${pageNum - 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Previous</a>` : ''}
+  <span>Page ${pageNum} of ${totalPages} (${totalCount} members)</span>
+  ${pageNum < totalPages ? `<a href="/team?page=${pageNum + 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Next</a>` : ''}
+</nav>`
+      : '';
+
   return page(
     'Vital Console — team',
-    `<p class="sub"><a href="/">← console</a></p>
+    `<p class="sub"><a href="${esc(extra?.home ?? '/')}">← console</a></p>
 <h1>Team</h1>
 ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
 <h2>${membersHeading}</h2>
+${filterForm}
 <table style="border-collapse:collapse;min-width:640px">
   <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th></th></tr></thead>
-  <tbody>${rows}</tbody>
+  <tbody>${rows || '<tr><td colspan="5" class="sub">No matching team members found.</td></tr>'}</tbody>
 </table>
+${paginationBar}
 ${
   pendingInvites.length
     ? `<h2>${invitesHeading}</h2>
@@ -997,8 +1218,8 @@ ${
 <p class="sub">${esc(accountNotice.detail)}</p>
 <form method="post" action="/team/invite">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
-  <label class="sub" for="email">work email</label>
-  <input id="email" name="email" type="email" required>
+  <label class="sub" for="email">work email (single or comma/newline separated)</label>
+  <textarea id="email" name="email" rows="2" required placeholder="member@acme.test, teammate@acme.test" style="width:100%;font-family:inherit;box-sizing:border-box"></textarea>
   <label class="sub" for="name">name</label>
   <input id="name" name="name" required>
   <label class="sub" for="role">role</label>
@@ -1070,9 +1291,13 @@ function selfHaltEntries(
   const items = selfHalts
     .map(
       (h) =>
-        `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${h.detail ?
-          ` — ${esc(h.detail.slice(0, 200))}` : ''}${h.outboxStatus ?
-          ` · outbox: ${esc(h.outboxStatus.status)} attempts=${esc(String(h.outboxStatus.attempts))} nextAt=${esc(h.outboxStatus.nextAt)}` : ''}</li>`,
+        `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${
+          h.detail ? ` — ${esc(h.detail.slice(0, 200))}` : ''
+        }${
+          h.outboxStatus
+            ? ` · outbox: ${esc(h.outboxStatus.status)} attempts=${esc(String(h.outboxStatus.attempts))} nextAt=${esc(h.outboxStatus.nextAt)}`
+            : ''
+        }</li>`,
     )
     .join('');
   return `<h3>Recent automation self-halts</h3>
@@ -1124,7 +1349,7 @@ function compilerGapsSection(
   const items = withGaps
     .map(
       (g) =>
-        `<li><code>${esc(g.cardId)}</code> ${esc(g.intent)} (${esc(g.state)}) — gaps: ${esc(g.gaps.join('; '))}${g.evalRef ? ` · eval: <code>${esc(g.evalRef)}</code>` : ' · no eval suite reference — evals are the spec'} · <a href="/api/learning/cards/${esc(encodeURIComponent(g.cardId))}/evidence">evaluation evidence</a> · <a href="/api/learning/cards/${esc(encodeURIComponent(g.cardId))}">card detail</a></li>`,
+        `<li><code>${esc(g.cardId)}</code> ${esc(g.intent)} (${esc(g.state)}) — gaps: ${esc(g.gaps.join('; '))}${g.evalRef ? ` · eval: <code>${esc(g.evalRef)}</code>` : ' · no eval suite reference — evals are the spec'} · <a href="/console/learning/${esc(encodeURIComponent(g.cardId))}">evaluation evidence</a></li>`,
     )
     .join('');
   return `<h2>Compiler trust gaps</h2>
@@ -1257,6 +1482,26 @@ async function dashboardSearchSection(
   return `${form}${body}</section>`;
 }
 
+/**
+ * Whether a review token is valid for this tenant.
+ *
+ * Fails closed when no secret is configured: without `VITAL_REVIEW_SECRET`
+ * there is no way to mint a legitimate token, so no token can be trusted.
+ * The literal `'vital-review-secret'` that used to be hard-coded here meant
+ * anyone who could read the source could approve any pending request.
+ */
+function reviewTokenValid(token: string, tenant: string): boolean {
+  let secret: string | null;
+  try {
+    secret = reviewSecretFromEnv();
+  } catch {
+    return false;
+  }
+  if (!secret) return false;
+  const verified = verifyReviewToken(token, secret);
+  return verified.valid && verified.tenant === tenant;
+}
+
 async function auditConsole(
   db: AsyncDb,
   tenant: string,
@@ -1367,9 +1612,89 @@ export function startConsoleServer(
     return build;
   };
 
+  // FLOW-013 / readiness strip: the same tri-state checks served at
+  // `/api/metrics` (DB required, worker optional-until-first-heartbeat,
+  // integrations optional-until-configured), rendered for the operator who
+  // opens the console. `ready`/`unconfigured-optional`/`failing` map to a
+  // visible green / grey / red pill so a silent worker or broken source is not
+  // a support-call mystery.
+  const computeReadiness = async (at: string): Promise<{ ready: boolean; checks: { name: string; status: string; detail?: string }[] }> =>
+    checkReadiness(
+      [
+        {
+          name: 'database',
+          check: async () => {
+            await db.prepare('SELECT 1 AS ok').get();
+            return { ok: true as const, detail: `${db.engine} reachable` };
+          },
+        },
+        {
+          name: 'worker',
+          optional: true,
+          check: async () => workerReadiness(db, tenant, { now: at }),
+        },
+        {
+          name: 'integrations',
+          optional: true,
+          check: async () => {
+            const config = await loadActivationConfig(db, tenant);
+            const collectors = new Set(await listKnownCollectors(db, tenant));
+            if (config) collectors.add(collectorName(config.sourcePath));
+            if (collectors.size === 0) return { ok: false, unconfigured: true, detail: 'no source configured' };
+            const parts: string[] = [];
+            let failing: string | null = null;
+            for (const collector of collectors) {
+              const health = await getIntegrationHealth(db, tenant, collector, {
+                configured: true,
+                now: at,
+              });
+              const projected = integrationReadinessState(health);
+              parts.push(projected.detail);
+              if (!projected.ok && projected.unconfigured !== true && !failing) failing = collector;
+            }
+            if (failing) return { ok: false, detail: parts.join(' | ') };
+            return { ok: true as const, detail: parts.join(' | ') };
+          },
+        },
+      ],
+      { now: at },
+    );
+
+  const readinessPill = (status: string): string => {
+    if (status === 'ok') return '<span style="display:inline-block;background:#0F7A3D;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">ok</span>';
+    if (status === 'unconfigured-optional')
+      return '<span style="display:inline-block;background:#9CA3AF;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">not configured</span>';
+    return '<span style="display:inline-block;background:#B91C1C;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">needs attention</span>';
+  };
+
+  const renderSystemReadiness = async (at: string): Promise<string> => {
+    const r = await computeReadiness(at);
+    const items = r.checks
+      .map(
+        (c) =>
+          `<li style="margin-bottom:6px">${readinessPill(c.status)} <strong>${esc(c.name)}</strong>${c.detail ? ` — <span class="sub">${esc(c.detail)}</span>` : ''}</li>`,
+      )
+      .join('');
+    const headline = r.ready
+      ? 'System is ready'
+      : 'System needs attention';
+    return `<section id="system-readiness" style="margin-bottom:24px">
+<h1>${esc(headline)}</h1>
+<ul style="list-style:none;padding:0;margin:8px 0 0 0">${items}</ul>
+<p class="sub"><a href="/setup">Setup</a> · <a href="/api/metrics" rel="noreferrer">Raw readiness (JSON)</a></p>
+</section>`;
+  };
+
   // Per-instance rate-limit buckets (see the rate-limit note above): a server
   // owns its own counters, so cohabiting instances never share one.
   const buckets = new Map<string, { n: number; reset: number }>();
+  // FINAL-005: short-lived, per-process MFA challenges. A correct password
+  // starts a challenge but mints no session; only the second factor does.
+  // Per-instance state (like the rate-limit buckets above) — the console is
+  // a single-tenant, single-process surface.
+  const mfaChallenges = new Map<string, { userId: string; tenant: string; expiresAtMs: number }>();
+  const MFA_COOKIE = 'vital_mfa';
+  const MFA_CHALLENGE_TTL_MS = 5 * 60_000;
   const rateOk = (key: string, limit: number, windowMs: number, atMs: number): boolean => {
     const b = buckets.get(key);
     if (!b || atMs > b.reset) {
@@ -1437,6 +1762,16 @@ export function startConsoleServer(
             '/account/password',
             '/account/email/request',
             '/verify-email',
+            '/login/mfa',
+            '/console/audit',
+            '/console/data',
+            '/console/data/export',
+            '/console/data/erase',
+            '/receipts/erasure',
+            '/account/mfa/setup',
+            '/account/mfa/enable',
+            '/account/mfa/recovery',
+            '/account/mfa/remove',
             '/forgot-password',
             '/reset-password',
             '/team',
@@ -1602,11 +1937,27 @@ export function startConsoleServer(
             });
           }
           try {
-            const { user, session, token } = await login(
+            const user = await verifyLoginCredentials(
               db,
               { tenant, email, password: call.fields.password ?? '', ip },
               at,
             );
+            if (await isMfaEnabled(db, user.id)) {
+              // Second factor enrolled: a correct password must NOT mint a
+              // usable session. Issue a short-lived challenge instead.
+              for (const [k, v] of mfaChallenges) if (v.expiresAtMs <= Date.parse(at)) mfaChallenges.delete(k);
+              const challenge = randomBytes(32).toString('hex');
+              mfaChallenges.set(challenge, {
+                userId: user.id,
+                tenant,
+                expiresAtMs: Date.parse(at) + MFA_CHALLENGE_TTL_MS,
+              });
+              await auditConsole(db, tenant, user.id, 'auth.mfa_challenge', 'login', at);
+              const mfaCookie = `${MFA_COOKIE}=${challenge}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(MFA_CHALLENGE_TTL_MS / 1000)}${secure ? '; Secure' : ''}`;
+              const loc = next ? `/login/mfa?next=${encodeURIComponent(next)}` : '/login/mfa';
+              return redirect(res, loc, mfaCookie);
+            }
+            const { session, token } = await startSessionForUser(db, tenant, user.id, at);
             const cookie = sessionCookie(token, at, secure, session);
             if (user.mustChangePassword) return redirect(res, '/change-password', cookie);
             return redirect(res, next ?? home, cookie);
@@ -1628,6 +1979,81 @@ export function startConsoleServer(
             );
             return;
           }
+        }
+        // FINAL-005: second-factor step. The session is created only after the
+        // code verifies; the challenge cookie is not a session.
+        if (path === '/login/mfa' && method === 'GET') {
+          const challenge = cookieValue(req, MFA_COOKIE);
+          const entry = challenge ? mfaChallenges.get(challenge) : undefined;
+          if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
+            return redirect(
+              res,
+              loginPath({ reason: 'expired' }),
+              `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+            );
+          }
+          const csrf = randomBytes(32).toString('hex');
+          const next = safeReturnPath(url.searchParams.get('next'));
+          res.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+          });
+          res.end(mfaChallengePage(csrf, { next, recovery: url.searchParams.get('mode') === 'recovery' }));
+          return;
+        }
+        if (path === '/login/mfa' && method === 'POST') {
+          const challenge = cookieValue(req, MFA_COOKIE);
+          const entry = challenge ? mfaChallenges.get(challenge) : undefined;
+          if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
+            return redirect(
+              res,
+              loginPath({ reason: 'expired' }),
+              `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+            );
+          }
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!preCsrfOk(req, call.csrf))
+            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+          if (!rateOk(`mfa:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
+            const shape = formErrorShape('rate-limited');
+            return json(res, shape.status, { ok: false, error: shape.message, code: shape.code });
+          }
+          const code = (call.fields.code ?? '').trim();
+          const next = safeReturnPath(call.fields.next);
+          const mode = call.fields.mode === 'recovery';
+          const accepted = mode
+            ? await consumeMfaRecoveryCode(db, tenant, entry.userId, code, at)
+            : await verifyMfaCode(db, tenant, entry.userId, code, at);
+          if (!accepted) {
+            const csrf = randomBytes(32).toString('hex');
+            res.writeHead(401, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(
+              mfaChallengePage(csrf, {
+                error: mode
+                  ? 'That recovery code is not valid or was already used.'
+                  : 'That code was not accepted. Check your device clock and try again.',
+                next,
+                recovery: mode,
+              }),
+            );
+            return;
+          }
+          mfaChallenges.delete(challenge!);
+          const { user, session, token } = await startSessionForUser(db, tenant, entry.userId, at);
+          const sessionCk = sessionCookie(token, at, secure, session);
+          const clearMfa = `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+          const target = user.mustChangePassword ? '/change-password' : (next ?? home);
+          res.writeHead(303, { location: target, 'set-cookie': [sessionCk, clearMfa] });
+          res.end();
+          return;
         }
         if (path === '/forgot-password' && method === 'GET') {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
@@ -1665,8 +2091,9 @@ export function startConsoleServer(
           const next = safeReturnPath(call.fields.next);
           const email = call.fields.email ?? '';
           const token = await tryPasswordReset(db, tenant, email, at);
-          let notice =
-            'If an account exists for that email, a single-use reset link was issued. Ask your operator to deliver it, or run vital reset-link from the server.';
+          let notice = hasMailerConfigured()
+            ? 'If an account exists for that email, a password reset link has been sent to your inbox.'
+            : 'If an account exists for that email, the reset request has been recorded. Automatic email delivery is not configured on this host — ask your operator to deliver your single-use link via vital reset-link (turnaround: under 1 hour).';
           if (token) {
             // FLOW-007: recovery rides on a verified address. The reset token
             // is still issued (no oracle for strangers), but the owner is
@@ -1771,6 +2198,26 @@ export function startConsoleServer(
           }
           const loginTarget = `/login?reset=ok${next ? `&next=${encodeURIComponent(next)}` : ''}`;
           return redirect(res, loginTarget, CLEAR_SESSION_COOKIE);
+        }
+        if (path === '/receipts/erasure' && method === 'GET') {
+          const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase();
+          if (slug) {
+            return redirect(res, `/receipts/erasure/${encodeURIComponent(slug)}`);
+          }
+          const verification = { found: false, slug: '' };
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(renderErasureReceiptPage(verification as any, home));
+          return;
+        }
+        if (path.startsWith('/receipts/erasure/') && method === 'GET') {
+          const slug = decodeURIComponent(path.slice('/receipts/erasure/'.length)).trim().toLowerCase();
+          const verification = await verifyErasureReceipt(db, slug);
+          res.writeHead(verification.found ? 200 : 404, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(renderErasureReceiptPage(verification, home));
+          return;
         }
         if (path === '/signup' && method === 'GET') {
           // Signup exists only to claim an UNPROVISIONED console. Once the
@@ -1947,8 +2394,15 @@ export function startConsoleServer(
           if (!auth) return redirectLogin();
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
+          const factors = await listMfaFactors(db, auth.user.id);
+          const recoveryCount = await countLiveRecoveryCodes(db, auth.user.id);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, { emailVerified: verified }));
+          res.end(
+            accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, {
+              emailVerified: verified,
+              mfa: { enabled: factors.length > 0, factors, recoveryCount },
+            }),
+          );
           return;
         }
         // FLOW-007: email-verification lifecycle over HTTP. The request route
@@ -1976,9 +2430,18 @@ export function startConsoleServer(
           const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(
-            accountPage(auth.session.csrfToken, auth.user, undefined, 'Verification link issued. Confirm within 24 hours.', home, {
-              emailVerified: verified,
-            }),
+            accountPage(
+              auth.session.csrfToken,
+              auth.user,
+              undefined,
+              hasMailerConfigured()
+                ? 'Verification link sent to your inbox. Confirm within 24 hours.'
+                : 'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
+              home,
+              {
+                emailVerified: verified,
+              },
+            ),
           );
           return;
         }
@@ -2042,6 +2505,81 @@ export function startConsoleServer(
           }
           const loc = loginPath({ reset: true });
           return redirect(res, loc, CLEAR_SESSION_COOKIE);
+        }
+        // FINAL-005: authenticator enrollment + recovery-code management.
+        if (path === '/account/mfa/setup' && method === 'GET') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          const secret = newTotpSecret();
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(mfaSetupPage(auth.session.csrfToken, secret, auth.user.email));
+          return;
+        }
+        if (path === '/account/mfa/enable' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const secret = call.fields.secret ?? '';
+          try {
+            await confirmMfaEnrollment(db, tenant, auth.user.id, secret, call.fields.code ?? '', at);
+            const codes = await generateMfaRecoveryCodes(db, tenant, auth.user.id, at);
+            await auditConsole(db, tenant, by(auth.user), 'account.mfa_enabled', `user:${auth.user.id}`, at);
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(mfaRecoveryCodesPage(codes, home));
+          } catch (e) {
+            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              mfaSetupPage(auth.session.csrfToken, secret, auth.user.email, {
+                error: e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+              }),
+            );
+          }
+          return;
+        }
+        if (path === '/account/mfa/recovery' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          if (!(await isMfaEnabled(db, auth.user.id))) return redirect(res, '/account');
+          const codes = await generateMfaRecoveryCodes(db, tenant, auth.user.id, at);
+          await auditConsole(db, tenant, by(auth.user), 'account.mfa_recovery_regenerated', `user:${auth.user.id}`, at);
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(mfaRecoveryCodesPage(codes, home));
+          return;
+        }
+        if (path === '/account/mfa/remove' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          try {
+            await removeMfaFactor(db, tenant, auth.user.id, call.fields.factorId ?? '', at);
+            await auditConsole(db, tenant, by(auth.user), 'account.mfa_removed', `user:${auth.user.id}`, at);
+          } catch {
+            /* unknown factor — nothing to remove; return to the account page */
+          }
+          return redirect(res, '/account');
         }
         if (path === '/logout' && method === 'POST') {
           const auth = await sessionOf();
@@ -2118,7 +2656,7 @@ export function startConsoleServer(
           }
           const days = url.searchParams.get('days') ?? '7';
           if (!['1', '7', '30', 'all'].includes(days))
-            return json(res, 400, { ok: false, error: 'days must be 1, 7, 30 or all' });
+            return respondGetError(req, res, 400, 'days must be 1, 7, 30 or all');
           const window = days as DigestDays;
           const since = digestWindowSince(at, window);
           const navigation = `<nav aria-label="Digest time window">${(['1', '7', '30', 'all'] as DigestDays[]).map((value) => `<a href="/console/digest?days=${value}"${value === window ? ' aria-current="page"' : ''}>${value === 'all' ? 'All history' : `Last ${value} day(s)`}</a>`).join(' ')}</nav>`;
@@ -2134,6 +2672,368 @@ export function startConsoleServer(
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(html);
+          return;
+        }
+        // FINAL-004: human surface for learning review (labeling + card gaps).
+        // Replaces the in-product links that previously pointed at the JSON
+        // learning APIs, which render as an unstyled blob in a browser.
+        if (method === 'GET' && path === '/console/learning') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(detailDocument('Learning review', body, detailOpts));
+            return;
+          }
+          const labeled = url.searchParams.get('labeled');
+          const errorParam = url.searchParams.get('error');
+          let notice: string | undefined;
+          if (labeled === 'ok') notice = 'Decision labeled.';
+          else if (errorParam) notice = `Could not label: ${errorParam}`;
+          const body = await renderLearningPage(db, new CognitiveRouter(db), comp, tenant, {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            notice,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(detailDocument('Learning review', body, detailOpts));
+          return;
+        }
+        // ------------------------------------------------------------ Buzz workspace
+        // The human-facing room console: roster + per-room thread view.
+        // Authenticated, admin-gated pages over the same evaluators the APIs
+        // expose — the first UI that consumes any of it.
+        if (method === 'GET' && path === '/console/buzz') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              detailDocument(
+                'Buzz Workspace',
+                '<p class="sub">The Buzz workspace requires the admin or owner role.</p>',
+                detailOpts,
+              ),
+            );
+            return;
+          }
+          const surface = await maybeBuzzSurface(db, tenant);
+          try {
+            const roster = await buildBuzzRoster(db, tenant, surface);
+            const body = renderBuzzRoster(roster, home, auth.session.csrfToken);
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(detailDocument('Buzz Workspace', body, detailOpts));
+          } finally {
+            // The surface holds no pooled connections of its own; the health
+            // probe is one fetch. Nothing to close — this block documents that.
+          }
+          return;
+        }
+        const buzzRoom = path.match(/^\/console\/buzz\/([^/]+)$/);
+        if (method === 'GET' && buzzRoom) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              detailDocument(
+                'Buzz room',
+                '<p class="sub">The Buzz workspace requires the admin or owner role.</p>',
+                detailOpts,
+              ),
+            );
+            return;
+          }
+          const scope = decodeURIComponent(buzzRoom[1]!);
+          const surface = await maybeBuzzSurface(db, tenant);
+          const notice = url.searchParams.get('notice') ?? undefined;
+          const body = await renderBuzzRoom(
+            db,
+            tenant,
+            scope,
+            home,
+            auth.session.csrfToken,
+            surface,
+            notice ?? undefined,
+          );
+          if (!body) {
+            res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              detailDocument(
+                'Buzz room',
+                '<p class="sub">No such room. <a href="' + esc(home) + 'console/buzz">Back to the workspace</a>.</p>',
+                detailOpts,
+              ),
+            );
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(detailDocument(`Buzz room: ${scope}`, body, detailOpts));
+          return;
+        }
+        const buzzRoomCommand = path.match(/^\/console\/buzz\/([^/]+)\/command$/);
+        if (method === 'POST' && buzzRoomCommand) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          if (!atLeast(auth.user.role, 'admin')) {
+            return json(res, 403, { ok: false, error: 'admin role required' });
+          }
+          const call = await parseCall(req);
+          if (!csrfOk(auth.session, call.csrf)) {
+            return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          }
+          const scope = decodeURIComponent(buzzRoomCommand[1]!);
+          const command = String(call.fields.command ?? '').trim();
+          const back = `${home}console/buzz/${encodeURIComponent(scope)}`;
+          if (!command) return redirect(res, back);
+          const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
+          const result = await executeRoomCommand(command, {
+            db,
+            tenant,
+            actor: by(auth.user),
+            currentScope: scope,
+            coord,
+            ledger,
+            evaluator,
+          });
+          await auditConsole(db, tenant, by(auth.user), 'buzz.command', `room:${scope}`, at, command.slice(0, 200));
+          const notice = result.handled
+            ? `Command ${result.command} executed.`
+            : `Not a room command: ${command.slice(0, 60)}`;
+          return redirect(res, `${back}?notice=${encodeURIComponent(notice.slice(0, 200))}`);
+        }
+        const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
+        if (method === 'GET' && learningCard) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(detailDocument('Skill card', body, detailOpts));
+            return;
+          }
+          let cardId: string;
+          try {
+            cardId = decodeURIComponent(learningCard[1]!);
+          } catch {
+            return json(res, 400, { ok: false, error: 'malformed card id' });
+          }
+          const body = await renderLearningCardPage(db, comp, tenant, cardId);
+          if (!body) return json(res, 404, { ok: false, error: 'skill card not found' });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(detailDocument('Skill card', body, detailOpts));
+          return;
+        }
+        if (path === '/console/learning/label' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
+          const decisionId = Number(call.fields.decisionId);
+          const correctTier = call.fields.correctTier ?? '';
+          if (!Number.isInteger(decisionId) || decisionId <= 0) {
+            return redirect(
+              res,
+              '/console/learning?error=' + encodeURIComponent('decisionId must be a positive integer'),
+            );
+          }
+          if (!['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'].includes(correctTier)) {
+            return redirect(res, '/console/learning?error=' + encodeURIComponent('invalid routing tier'));
+          }
+          const reviewer = by(auth.user);
+          try {
+            await new CognitiveRouter(db).label(tenant, decisionId, correctTier as never, reviewer);
+            await auditConsole(
+              db,
+              tenant,
+              reviewer,
+              'console.label_decision',
+              String(decisionId),
+              at,
+              `correct_tier=${correctTier}`,
+            );
+            return redirect(res, '/console/learning?labeled=ok');
+          } catch (e) {
+            return redirect(res, '/console/learning?error=' + encodeURIComponent((e as Error).message));
+          }
+        }
+        // FINAL-006: admin audit-log surface (the audit API existed with no page).
+        if (method === 'GET' && path === '/console/audit') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              detailDocument('Audit log', '<p class="sub">Audit log requires the admin or owner role.</p>', detailOpts),
+            );
+            return;
+          }
+          const offsetRaw = Number(url.searchParams.get('offset') ?? '0');
+          const { html } = await renderAuditPage(db, tenant, {
+            actor: url.searchParams.get('actor') ?? undefined,
+            action: url.searchParams.get('action') ?? undefined,
+            from: url.searchParams.get('from') ?? undefined,
+            to: url.searchParams.get('to') ?? undefined,
+            request: url.searchParams.get('request') ?? undefined,
+            offset: Number.isSafeInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(detailDocument('Audit log', html, detailOpts));
+          return;
+        }
+        if (method === 'GET' && path === '/console/data') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const detailOpts = {
+            tenant,
+            actor: by(auth.user),
+            csrf: auth.session.csrfToken,
+            canApprove: false,
+            requiredRole: approverMin,
+            operatorMode: 'session' as const,
+            home,
+          };
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              detailDocument(
+                'Data & retention',
+                '<p class="sub">Data & retention requires the admin or owner role.</p>',
+                detailOpts,
+              ),
+            );
+            return;
+          }
+          const html = renderDataPage(tenant, {
+            csrf: auth.session.csrfToken,
+            home,
+            notice: url.searchParams.get('notice') ?? undefined,
+            error: url.searchParams.get('error') ?? undefined,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(detailDocument('Data & retention', html, detailOpts));
+          return;
+        }
+        if (method === 'GET' && path === '/console/data/export') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end('Export requires the admin or owner role.');
+            return;
+          }
+          const bundle = await exportLedger(db, tenant, at);
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="${tenant}-ledger-export.json"`,
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify(bundle, null, 2));
+          return;
+        }
+        if (method === 'POST' && path === '/console/data/erase') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          if (!atLeast(auth.user.role, 'admin')) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end('Erasure requires the admin or owner role.');
+            return;
+          }
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const confirmSlug = (call.fields.confirmSlug ?? '').trim();
+          const confirmed = call.fields.confirmed;
+          if (confirmSlug !== tenant || confirmed !== 'on') {
+            redirect(
+              res,
+              `/console/data?error=${encodeURIComponent('Typed confirmation did not match organization slug.')}`,
+            );
+            return;
+          }
+          try {
+            await eraseTenant(db, tenant, by(auth.user), at);
+            return redirect(res, `/receipts/erasure/${encodeURIComponent(tenant)}`, CLEAR_SESSION_COOKIE);
+          } catch (e) {
+            redirect(res, `/console/data?error=${encodeURIComponent((e as Error).message)}`);
+          }
           return;
         }
         if (method === 'GET' && path === '/console/workflows') {
@@ -2325,9 +3225,13 @@ export function startConsoleServer(
                 if (pageResult.truncated)
                   body += `<p class="sub">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching requests</p>`;
               }
-              const prev = pageResult.offset > 0
-                ? listStateUrl('/console/requests', { ...state, offset: Math.max(0, pageResult.offset - pageResult.limit) })
-                : null;
+              const prev =
+                pageResult.offset > 0
+                  ? listStateUrl('/console/requests', {
+                      ...state,
+                      offset: Math.max(0, pageResult.offset - pageResult.limit),
+                    })
+                  : null;
               const next = pageResult.hasMore
                 ? listStateUrl('/console/requests', { ...state, offset: pageResult.offset + pageResult.rows.length })
                 : null;
@@ -2373,9 +3277,13 @@ export function startConsoleServer(
                   ? `<p class="sub">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching claims</p>`
                   : '');
             }
-            const prev = pageResult.offset > 0
-              ? listStateUrl('/console/claims', { ...state, offset: Math.max(0, pageResult.offset - pageResult.limit) })
-              : null;
+            const prev =
+              pageResult.offset > 0
+                ? listStateUrl('/console/claims', {
+                    ...state,
+                    offset: Math.max(0, pageResult.offset - pageResult.limit),
+                  })
+                : null;
             const next = pageResult.hasMore
               ? listStateUrl('/console/claims', { ...state, offset: pageResult.offset + pageResult.rows.length })
               : null;
@@ -2410,12 +3318,12 @@ export function startConsoleServer(
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           const state = decodeListState(url.search);
           const here = returnPath();
-          const limit = state.limit !== undefined && Number.isSafeInteger(state.limit) && state.limit > 0
-            ? Math.min(state.limit, 100)
-            : 20;
-          const offset = state.offset !== undefined && Number.isSafeInteger(state.offset) && state.offset >= 0
-            ? state.offset
-            : 0;
+          const limit =
+            state.limit !== undefined && Number.isSafeInteger(state.limit) && state.limit > 0
+              ? Math.min(state.limit, 100)
+              : 20;
+          const offset =
+            state.offset !== undefined && Number.isSafeInteger(state.offset) && state.offset >= 0 ? state.offset : 0;
           const detailOpts = {
             tenant,
             actor: by(auth.user),
@@ -2439,19 +3347,24 @@ export function startConsoleServer(
             const items: string[] = [];
             for (const scope of pageScopes) {
               const n = (await db
-                .prepare(`SELECT COUNT(*) AS n FROM requests WHERE tenant = ? AND (origin_scope = ? OR target_scope = ?)`)
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM requests WHERE tenant = ? AND (origin_scope = ? OR target_scope = ?)`,
+                )
                 .get(tenant, scope, scope)) as { n: unknown };
               items.push(
                 `<li><a href="${esc(`/console/requests?scope=${encodeURIComponent(scope)}&return=${encodeURIComponent(here)}`)}">${esc(scope)}</a> <span class="sub">${Number(n?.n ?? 0)} request(s)</span></li>`,
               );
             }
-            const body = total === 0
-              ? `<p class="sub">No results: no rooms match this search. <a href="${esc(clearFilterUrl('/console/rooms'))}">Clear search and filters</a></p>`
-              : `<ul>${items.join('')}</ul>${offset + pageScopes.length < total ? `<p class="sub">explicit truncation: showing ${pageScopes.length} of ${total} rooms</p>` : ''}`;
-            const prev = offset > 0 ? listStateUrl('/console/rooms', { ...state, offset: Math.max(0, offset - limit) }) : null;
-            const next = offset + pageScopes.length < total
-              ? listStateUrl('/console/rooms', { ...state, offset: offset + pageScopes.length })
-              : null;
+            const body =
+              total === 0
+                ? `<p class="sub">No results: no rooms match this search. <a href="${esc(clearFilterUrl('/console/rooms'))}">Clear search and filters</a></p>`
+                : `<ul>${items.join('')}</ul>${offset + pageScopes.length < total ? `<p class="sub">explicit truncation: showing ${pageScopes.length} of ${total} rooms</p>` : ''}`;
+            const prev =
+              offset > 0 ? listStateUrl('/console/rooms', { ...state, offset: Math.max(0, offset - limit) }) : null;
+            const next =
+              offset + pageScopes.length < total
+                ? listStateUrl('/console/rooms', { ...state, offset: offset + pageScopes.length })
+                : null;
             const html = detailDocument(
               'Rooms',
               renderListPage({
@@ -2476,18 +3389,23 @@ export function startConsoleServer(
           const q = (state.q ?? '').trim().toLowerCase();
           const all = await coord.list(tenant);
           const terminal = new Set(['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED']);
-          let work = all.filter((r) => r.messageClass === 'REQUEST' && r.bid.humanMinutes > 0 && !terminal.has(r.state));
+          let work = all.filter(
+            (r) => r.messageClass === 'REQUEST' && r.bid.humanMinutes > 0 && !terminal.has(r.state),
+          );
           if (q) work = work.filter((r) => `${r.goal} ${r.id}`.toLowerCase().includes(q));
           work.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
           const total = work.length;
           const pageWork = work.slice(offset, offset + limit);
-          const body = total === 0
-            ? `<p class="sub">No results: no human work matches this search. <a href="${esc(clearFilterUrl('/console/human-work'))}">Clear search and filters</a></p>`
-            : `<ul>${pageWork.map((r) => `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a> <span class="sub">${esc(r.id)} · ${esc(r.state)}</span></li>`).join('')}</ul>${offset + pageWork.length < total ? `<p class="sub">explicit truncation: showing ${pageWork.length} of ${total} items</p>` : ''}`;
-          const prev = offset > 0 ? listStateUrl('/console/human-work', { ...state, offset: Math.max(0, offset - limit) }) : null;
-          const next = offset + pageWork.length < total
-            ? listStateUrl('/console/human-work', { ...state, offset: offset + pageWork.length })
-            : null;
+          const body =
+            total === 0
+              ? `<p class="sub">No results: no human work matches this search. <a href="${esc(clearFilterUrl('/console/human-work'))}">Clear search and filters</a></p>`
+              : `<ul>${pageWork.map((r) => `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a> <span class="sub">${esc(r.id)} · ${esc(r.state)}</span></li>`).join('')}</ul>${offset + pageWork.length < total ? `<p class="sub">explicit truncation: showing ${pageWork.length} of ${total} items</p>` : ''}`;
+          const prev =
+            offset > 0 ? listStateUrl('/console/human-work', { ...state, offset: Math.max(0, offset - limit) }) : null;
+          const next =
+            offset + pageWork.length < total
+              ? listStateUrl('/console/human-work', { ...state, offset: offset + pageWork.length })
+              : null;
           const html = detailDocument(
             'Human work',
             renderListPage({
@@ -2519,11 +3437,11 @@ export function startConsoleServer(
           try {
             id = decodeURIComponent(detail[2]!);
           } catch {
-            return json(res, 400, { ok: false, error: 'malformed detail id' });
+            return respondGetError(req, res, 400, 'malformed detail id');
           }
           const pageIndex = Number(url.searchParams.get('page') ?? '0');
           if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
-            return json(res, 400, { ok: false, error: 'page must be a nonnegative integer' });
+            return respondGetError(req, res, 400, 'page must be a nonnegative integer');
           const detailNav = parseDetailNav(url.search);
           const fallbackMode = operatorSecret ? 'secret' : 'session';
           const detailOpts = {
@@ -2534,6 +3452,8 @@ export function startConsoleServer(
             requiredRole: approverMin,
             operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
             home: detailBackTarget(detailNav.returnTo, queueReturnUrl(home, {})),
+            notice: url.searchParams.get('notice') ?? undefined,
+            draft: url.searchParams.get('draft') === '1',
           };
           const navCtx = {
             returnTo: detailNav.returnTo ?? undefined,
@@ -2547,10 +3467,77 @@ export function startConsoleServer(
           } else {
             html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts, artifactDir, navCtx);
           }
-          if (!html) return json(res, 404, { ok: false, error: 'evidence not found' });
+          if (!html) return respondGetError(req, res, 404, 'evidence not found');
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(html);
           return;
+        }
+        const deliverableDraftPost = path.match(/^\/console\/requests\/([^/]+)\/deliverable$/);
+        if (method === 'POST' && deliverableDraftPost) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+          let id: string;
+          try {
+            id = decodeURIComponent(deliverableDraftPost[1]!);
+          } catch {
+            return json(res, 400, { ok: false, error: 'malformed request id' });
+          }
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const request = await coord.get(tenant, id);
+          if (!request) return json(res, 404, { ok: false, error: 'request not found' });
+          const content = String(call.fields.content ?? '').trim();
+          if (!content) return json(res, 400, { ok: false, error: 'deliverable content is required' });
+          const deliverableSchema = String(
+            call.fields.deliverableSchema ?? request.deliverableSchema ?? 'feature-plan.v1',
+          ).trim();
+          const priorVersionId = String(call.fields.priorVersionId ?? '').trim() || null;
+          const revisionNotes = String(call.fields.revisionNotes ?? '').trim() || null;
+          const externalPublish = call.fields.externalPublish === 'on' || call.fields.externalPublish === 'true';
+
+          const claimIdSet = new Set<string>();
+          for (const m of content.matchAll(/\[claim:([^\]]+)\]/gi)) {
+            claimIdSet.add(m[1]!);
+          }
+          if (claimIdSet.size === 0) {
+            for (const cid of [...request.claimRefs, ...request.chainClaimIds]) {
+              claimIdSet.add(cid);
+            }
+          }
+
+          const version = await persistDeliverableVersion(db, ledger, {
+            tenant,
+            requestId: id,
+            workflowId: null,
+            deliverableSchema,
+            content,
+            claimIds: [...claimIdSet],
+            createdBy: by(auth.user),
+            now: at,
+            artifactDir: artifactDir ?? process.env.ARTIFACT_DIR,
+            externalPublish,
+            revisionNotes,
+            priorVersionId,
+          });
+
+          await auditConsole(
+            db,
+            tenant,
+            by(auth.user),
+            'console.draft-deliverable',
+            `deliverable:${version.id}`,
+            at,
+            `version=${version.version}`,
+          );
+
+          return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
         }
         if (method === 'GET' && path === home) {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
@@ -2579,6 +3566,7 @@ export function startConsoleServer(
           });
           const report = await reportHtml(tenant, at);
           const fallbackMode = operatorSecret ? 'secret' : 'session';
+          const readiness = await renderSystemReadiness(at);
           const activation = renderActivationPanel(activationState, auth.session.csrfToken, home);
           const review = await renderReview(coord, ledger, {
             tenant,
@@ -2592,7 +3580,7 @@ export function startConsoleServer(
           });
           const html = report.replace(
             '<h1>Reality health</h1>',
-            `${searchHtml}${activation}${review}<h1>Reality health</h1>`,
+            `${readiness}${searchHtml}${activation}${review}<h1>Reality health</h1>`,
           );
           // The CSRF token rides in the page so same-origin form posts and
           // same-origin fetches can both present it.
@@ -2600,7 +3588,20 @@ export function startConsoleServer(
             '</head>',
             `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head>`,
           );
-          const consoleNav = renderConsoleNav(buildConsoleNav(home));
+          const isAdmin = atLeast(auth.user.role, 'admin');
+          const consoleNav = renderConsoleNav(
+            buildConsoleNav(home, {
+              requests: true,
+              claims: true,
+              rooms: true,
+              humanWork: true,
+              settings: isAdmin,
+              learning: isAdmin,
+              audit: isAdmin,
+              data: isAdmin,
+              buzz: isAdmin,
+            }),
+          );
           const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
           const skip = `<a class="skip-link" href="#main">Skip to main content</a>`;
           const withUser = withCsrf
@@ -2804,18 +3805,24 @@ export function startConsoleServer(
           return;
         }
 
-        if ((path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') && method === 'GET') {
+        if (
+          (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
+          method === 'GET'
+        ) {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (auth.user.mustChangePassword) return redirect(res, '/change-password');
           const notice = url.searchParams.get('saved') === 'ok' ? 'Room configuration saved and deployed.' : undefined;
-          const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, notice);
+          const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, notice, home);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
           return;
         }
-        if ((path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') && method === 'POST') {
+        if (
+          (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
+          method === 'POST'
+        ) {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -2832,7 +3839,7 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'setup.rooms', `tenant:${tenant}`, at);
             return redirect(res, '/setup/rooms?saved=ok');
           } catch (e) {
-            const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, (e as Error).message);
+            const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, (e as Error).message, home);
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
             return;
@@ -2863,9 +3870,10 @@ export function startConsoleServer(
           const stops = await describeStops(db, tenant);
           const haltEvidence = await listHaltEvidence(db, tenant);
           // Query outbox for automation-self-halt rows and pair with audit entries.
-          const outboxRows = (await db.prepare(
-            `SELECT id, status, attempts, next_at FROM outbox WHERE tenant = ? AND kind = 'automation-self-halt' ORDER BY id DESC LIMIT 5`,
-          )
+          const outboxRows = (await db
+            .prepare(
+              `SELECT id, status, attempts, next_at FROM outbox WHERE tenant = ? AND kind = 'automation-self-halt' ORDER BY id DESC LIMIT 5`,
+            )
             .all(tenant)) as { id: string; status: string; attempts: number; next_at: string }[];
           const outboxStatus = new Map<string, { status: string; attempts: number; nextAt: string }>();
           for (const r of outboxRows) {
@@ -2893,7 +3901,13 @@ export function startConsoleServer(
           else if (operatorSecret) operatorMode = 'secret';
           // FLOW-025: read-only trust gaps for every card (presentation
           // path only — never the evaluating describeCard).
-          const compilerGaps: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[] = [];
+          const compilerGaps: {
+            cardId: string;
+            intent: string;
+            state: string;
+            gaps: string[];
+            evalRef: string | null;
+          }[] = [];
           try {
             const cards = await comp.list(tenant, {});
             for (const card of cards.slice(0, 100)) {
@@ -2913,13 +3927,20 @@ export function startConsoleServer(
           } catch {
             // No cards or compiler unavailable — the section renders empty.
           }
+          const q = url.searchParams.get('q') ?? undefined;
+          const role = url.searchParams.get('role') ?? undefined;
+          const status = url.searchParams.get('status') ?? undefined;
+          const rawPage = Number(url.searchParams.get('page') ?? '1');
+          const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
           const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+            home,
             now: at,
             confirmations,
             stops,
             selfHalts,
             policy: { approverRole: approverMin, operatorMode },
             compilerGaps,
+            filter: { q, role, status, page: pageNum },
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
@@ -2939,64 +3960,124 @@ export function startConsoleServer(
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
           if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
           const data = await teamData();
-          try {
-            const { invitation, token } = await createInvitation(
-              db,
-              tenant,
-              {
-                email: call.fields.email ?? '',
-                name: call.fields.name ?? '',
-                role: parseRole(call.fields.role ?? 'member'),
-              },
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'team.invite',
-              `invitation:${invitation.id}`,
-              at,
-              `role=${invitation.role}`,
-            );
-            const link = `/accept-invite?token=${encodeURIComponent(token)}`;
-            const exposeInvite =
-              process.env.VITAL_EXPOSE_INVITE_LINK === '1'
-                ? ` Acceptance link (deliver out of band): ${link}`
-                : ' Deliver the acceptance link out of band — run with VITAL_EXPOSE_INVITE_LINK=1 in development to print it here.';
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              await listInvitations(db, tenant, at),
-              `${invitation.email} invited as ${invitation.role}.${exposeInvite}`,
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const attempted = (call.fields.email ?? '').trim().toLowerCase();
-            let hint = '';
-            if (e instanceof AuthError) {
-              if (e.code === 'DISABLED_USER_EXISTS') {
-                hint = ` ${invitationNextSteps('disabled_account', attempted).action}`;
-              } else if (e.code === 'INVITATION_PENDING') {
-                hint = ` ${invitationNextSteps('pending_invitation', attempted).action}`;
-              } else if (e.code === 'DUPLICATE_USER') {
-                hint = ` ${invitationNextSteps('active_account', attempted).action}`;
+          const rawEmail = (call.fields.email ?? '').trim();
+          const emailList = rawEmail
+            .split(/[\r\n,;]+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+
+          if (emailList.length <= 1) {
+            try {
+              const { invitation, token } = await createInvitation(
+                db,
+                tenant,
+                {
+                  email: emailList[0] ?? '',
+                  name: call.fields.name ?? '',
+                  role: parseRole(call.fields.role ?? 'member'),
+                },
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'team.invite',
+                `invitation:${invitation.id}`,
+                at,
+                `role=${invitation.role}`,
+              );
+              const link = `/accept-invite?token=${encodeURIComponent(token)}`;
+              const exposeInvite =
+                process.env.VITAL_EXPOSE_INVITE_LINK === '1'
+                  ? ` Acceptance link (deliver out of band): ${link}`
+                  : ' Deliver the acceptance link out of band — run with VITAL_EXPOSE_INVITE_LINK=1 in development to print it here.';
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                await listInvitations(db, tenant, at),
+                `${invitation.email} invited as ${invitation.role}.${exposeInvite}`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const attempted = (emailList[0] ?? '').toLowerCase();
+              let hint = '';
+              if (e instanceof AuthError) {
+                if (e.code === 'DISABLED_USER_EXISTS') {
+                  hint = ` ${invitationNextSteps('disabled_account', attempted).action}`;
+                } else if (e.code === 'INVITATION_PENDING') {
+                  hint = ` ${invitationNextSteps('pending_invitation', attempted).action}`;
+                } else if (e.code === 'DUPLICATE_USER') {
+                  hint = ` ${invitationNextSteps('active_account', attempted).action}`;
+                }
               }
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `create account failed: ${msg}${hint}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
             }
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `create account failed: ${msg}${hint}`,
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
+            return;
           }
+
+          // Bulk onboarding for multiple addresses
+          const invited: { email: string; token: string }[] = [];
+          const failed: { email: string; error: string }[] = [];
+          const targetRole = parseRole(call.fields.role ?? 'member');
+          for (const email of emailList) {
+            try {
+              const { invitation, token } = await createInvitation(
+                db,
+                tenant,
+                {
+                  email,
+                  name: call.fields.name
+                    ? `${call.fields.name} (${email.split('@')[0]})`
+                    : (email.split('@')[0] ?? 'Member'),
+                  role: targetRole,
+                },
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'team.invite',
+                `invitation:${invitation.id}`,
+                at,
+                `role=${invitation.role}`,
+              );
+              invited.push({ email, token });
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              failed.push({ email, error: msg });
+            }
+          }
+
+          const exposeInvite =
+            process.env.VITAL_EXPOSE_INVITE_LINK === '1' && invited.length > 0
+              ? ` Acceptance links: ${invited.map((i) => `${i.email}: /accept-invite?token=${encodeURIComponent(i.token)}`).join(' · ')}`
+              : ' Deliver acceptance links out of band.';
+          const failMsg =
+            failed.length > 0
+              ? ` (${failed.length} failed: ${failed.map((f) => `${f.email}: ${f.error}`).join(', ')})`
+              : '';
+          const statusMsg = `${invited.length} members invited as ${targetRole}.${failMsg}${exposeInvite}`;
+          const currentInvites = await listInvitations(db, tenant, at);
+          const html = teamPage(auth.session.csrfToken, auth.user, data.users, currentInvites, statusMsg, { home });
+          res.writeHead(invited.length > 0 ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(html);
           return;
         }
         if (path === '/team/invitation/resend' && method === 'POST') {
@@ -3032,6 +4113,7 @@ export function startConsoleServer(
               data.users,
               await listInvitations(db, tenant, at),
               `Invitation resent to ${invitation.email}.${exposeInvite}`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3043,6 +4125,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `resend failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3077,6 +4160,7 @@ export function startConsoleServer(
               data.users,
               await listInvitations(db, tenant, at),
               `Invitation to ${invitation.email} revoked`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3088,6 +4172,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `revoke failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3123,6 +4208,7 @@ export function startConsoleServer(
               await listUsers(db, tenant),
               data.invitations,
               `${user.email} reactivated — they must sign in again; old sessions stay revoked`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3134,6 +4220,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `reactivate failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3170,6 +4257,7 @@ export function startConsoleServer(
               await listUsers(db, tenant),
               data.invitations,
               `${user.email} is now ${user.role}`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3181,6 +4269,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `role change failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3217,6 +4306,7 @@ export function startConsoleServer(
               await listUsers(db, tenant),
               data.invitations,
               `Ownership transferred to ${to.email}. You are now an admin.`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3228,6 +4318,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `transfer failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3277,6 +4368,7 @@ export function startConsoleServer(
               await listUsers(db, tenant),
               data.invitations,
               `${target.email} disabled — every live session was revoked immediately.${handoffMsg} Reactivate restores sign-in access but does not restore old sessions.`,
+              { home },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3288,6 +4380,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `disable failed: ${msg}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3320,6 +4413,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               'recover failed: a recorded reason is required',
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3345,6 +4439,7 @@ export function startConsoleServer(
               data.users,
               data.invitations,
               `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
+              { home },
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
@@ -3519,6 +4614,9 @@ export function startConsoleServer(
             if (action === 'approve' && result.state === 'ACCEPTED' && !result.repeated) {
               await recordFirstReviewAt(db, tenant, at);
             }
+            if (prefersHtml(req)) {
+              return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
+            }
             json(res, 200, { ok: action === 'approve', id, ...result, ...identity });
           } catch (e) {
             const code = e instanceof ExecutionSpecError ? e.code : undefined;
@@ -3603,6 +4701,13 @@ export function startConsoleServer(
             json(res, 404, { ok: false, error: 'deliverable version not found' });
             return;
           }
+          if (version.externalPublish) {
+            const confirmText = String(call.fields.confirmText ?? '').trim();
+            if (confirmText !== 'PUBLISH') {
+              json(res, 400, { ok: false, error: 'type PUBLISH to confirm external publication' });
+              return;
+            }
+          }
           const request = await coord.get(tenant, version.requestId);
           try {
             const result = await db.transaction(async () => {
@@ -3619,6 +4724,9 @@ export function startConsoleServer(
               await auditConsole(db, tenant, who, 'console.approve-deliverable', `deliverable:${versionId}`, at);
               return approved;
             });
+            if (prefersHtml(req)) {
+              return redirect(res, `/console/requests/${encodeURIComponent(version.requestId)}`);
+            }
             json(res, 200, {
               ok: true,
               decisionId: result.decisionId,
@@ -3670,6 +4778,9 @@ export function startConsoleServer(
           try {
             const revised = await requestDeliverableRevision(db, tenant, versionId, notes, who, at);
             await auditConsole(db, tenant, who, 'console.request-changes', `deliverable:${versionId}`, at);
+            if (prefersHtml(req)) {
+              return redirect(res, `/console/requests/${encodeURIComponent(revised.requestId)}`);
+            }
             json(res, 200, { ok: true, status: revised.status, revisionNotes: revised.revisionNotes, ...identity });
           } catch (e) {
             json(res, 409, { ok: false, error: (e as Error).message.replace(/^\[wedge:[^\]]+\]\s*/, '') });
@@ -3722,8 +4833,7 @@ export function startConsoleServer(
                   const config = await loadActivationConfig(db, tenant);
                   const collectors = new Set(await listKnownCollectors(db, tenant));
                   if (config) collectors.add(collectorName(config.sourcePath));
-                  if (collectors.size === 0)
-                    return { ok: false, unconfigured: true, detail: 'no source configured' };
+                  if (collectors.size === 0) return { ok: false, unconfigured: true, detail: 'no source configured' };
                   const parts: string[] = [];
                   let failing: string | null = null;
                   for (const collector of collectors) {
@@ -4216,36 +5326,92 @@ export function startConsoleServer(
         }
 
         // ------------------------------------------------------------ Buzz Webhook & APIs
+        //
+        // SECURITY: every route under /api/buzz is authenticated. These routes
+        // previously had no gate at all, which meant an anonymous caller could
+        // read tenant ledger content (`/canvas/:room`), rewrite room policy
+        // (`/rooms/configure`), engage the scope kill switch
+        // (`/commands` -> `setKill`) and approve a pending human-approval
+        // request without a session or token (`/webhook?action=approve`).
+        //
+        // Two distinct callers are served, and they need different proof:
+        //  - A human in the console: session + CSRF + admin role.
+        //  - Buzz relay/room tooling: an HMAC-signed review token over the
+        //    exact (tenant, request, action). There is no tokenless path.
+        let buzzAdminUser: User | null = null;
+        // The request body can only be read once. Parsing here and re-using the
+        // result is what keeps the POST routes below from blocking forever on a
+        // stream that has already ended.
+        let buzzCall: Call | null = null;
+        if (path === '/api/buzz' || path.startsWith('/api/buzz/')) {
+          buzzCall = method === 'POST' ? await parseCall(req).catch(() => null) : null;
+          const providedToken =
+            method === 'POST'
+              ? (buzzCall?.fields.token ?? (buzzCall?.json?.token as string | undefined))
+              : url.searchParams.get('token');
+          const buzzAuth = await sessionOf();
+          const isAdmin = buzzAuth !== null && buzzAuth.user.tenant === tenant && atLeast(buzzAuth.user.role, 'admin');
+          const signedTokenOk =
+            typeof providedToken === 'string' && providedToken.length > 0 && reviewTokenValid(providedToken, tenant);
+          if (!isAdmin && !signedTokenOk) {
+            return json(res, 401, {
+              ok: false,
+              error: buzzAuth
+                ? 'admin role required for Buzz room administration'
+                : 'authentication required (session cookie or a signed review token)',
+            });
+          }
+          // A session-based mutation still needs CSRF: the session alone is not
+          // proof the request came from our own UI.
+          if (isAdmin && method === 'POST' && buzzCall && !signedTokenOk && !csrfOk(buzzAuth!.session, buzzCall.csrf)) {
+            return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          }
+          if (isAdmin) {
+            buzzAdminUser = buzzAuth!.user;
+          }
+        }
         if (path === '/api/buzz/webhook' && (method === 'POST' || method === 'GET')) {
           let action = url.searchParams.get('action');
           let token = url.searchParams.get('token');
           let requestId = url.searchParams.get('req');
           let forkedParams: any = {};
-          let actor = 'buzz:human';
+          let actor = buzzAdminUser ? by(buzzAdminUser) : 'buzz:token';
 
-          if (method === 'POST') {
-            try {
-              const call = await parseCall(req);
-              action = (call.fields.action ?? call.json?.action ?? action) as string;
-              token = (call.fields.token ?? call.json?.token ?? token) as string;
-              requestId = (call.fields.requestId ?? call.json?.requestId ?? requestId) as string;
-              if (call.json?.forkedParams) forkedParams = call.json.forkedParams;
-              if (call.fields.actor) actor = String(call.fields.actor);
-            } catch {
-              // fallback to query params
-            }
+          if (method === 'POST' && buzzCall) {
+            action = (buzzCall.fields.action ?? buzzCall.json?.action ?? token ?? action) as string;
+            token = (buzzCall.fields.token ?? buzzCall.json?.token ?? token) as string;
+            requestId = (buzzCall.fields.requestId ?? buzzCall.json?.requestId ?? requestId) as string;
+            if (buzzCall.json?.forkedParams) forkedParams = buzzCall.json.forkedParams;
+            if (buzzCall.fields.actor && buzzAdminUser) actor = by(buzzAdminUser);
           }
 
+          // A signed token proves exactly one thing: someone legitimately minted
+          // this (tenant, request, action). It never supplies an actor identity.
           if (token) {
-            const verified = verifyReviewToken(token, 'vital-review-secret');
-            if (verified.valid) {
+            const secret = reviewSecretFromEnv();
+            const verified = secret ? verifyReviewToken(token, secret) : { valid: false as const };
+            if (verified.valid && verified.tenant === tenant) {
               action = verified.action ?? action;
               requestId = verified.requestId ?? requestId;
+            } else if (!buzzAdminUser) {
+              return json(res, 401, { ok: false, error: 'invalid or expired review token' });
             }
           }
 
           if (!requestId) {
             return json(res, 400, { ok: false, error: 'missing requestId or valid token' });
+          }
+
+          // GET is a confirmation step, never a mutation: a URL that approves
+          // on fetch is prefetchable, CSRF-able and gets executed by link
+          // scanners. A human (or Buzz) confirms with the form below.
+          if (method === 'GET' && (action === 'approve' || action === 'decline')) {
+            const verb = action === 'approve' ? 'Approve' : 'Decline';
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0A0F14;color:#F4F7F5;padding:40px;"><h2>${verb} request <code>${esc(requestId)}</code>?</h2><p style="color:#9FB0A9;">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" style="background:#10B981;color:#04120C;border:0;border-radius:6px;padding:12px 20px;font-size:15px;cursor:pointer;">${verb}</button></form><p><a href="${esc(home)}" style="color:#10B981;">Return to Mission Control</a></p></body></html>`,
+            );
+            return;
           }
 
           if (action === 'approve') {
@@ -4269,11 +5435,6 @@ export function startConsoleServer(
                 });
                 await auditConsole(db, tenant, actor, 'buzz.approve', `request:${requestId}`, at);
               }
-              if (method === 'GET') {
-                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-                res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;background:#111827;color:#F9FAFB;padding:40px;text-align:center;"><h2>🟢 Approval Recorded</h2><p>Request <code>${esc(requestId)}</code> has been approved and admitted for execution.</p><p><a href="/console" style="color:#10B981;">Return to Mission Control</a></p></body></html>`);
-                return;
-              }
               return json(res, 200, { ok: true, action: 'approve', requestId, status: 'ACCEPTED' });
             } catch (e) {
               return json(res, 409, { ok: false, error: (e as Error).message });
@@ -4287,11 +5448,6 @@ export function startConsoleServer(
               if (current.state === 'ADMITTED') {
                 await coord.decline(tenant, requestId, 'Declined via Buzz review card');
                 await auditConsole(db, tenant, actor, 'buzz.decline', `request:${requestId}`, at);
-              }
-              if (method === 'GET') {
-                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-                res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;background:#111827;color:#F9FAFB;padding:40px;text-align:center;"><h2>🔴 Request Declined</h2><p>Request <code>${esc(requestId)}</code> has been declined.</p><p><a href="/console" style="color:#10B981;">Return to Mission Control</a></p></body></html>`);
-                return;
               }
               return json(res, 200, { ok: true, action: 'decline', requestId, status: 'DECLINED' });
             } catch (e) {
@@ -4329,12 +5485,8 @@ export function startConsoleServer(
 
         // POST /api/buzz/rooms/configure: configure a room
         if (path === '/api/buzz/rooms/configure' && method === 'POST') {
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
+          if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
+          const call = buzzCall;
           const scope = String(call.fields.scope ?? call.json?.scope ?? '').trim();
           if (!scope) return json(res, 400, { ok: false, error: 'scope is required' });
           const updates: any = {};
@@ -4376,12 +5528,8 @@ export function startConsoleServer(
 
         // POST /api/buzz/commands: execute in-room slash command
         if (path === '/api/buzz/commands' && method === 'POST') {
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
+          if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
+          const call = buzzCall;
           const command = String(call.fields.command ?? call.json?.command ?? '').trim();
           const roomScope = String(call.fields.scope ?? call.json?.scope ?? 'core');
           const actor = String(call.fields.actor ?? call.json?.actor ?? 'operator');
@@ -4437,10 +5585,46 @@ export function startConsoleServer(
         const addr = server.address();
         if (!addr || typeof addr === 'string') return reject(new Error('[console:UNBOUND] server did not bind'));
         boundAddress = `${addr.address}:${addr.port}`;
+        const boundHost = addr.address;
+        const boundPort = addr.port;
         resolve({
-          host: addr.address,
-          port: addr.port,
+          host: boundHost,
+          port: boundPort,
           address: boundAddress,
+          ready: () =>
+            new Promise((resoleReady) => {
+              const loopbackHost = publicBind || boundHost === '0.0.0.0' || boundHost === '::' ? '127.0.0.1' : boundHost;
+              const probeUrl = `http://${loopbackHost}:${boundPort}/healthz`;
+              const probe = new URL(probeUrl);
+              const req = httpRequest(probe);
+              const timer = setTimeout(() => {
+                req.destroy();
+                resoleReady({ ok: false, status: 'failed', detail: 'readiness probe timed out — console not answering yet' });
+              }, 2000);
+              req.once('response', (resP: IncomingMessage & { resume?: () => void }) => {
+                clearTimeout(timer);
+                const status = resP.statusCode ?? 500;
+                resP.resume();
+                if (status === 200) {
+                  resoleReady({
+                    ok: true,
+                    status: 'ready',
+                    detail: `console answers on ${boundAddress} (healthz ${status})`,
+                  });
+                } else {
+                  resoleReady({
+                    ok: false,
+                    status: 'blocked',
+                    detail: `console bound on ${boundAddress} but healthz returned ${status}`,
+                  });
+                }
+              });
+              req.once('error', () => {
+                clearTimeout(timer);
+                resoleReady({ ok: false, status: 'failed', detail: 'readiness probe could not reach the console' });
+              });
+              req.end();
+            }),
           close: () =>
             new Promise<void>((r) => {
               for (const sock of open) sock.destroy();

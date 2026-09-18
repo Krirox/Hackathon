@@ -10,6 +10,7 @@ import {
   watchRun,
   type BuzzNostrEvent,
 } from '../src/talk/buzz.ts';
+import { generateNostrKeypair, verifyNostrEvent } from '../src/talk/nostr.ts';
 import { judgeText, approvedCompleteChat, devProfile } from '../src/substrate/models.ts';
 import { laneModelFn } from '../src/sense/triage.ts';
 import { ApplicationWorker } from '../src/substrate/worker.ts';
@@ -80,21 +81,29 @@ T('a tampered binding fails loudly, never degrades silently', async () => {
   await rejects(async () => createHmacSurface(''), 'NO_SECRET');
 });
 
-/** A relay that lives for one assertion block: captures POST /events. */
+/**
+ * A relay that lives for one assertion block: captures POST /events.
+ *
+ * It captures the **bare event**, which is what a real Buzz relay expects —
+ * the old `{ event }` envelope was answered with `invalid event JSON: missing
+ * field \`id\``.
+ */
 async function fakeRelay(handler?: (body: unknown) => { status: number; json: unknown }): Promise<{
   url: string;
-  received: { path: string; body: { event: BuzzNostrEvent } }[];
+  received: { path: string; body: BuzzNostrEvent; headers: Record<string, string> }[];
   close(): Promise<void>;
 }> {
-  const received: { path: string; body: { event: BuzzNostrEvent } }[] = [];
+  const received: { path: string; body: BuzzNostrEvent; headers: Record<string, string> }[] = [];
   const server: Server = createServer((req, res) => {
     let data = '';
     req.on('data', (c: Buffer) => {
       data += c.toString();
     });
     req.on('end', () => {
-      const body = JSON.parse(data) as { event: BuzzNostrEvent };
-      received.push({ path: req.url ?? '', body });
+      const body = JSON.parse(data) as BuzzNostrEvent;
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers[k] = v;
+      received.push({ path: req.url ?? '', body, headers });
       const out = handler ? handler(body) : { status: 200, json: { ok: true } };
       res.writeHead(out.status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(out.json));
@@ -106,10 +115,22 @@ async function fakeRelay(handler?: (body: unknown) => { status: number; json: un
   return { url: `http://127.0.0.1:${port}`, received, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
-const stubSigner = (pubkey: string) => ({
-  pubkey,
-  sign: (id: string) => `sig:${id.slice(0, 16)}`,
-});
+/**
+ * A real agent identity plus the room's relay channel UUID. Both are load
+ * bearing now: the relay verifies the Schnorr signature, and channel-scoped
+ * events must carry a real channel UUID in `#h`.
+ */
+const testAgent = generateNostrKeypair();
+const TEST_CHANNEL = '9f1c1d3e-6a2b-4c3d-8e4f-5a6b7c8d9e0f';
+const TEST_THREAD_ROOT = 'a'.repeat(64);
+const testSurface = (relayUrl: string) =>
+  createBuzzSurface({
+    relayUrl,
+    keypair: testAgent,
+    authMode: 'dev-pubkey',
+    fetchFn: stubFetch,
+    channelIdFor: (ref) => (ref === 'engineering' || ref === 'risk' ? TEST_CHANNEL : null),
+  });
 
 const stubFetch = async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
   const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
@@ -119,10 +140,10 @@ const stubFetch = async (url: string, init: { method: string; headers: Record<st
 T('progress posts are signed kind-9 messages bound to channel, thread and request', async () => {
   const relay = await fakeRelay();
   try {
-    const buzz = createBuzzSurface({ relayUrl: relay.url, signer: stubSigner('room-pubkey'), fetchFn: stubFetch });
+    const buzz = testSurface(relay.url);
     const ev = await buzz.post({
-      channel: 'chan-engineering',
-      threadRoot: 'root-event-id',
+      channel: 'engineering',
+      threadRoot: TEST_THREAD_ROOT,
       requestId: 'req_1',
       step: 3,
       toolName: 'write_file',
@@ -131,21 +152,42 @@ T('progress posts are signed kind-9 messages bound to channel, thread and reques
     });
     eq(relay.received.length, 1);
     eq(relay.received[0]!.path, '/events');
+    // The wire body is the bare event: a real relay parses it as one.
+    eq(relay.received[0]!.body.id, ev.id, 'the posted body is the event itself:');
+    eq(relay.received[0]!.headers['content-type'], 'application/json');
+    eq(relay.received[0]!.headers['x-pubkey'], testAgent.pubkey, 'dev auth names the agent:');
     eq(ev.kind, BUZZ_CHAT_KIND, 'NIP-29 group-chat message:');
-    eq(ev.pubkey, 'room-pubkey', 'the room agent posts as itself:');
+    eq(ev.pubkey, testAgent.pubkey, 'the room agent posts as itself:');
     eq(
       ev.tags,
       [
-        ['h', 'chan-engineering'],
-        ['e', 'root-event-id', relay.url, 'reply'],
+        ['h', TEST_CHANNEL],
+        ['e', TEST_THREAD_ROOT, relay.url, 'reply'],
         ['vital-request', 'req_1', 'IN_FLIGHT'],
         ['vital-tool', 'write_file'],
       ],
       'channel + thread root + request binding ride tags, not prose:',
     );
     eq(ev.content.includes('req_1') && ev.content.includes('1500'), true, 'humans can read it too:');
-    eq(ev.id, nostrEventId(ev.pubkey, ev.created_at, ev.kind, ev.tags, ev.content), 'id recomputes (NIP-01):');
-    eq(ev.sig, `sig:${ev.id.slice(0, 16)}`, 'signed by the room identity:');
+    eq(
+      ev.id,
+      nostrEventId(ev.pubkey, { kind: ev.kind, tags: ev.tags, content: ev.content, createdAt: ev.created_at }),
+      'id recomputes (NIP-01):',
+    );
+    eq(ev.sig.length, 128, 'a real 64-byte BIP-340 signature is attached:');
+    eq(
+      verifyNostrEvent({
+        pubkey: ev.pubkey,
+        id: ev.id,
+        sig: ev.sig,
+        kind: ev.kind,
+        tags: ev.tags,
+        content: ev.content,
+        createdAt: ev.created_at,
+      }),
+      true,
+      'the relay would accept this signature:',
+    );
   } finally {
     await relay.close();
   }
@@ -154,18 +196,20 @@ T('progress posts are signed kind-9 messages bound to channel, thread and reques
 T('relay failures fail loud; unbound posts never reach the network', async () => {
   const dead = createBuzzSurface({
     relayUrl: 'http://127.0.0.1:1',
-    signer: stubSigner('room-pubkey'),
+    keypair: testAgent,
+    authMode: 'dev-pubkey',
     fetchFn: stubFetch,
+    channelIdFor: () => TEST_CHANNEL,
   });
   await rejects(
-    async () => dead.post({ channel: 'c', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
+    async () => dead.post({ channel: 'engineering', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
     'RELAY_UNREACHABLE',
   );
   const refusing = await fakeRelay(() => ({ status: 403, json: { error: 'not a member' } }));
   try {
-    const buzz = createBuzzSurface({ relayUrl: refusing.url, signer: stubSigner('room-pubkey'), fetchFn: stubFetch });
+    const buzz = testSurface(refusing.url);
     await rejects(
-      async () => buzz.post({ channel: 'c', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
+      async () => buzz.post({ channel: 'engineering', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
       'RELAY_REJECTED',
     );
   } finally {
@@ -173,14 +217,20 @@ T('relay failures fail loud; unbound posts never reach the network', async () =>
   }
   const relay = await fakeRelay();
   try {
-    const buzz = createBuzzSurface({ relayUrl: relay.url, signer: stubSigner('room-pubkey'), fetchFn: stubFetch });
+    const buzz = testSurface(relay.url);
     await rejects(
       async () => buzz.post({ channel: '', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
       'NO_CHANNEL',
     );
     await rejects(
-      async () => buzz.post({ channel: 'c', requestId: '', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
+      async () => buzz.post({ channel: 'engineering', requestId: '', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
       'NO_REQUEST',
+    );
+    // A room that was never provisioned has no relay channel UUID: publishing
+    // must refuse rather than guess at a channel name.
+    await rejects(
+      async () => buzz.post({ channel: 'ops', requestId: 'r', step: 1, tokens: 0, state: 'IN_FLIGHT' }),
+      'CHANNEL_NOT_PROVISIONED',
     );
     eq(relay.received.length, 0, 'nothing unbound touches the wire:');
   } finally {
@@ -216,14 +266,22 @@ T('a live run streams progress into the originating thread', async () => {
       const { request } = await coord.submit(
         base({ id: 'live1', claimRefs: [clm.id], bid: { dollars: 5, tokens: 100_000 } }),
       );
-      const buzz = createBuzzSurface({ relayUrl: relay.url, signer: stubSigner('room-pubkey'), fetchFn: stubFetch });
+      const buzz = createBuzzSurface({
+        relayUrl: relay.url,
+        keypair: testAgent,
+        authMode: 'dev-pubkey',
+        fetchFn: stubFetch,
+        channelIdFor: () => TEST_CHANNEL,
+      });
       const r = new JcodeRunner(db, ledger, coord);
       watchRun(
         (fn) => {
           r.on('progress', fn);
         },
         buzz,
-        { channel: 'chan-eng', threadRoot: 'root-1', requestId: request.id },
+        // A bogus thread root is dropped rather than published: the surface
+        // only emits an `e` reply tag for a real 64-hex event id.
+        { channel: 'eng', threadRoot: 'root-1', requestId: request.id },
       );
       const out = await r.run(
         TEN,
@@ -241,12 +299,18 @@ T('a live run streams progress into the originating thread', async () => {
       }
       eq(posts >= 2, true, `progress reached the thread (got ${posts}):`);
       for (const { body } of relay.received) {
+        const ev = body;
         eq(
-          body.event.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
+          ev.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
           true,
           'every post names its request:',
         );
-        eq(body.event.tags[0], ['h', 'chan-eng']);
+        eq(ev.tags[0], ['h', TEST_CHANNEL], 'posts land in the relay channel UUID:');
+        eq(
+          ev.tags.some((t) => t[0] === 'e'),
+          false,
+          'a non-event thread root emits no reply tag:',
+        );
       }
       eq((await coord.get(TEN, request.id))!.spent.tokens, 1500, 'the mid-run flow persisted the spend:');
     });
@@ -346,10 +410,7 @@ T('F25: laneModelFn rejects unapproved model before any network call', async () 
   };
   const modelFn = laneModelFn('dev', stubFetch as never);
   const unapproved = { ...devProfile(), model: 'forbidden-model' };
-  await rejects(
-    () => modelFn(unapproved, 'key', [{ role: 'user', text: 'test' }]),
-    'UNAPPROVED_MODEL',
-  );
+  await rejects(() => modelFn(unapproved, 'key', [{ role: 'user', text: 'test' }]), 'UNAPPROVED_MODEL');
   eq(networkHit, false, 'forbidden model never reaches the wire:');
 });
 
@@ -397,11 +458,13 @@ T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures 
 
     const buzzSurface = createBuzzSurface({
       relayUrl: relay.url,
-      signer: { pubkey: 'worker-key', sign: (id) => `sig:${id.slice(0, 8)}` },
+      keypair: testAgent,
+      authMode: 'dev-pubkey',
       fetchFn: async (url, init) => {
         const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
         return { ok: res.ok, status: res.status, text: () => res.text() };
       },
+      channelIdFor: () => TEST_CHANNEL,
     });
 
     const worker = new ApplicationWorker(db, ledger, coord, {
@@ -413,7 +476,7 @@ T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures 
       sweepIntervalMs: 99_999,
       buzz: {
         surface: buzzSurface,
-        channelFor: () => ({ channel: 'chan-engineering', threadRoot: 'root-ev' }),
+        channelFor: () => ({ channel: 'engineering' }),
       },
     });
 
@@ -424,15 +487,19 @@ T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures 
       await new Promise((r) => setTimeout(r, 20));
     }
 
-    eq(relay.received.length >= 1, true, `at least one terminal Buzz event must be posted (got ${relay.received.length}):`);
+    eq(
+      relay.received.length >= 1,
+      true,
+      `at least one terminal Buzz event must be posted (got ${relay.received.length}):`,
+    );
     const last = relay.received[relay.received.length - 1]!;
     eq(
-      last.body.event.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
+      last.body.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
       true,
       'terminal event names the request:',
     );
     eq(
-      last.body.event.tags.some((t) => t[0] === 'vital-request' && (t[2] === 'COMPLETED' || t[2] === 'FAILED')),
+      last.body.tags.some((t) => t[0] === 'vital-request' && (t[2] === 'COMPLETED' || t[2] === 'FAILED')),
       true,
       'terminal event carries terminal state:',
     );
@@ -459,15 +526,19 @@ T('F25: worker skips Buzz posting for test-baseline adapters', async () => {
       authorType: 'system',
       provenance: sor(),
     });
-    await coord.submit(base({ id: 'buzz2', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }));
+    await coord.submit(
+      base({ id: 'buzz2', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }),
+    );
 
     const buzzSurface = createBuzzSurface({
       relayUrl: relay.url,
-      signer: { pubkey: 'worker-key', sign: (id) => `sig:${id.slice(0, 8)}` },
+      keypair: testAgent,
+      authMode: 'dev-pubkey',
       fetchFn: async (url, init) => {
         const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
         return { ok: res.ok, status: res.status, text: () => res.text() };
       },
+      channelIdFor: () => TEST_CHANNEL,
     });
 
     // LocalEchoAdapter is a test-baseline; Buzz should be silenced for it

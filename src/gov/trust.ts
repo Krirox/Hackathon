@@ -124,12 +124,18 @@ export async function recordTrustOutcome(
       await recordSelfHalt(db, tenant, scope, actionClass, 'honeytask miss — automatic freeze', 'trust', [], now);
       // Also persist a durable outbox row so the outbox worker can deliver
       // the notification with retries, backoff, and lease-based restart recovery.
-      await enqueueOutbox(db, tenant, 'automation-self-halt', {
-        scope,
-        actionClass,
-        reason: outcome.honeyMiss ? 'honeytask miss — automatic freeze' : 'automation self-halt',
-        affected: [],
-      }, { now });
+      await enqueueOutbox(
+        db,
+        tenant,
+        'automation-self-halt',
+        {
+          scope,
+          actionClass,
+          reason: outcome.honeyMiss ? 'honeytask miss — automatic freeze' : 'automation self-halt',
+          affected: [],
+        },
+        { now },
+      );
       return;
     }
     if (outcome.override === true || !outcome.clean) {
@@ -799,13 +805,19 @@ export async function recordSelfHalt(
   );
   // Persist a durable outbox row so the outbox worker can deliver
   // the notification with retries, backoff, and lease-based restart recovery.
-  await enqueueOutbox(db, tenant, 'automation-self-halt', {
-    scope,
-    actionClass,
-    reason,
-    detectedAt: at,
-    affected,
-  }, { now: at });
+  await enqueueOutbox(
+    db,
+    tenant,
+    'automation-self-halt',
+    {
+      scope,
+      actionClass,
+      reason,
+      detectedAt: at,
+      affected,
+    },
+    { now: at },
+  );
   return notification;
 }
 
@@ -917,8 +929,7 @@ export async function readWorkerHeartbeat(
   tenant: string,
 ): Promise<{ workerId: string; at: string } | null> {
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(workerHeartbeatKey(tenant))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!row) return null;
   try {
     const parsed = JSON.parse(String(row.value)) as { workerId?: unknown; at?: unknown };

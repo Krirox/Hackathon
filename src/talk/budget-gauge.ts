@@ -112,8 +112,7 @@ export class RoomBudgetTracker {
 
     const alertKey = `budget:warned:${this.tenant}:${gauge.scope}`;
     const warnedRow = (await this.db.prepare('SELECT value FROM meta WHERE key = ?').get(alertKey)) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
 
     // Check if warned recently within last 24h
     if (warnedRow && !opts.forceAlert) {
@@ -133,15 +132,17 @@ export class RoomBudgetTracker {
       .run(alertKey, this.now());
 
     if (this.surface) {
-      void this.surface.post({
-        channel: room.channel,
-        threadRoot: opts.threadRoot,
-        requestId: `budget_warn_${gauge.scope}_${Date.now()}`,
-        step: 1,
-        tokens: 100,
-        state: 'BUDGET_WARNING',
-        text: message,
-      }).catch(() => {});
+      void this.surface
+        .post({
+          channel: room.channel,
+          threadRoot: opts.threadRoot,
+          requestId: `budget_warn_${gauge.scope}_${Date.now()}`,
+          step: 1,
+          tokens: 100,
+          state: 'BUDGET_WARNING',
+          text: message,
+        })
+        .catch(() => {});
     }
 
     return { alerted: true, gauge, message };

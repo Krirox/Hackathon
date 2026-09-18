@@ -1,68 +1,46 @@
-import { T, eq, TEN, NOW, fresh, sor, base, rejects } from './helpers.ts';
+import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
 import {
   CANONICAL_ROOMS,
   agentForScope,
   normalizeScope,
-  roomForScope,
   channelForScope,
   channelForRequest,
   loadRoomConfig,
   saveRoomConfig,
-  listRoomConfigs,
 } from '../src/talk/rooms.ts';
 import {
   ScopeHealthEvaluator,
   publishRoomStatusBeacon,
   formatStatusBeacon,
-  STATUS_BADGES,
   BUZZ_STATUS_BEACON_KIND,
 } from '../src/talk/health.ts';
-import {
-  renderReviewCard,
-  mintReviewToken,
-  verifyReviewToken,
-  requestToReviewCard,
-} from '../src/talk/review-card.ts';
-import { executeRoomCommand, isRoomCommand } from '../src/talk/commands.ts';
-import {
-  InterAgentSwarmCoordinator,
-  parseCrossRoomDispatch,
-} from '../src/talk/swarm.ts';
-import {
-  LiveCanvasSynchronizer,
-  BUZZ_CANVAS_KIND,
-} from '../src/talk/canvas.ts';
-import {
-  AutomatedHoneytaskCanary,
-  CANARY_PRESETS,
-} from '../src/talk/canary.ts';
-import {
-  AmbientMorningBriefingSynthesizer,
-  generateVoiceAudioWav,
-} from '../src/talk/huddle.ts';
-import {
-  RoomBudgetTracker,
-  renderProgressBar,
-  formatTokenRate,
-} from '../src/talk/budget-gauge.ts';
+import { renderReviewCard, mintReviewToken, verifyReviewToken } from '../src/talk/review-card.ts';
+import { executeRoomCommand } from '../src/talk/commands.ts';
+import { InterAgentSwarmCoordinator, parseCrossRoomDispatch } from '../src/talk/swarm.ts';
+import { LiveCanvasSynchronizer } from '../src/talk/canvas.ts';
+import { AutomatedHoneytaskCanary } from '../src/talk/canary.ts';
+import { AmbientMorningBriefingSynthesizer, generateVoiceAudioWav } from '../src/talk/huddle.ts';
+import { RoomBudgetTracker, renderProgressBar, formatTokenRate } from '../src/talk/budget-gauge.ts';
 import { TimeTravelForkEngine } from '../src/talk/fork.ts';
-import {
-  renderRoomsSetupPage,
-  handleRoomsSetupPost,
-  INDUSTRY_PRESETS,
-} from '../src/console/rooms-setup.ts';
-import { createBuzzSurface, type BuzzNostrEvent, type BuzzProgressPost } from '../src/talk/buzz.ts';
+import { renderRoomsSetupPage, handleRoomsSetupPost, INDUSTRY_PRESETS } from '../src/console/rooms-setup.ts';
+import { createBuzzSurface, type BuzzNostrEvent } from '../src/talk/buzz.ts';
+import { generateNostrKeypair, pubkeyFromSecret, verifyNostrEvent } from '../src/talk/nostr.ts';
+import { signAsRoomAgent } from '../src/talk/rooms.ts';
 import { createServer, type Server } from 'node:http';
 
 console.log('\n\x1b[1m🏛️ Vital Buzz Autonomous Rooms & Swarms Test Suite\x1b[0m');
 
 /** Mock Nostr Relay for testing */
+/**
+ * A relay that captures the **bare event** — the shape a real Buzz relay
+ * parses. It also records headers so the auth scheme is assertable.
+ */
 async function fakeRelay(): Promise<{
   url: string;
-  received: { path: string; body: { event: BuzzNostrEvent } }[];
+  received: { path: string; body: BuzzNostrEvent; headers: Record<string, string> }[];
   close(): Promise<void>;
 }> {
-  const received: { path: string; body: { event: BuzzNostrEvent } }[] = [];
+  const received: { path: string; body: BuzzNostrEvent; headers: Record<string, string> }[] = [];
   const server: Server = createServer((req, res) => {
     let data = '';
     req.on('data', (c: Buffer) => {
@@ -70,9 +48,14 @@ async function fakeRelay(): Promise<{
     });
     req.on('end', () => {
       try {
-        const body = JSON.parse(data) as { event: BuzzNostrEvent };
-        received.push({ path: req.url ?? '', body });
-      } catch {}
+        const body = JSON.parse(data) as BuzzNostrEvent;
+        const headers: Record<string, string> = {};
+        for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers[k] = v;
+        received.push({ path: req.url ?? '', body, headers });
+      } catch {
+        // A probe that is not JSON is recorded as nothing; the relay-style
+        // error path is exercised elsewhere.
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -92,29 +75,73 @@ const stubFetch = async (url: string, init: { method: string; headers: Record<st
   return { ok: res.ok, status: res.status, text: () => res.text() };
 };
 
+/** A real agent identity for the tests that publish. */
+const testAgent = generateNostrKeypair();
+/** A provisioned room's relay channel UUID. */
+const TEST_CHANNEL = '6f2d1c4b-3a5e-4d7c-9b1a-2c3d4e5f6a7b';
+const surfaceFor = (relayUrl: string) =>
+  createBuzzSurface({
+    relayUrl,
+    keypair: testAgent,
+    authMode: 'dev-pubkey',
+    fetchFn: stubFetch,
+    channelIdFor: () => TEST_CHANNEL,
+  });
+
 // ------------------------------------------------------------------ Phase 1 Tests
 T('Phase 1: 12 Canonical Rooms and cryptographic agent identities are properly initialized', async () => {
   const { db } = await fresh();
   eq(CANONICAL_ROOMS.length, 12, 'exactly 12 canonical rooms:');
 
   const expectedRooms = [
-    'reality-core', 'fact-check', 'market-intel', 'risk-monitor',
-    'user-feedback', 'compliance', 'finance', 'ops',
-    'growth', 'data-pipeline', 'exec', 'sandbox',
+    'reality-core',
+    'fact-check',
+    'market-intel',
+    'risk-monitor',
+    'user-feedback',
+    'compliance',
+    'finance',
+    'ops',
+    'growth',
+    'data-pipeline',
+    'exec',
+    'sandbox',
   ];
 
   for (const name of expectedRooms) {
     const room = CANONICAL_ROOMS.find((r) => r.name === name);
     eq(Boolean(room), true, `room ${name} exists in roster:`);
-    const agent = agentForScope(room!.scope);
-    eq(agent.name, room!.agentName, `agent ${room!.agentName} matches room:`);
-    eq(typeof agent.pubkey, 'string', 'agent has valid pubkey:');
-    eq(agent.pubkey.length, 64, 'pubkey is 64 hex characters (sha256):');
-
-    // Test signature
-    const sig = await agent.signer.sign('test-event-id');
-    eq(sig.startsWith('sig:'), true, 'signer signs event ID:');
+    eq(room!.agentName.endsWith('-agent'), true, `room ${name} names an agent:`);
   }
+
+  // Fail closed: with no key material configured, a room has NO identity. The
+  // old implementation invented a "pubkey" as sha256("vital:agent:<name>") and
+  // signed with a plain hash, which no relay would accept and anyone could forge.
+  if (!process.env.BUZZ_AGENT_MASTER_KEY) {
+    eq(agentForScope('risk'), null, 'an unconfigured deployment has no agent identity:');
+  }
+
+  // With a master secret, identities are real secp256k1 keys, one per agent,
+  // and reproducible — provisioning stays idempotent without storing 12 keys.
+  process.env.BUZZ_AGENT_MASTER_KEY = 'a'.repeat(64);
+  const risk = agentForScope('risk');
+  eq(Boolean(risk), true, 'a configured deployment resolves an identity:');
+  eq(risk!.name, 'risk-agent');
+  eq(risk!.scope, 'risk');
+  eq(risk!.pubkey, pubkeyFromSecret(risk!.keypair.secretKey), "the pubkey is the keypair's real pubkey:");
+  eq(risk!.resolution.source, 'master-key');
+  eq(agentForScope('risk')!.pubkey, risk!.pubkey, 'identity derivation is stable:');
+  eq(agentForScope('finance')!.pubkey !== risk!.pubkey, true, 'each room agent is a distinct identity:');
+
+  // Signing as the room agent produces an event a relay would accept.
+  const signed = signAsRoomAgent('risk', {
+    kind: BUZZ_STATUS_BEACON_KIND,
+    tags: [['h', TEST_CHANNEL]],
+    content: 'probe',
+  });
+  eq(verifyNostrEvent(signed), true, 'the room agent signs verifiable events:');
+  eq(signed.pubkey, risk!.pubkey);
+  delete process.env.BUZZ_AGENT_MASTER_KEY;
 
   // Scope normalization
   eq(normalizeScope('scope:risk'), 'risk');
@@ -162,19 +189,45 @@ T('Phase 2: ScopeHealthEvaluator computes composite health and publishes status 
   eq(haltedHealth.status, 'halted');
   eq(haltedHealth.badge, '🔴');
   eq(haltedHealth.activeStops, 1);
-  eq(haltedHealth.reasons.some((r) => r.includes('Active stop engaged')), true);
+  eq(
+    haltedHealth.reasons.some((r) => r.includes('Active stop engaged')),
+    true,
+  );
 
   // Publish beacon to Nostr relay
   const relay = await fakeRelay();
   try {
-    const agent = agentForScope('risk');
-    const surface = createBuzzSurface({ relayUrl: relay.url, signer: agent.signer, fetchFn: stubFetch });
-    await publishRoomStatusBeacon(surface, haltedHealth, agent.pubkey, agent.signer.sign);
+    const surface = surfaceFor(relay.url);
+    await publishRoomStatusBeacon(surface, haltedHealth);
 
     eq(relay.received.length >= 1, true, 'status beacon reached relay:');
     const last = relay.received[relay.received.length - 1]!;
-    eq(last.body.event.tags.some((t) => t[0] === 'h' && t[1] === 'chan-risk-monitor'), true);
-    eq(last.body.event.content.includes('🔴 #risk-monitor'), true);
+    const ev = last.body;
+    eq(ev.kind, BUZZ_STATUS_BEACON_KIND, 'the beacon is published as kind 30315, not as chat text:');
+    eq(
+      ev.tags.some((t) => t[0] === 'h' && t[1] === TEST_CHANNEL),
+      true,
+      'the beacon addresses the room relay channel UUID:',
+    );
+    eq(
+      ev.tags.some((t) => t[0] === 'd' && t[1] === 'status:risk'),
+      true,
+      'the beacon is addressable per room:',
+    );
+    eq(
+      verifyNostrEvent({
+        pubkey: ev.pubkey,
+        id: ev.id,
+        sig: ev.sig,
+        kind: ev.kind,
+        tags: ev.tags,
+        content: ev.content,
+        createdAt: ev.created_at,
+      }),
+      true,
+      'the relay would accept this beacon:',
+    );
+    eq(ev.content.includes('🔴 #risk-monitor'), true);
   } finally {
     await relay.close();
   }
@@ -270,7 +323,9 @@ T('Phase 5: In-Room Slash Commands execute /halt, /recover, /status, /cost, /pol
 
   // 7. Verify signed immutable audit_log record
   const auditRow = (await db
-    .prepare('SELECT actor, action, target, detail FROM audit_log WHERE tenant = ? AND action = ? ORDER BY seq DESC LIMIT 1')
+    .prepare(
+      'SELECT actor, action, target, detail FROM audit_log WHERE tenant = ? AND action = ? ORDER BY seq DESC LIMIT 1',
+    )
     .get(TEN, 'POLICY_MUTATE')) as { actor: string; action: string; target: string; detail: string } | undefined;
   eq(Boolean(auditRow), true);
   eq(auditRow?.actor, 'risk-lead');
@@ -284,8 +339,7 @@ T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', a
   const relay = await fakeRelay();
 
   try {
-    const marketAgent = agentForScope('research');
-    const surface = createBuzzSurface({ relayUrl: relay.url, signer: marketAgent.signer, fetchFn: stubFetch });
+    const surface = surfaceFor(relay.url);
     const swarm = new InterAgentSwarmCoordinator({ db, ledger, coord, surface });
 
     // Ingest origin observation claim in #market-intel
@@ -539,11 +593,7 @@ T('Feature 6: In-Room Time-Travel Forking clones context into #sandbox and diffs
   });
 
   // Fork the decision with Claude 3.5 Sonnet at temp 0.2
-  const diff = await forkEngine.forkRun(
-    TEN,
-    { decisionId: dec.id },
-    { model: 'claude-3-5-sonnet', temperature: 0.2 },
-  );
+  const diff = await forkEngine.forkRun(TEN, { decisionId: dec.id }, { model: 'claude-3-5-sonnet', temperature: 0.2 });
 
   eq(diff.originalDecisionId, dec.id);
   eq(diff.originalParams.recommendation, 'Apply 50% partial hedge on counterparty drift');
@@ -602,7 +652,9 @@ T('Phase 6: Room Selection Onboarding Setup Wizard renders presets and saves con
 
   // 4. Verify immutable audit entry in audit_log
   const auditEntry = (await db
-    .prepare('SELECT actor, action, target, detail FROM audit_log WHERE tenant = ? AND target = ? ORDER BY seq DESC LIMIT 1')
+    .prepare(
+      'SELECT actor, action, target, detail FROM audit_log WHERE tenant = ? AND target = ? ORDER BY seq DESC LIMIT 1',
+    )
     .get(TEN, 'room:risk')) as { actor: string; action: string; target: string; detail: string } | undefined;
   eq(Boolean(auditEntry), true);
   eq(auditEntry?.actor, 'operator:admin');

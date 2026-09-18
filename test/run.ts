@@ -47,6 +47,7 @@ import './export-audit.test.ts';
 import './backup-restore.test.ts';
 import './learning.test.ts';
 import './e2e-gates.test.ts';
+import './buzz.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

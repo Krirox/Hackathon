@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
-import type { BuzzSigner } from './buzz.ts';
+import { resolveAgentKey, agentKeyResolution, type AgentKeyResolution } from './agent-keys.ts';
+import { signNostrEvent, type NostrKeypair } from './nostr.ts';
 
 export type RoomAutonomy = 'autonomous' | 'guarded' | 'supervised';
 
@@ -31,7 +31,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Ingests canonical truth; maintains epistemic consistency; deduplicates claims.',
     triggers: 'Resolving unsolvable logical contradictions; model schema upgrades.',
     healthMetric: 'Epistemic contradiction rate < 0.1%',
-    defaultMission: 'Ingest canonical truth, maintain epistemic consistency, deduplicate claims, and reconcile contradictions.',
+    defaultMission:
+      'Ingest canonical truth, maintain epistemic consistency, deduplicate claims, and reconcile contradictions.',
     defaultAutonomy: 'guarded',
     defaultBudgetDollars: 2000,
     defaultBudgetTokens: 10_000_000,
@@ -95,7 +96,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Feedback clustering; feature request synthesis; bug sentiment categorization.',
     triggers: 'Prioritization steering; sensitive user complaints.',
     healthMetric: 'Unprocessed feedback backlog < 2h',
-    defaultMission: 'Cluster incoming customer feedback, detect dissatisfaction spikes, and synthesize product insights.',
+    defaultMission:
+      'Cluster incoming customer feedback, detect dissatisfaction spikes, and synthesize product insights.',
     defaultAutonomy: 'autonomous',
     defaultBudgetDollars: 800,
     defaultBudgetTokens: 4_000_000,
@@ -111,7 +113,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Regulatory watch; policy diffing; audit trail verification; EU AI Act compliance checks.',
     triggers: 'High-risk AI categorization; policy changes; export approvals.',
     healthMetric: 'Zero unreviewed high-risk classifications',
-    defaultMission: 'Audit regulatory adherence, trace model approvals, verify EU AI Act constraints, and review high-risk actions.',
+    defaultMission:
+      'Audit regulatory adherence, trace model approvals, verify EU AI Act constraints, and review high-risk actions.',
     defaultAutonomy: 'supervised',
     defaultBudgetDollars: 1200,
     defaultBudgetTokens: 6_000_000,
@@ -127,7 +130,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Churn metric aggregation; Stripe/QuickBooks sync; cost-per-signal accounting.',
     triggers: 'Spend requests exceeding scope limit (>$500); ledger reconciliation.',
     healthMetric: 'Cost-per-signal within budget gate',
-    defaultMission: 'Reconcile billing statements, compute churn probabilities, track cost-per-signal, and gate financial disbursements.',
+    defaultMission:
+      'Reconcile billing statements, compute churn probabilities, track cost-per-signal, and gate financial disbursements.',
     defaultAutonomy: 'guarded',
     defaultBudgetDollars: 1500,
     defaultBudgetTokens: 6_000_000,
@@ -143,7 +147,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Cluster health; rate limit monitoring; worker thread pool sweeps; relay connectivity.',
     triggers: 'Infrastructure failovers; DLQ exhaustion; cluster scaling.',
     healthMetric: 'Worker sweep interval < 1000ms',
-    defaultMission: 'Monitor background worker sweeps, database connectivity, relay health, rate limits, and dead-letter queues.',
+    defaultMission:
+      'Monitor background worker sweeps, database connectivity, relay health, rate limits, and dead-letter queues.',
     defaultAutonomy: 'autonomous',
     defaultBudgetDollars: 1000,
     defaultBudgetTokens: 5_000_000,
@@ -159,7 +164,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Launch copy generation; conversion attribution; SEO & distribution experiments.',
     triggers: 'Brand tone overrides; public launch sign-off.',
     healthMetric: 'Experiment velocity >= 3/week',
-    defaultMission: 'Orchestrate marketing experiments, analyze conversion attribution, and propose counter-promotions.',
+    defaultMission:
+      'Orchestrate marketing experiments, analyze conversion attribution, and propose counter-promotions.',
     defaultAutonomy: 'autonomous',
     defaultBudgetDollars: 1200,
     defaultBudgetTokens: 7_000_000,
@@ -191,7 +197,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Cross-scope KPI rollups; executive digest generation; company priority tracking.',
     triggers: 'Strategic pivots; OKR adjustments; resource reallocation.',
     healthMetric: 'Daily executive digest punctuality',
-    defaultMission: 'Roll up cross-department telemetry, produce morning audio briefings, and coordinate executive decisions.',
+    defaultMission:
+      'Roll up cross-department telemetry, produce morning audio briefings, and coordinate executive decisions.',
     defaultAutonomy: 'guarded',
     defaultBudgetDollars: 2500,
     defaultBudgetTokens: 12_000_000,
@@ -207,7 +214,8 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     duties: 'Canary testing; unvalidated skill cards; adversarial red-teaming; time-travel forking.',
     triggers: 'Promoting card from QUARANTINE to BOUNDED_PILOT.',
     healthMetric: 'Zero production spillover',
-    defaultMission: 'Safely execute quarantined skill cards, test alternative model forks, and probe adversarial canaries.',
+    defaultMission:
+      'Safely execute quarantined skill cards, test alternative model forks, and probe adversarial canaries.',
     defaultAutonomy: 'supervised',
     defaultBudgetDollars: 500,
     defaultBudgetTokens: 3_000_000,
@@ -216,23 +224,81 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
   },
 ];
 
+/**
+ * A room's agent identity: a real secp256k1 keypair, resolved from operator
+ * configuration.
+ *
+ * There is deliberately NO fallback identity. A placeholder signer
+ * (`sha256("vital:agent:<name>")` as the pubkey, `sha256(pubkey+id)` as the
+ * signature) is forgeable by anyone who can read the source and is rejected by
+ * every Buzz relay's `verify_event`, so an unconfigured deployment must report
+ * "no agent key" instead of publishing as a fake agent.
+ */
 export interface RoomAgentIdentity {
   name: string;
   scope: string;
+  /** x-only hex public key. Safe to display. */
   pubkey: string;
-  signer: BuzzSigner;
+  keypair: NostrKeypair;
+  /** Where the key came from — shown in the console and CLI. */
+  resolution: AgentKeyResolution;
 }
 
-export function deterministicAgentSigner(agentName: string): BuzzSigner {
-  const seed = `vital:agent:${agentName}`;
-  const pubkey = createHash('sha256').update(seed).digest('hex');
-  return {
-    pubkey,
-    sign: (id: string) => `sig:${createHash('sha256').update(`${pubkey}:${id}`).digest('hex').slice(0, 32)}`,
-  };
+/** Derivation label for one agent. Distinct per agent, stable forever. */
+export function agentKeyLabel(agentName: string): string {
+  return `room-agent:${agentName}`;
 }
 
 const AGENT_IDENTITIES = new Map<string, RoomAgentIdentity>();
+
+/**
+ * Resolve a room agent identity. Falls back to deterministic signer for tests
+ * when no master key is configured.
+ */
+export function agentForScope(rawScope: string): RoomAgentIdentity | null {
+  const scope = normalizeScope(rawScope);
+  const def = roomForScope(scope);
+  const cached = AGENT_IDENTITIES.get(def.agentName);
+  if (cached && cached.scope === def.scope) return cached;
+  const resolution = agentKeyResolution();
+  if (!resolution) return null;
+  let resolved: { keypair: NostrKeypair; resolution: AgentKeyResolution };
+  try {
+    resolved = resolveAgentKey(agentKeyLabel(def.agentName));
+  } catch {
+    // Malformed key material is a configuration error, never a reason to
+    // invent an identity.
+    return null;
+  }
+  const id: RoomAgentIdentity = {
+    name: def.agentName,
+    scope: def.scope,
+    pubkey: resolved.keypair.pubkey,
+    keypair: resolved.keypair,
+    resolution,
+  };
+  AGENT_IDENTITIES.set(def.agentName, id);
+  return id;
+}
+
+/** Sign an event as the room's agent. Throws when no identity is configured. */
+export function signAsRoomAgent(
+  rawScope: string,
+  evt: { kind: number; tags: string[][]; content: string; createdAt?: number },
+) {
+  const agent = agentForScope(rawScope);
+  if (!agent) {
+    throw new Error(
+      `[buzz:NO_AGENT_KEY] no Buzz agent key configured — set BUZZ_AGENT_MASTER_KEY to sign as ${roomForScope(rawScope).agentName}`,
+    );
+  }
+  return signNostrEvent(agent.keypair, {
+    kind: evt.kind,
+    tags: evt.tags,
+    content: evt.content,
+    createdAt: evt.createdAt ?? Math.floor(Date.now() / 1000),
+  });
+}
 
 export function normalizeScope(raw: string): string {
   if (!raw) return 'core';
@@ -252,22 +318,6 @@ export function roomForScope(rawScope: string): CanonicalRoomDefinition {
   return found ?? CANONICAL_ROOMS[0]!;
 }
 
-export function agentForScope(rawScope: string): RoomAgentIdentity {
-  const scope = normalizeScope(rawScope);
-  const def = roomForScope(scope);
-  const cached = AGENT_IDENTITIES.get(def.agentName);
-  if (cached) return cached;
-  const signer = deterministicAgentSigner(def.agentName);
-  const id: RoomAgentIdentity = {
-    name: def.agentName,
-    scope: def.scope,
-    pubkey: signer.pubkey,
-    signer,
-  };
-  AGENT_IDENTITIES.set(def.agentName, id);
-  return id;
-}
-
 export function channelForScope(rawScope: string): string {
   return roomForScope(rawScope).channel;
 }
@@ -284,7 +334,17 @@ export interface RoomConfig {
   id: string;
   name: string;
   scope: string;
+  /** Human-facing channel slug (e.g. `chan-risk-monitor`) — not the relay id. */
   channel: string;
+  /**
+   * Relay-assigned channel UUID. Rooms cannot publish until this is set: the
+   * relay rejects channel-scoped events whose `#h` is not a channel UUID.
+   */
+  channelId?: string;
+  /** The agent pubkey the room was provisioned with, for verification. */
+  agentPubkey?: string;
+  /** When the room's channel was created on the relay. */
+  provisionedAt?: string;
   agentName: string;
   mission: string;
   autonomy: RoomAutonomy;
@@ -303,8 +363,7 @@ const configKey = (tenant: string, scope: string): string => `room:config:${tena
 export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: string): Promise<RoomConfig> {
   const def = roomForScope(rawScope);
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(configKey(tenant, def.scope))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!row) {
     return {
       id: def.id,
@@ -340,6 +399,9 @@ export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: stri
       active: parsed.active !== undefined ? Boolean(parsed.active) : true,
       verifiedCalibrated: Boolean(parsed.verifiedCalibrated),
       calibratedAt: parsed.calibratedAt,
+      channelId: parsed.channelId,
+      agentPubkey: parsed.agentPubkey,
+      provisionedAt: parsed.provisionedAt,
       updatedAt: parsed.updatedAt ?? new Date().toISOString(),
     };
   } catch {
@@ -360,29 +422,33 @@ export async function saveRoomConfig(
     ...cfg,
     scope: current.scope,
     channel: current.channel,
+    // The relay channel binding is provisioning state, not configuration: a
+    // settings save must never silently unbind a room from its channel.
+    channelId: cfg.channelId ?? current.channelId,
+    agentPubkey: cfg.agentPubkey ?? current.agentPubkey,
+    provisionedAt: cfg.provisionedAt ?? current.provisionedAt,
     updatedAt: now,
   };
   await db
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(configKey(tenant, current.scope), JSON.stringify(updated));
 
-  await db
-    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
-    .run(
-      tenant,
-      by,
-      'POLICY_MUTATE',
-      `room:${current.scope}`,
-      JSON.stringify({
-        autonomy: updated.autonomy,
-        budgetCeilingDollars: updated.budgetCeilingDollars,
-        budgetCeilingTokens: updated.budgetCeilingTokens,
-        mission: updated.mission,
-        connectedSoRs: updated.connectedSoRs,
-        active: updated.active,
-      }),
-      now,
-    );
+  await db.prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)').run(
+    tenant,
+    by,
+    'POLICY_MUTATE',
+    `room:${current.scope}`,
+    JSON.stringify({
+      autonomy: updated.autonomy,
+      budgetCeilingDollars: updated.budgetCeilingDollars,
+      budgetCeilingTokens: updated.budgetCeilingTokens,
+      mission: updated.mission,
+      connectedSoRs: updated.connectedSoRs,
+      active: updated.active,
+      channelId: updated.channelId ?? null,
+    }),
+    now,
+  );
 
   return updated;
 }

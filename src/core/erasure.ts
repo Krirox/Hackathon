@@ -1,4 +1,13 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -389,7 +398,8 @@ function checkErasureExportFile(
   slug: string,
   exportedAt: string,
 ): { path: string; status: ExportFileStatus; detail: string } {
-  if (!existsSync(path)) return { path, status: 'missing', detail: 'export file no longer on disk (operator-managed retention)' };
+  if (!existsSync(path))
+    return { path, status: 'missing', detail: 'export file no longer on disk (operator-managed retention)' };
   let parsed: { tenant?: unknown; exportedAt?: unknown };
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8')) as { tenant?: unknown; exportedAt?: unknown };

@@ -454,8 +454,16 @@ T('FLOW-004: operator receipt verification names every bucket and checks the exp
   const verified = await verifyErasureReceipt(db, TEN);
   eq(verified.found, true);
   eq(verified.receipt?.deleted['claims'] ?? 0, 1);
-  eq(verified.receipt?.retained.some((x) => x.category === 'ledger-export'), true, 'retained export listed:');
-  eq(verified.receipt?.deferred.some((x) => x.category === 'backups'), true, 'deferred backups listed:');
+  eq(
+    verified.receipt?.retained.some((x) => x.category === 'ledger-export'),
+    true,
+    'retained export listed:',
+  );
+  eq(
+    verified.receipt?.deferred.some((x) => x.category === 'backups'),
+    true,
+    'deferred backups listed:',
+  );
   eq(verified.exportFile?.status, 'verified', 'durable export re-checks against the receipt:');
   // Tamper with the file: verification must notice.
   writeFileSync(verified.exportFile!.path, JSON.stringify({ tenant: TEN, exportedAt: 'tampered' }));

@@ -1051,11 +1051,17 @@ export async function disableConfirmation(db: AsyncDb, tenant: string, userId: s
  * Login under lockout. Keys the attempt counter by (tenant, ip, email) when an
  * IP is available — HTTP callers pass `ip` — else by (tenant, email).
  */
-export async function login(
+/**
+ * FLOW-007 / FINAL-005: verify a password (with lockout + audit) WITHOUT
+ * issuing a session. Used by `login()` and by the MFA-gated console login so
+ * a correct password alone never mints a usable session when a second factor
+ * is enrolled.
+ */
+export async function verifyLoginCredentials(
   db: AsyncDb,
   input: { tenant: string; email: string; password: string; ip?: string },
   now: string,
-): Promise<{ user: User; session: Session; token: string }> {
+): Promise<User> {
   const email = input.email.trim().toLowerCase();
   const key = `${input.tenant}|${input.ip ?? '-'}|${email}`;
   const day = dayOf(now);
@@ -1092,13 +1098,39 @@ export async function login(
   if (!verifyPassword(input.password, String((user as Row).password_hash))) await fail(`bad password for ${email}`);
 
   await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(key);
-  const { session, token } = await createSession(db, u, now);
-  await db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now, u.id);
+  return u;
+}
+
+/**
+ * FLOW-007 / FINAL-005: start a session for an already-authenticated user.
+ * Shared by `login()` (password only) and the MFA completion path (password +
+ * second factor) so both audit and stamp `last_login_at` identically.
+ */
+export async function startSessionForUser(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  now: string,
+): Promise<{ user: User; session: Session; token: string }> {
+  const user = await getUser(db, tenant, userId);
+  if (!user) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  if (user.disabled) throw new AuthError('DISABLED_USER', 'account is disabled');
+  const { session, token } = await createSession(db, user, now);
+  await db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now, user.id);
   // NOTE: must_change_password is deliberately NOT cleared here. The flag
   // means "your next action is a password change"; only changePassword()
   // retires it, so an invited/bootstrap user is gated until they comply.
-  await audit(db, input.tenant, u.id, 'auth.login', 'login', now);
-  return { user: u, session, token };
+  await audit(db, tenant, user.id, 'auth.login', 'login', now);
+  return { user, session, token };
+}
+
+export async function login(
+  db: AsyncDb,
+  input: { tenant: string; email: string; password: string; ip?: string },
+  now: string,
+): Promise<{ user: User; session: Session; token: string }> {
+  const u = await verifyLoginCredentials(db, input, now);
+  return startSessionForUser(db, input.tenant, u.id, now);
 }
 
 /** Next rolling expiry, capped by the absolute lifetime from session creation. */
@@ -1305,8 +1337,7 @@ export async function requestEmailVerification(
 
 export async function confirmEmailVerification(db: AsyncDb, token: string, now: string): Promise<User> {
   const r = (await db.prepare('SELECT * FROM email_verifications WHERE token_hash = ?').get(sha256(token))) as
-    | { user_id: string; expires_at: string; used_at: string | null }
-    | undefined;
+    { user_id: string; expires_at: string; used_at: string | null } | undefined;
   if (!r) throw new AuthError('BAD_VERIFICATION_TOKEN', 'unknown verification token');
   if (r.used_at !== null && r.used_at !== '') throw new AuthError('BAD_VERIFICATION_TOKEN', 'token already used');
   if (r.expires_at <= now) throw new AuthError('BAD_VERIFICATION_TOKEN', 'verification token expired');
@@ -1464,8 +1495,7 @@ function hotp(secret: Uint8Array, counter: bigint, digits: number): string {
   hmac.update(Buffer.from(secret));
   const mac = hmac.update(msg).digest();
   const offset = mac[mac.length - 1]! & 0x0f;
-  const code =
-    ((mac[offset]! & 0x7f) << 24) | (mac[offset + 1]! << 16) | (mac[offset + 2]! << 8) | mac[offset + 3]!;
+  const code = ((mac[offset]! & 0x7f) << 24) | (mac[offset + 1]! << 16) | (mac[offset + 2]! << 8) | mac[offset + 3]!;
   return String(code % 10 ** digits).padStart(digits, '0');
 }
 
@@ -1535,7 +1565,13 @@ export async function isMfaEnabled(db: AsyncDb, userId: string): Promise<boolean
   return Number(row.n) > 0;
 }
 
-export async function removeMfaFactor(db: AsyncDb, tenant: string, userId: string, factorId: string, now: string): Promise<void> {
+export async function removeMfaFactor(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  factorId: string,
+  now: string,
+): Promise<void> {
   const out = await db.prepare('DELETE FROM mfa_factors WHERE id = ? AND user_id = ?').run(factorId, userId);
   if (out.changes === 0) throw new AuthError('UNKNOWN_MFA_FACTOR', `no MFA factor ${factorId}`);
   await db.prepare('DELETE FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL').run(userId);
@@ -1543,7 +1579,13 @@ export async function removeMfaFactor(db: AsyncDb, tenant: string, userId: strin
 }
 
 /** Verify a TOTP code against any enrolled TOTP factor; stamps last_used_at. */
-export async function verifyMfaCode(db: AsyncDb, tenant: string, userId: string, code: string, now: string): Promise<boolean> {
+export async function verifyMfaCode(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  code: string,
+  now: string,
+): Promise<boolean> {
   const factors = await listMfaFactors(db, userId);
   const atMs = Date.parse(now);
   for (const f of factors) {
@@ -1581,11 +1623,9 @@ export async function generateMfaRecoveryCodes(
   await db.transaction(async () => {
     await db.prepare('DELETE FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL').run(userId);
     for (const c of codes)
-      await db.prepare('INSERT INTO mfa_recovery_codes (code_hash, user_id, used_at, created_at) VALUES (?, ?, NULL, ?)').run(
-        sha256(c),
-        userId,
-        now,
-      );
+      await db
+        .prepare('INSERT INTO mfa_recovery_codes (code_hash, user_id, used_at, created_at) VALUES (?, ?, NULL, ?)')
+        .run(sha256(c), userId, now);
     await audit(db, tenant, userId, 'auth.mfa_recovery_issued', `user:${userId}`, now, `count=${count}`);
   });
   return codes;
@@ -1623,7 +1663,9 @@ export async function assertRecentAuthForSensitiveOp(
   windowMs = MFA_RECENT_AUTH_WINDOW_MS,
 ): Promise<void> {
   const session = (await db
-    .prepare('SELECT created_at FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1')
+    .prepare(
+      'SELECT created_at FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1',
+    )
     .get(userId)) as { created_at: string } | undefined;
   if (!session) throw new AuthError('REAUTH_REQUIRED', 'recent authentication required for sensitive operation');
   if (Date.parse(now) - Date.parse(session.created_at) > windowMs) {

@@ -204,15 +204,17 @@ export class TimeTravelForkEngine {
 
     // Post comparison back into originating thread
     if (this.surface && opts.channel) {
-      void this.surface.post({
-        channel: opts.channel,
-        threadRoot: opts.threadRoot,
-        requestId: sandboxRequestId,
-        step: 1,
-        tokens: forkedTokens,
-        state: 'FORK_DIFF',
-        text: sideBySideMarkdown,
-      }).catch(() => {});
+      void this.surface
+        .post({
+          channel: opts.channel,
+          threadRoot: opts.threadRoot,
+          requestId: sandboxRequestId,
+          step: 1,
+          tokens: forkedTokens,
+          state: 'FORK_DIFF',
+          text: sideBySideMarkdown,
+        })
+        .catch(() => {});
     }
 
     return {

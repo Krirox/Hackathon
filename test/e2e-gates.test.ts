@@ -186,7 +186,12 @@ T('E2E-06: approval freezes a decision; execution, artifact, outcome, and replay
         command: 'write marketing blog copy for streaming replication',
         draftText: 'Postgres streaming replication is now live with 0ms downtime.',
         now: NOW,
-        measurement: { metric: 'launch_reach_impressions', predicted: 1000, actual: 1250, basis: 'blog views analytics' },
+        measurement: {
+          metric: 'launch_reach_impressions',
+          predicted: 1000,
+          actual: 1250,
+          basis: 'blog views analytics',
+        },
         executeAction: () => ({
           executed: true,
           receiptId: 'rcpt_e2e06_blog',
@@ -200,8 +205,16 @@ T('E2E-06: approval freezes a decision; execution, artifact, outcome, and replay
     eq(asset.measuredOutcome.metric, 'launch_reach_impressions');
     const replay = await ledger.replayDecision(TEN, asset.decisionId);
     eq(replay.record.id, asset.decisionId, 'frozen decision replays:');
-    eq(replay.drift.every((d) => !d.drifted), true, 'no drift at approval time:');
-    eq(replay.record.bundle.claims.some((c) => c.id === a.id), true, 'frozen bundle holds the approved evidence:');
+    eq(
+      replay.drift.every((d) => !d.drifted),
+      true,
+      'no drift at approval time:',
+    );
+    eq(
+      replay.record.bundle.claims.some((c) => c.id === a.id),
+      true,
+      'frozen bundle holds the approved evidence:',
+    );
   } finally {
     await db.close();
   }
@@ -372,7 +385,13 @@ T('E2E-12: outage surfaces failed health; recovery settles receipts without dupl
     });
     eq(recovered.state, 'ready', 'recovery reports ready:');
     eq(recovered.lastReceipt?.claimId, first.claimIds[0], 'receipt links to the settled claim:');
-    await recordPollHealth(db, TEN, collectorName, { at: NOW, ok: false, eventsFetched: 0, staged: 0, errorCode: 'RATE_LIMITED' });
+    await recordPollHealth(db, TEN, collectorName, {
+      at: NOW,
+      ok: false,
+      eventsFetched: 0,
+      staged: 0,
+      errorCode: 'RATE_LIMITED',
+    });
     const limited = deriveIntegrationState({
       configured: true,
       disabled: false,
@@ -400,7 +419,7 @@ T('E2E-17: compose topology serves liveness; readiness fails when a required dep
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const base = `http://127.0.0.1:${server.port}`;
-    const healthz = await (await fetch(`${base}/healthz`)).json() as { ok: boolean };
+    const healthz = (await (await fetch(`${base}/healthz`)).json()) as { ok: boolean };
     eq(healthz.ok, true, 'reachable application answers liveness:');
     eq((await fetch(`${base}/api/metrics`)).status, 401, 'readiness stays session-gated:');
     const session = await loginCookies(server.port);

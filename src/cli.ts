@@ -5,7 +5,14 @@ import { buildReport } from './console/report.ts';
 import { renderHtml } from './console/render.ts';
 import { startConsoleServer } from './console/serve.ts';
 import { CognitiveRouter } from './router/router.ts';
-import { installAuthSchema, signupTenant, operatorSetPassword, tryPasswordReset } from './core/auth.ts';
+import {
+  installAuthSchema,
+  signupTenant,
+  operatorSetPassword,
+  tryPasswordReset,
+  listUsers,
+  requestEmailVerification,
+} from './core/auth.ts';
 import { collectErasureArtifacts, eraseTenant, ERASURE_DONE_ACTION, verifyErasureReceipt } from './core/erasure.ts';
 import {
   assertTenantExists,
@@ -45,6 +52,7 @@ import {
 } from './ledger/export.ts';
 import { runIngestionWorker } from './ingest/worker.ts';
 import { runApplicationWorker } from './substrate/worker.ts';
+import { workerBuzzSurface } from './talk/buzz-runtime.ts';
 
 /**
  * Minimal dev CLI + instance verifier (TODO §§0.4, V2.1, FLOW-005).
@@ -273,8 +281,18 @@ if (cmd === 'status') {
         const slug = receiptArg.trim().toLowerCase();
         if (!slug) throw new Error('usage: vital verify --erasure-receipt <slug> [--db <target>]');
         const verification = await verifyErasureReceipt(db, slug);
-        console.log(JSON.stringify({ vital: '0.0.1', ok: verification.found, ...formatTargetHeader(target), ...verification }, null, 2));
-        if (!verification.found || verification.exportFile?.status === 'mismatch' || verification.exportFile?.status === 'unreadable') {
+        console.log(
+          JSON.stringify(
+            { vital: '0.0.1', ok: verification.found, ...formatTargetHeader(target), ...verification },
+            null,
+            2,
+          ),
+        );
+        if (
+          !verification.found ||
+          verification.exportFile?.status === 'mismatch' ||
+          verification.exportFile?.status === 'unreadable'
+        ) {
           process.exitCode = 1;
         }
       } else if (archivalArg) {
@@ -289,7 +307,18 @@ if (cmd === 'status') {
           key,
           probe: archiveDir ? filesystemArchivalProbe(archiveDir) : undefined,
         });
-        console.log(JSON.stringify({ vital: '0.0.1', ok: report.status === 'verified' || report.status === 'unconfigured', ...formatTargetHeader(target), archival: report }, null, 2));
+        console.log(
+          JSON.stringify(
+            {
+              vital: '0.0.1',
+              ok: report.status === 'verified' || report.status === 'unconfigured',
+              ...formatTargetHeader(target),
+              archival: report,
+            },
+            null,
+            2,
+          ),
+        );
         if (report.status !== 'verified' && report.status !== 'unconfigured') process.exitCode = 1;
       } else if (recoverArg) {
         const tenant = resolveTenant({ flag: flag('--tenant'), required: true })!;
@@ -486,22 +515,42 @@ if (cmd === 'status') {
     server.host === '0.0.0.0' || server.host === '::'
       ? `http://127.0.0.1:${server.port}`
       : `http://${server.host}:${server.port}`;
-  console.log(
-    `vital console listening on ${server.address} (${localUrl} locally; ${JSON.stringify(formatTargetHeader(target, tenant))}${site ? ', site ./site' : ''})`,
-  );
+  // FLOW-013 / activation-ready: surface a *usable* result, not just a bound
+  // address. A server that bound but never answers is not "running" from the
+  // user's perspective. Classify into ready / blocked / failed with a
+  // recoverable next step.
+  const probe = await server.ready();
+  if (probe.status === 'ready') {
+    console.log(
+      `vital console ready — ${localUrl} (${probe.detail}; ${JSON.stringify(formatTargetHeader(target, tenant))}${site ? ', site ./site' : ''})`,
+    );
+  } else if (probe.status === 'blocked') {
+    console.log(
+      `vital console bound on ${server.address} but not ready (${probe.detail}). ` +
+        `This can mean the tenant is awaiting setup or a dependency is unhealthy. ` +
+        `Open ${localUrl} and finish setup, or run \`vital serve --readiness --tenant ${tenant}\` to diagnose.`,
+    );
+  } else {
+    console.log(
+      `vital console bound on ${server.address} but the readiness probe could not confirm it (${probe.detail}). ` +
+        `The server may still be starting or a port is misconfigured. Retry, or run \`vital status --readiness --tenant ${tenant}\`.`,
+    );
+  }
   const withWorker = args.includes('--with-worker') || process.env.VITAL_WITH_WORKER === '1';
   if (withWorker) {
     const workerController = new AbortController();
     const stopWorker = () => workerController.abort();
     process.once('SIGINT', stopWorker);
     process.once('SIGTERM', stopWorker);
+    const buzz = await workerBuzzSurface(db, tenant);
     const workerPromise = runApplicationWorker(db, createLedger(db), createCoordinator(db), {
       tenant,
       jcodeSocketPath: process.env.JCODE_API_SOCKET,
       signal: workerController.signal,
+      ...(buzz ? { buzz } : {}),
     });
     workerPromise.catch((err) => console.error('[worker-error]', err));
-    console.log(`vital worker active in-process for tenant "${tenant}"`);
+    console.log(`vital worker active in-process for tenant "${tenant}"${buzz ? ' (Buzz live)' : ''}`);
   }
 } else if (cmd === 'ingest-files') {
   const tenant = flag('--tenant');
@@ -588,12 +637,15 @@ if (cmd === 'status') {
   process.once('SIGTERM', stop);
 
   console.log(`vital worker started for tenant "${tenant}" (${JSON.stringify(formatTargetHeader(target, tenant))})`);
+  const buzz = await workerBuzzSurface(db, tenant);
+  if (buzz) console.log('vital worker: Buzz surface live (run progress streams to room threads)');
   try {
     const result = await runApplicationWorker(db, createLedger(db), createCoordinator(db), {
       tenant,
       jcodeSocketPath: jcodeSocket,
       pollIntervalMs,
       signal: controller.signal,
+      ...(buzz ? { buzz } : {}),
     });
     console.log(JSON.stringify(result));
     if (result.errors.length > 0) process.exitCode = 1;
@@ -678,6 +730,29 @@ if (cmd === 'status') {
   } catch (e) {
     fail(e);
   }
+} else if (cmd === 'verify-link') {
+  try {
+    const target = resolveDbTarget({ flag: flag('--db') });
+    const tenant = resolveTenant({ flag: flag('--tenant'), required: true });
+    const email = flag('--email');
+    const baseUrl = (flag('--base-url') ?? 'http://127.0.0.1:3100').replace(/\/$/, '');
+    if (!email) throw new Error('usage: vital verify-link --tenant <slug> --email <email> [--base-url <url>]');
+    const db = openDbTarget(target);
+    try {
+      await migrateDbTarget(db);
+      await installAuthSchema(db);
+      await assertTenantExists(db, tenant!, { strict: true });
+      const users = await listUsers(db, tenant!);
+      const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+      if (!user) throw new Error(`no user ${email} in tenant ${tenant}`);
+      const token = await requestEmailVerification(db, tenant!, user.id, new Date().toISOString());
+      console.log(`${baseUrl}/verify-email?token=${encodeURIComponent(token)}`);
+    } finally {
+      await db.close();
+    }
+  } catch (e) {
+    fail(e);
+  }
 } else if (cmd === 'erase') {
   try {
     const target = resolveDbTarget({ flag: flag('--db') });
@@ -709,8 +784,15 @@ if (cmd === 'status') {
       const result = await eraseTenant(db, tenant!, actor, undefined, { exportTo: exportDir ?? undefined });
       // Post-commit collector: runs AFTER the transaction commits so a
       // rollback can never restore refs to already-deleted blobs.
-      const deferredRefs = (result.receipt.deferred.find((d) => d.category === 'artifacts')?.items ?? []).slice().sort();
-      let collected: { deleted: string[]; retainedShared: string[]; missing: string[]; failed: { ref: string; reason: string }[] } | null = null;
+      const deferredRefs = (result.receipt.deferred.find((d) => d.category === 'artifacts')?.items ?? [])
+        .slice()
+        .sort();
+      let collected: {
+        deleted: string[];
+        retainedShared: string[];
+        missing: string[];
+        failed: { ref: string; reason: string }[];
+      } | null = null;
       if (deferredRefs.length > 0) {
         collected = await collectErasureArtifacts(db, tenant!, deferredRefs, { actor });
         console.log(
@@ -816,7 +898,14 @@ if (cmd === 'status') {
         const result = await killDrill(db, tenant, 'cli:drill', now);
         console.log(
           JSON.stringify(
-            { vital: '0.0.1', ok: result.allHalted, ...formatTargetHeader(target, tenant), mode: result.mode, ...mode, result },
+            {
+              vital: '0.0.1',
+              ok: result.allHalted,
+              ...formatTargetHeader(target, tenant),
+              mode: result.mode,
+              ...mode,
+              result,
+            },
             null,
             2,
           ),
@@ -826,20 +915,30 @@ if (cmd === 'status') {
         const scope = flag('--scope')?.trim();
         const actionClass = (flag('--class') ?? flag('--action-class'))?.trim();
         if (!scope || !actionClass)
-          throw new Error('usage: vital drill --runtime --scope <scope> --class <action-class> --tenant <slug> [--db <target>]');
+          throw new Error(
+            'usage: vital drill --runtime --scope <scope> --class <action-class> --tenant <slug> [--db <target>]',
+          );
         await assertTenantExists(db, tenant, { strict: true });
         const mode = describeDrillMode('runtime-halt');
         const result = await runtimeHaltDrill(db, tenant, { scope, actionClass }, 'cli:drill', now);
         console.log(
           JSON.stringify(
-            { vital: '0.0.1', ok: result.held && result.released && result.authorizationHeld, ...formatTargetHeader(target, tenant), ...mode, result },
+            {
+              vital: '0.0.1',
+              ok: result.held && result.released && result.authorizationHeld,
+              ...formatTargetHeader(target, tenant),
+              ...mode,
+              result,
+            },
             null,
             2,
           ),
         );
         if (!result.held || !result.released || !result.authorizationHeld) process.exitCode = 1;
       } else {
-        throw new Error('usage: vital drill (--policy-only | --runtime --scope <s> --class <c>) --tenant <slug> [--db <target>]');
+        throw new Error(
+          'usage: vital drill (--policy-only | --runtime --scope <s> --class <c>) --tenant <slug> [--db <target>]',
+        );
       }
     } finally {
       await db.close();
@@ -849,7 +948,7 @@ if (cmd === 'status') {
   }
 } else {
   console.error(
-    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | erase | stop | drill)`,
+    `unknown command "${cmd}" (try: status | verify | report | serve | worker | ingest-files | ingest-test | signup | passwd | reset-link | verify-link | erase | stop | drill)`,
   );
   process.exit(1);
 }

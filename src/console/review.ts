@@ -15,6 +15,8 @@ export interface ReviewOptions {
   operatorMode: 'session' | 'secret' | 'signature';
   page?: number;
   home?: string;
+  notice?: string;
+  draft?: boolean;
 }
 
 export function operatorFields(opts: ReviewOptions, id: string, action: string): string {
@@ -51,7 +53,7 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
 ${action === 'decline' ? '<label>Decline reason <textarea name="reason" required maxlength="2000"></textarea></label>' : ''}
 ${operatorFields(opts, r.id, action)}
 <label><input type="checkbox" name="confirmed" required> ${action === 'approve' ? 'I reviewed the evidence and approve beginning work on this request' : 'I confirm this request should be declined'}</label>
-<button type="submit" disabled>${action === 'approve' ? 'Approve' : 'Decline'}</button>
+<button type="submit">${action === 'approve' ? 'Approve' : 'Decline'}</button>
 </form>`;
           })
           .join('')
@@ -71,7 +73,7 @@ ${forms}<p role="status" aria-live="polite" data-review-status></p></article>`);
   return `<section id="pending-review"><h2>Pending review (${pending.length})</h2>
 <p>Signed in as ${esc(opts.actor)}. Approval records a decision to BEGIN work, not final-deliverable authorization or evidence of execution or measurement.</p>
 <nav aria-label="Review pages">${page > 0 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page - 1}#pending-review">Previous reviews</a>` : ''} Page ${page + 1} of ${Math.max(1, Math.ceil(pending.length / 100))} ${pending.length > (page + 1) * 100 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page + 1}#pending-review">Next reviews</a>` : ''}</nav>
-<noscript>JavaScript is required for these controls. No request is sent without it.</noscript>
+<noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript>
 <div class="grid">${cards.join('') || '<p>No admitted requests awaiting human review.</p>'}</div>
 <p><a href="#" data-review-refresh>Refresh review queue</a></p></section>
 <script>${REVIEW_SCRIPT}</script>`;

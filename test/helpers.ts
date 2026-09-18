@@ -70,11 +70,7 @@ let fail = 0;
  * var/status.json's test count covers every suite test — that count is the
  * machine-readable truth `docs:check` pins.
  */
-export const T = (
-  name: string,
-  fn: () => void | Promise<void>,
-  opts: { timeout?: number } = {},
-): void => {
+export const T = (name: string, fn: () => void | Promise<void>, opts: { timeout?: number } = {}): void => {
   test(name, { timeout: opts.timeout ?? 15_000 }, async () => {
     try {
       await fn();

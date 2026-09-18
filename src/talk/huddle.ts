@@ -79,11 +79,13 @@ export class AmbientMorningBriefingSynthesizer {
   }
 
   /** Synthesizes the morning voice briefing from overnight autonomous activity */
-  async synthesizeBriefing(opts: {
-    hoursBack?: number;
-    durationSeconds?: number;
-    baseUrl?: string;
-  } = {}): Promise<MorningBriefing> {
+  async synthesizeBriefing(
+    opts: {
+      hoursBack?: number;
+      durationSeconds?: number;
+      baseUrl?: string;
+    } = {},
+  ): Promise<MorningBriefing> {
     const at = this.now();
     const hours = opts.hoursBack ?? 12;
     const cutoff = new Date(Date.parse(at) - hours * 3600 * 1000).toISOString();
@@ -132,13 +134,15 @@ export class AmbientMorningBriefingSynthesizer {
     const overallHealth: 'green' | 'yellow' | 'red' = anyRed ? 'red' : anyYellow ? 'yellow' : 'green';
 
     // 4. Compose transcript
-    const approvalText = pendingApprovals > 0
-      ? `Risk-monitor flagged ${pendingApprovals} approval waiting for review in ${pendingRooms.join(', ')}.`
-      : 'All scopes are operating autonomously with zero pending gates.';
+    const approvalText =
+      pendingApprovals > 0
+        ? `Risk-monitor flagged ${pendingApprovals} approval waiting for review in ${pendingRooms.join(', ')}.`
+        : 'All scopes are operating autonomously with zero pending gates.';
 
-    const recoveryText = incidentsRecovered > 0 || failedChecks > 0
-      ? 'Ops experienced a minor latency spike but auto-recovered.'
-      : 'Cluster latency and worker thread sweeps remained nominal.';
+    const recoveryText =
+      incidentsRecovered > 0 || failedChecks > 0
+        ? 'Ops experienced a minor latency spike but auto-recovered.'
+        : 'Cluster latency and worker thread sweeps remained nominal.';
 
     const transcript =
       `Good morning. Overnight, ${totalChecks} checks ran autonomously across ${roomsCovered} rooms. ` +
@@ -181,20 +185,22 @@ export class AmbientMorningBriefingSynthesizer {
     // 6. Post Buzz Huddle audio dispatch to #exec
     if (this.surface) {
       const execRoom = roomForScope('exec');
-      void this.surface.post({
-        channel: execRoom.channel,
-        requestId: briefingId,
-        step: 1,
-        tokens: 350,
-        state: 'HUDDLE_BRIEFING',
-        text: [
-          `🎙️ **[BUZZ HUDDLE: 60-SECOND MORNING VOICE BRIEFING]**`,
-          `> "${transcript}"`,
-          '',
-          `▶️ **[Play Audio Briefing](${audioUrl})** · ⏱️ \`0:60\` · 🟢 Health: \`${overallHealth.toUpperCase()}\``,
-          `*Delivered autonomously to #exec by \`@exec-agent\` for commute listening.*`,
-        ].join('\n'),
-      }).catch(() => {});
+      void this.surface
+        .post({
+          channel: execRoom.channel,
+          requestId: briefingId,
+          step: 1,
+          tokens: 350,
+          state: 'HUDDLE_BRIEFING',
+          text: [
+            `🎙️ **[BUZZ HUDDLE: 60-SECOND MORNING VOICE BRIEFING]**`,
+            `> "${transcript}"`,
+            '',
+            `▶️ **[Play Audio Briefing](${audioUrl})** · ⏱️ \`0:60\` · 🟢 Health: \`${overallHealth.toUpperCase()}\``,
+            `*Delivered autonomously to #exec by \`@exec-agent\` for commute listening.*`,
+          ].join('\n'),
+        })
+        .catch(() => {});
     }
 
     return briefing;
@@ -202,8 +208,7 @@ export class AmbientMorningBriefingSynthesizer {
 
   async getLatestBriefing(): Promise<MorningBriefing | null> {
     const row = (await this.db.prepare('SELECT value FROM meta WHERE key = ?').get(`huddle:${this.tenant}:latest`)) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(row.value) as MorningBriefing;
@@ -214,8 +219,7 @@ export class AmbientMorningBriefingSynthesizer {
 
   async getBriefingById(id: string): Promise<MorningBriefing | null> {
     const row = (await this.db.prepare('SELECT value FROM meta WHERE key = ?').get(`huddle:${this.tenant}:${id}`)) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(row.value) as MorningBriefing;

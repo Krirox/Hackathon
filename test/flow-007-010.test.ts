@@ -445,13 +445,10 @@ T('FLOW-010: expired correction POST returns the draft for resubmission', async 
   let at = NOW;
   const ctx = await authed();
   const ledger = createLedger(ctx.db);
-  const s = await startConsoleServer(
-    ctx.db,
-    ledger,
-    createCoordinator(ctx.db),
-    new OrganizationalCompiler(ctx.db),
-    { tenant: TEN, now: () => at },
-  );
+  const s = await startConsoleServer(ctx.db, ledger, createCoordinator(ctx.db), new OrganizationalCompiler(ctx.db), {
+    tenant: TEN,
+    now: () => at,
+  });
   try {
     const rel = await ledger.append({
       tenant: TEN,
@@ -464,7 +461,13 @@ T('FLOW-010: expired correction POST returns the draft for resubmission', async 
       owner: 'sync:gh',
       scope: 'engineering',
       authorType: 'system',
-      provenance: { sourceUri: 'https://example.test/x', sourceTier: 'SYSTEM_OF_RECORD', extractor: 't', extractorVersion: '1', retrievedAt: NOW },
+      provenance: {
+        sourceUri: 'https://example.test/x',
+        sourceTier: 'SYSTEM_OF_RECORD',
+        extractor: 't',
+        extractorVersion: '1',
+        retrievedAt: NOW,
+      },
     });
     const { cookie } = await loginViaHttp(s.port, 'owner@acme.test', SIGNUP.password);
     const home = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { cookie } })).text();

@@ -1,77 +1,115 @@
-import { openDb, migrate, type AsyncDb } from '../src/core/db.ts';
-import {
-  CANONICAL_ROOMS,
-  agentForScope,
-  loadRoomConfig,
-  saveRoomConfig,
-} from '../src/talk/rooms.ts';
-import { createBuzzSurface, type BuzzSigner } from '../src/talk/buzz.ts';
-import { LiveCanvasSynchronizer } from '../src/talk/canvas.ts';
+import { openDb, migrate } from '../src/core/db.ts';
+import { loadRoomConfig } from '../src/talk/rooms.ts';
+import { buzzRuntimeStatus } from '../src/talk/buzz-runtime.ts';
+import { provisionAllRooms } from '../src/talk/provision.ts';
 import { ScopeHealthEvaluator, formatStatusBeacon } from '../src/talk/health.ts';
+import { createBuzzSurface } from '../src/talk/buzz.ts';
+
+/**
+ * Provision the 12 canonical rooms on a real Buzz relay.
+ *
+ * This script used to open an in-memory database (provisioning evaporated on
+ * exit), swallow relay failures as `{"mock":true}` successes, and "sign" with a
+ * hash — so it printed green while doing nothing. It now:
+ *   1. refuses to run without a relay URL and key material (fail closed),
+ *   2. provisions against the relay with real signed events,
+ *   3. verifies each room's channel binding by reading relay metadata back,
+ *   4. persists the bindings to the real Vital database, and
+ *   5. exits non-zero if any room could not be provisioned.
+ *
+ * Usage:
+ *   BUZZ_RELAY_URL=http://localhost:3000 \
+ *   BUZZ_AGENT_MASTER_KEY=<64 hex chars> \
+ *   VITAL_DB=./vital.db \
+ *   node --import tsx scripts/seed-buzz-rooms.ts [--tenant <slug>]
+ *
+ * Against a relay in dev mode (BUZZ_REQUIRE_AUTH_TOKEN=false), add
+ * BUZZ_ALLOW_DEV_KEYS=1 to use development identities instead of a master key.
+ */
 
 async function main() {
   const args = process.argv.slice(2);
-  const dryRun = args.includes('--dry-run');
-  const tenant = process.env.VITAL_TENANT ?? 'vital-corp';
-  const relayUrl = process.env.BUZZ_RELAY_URL ?? 'http://127.0.0.1:4869';
+  const tenantIdx = args.indexOf('--tenant');
+  const tenant = tenantIdx >= 0 ? (args[tenantIdx + 1] ?? '') : (process.env.VITAL_TENANT ?? 'vital-corp');
+  const dbPath = process.env.VITAL_DB;
+  if (!dbPath) {
+    console.error(
+      '[seed-buzz-rooms] Refusing to run without a database: set VITAL_DB (provisioning must persist, not evaporate)',
+    );
+    process.exit(1);
+  }
+  if (!tenant) {
+    console.error('[seed-buzz-rooms] No tenant given: pass --tenant <slug> or set VITAL_TENANT');
+    process.exit(1);
+  }
 
-  console.log(`\n\x1b[1m🏛️ Vital Buzz Room Provisioning & Seeding\x1b[0m`);
-  console.log(`Tenant: \x1b[36m${tenant}\x1b[0m | Relay: \x1b[36m${relayUrl}\x1b[0m | Dry-run: \x1b[33m${dryRun}\x1b[0m\n`);
+  const status = buzzRuntimeStatus();
+  if (!status.configured) {
+    console.error('[seed-buzz-rooms] Buzz is not configured. Missing:');
+    for (const m of status.missing) console.error(`  - ${m}`);
+    console.error('\nSet BUZZ_RELAY_URL and BUZZ_AGENT_MASTER_KEY (hex, >=16 bytes), then re-run.');
+    process.exit(1);
+  }
 
-  // Initialize DB connection and run migrations
-  const db = openDb(':memory:');
+  const relayUrl = status.relayUrl!;
+  console.log('\n\x1b[1m🏛️ Vital Buzz Room Provisioning\x1b[0m');
+  console.log(`Tenant: \x1b[36m${tenant}\x1b[0m | Relay: \x1b[36m${relayUrl}\x1b[0m | DB: \x1b[36m${dbPath}\x1b[0m\n`);
+
+  const db = openDb(dbPath);
   await migrate(db);
 
-  const stubFetch = async (url: string, init: { method: string; body: string; headers: Record<string, string> }) => {
-    if (dryRun) {
-      return { ok: true, status: 200, text: async () => '{"ok":true}' };
-    }
-    try {
-      const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
-      return { ok: res.ok, status: res.status, text: () => res.text() };
-    } catch {
-      return { ok: true, status: 200, text: async () => '{"mock":true}' };
-    }
-  };
+  const { resolveAgentKey } = await import('../src/talk/agent-keys.ts');
+  const { keypair, resolution } = resolveAgentKey('workspace-agent');
+  if (resolution.source === 'dev-key') {
+    console.log('\x1b[33m⚠ Development identities in use (BUZZ_ALLOW_DEV_KEYS=1) — never for production.\x1b[0m\n');
+  }
 
-  console.log(`Registering 12 Canonical Scoped Rooms & Cryptographic Agent Keypairs...\n`);
-  console.log(`| Room Name | Scope | Agent Identity | Pubkey (Nostr) | Channel | Autonomy |`);
-  console.log(`| :--- | :--- | :--- | :--- | :--- | :--- |`);
+  const surface = createBuzzSurface({
+    relayUrl,
+    keypair,
+    authMode: 'nip98',
+    fetchFn: (url, init) =>
+      // GET/HEAD must not carry a body (the fetch spec forbids it).
+      init.method === 'GET' || init.method === 'HEAD'
+        ? fetch(url, { method: init.method, headers: init.headers })
+        : fetch(url, init),
+  });
 
-  for (const def of CANONICAL_ROOMS) {
-    const agent = agentForScope(def.scope);
-    const config = await saveRoomConfig(db, tenant, {
-      scope: def.scope,
-      mission: def.defaultMission,
-      autonomy: def.defaultAutonomy,
-      budgetCeilingDollars: def.defaultBudgetDollars,
-      budgetCeilingTokens: def.defaultBudgetTokens,
-      active: true,
-    }, 'seeder');
+  // Fail fast with a readable message if the relay is unreachable.
+  const health = await surface.health();
+  if (!health.ok) {
+    console.error(`[seed-buzz-rooms] Relay unreachable: ${health.error}`);
+    console.error(`  Check BUZZ_RELAY_URL (${relayUrl}) and that the relay's community binds this host.`);
+    process.exit(1);
+  }
+  console.log(
+    `Relay: ${health.software ?? 'buzz relay'} ${health.version ?? ''} (community ${health.communityHost})\n`,
+  );
 
-    const surface = createBuzzSurface({
-      relayUrl,
-      signer: agent.signer,
-      fetchFn: stubFetch,
-    });
+  const results = await provisionAllRooms(db, tenant, surface, 'seed:provision');
 
-    const canvasSync = new LiveCanvasSynchronizer({ db, tenant, surface });
-    await canvasSync.publishCanvas(def.scope, agent.pubkey, agent.signer.sign);
-
+  console.log(`| Room | Scope | Channel UUID | Result |`);
+  console.log(`| :--- | :--- | :--- | :--- |`);
+  for (const r of results) {
+    const cfg = await loadRoomConfig(db, tenant, r.scope);
+    const flag = r.reused ? 'reused (verified)' : 'created';
     console.log(
-      `| 🟢 #${def.name.padEnd(14)} | ${def.scope.padEnd(12)} | ${agent.name.padEnd(16)} | ${agent.pubkey.slice(0, 12)}... | #${def.channel.padEnd(18)} | ${config.autonomy.padEnd(10)} |`,
+      `| #${r.roomName} | ${r.scope} | ${r.channelId} | ${flag}${cfg.channelId === r.channelId ? '' : ' ⚠ persist mismatch'} |`,
     );
   }
 
-  const evaluator = new ScopeHealthEvaluator(db, tenant);
-  const healthRoster = await evaluator.evaluateAll();
+  const evaluator = new ScopeHealthEvaluator(db, tenant, {});
+  const roster = await evaluator.evaluateAll();
+  console.log('\n\x1b[1mRoom health telemetry:\x1b[0m');
+  for (const h of roster) console.log(`  ${formatStatusBeacon(h)}`);
 
-  console.log(`\n\x1b[1mLive Ambient Health Telemetry Beacons:\x1b[0m`);
-  for (const h of healthRoster) {
-    console.log(`  ${formatStatusBeacon(h)}`);
+  const failed = results.filter((r) => !r.verified);
+  if (failed.length > 0) {
+    console.error(`\n\x1b[31m✗ ${failed.length} room(s) could not be verified on the relay.\x1b[0m`);
+    process.exit(1);
   }
-
-  console.log(`\n\x1b[32m✔ Successfully provisioned all 12 canonical rooms with live epistemic canvases.\x1b[0m\n`);
+  console.log(`\n\x1b[32m✔ ${results.length} rooms provisioned and verified against ${relayUrl}.\x1b[0m`);
+  console.log('  Run `vital console` to see them under Buzz in the nav.\n');
 }
 
 main().catch((err) => {

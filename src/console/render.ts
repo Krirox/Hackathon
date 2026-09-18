@@ -229,8 +229,9 @@ export function renderHtml(r: ConsoleReport, live = false): string {
     if (r.omitted.cards > 0) parts.push(`${r.omitted.cards} cards beyond the compiler columns`);
     return parts.length > 0 ? `<p class="sub">Also beyond this view: ${parts.join(' · ')}</p>` : '';
   };
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Vital Console — ${esc(r.tenant)}</title>
-<style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:${INK};margin:0;padding:24px}h1{font-size:28px;margin:0}h2{font-size:16px;margin:24px 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid ${HAIRLINE};border-radius:10px;padding:16px;background:#fff}.big{font-size:32px;font-weight:800}.sub{font-size:11px;color:${MUTED}}.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.bar{height:6px;background:${HAIRLINE};border-radius:3px}.bar>i{display:block;height:100%;background:${TEAL};border-radius:3px}</style>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vital Console — ${esc(r.tenant)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:${INK};margin:0 auto;padding:28px 24px;max-width:1280px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}h1{font-size:26px;font-weight:600;letter-spacing:-0.025em;margin:16px 0 12px}h2{font-size:15px;font-weight:600;letter-spacing:-0.015em;margin:28px 0 12px;color:#111827}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.card{border:1px solid ${HAIRLINE};border-radius:10px;padding:18px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03),0 1px 2px rgba(0,0,0,0.02);transition:border-color .15s ease,box-shadow .15s ease}.card:hover{border-color:#D1D1CB;box-shadow:0 4px 12px rgba(0,0,0,0.05)}.big{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:4px 0}.sub{font-size:12px;color:${MUTED};line-height:1.4}.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.bar{height:6px;background:${HAIRLINE};border-radius:3px;overflow:hidden;margin:6px 0}.bar>i{display:block;height:100%;background:${TEAL};border-radius:3px}a{color:${TEAL};text-decoration:none}a:hover{text-decoration:underline}code,pre{font-family:'JetBrains Mono',monospace}button{font-family:inherit}nav[aria-label="Console"]{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;background:#fff;border:1px solid ${HAIRLINE};border-radius:8px;margin-top:24px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}nav[aria-label="Console"] a{padding:6px 12px;border-radius:5px;font-size:13px;font-weight:500;color:#374151;text-decoration:none;transition:all 0.15s ease}nav[aria-label="Console"] a:hover{background:#F3F4F6;color:#111827}nav[aria-label="Console"] a[aria-current="page"]{background:${TEAL};color:#fff}</style>
 </head><body>
 <p class="sub">${esc(r.tenant)} · ${esc(r.at)}</p>${omittedLine()}
 <h1>Reality health</h1>
@@ -256,12 +257,35 @@ ${rooms || '<p class="sub">no rooms yet</p>'}
 </body></html>`;
 }
 
-export type NavKey = 'reviews' | 'workflows' | 'digest' | 'team' | 'account';
+export type NavKey =
+  | 'reviews'
+  | 'requests'
+  | 'claims'
+  | 'rooms'
+  | 'humanWork'
+  | 'workflows'
+  | 'buzz'
+  | 'digest'
+  | 'learning'
+  | 'audit'
+  | 'settings'
+  | 'data'
+  | 'team'
+  | 'account';
 
 export interface NavAvailability {
   reviews: boolean;
+  requests: boolean;
+  claims: boolean;
+  rooms: boolean;
+  humanWork: boolean;
   workflows: boolean;
+  buzz: boolean;
   digest: boolean;
+  learning: boolean;
+  audit: boolean;
+  settings: boolean;
+  data: boolean;
   team: boolean;
   account: boolean;
 }
@@ -289,8 +313,17 @@ export function resolveConsoleHome(siteDir?: string | null): string {
 export function buildConsoleNav(home: string, availability: Partial<NavAvailability> = {}): NavDestination[] {
   const open: NavAvailability = {
     reviews: true,
+    requests: false,
+    claims: false,
+    rooms: false,
+    humanWork: false,
     workflows: true,
+    buzz: false,
     digest: true,
+    learning: false,
+    audit: false,
+    settings: false,
+    data: false,
     team: true,
     account: true,
     ...availability,
@@ -299,11 +332,38 @@ export function buildConsoleNav(home: string, availability: Partial<NavAvailabil
   if (open.reviews) {
     items.push({ key: 'reviews', label: 'Reviews', href: `${home}#pending-review` });
   }
+  if (open.requests) {
+    items.push({ key: 'requests', label: 'Requests', href: '/console/requests' });
+  }
+  if (open.claims) {
+    items.push({ key: 'claims', label: 'Claims', href: '/console/claims' });
+  }
+  if (open.rooms) {
+    items.push({ key: 'rooms', label: 'Rooms', href: '/console/rooms' });
+  }
+  if (open.humanWork) {
+    items.push({ key: 'humanWork', label: 'Human work', href: '/console/human-work' });
+  }
   if (open.workflows) {
     items.push({ key: 'workflows', label: 'Workflows', href: '/console/workflows' });
   }
+  if (open.buzz) {
+    items.push({ key: 'buzz', label: 'Buzz', href: '/console/buzz' });
+  }
   if (open.digest) {
     items.push({ key: 'digest', label: 'Digest', href: '/console/digest' });
+  }
+  if (open.learning) {
+    items.push({ key: 'learning', label: 'Learning', href: '/console/learning' });
+  }
+  if (open.audit) {
+    items.push({ key: 'audit', label: 'Audit', href: '/console/audit' });
+  }
+  if (open.settings) {
+    items.push({ key: 'settings', label: 'Settings', href: '/setup' });
+  }
+  if (open.data) {
+    items.push({ key: 'data', label: 'Data', href: '/console/data' });
   }
   if (open.team) {
     items.push({ key: 'team', label: 'Team', href: '/team' });
@@ -356,7 +416,7 @@ export const CONSOLE_NAV_SCRIPT = `(() => {
 })();`;
 
 export function renderAccountCluster(email: string, role: string, csrf: string): string {
-  return `<div style="margin-top:24px;display:flex;gap:12px;align-items:center" class="sub"><span>signed in as ${esc(email)} · ${esc(role)}</span><a href="/account">account</a><a href="/team">team</a><form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280">Sign out</button></form></div>`;
+  return `<div style="margin-top:24px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 16px;background:#fff;border:1px solid ${HAIRLINE};border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.03)" class="sub"><span>signed in as <strong style="color:#0A0F14">${esc(email)}</strong> · <span style="font-family:'JetBrains Mono',monospace;font-size:11px;background:#F3F4F6;padding:2px 6px;border-radius:4px;border:1px solid #E5E7EB">${esc(role)}</span></span><a href="/account" style="color:${TEAL};font-weight:500">account</a><a href="/team" style="color:${TEAL};font-weight:500">team</a><a href="/settings/rooms" style="color:${TEAL};font-weight:500">rooms</a><form method="post" action="/logout" style="display:inline;margin-left:auto"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280;color:#fff;border:none;border-radius:5px;padding:6px 14px;font-size:12px;font-weight:500;cursor:pointer">Sign out</button></form></div>`;
 }
 
 export function needsHumanTaskUrl(requestId: string): string {
@@ -437,7 +497,10 @@ export function renderListPage(opts: {
   body: string;
   returnNote?: string;
 }): string {
-  const pages = [opts.prevUrl ? `<a href="${esc(opts.prevUrl)}">Previous</a>` : '', opts.nextUrl ? `<a href="${esc(opts.nextUrl)}">Next</a>` : '']
+  const pages = [
+    opts.prevUrl ? `<a href="${esc(opts.prevUrl)}">Previous</a>` : '',
+    opts.nextUrl ? `<a href="${esc(opts.nextUrl)}">Next</a>` : '',
+  ]
     .filter(Boolean)
     .join(' · ');
   return `<h1>${esc(opts.heading)}</h1>

@@ -22,6 +22,35 @@ export interface ReviewCardOptions {
   secret?: string;
 }
 
+/**
+ * The review-token signing secret.
+ *
+ * This used to default to the literal string `'vital-review-secret'` in both
+ * `mintReviewToken` and the webhook verifier, so anyone who could read the
+ * source could mint a token that approves any pending request. There is now no
+ * default: an unset secret means review cards cannot be minted and the webhook
+ * refuses tokens entirely (falling back to an authenticated admin session).
+ */
+export function reviewSecretFromEnv(): string | null {
+  const secret = (process.env.VITAL_REVIEW_SECRET ?? '').trim();
+  if (!secret) return null;
+  if (secret.length < 16) {
+    throw new Error('VITAL_REVIEW_SECRET must be at least 16 characters');
+  }
+  return secret;
+}
+
+/** Same as `reviewSecretFromEnv` but with a name that reads well at call sites. */
+export function requireReviewSecret(): string {
+  const secret = reviewSecretFromEnv();
+  if (!secret) {
+    throw new Error(
+      '[talk:NO_REVIEW_SECRET] VITAL_REVIEW_SECRET is not set — review tokens cannot be minted or verified without it',
+    );
+  }
+  return secret;
+}
+
 export function mintReviewToken(
   secret: string,
   tenant: string,
@@ -59,11 +88,13 @@ export function verifyReviewToken(
 
 export function renderReviewCard(opts: ReviewCardOptions): string {
   const baseUrl = (opts.webhookBaseUrl ?? 'http://127.0.0.1:4200').replace(/\/$/, '');
-  const secret = opts.secret ?? 'vital-review-secret';
+  const secret = opts.secret ?? requireReviewSecret();
 
   const approveToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'approve');
   const declineToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'decline');
 
+  // Approve/decline land on a confirmation page, not a mutating GET: a link
+  // that changes state the moment it is fetched is prefetchable and CSRF-able.
   const approveUrl = `${baseUrl}/api/buzz/webhook?action=approve&token=${approveToken}`;
   const declineUrl = `${baseUrl}/api/buzz/webhook?action=decline&token=${declineToken}`;
 

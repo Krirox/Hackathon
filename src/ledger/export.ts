@@ -233,7 +233,13 @@ export async function verifyArchivalDelivery(
       detail: `archived bytes hash to ${got}, expected ${want} — object is missing, partial, or crossed`,
     };
   }
-  return { status: 'verified', bucket, key, expectedSha256: want, detail: `object "${key}" exists and matches sha256 ${want}` };
+  return {
+    status: 'verified',
+    bucket,
+    key,
+    expectedSha256: want,
+    detail: `object "${key}" exists and matches sha256 ${want}`,
+  };
 }
 
 export async function streamExportLedger(
@@ -252,7 +258,11 @@ export async function streamExportLedger(
   return db.transaction(async () => {
     const emit = opts.onProgress;
     const attempts = new Map<string, number>();
-    const progress = (section: ExportProgressEvent['section'], phase: ExportProgressEvent['phase'], completed: number): void => {
+    const progress = (
+      section: ExportProgressEvent['section'],
+      phase: ExportProgressEvent['phase'],
+      completed: number,
+    ): void => {
       if (!emit) return;
       attempts.set(section, (attempts.get(section) ?? 0) + (phase === 'start' ? 1 : 0));
       emit({ section, phase, completed, attempts: attempts.get(section) ?? 1 });

@@ -736,9 +736,21 @@ ${forms.join('\n')}`,
 
 function pageShell(title: string, body: string): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Vital</title>
-<style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0;padding:24px;max-width:960px}
-.sub{color:#6B7280;font-size:12px}.err{color:#B91C1C}.card{border:1px solid #E4E4E1;border-radius:10px;padding:16px;background:#fff;margin:16px 0}
-table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #E4E4E1;padding:8px;text-align:left;font-size:14px}
-input,button{padding:8px;border:1px solid #E4E4E1;border-radius:6px}button{background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;border:0}
-label{display:block;margin:8px 0}</style></head><body>${body}</body></html>`;
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:960px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+h1{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin:0 0 16px 0;color:#0A0F14}
+h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:20px 0 10px;color:#111827}
+a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
+.sub{color:#6B7280;font-size:13px;line-height:1.4}.err{color:#B91C1C;font-size:13px}
+.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #E4E4E1;border-radius:8px;overflow:hidden}
+td,th{border-bottom:1px solid #E4E4E1;padding:10px 14px;text-align:left;font-size:13px}
+th{background:#F9F9F8;font-weight:600;color:#4B5563;text-transform:uppercase;font-size:11px;letter-spacing:0.04em}
+input,button{padding:9px 14px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:13px}
+button{background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;border:0;transition:background .15s ease}
+button:hover{background:#0B4A45}
+label{display:block;margin:8px 0;font-size:13px;font-weight:500;color:#374151}
+code,pre{font-family:'JetBrains Mono',monospace}
+</style></head><body>${body}</body></html>`;
 }

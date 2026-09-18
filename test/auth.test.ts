@@ -640,7 +640,8 @@ T('a fresh boot is unprovisioned: the console offers signup, not a login wall', 
     eq(cookie.includes('vital_session='), true, 'a session was issued:');
     const opened = await call(s.port, '/', { cookie });
     eq(opened.status, 200, 'the new owner lands on their console:');
-    eq(opened.body.includes('signed in as peter@initech.test'), true);
+    eq(opened.body.includes('signed in as'), true);
+    eq(opened.body.includes('peter@initech.test'), true);
     // Signup closes the moment the tenant has an owner.
     eq((await call(s.port, '/signup')).location, '/login', 'the form is gone:');
     // The refusal happens before CSRF checking — no token needed to be told no.
@@ -750,7 +751,8 @@ T('login → force change → login → console, the full first-boot flow over H
     const home = await call(port, '/', { cookie: cookie2 });
     eq(home.status, 200);
     eq(home.body.includes('Reality health'), true);
-    eq(home.body.includes('signed in as owner@acme.test'), true);
+    eq(home.body.includes('signed in as'), true);
+    eq(home.body.includes('owner@acme.test'), true);
     eq(home.body.includes('vital-csrf'), true, 'page carries the CSRF token:');
   } finally {
     await s.close();
@@ -1185,6 +1187,41 @@ T('with siteDir, `/` serves the site, the console lives at /console, and console
     eq(opened.body.includes('Reality health'), true);
   } finally {
     await s.close();
+  }
+});
+
+T('FINAL-001: authenticated back links resolve to the console home in both serve modes', async () => {
+  for (const siteDir of [undefined, 'site'] as const) {
+    const ctx = await authed();
+    const s = await startConsoleServer(
+      ctx.db,
+      createLedger(ctx.db),
+      createCoordinator(ctx.db),
+      new OrganizationalCompiler(ctx.db),
+      { tenant: TEN, now: () => NOW, siteDir },
+    );
+    try {
+      const home = siteDir ? '/console' : '/';
+      const { cookie } = await loginViaHttp(s.port, 'owner@acme.test', SIGNUP.password);
+      const team = await call(s.port, '/team', { cookie });
+      eq(team.status, 200);
+      eq(
+        team.body.includes(`<a href="${home}">← console</a>`),
+        true,
+        `team back link is ${home} (siteDir=${siteDir}):`,
+      );
+      const rooms = await call(s.port, '/console/settings/rooms', { cookie });
+      eq(rooms.status, 200);
+      eq(
+        rooms.body.includes(
+          `<a href="${home}" style="color:#6B7280;text-decoration:none;font-size:14px;">← Back to the console</a>`,
+        ),
+        true,
+        `rooms back link is ${home} (siteDir=${siteDir}):`,
+      );
+    } finally {
+      await s.close();
+    }
   }
 });
 

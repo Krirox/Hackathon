@@ -217,178 +217,183 @@ T(
     // is what the browser gate wants (no silently skipped phase).
     const t = { test: async (_name: string, fn: () => Promise<void>) => await fn() };
     const browser = await launchBrowser();
-  try {
-    await t.test('JavaScript disabled: readable sections, early CTA, usable console and footer links', async () => {
-      for (const width of [320, 375, 414, 768, 1280]) {
-        const { context, page } = await localPage(browser, {
-          javaScriptEnabled: false,
-          viewport: { width, height: 812 },
+    try {
+      await t.test('JavaScript disabled: readable sections, early CTA, usable console and footer links', async () => {
+        for (const width of [320, 375, 414, 768, 1280]) {
+          const { context, page } = await localPage(browser, {
+            javaScriptEnabled: false,
+            viewport: { width, height: 812 },
+          });
+          try {
+            await page.goto(origin);
+            await page.keyboard.press('Tab');
+            await expect(page.getByRole('link', { name: 'Skip to content' })).toBeFocused();
+            await page.keyboard.press('Enter');
+            await expect(page.locator('#top')).toBeFocused();
+            await readableContent(page);
+            await expect(page.locator('#menu-btn')).not.toBeVisible();
+            await expect(page.locator('#overlay')).not.toBeVisible();
+            await expect(page.locator('.layer-tab').first()).toBeDisabled();
+            const primary = page.locator('.hero-actions .cta-btn');
+            await expect(primary).toBeInViewport({ ratio: 1 });
+            const box = await primary.boundingBox();
+            assert.ok(box && box.x >= 0 && box.x + box.width <= width && box.height >= 44);
+            await primary.click({ trial: true });
+            await page.locator('.foot-nav a[href="#wedge"]').click();
+            await expect(page.locator('#wedge h2')).toBeInViewport();
+            await page.locator('.header-nav .nav-signin').click();
+            await expect(page).toHaveURL(origin + '/login');
+          } finally {
+            await context.close();
+          }
+        }
+      });
+
+      await t.test('delayed application script: first-paint content and CTA remain accessible', async () => {
+        const { context, page } = await localPage(browser, { viewport: { width: 375, height: 812 } });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await page.route('**/app.js', async (route) => {
+          await gate;
+          await route.fulfill(files.get('/app.js')!);
         });
         try {
-          await page.goto(origin);
-          await page.keyboard.press('Tab');
-          await expect(page.getByRole('link', { name: 'Skip to content' })).toBeFocused();
-          await page.keyboard.press('Enter');
-          await expect(page.locator('#top')).toBeFocused();
+          const navigation = page.goto(origin);
           await readableContent(page);
           await expect(page.locator('#menu-btn')).not.toBeVisible();
-          await expect(page.locator('#overlay')).not.toBeVisible();
-          await expect(page.locator('.layer-tab').first()).toBeDisabled();
-          const primary = page.locator('.hero-actions .cta-btn');
-          await expect(primary).toBeInViewport({ ratio: 1 });
-          const box = await primary.boundingBox();
-          assert.ok(box && box.x >= 0 && box.x + box.width <= width && box.height >= 44);
-          await primary.click({ trial: true });
-          await page.locator('.foot-nav a[href="#wedge"]').click();
-          await expect(page.locator('#wedge h2')).toBeInViewport();
-          await page.locator('.header-nav .nav-signin').click();
-          await expect(page).toHaveURL(origin + '/login');
+          await expect(page.locator('.hero-actions .cta-btn')).toBeInViewport({ ratio: 1 });
+          await page.locator('.hero-actions .cta-btn').click({ trial: true });
+          release();
+          await navigation;
+          await keyboardMenu(page);
         } finally {
+          release();
           await context.close();
         }
-      }
-    });
-
-    await t.test('delayed application script: first-paint content and CTA remain accessible', async () => {
-      const { context, page } = await localPage(browser, { viewport: { width: 375, height: 812 } });
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
       });
-      await page.route('**/app.js', async (route) => {
-        await gate;
-        await route.fulfill(files.get('/app.js')!);
-      });
-      try {
-        const navigation = page.goto(origin);
-        await readableContent(page);
-        await expect(page.locator('#menu-btn')).not.toBeVisible();
-        await expect(page.locator('.hero-actions .cta-btn')).toBeInViewport({ ratio: 1 });
-        await page.locator('.hero-actions .cta-btn').click({ trial: true });
-        release();
-        await navigation;
-        await keyboardMenu(page);
-      } finally {
-        release();
-        await context.close();
-      }
-    });
 
-    for (const failure of ['missing-three', 'no-webgl', 'context-throws', 'renderer-throws', 'render-throws']) {
-      await t.test(failure + ': navigation, console wiring and layer controls survive', async () => {
-        const { context, page } = await localPage(browser, { viewport: { width: 1280, height: 900 } });
-        const errors: string[] = [];
-        page.on('pageerror', (error) => errors.push(error.message));
-        try {
-          if (failure === 'missing-three') await page.route('**/assets/three.min.js', (route) => route.abort());
-          await page.addInitScript(`
+      for (const failure of ['missing-three', 'no-webgl', 'context-throws', 'renderer-throws', 'render-throws']) {
+        await t.test(failure + ': navigation, console wiring and layer controls survive', async () => {
+          const { context, page } = await localPage(browser, { viewport: { width: 1280, height: 900 } });
+          const errors: string[] = [];
+          page.on('pageerror', (error) => errors.push(error.message));
+          try {
+            if (failure === 'missing-three') await page.route('**/assets/three.min.js', (route) => route.abort());
+            await page.addInitScript(`
             window.IntersectionObserver = undefined;
             if (${JSON.stringify(failure)} === 'no-webgl') HTMLCanvasElement.prototype.getContext = () => null;
             if (${JSON.stringify(failure)} === 'context-throws') HTMLCanvasElement.prototype.getContext = () => { throw new Error('graphics unavailable'); };
           `);
-          await page.route('**/graphics.js', async (route) => {
-            let prefix = '';
-            if (failure === 'renderer-throws')
-              prefix =
-                "THREE.WebGLRenderer = function () { window.rendererAttempted = true; throw new Error('renderer unavailable'); };";
-            if (failure === 'render-throws')
-              prefix =
-                "const OriginalRenderer = THREE.WebGLRenderer; THREE.WebGLRenderer = function (...args) { const renderer = new OriginalRenderer(...args); renderer.render = () => { window.renderAttempted = true; throw new Error('render failed'); }; return renderer; };";
-            await route.fulfill({
-              contentType: 'text/javascript',
-              body: prefix + files.get('/graphics.js')!.body.toString(),
+            await page.route('**/graphics.js', async (route) => {
+              let prefix = '';
+              if (failure === 'renderer-throws')
+                prefix =
+                  "THREE.WebGLRenderer = function () { window.rendererAttempted = true; throw new Error('renderer unavailable'); };";
+              if (failure === 'render-throws')
+                prefix =
+                  "const OriginalRenderer = THREE.WebGLRenderer; THREE.WebGLRenderer = function (...args) { const renderer = new OriginalRenderer(...args); renderer.render = () => { window.renderAttempted = true; throw new Error('render failed'); }; return renderer; };";
+              await route.fulfill({
+                contentType: 'text/javascript',
+                body: prefix + files.get('/graphics.js')!.body.toString(),
+              });
             });
+            await page.route('**/index.html', async (route) =>
+              route.fulfill({
+                contentType: 'text/html',
+                body: files
+                  .get('/index.html')!
+                  .body.toString()
+                  .replace('name="vital-console-url" content=""', `name="vital-console-url" content="${origin}/bound"`),
+              }),
+            );
+            await page.goto(origin + '/index.html');
+            await readableContent(page);
+            await expect(page.locator('.header-nav .nav-signin')).toHaveAttribute('href', origin + '/bound/login');
+            if (failure === 'renderer-throws') assert.equal(await page.evaluate('window.rendererAttempted'), true);
+            if (failure === 'render-throws') assert.equal(await page.evaluate('window.renderAttempted'), true);
+            await keyboardMenu(page);
+            const compute = page.locator('[data-layer="2"]');
+            await compute.focus();
+            await page.keyboard.press('Enter');
+            await expect(compute).toHaveAttribute('aria-pressed', 'true');
+            await expect(page.locator('[data-layer="1"]')).toHaveAttribute('aria-pressed', 'false');
+            await expect(page.locator('#card-tag')).toHaveText('Cognitive Router');
+            await page.locator('[data-layer="3"]').focus();
+            await page.keyboard.press('Space');
+            await expect(page.locator('#card-tag')).toHaveText('Coordination Surface');
+            assert.deepEqual(errors, []);
+          } finally {
+            await context.close();
+          }
+        });
+      }
+
+      await t.test('reduced motion and mobile keyboard: no animation, reachable CTAs, responsive menu', async () => {
+        for (const width of [320, 375, 414, 768]) {
+          const { context, page } = await localPage(browser, {
+            reducedMotion: 'reduce',
+            viewport: { width, height: 812 },
           });
-          await page.route('**/index.html', async (route) =>
-            route.fulfill({
-              contentType: 'text/html',
-              body: files
-                .get('/index.html')!
-                .body.toString()
-                .replace('name="vital-console-url" content=""', `name="vital-console-url" content="${origin}/bound"`),
-            }),
-          );
-          await page.goto(origin + '/index.html');
-          await readableContent(page);
-          await expect(page.locator('.header-nav .nav-signin')).toHaveAttribute('href', origin + '/bound/login');
-          if (failure === 'renderer-throws') assert.equal(await page.evaluate('window.rendererAttempted'), true);
-          if (failure === 'render-throws') assert.equal(await page.evaluate('window.renderAttempted'), true);
-          await keyboardMenu(page);
-          const compute = page.locator('[data-layer="2"]');
-          await compute.focus();
-          await page.keyboard.press('Enter');
-          await expect(compute).toHaveAttribute('aria-pressed', 'true');
-          await expect(page.locator('[data-layer="1"]')).toHaveAttribute('aria-pressed', 'false');
-          await expect(page.locator('#card-tag')).toHaveText('Cognitive Router');
-          await page.locator('[data-layer="3"]').focus();
-          await page.keyboard.press('Space');
-          await expect(page.locator('#card-tag')).toHaveText('Coordination Surface');
-          assert.deepEqual(errors, []);
-        } finally {
-          await context.close();
+          try {
+            await page.addInitScript(
+              `window.graphicsCalls = 0; HTMLCanvasElement.prototype.getContext = () => { window.graphicsCalls++; throw new Error('should not initialize'); };`,
+            );
+            await page.goto(origin);
+            await readableContent(page);
+            assert.equal(await page.evaluate('window.graphicsCalls'), 0);
+            assert.equal(await page.evaluate('document.getAnimations().length'), 0);
+            await expect(page.locator('html')).toHaveCSS('scroll-behavior', 'auto');
+            await expect(page.locator('.hero-actions .cta-btn')).toBeInViewport({ ratio: 1 });
+            await page.keyboard.press('Tab');
+            await page.keyboard.press('Enter');
+            await page.keyboard.press('Tab');
+            await expect(page.locator('.hero-actions .cta-btn')).toBeFocused();
+            await expect(page.locator('.hero-actions .cta-btn')).toHaveCSS('outline-style', 'solid');
+            await keyboardMenu(page);
+            assert.equal(await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
+            await page.locator('#contact .cta-btn').click({ trial: true });
+            const box = await page.locator('#contact .cta-btn').boundingBox();
+            assert.ok(box && box.x >= 0 && box.x + box.width <= width);
+          } finally {
+            await context.close();
+          }
         }
       });
+
+      await t.test(
+        'normal graphics: static, context loss and preference changes do not block interaction',
+        async () => {
+          const { context, page } = await localPage(browser, { viewport: { width: 1280, height: 900 } });
+          const errors: string[] = [];
+          page.on('pageerror', (error) => errors.push(error.message));
+          try {
+            await page.addInitScript(
+              `window.animationCalls = 0; const raf = window.requestAnimationFrame; window.requestAnimationFrame = (...args) => { window.animationCalls++; return raf(...args); };`,
+            );
+            await page.goto(origin);
+            await readableContent(page);
+            await expect(page.locator('#canvas-3d-container canvas')).toHaveCount(1);
+            assert.equal(await page.evaluate('window.animationCalls'), 0);
+            assert.equal(await page.evaluate('document.getAnimations().length'), 0);
+            await page.locator('#bg-canvas').dispatchEvent('webglcontextlost');
+            await page.locator('#canvas-3d-container canvas').dispatchEvent('webglcontextlost');
+            await page.setViewportSize({ width: 1100, height: 800 });
+            await keyboardMenu(page);
+            await page.emulateMedia({ reducedMotion: 'reduce' });
+            await expect(page.locator('#stage-3d-wrapper')).not.toBeVisible();
+            assert.equal(await page.evaluate('document.getAnimations().length'), 0);
+            await expect(page.locator('.hero-actions .cta-btn')).toBeVisible();
+            assert.deepEqual(errors, []);
+          } finally {
+            await context.close();
+          }
+        },
+      );
+    } finally {
+      await browser.close();
     }
-
-    await t.test('reduced motion and mobile keyboard: no animation, reachable CTAs, responsive menu', async () => {
-      for (const width of [320, 375, 414, 768]) {
-        const { context, page } = await localPage(browser, {
-          reducedMotion: 'reduce',
-          viewport: { width, height: 812 },
-        });
-        try {
-          await page.addInitScript(
-            `window.graphicsCalls = 0; HTMLCanvasElement.prototype.getContext = () => { window.graphicsCalls++; throw new Error('should not initialize'); };`,
-          );
-          await page.goto(origin);
-          await readableContent(page);
-          assert.equal(await page.evaluate('window.graphicsCalls'), 0);
-          assert.equal(await page.evaluate('document.getAnimations().length'), 0);
-          await expect(page.locator('html')).toHaveCSS('scroll-behavior', 'auto');
-          await expect(page.locator('.hero-actions .cta-btn')).toBeInViewport({ ratio: 1 });
-          await page.keyboard.press('Tab');
-          await page.keyboard.press('Enter');
-          await page.keyboard.press('Tab');
-          await expect(page.locator('.hero-actions .cta-btn')).toBeFocused();
-          await expect(page.locator('.hero-actions .cta-btn')).toHaveCSS('outline-style', 'solid');
-          await keyboardMenu(page);
-          assert.equal(await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-          await page.locator('#contact .cta-btn').click({ trial: true });
-          const box = await page.locator('#contact .cta-btn').boundingBox();
-          assert.ok(box && box.x >= 0 && box.x + box.width <= width);
-        } finally {
-          await context.close();
-        }
-      }
-    });
-
-    await t.test('normal graphics: static, context loss and preference changes do not block interaction', async () => {
-      const { context, page } = await localPage(browser, { viewport: { width: 1280, height: 900 } });
-      const errors: string[] = [];
-      page.on('pageerror', (error) => errors.push(error.message));
-      try {
-        await page.addInitScript(
-          `window.animationCalls = 0; const raf = window.requestAnimationFrame; window.requestAnimationFrame = (...args) => { window.animationCalls++; return raf(...args); };`,
-        );
-        await page.goto(origin);
-        await readableContent(page);
-        await expect(page.locator('#canvas-3d-container canvas')).toHaveCount(1);
-        assert.equal(await page.evaluate('window.animationCalls'), 0);
-        assert.equal(await page.evaluate('document.getAnimations().length'), 0);
-        await page.locator('#bg-canvas').dispatchEvent('webglcontextlost');
-        await page.locator('#canvas-3d-container canvas').dispatchEvent('webglcontextlost');
-        await page.setViewportSize({ width: 1100, height: 800 });
-        await keyboardMenu(page);
-        await page.emulateMedia({ reducedMotion: 'reduce' });
-        await expect(page.locator('#stage-3d-wrapper')).not.toBeVisible();
-        assert.equal(await page.evaluate('document.getAnimations().length'), 0);
-        await expect(page.locator('.hero-actions .cta-btn')).toBeVisible();
-        assert.deepEqual(errors, []);
-      } finally {
-        await context.close();
-      }
-    });
-  } finally {
-    await browser.close();
-  }
-}, { timeout: 120_000 });
+  },
+  { timeout: 120_000 },
+);

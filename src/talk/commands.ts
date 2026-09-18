@@ -123,7 +123,8 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
 
   // 3. /status [scope]
   if (cmd === 'status') {
-    const evaluator = ctx.evaluator ?? new ScopeHealthEvaluator(ctx.db, ctx.tenant, { coord: ctx.coord, ledger: ctx.ledger });
+    const evaluator =
+      ctx.evaluator ?? new ScopeHealthEvaluator(ctx.db, ctx.tenant, { coord: ctx.coord, ledger: ctx.ledger });
     const rawTarget = positional[0] ?? named.scope ?? ctx.currentScope;
     if (rawTarget && rawTarget !== 'all') {
       const scope = normalizeScope(rawTarget);
@@ -247,7 +248,10 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
       }
       if (named.sor || named.sors) {
         const raw = named.sor ?? named.sors ?? '';
-        updates.connectedSoRs = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        updates.connectedSoRs = raw
+          .split(',')
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean);
       }
 
       if (Object.keys(updates).length === 0) {

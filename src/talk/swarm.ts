@@ -107,7 +107,9 @@ export class InterAgentSwarmCoordinator {
     const at = this.now();
     const chainId = `swm_${randomUUID().slice(0, 10)}`;
     const originScope = normalizeScope(input.originScope);
-    const originAgent = input.originAgent ?? agentForScope(originScope).name;
+    // An unconfigured agent identity must not stop a deliberation: the room
+    // name still identifies the speaker in the log.
+    const originAgent = input.originAgent ?? agentForScope(originScope)?.name ?? roomForScope(originScope).agentName;
 
     const dispatch = parseCrossRoomDispatch(input.dispatchText);
     if (!dispatch) {
@@ -221,9 +223,14 @@ export class InterAgentSwarmCoordinator {
     churnProbability: number;
     statement: string;
     threadRoot?: string;
-  }): Promise<{ findingClaimId: string; escalated: boolean; downstreamRooms: string[]; events: SwarmDeliberationEvent[] }> {
+  }): Promise<{
+    findingClaimId: string;
+    escalated: boolean;
+    downstreamRooms: string[];
+    events: SwarmDeliberationEvent[];
+  }> {
     const at = this.now();
-    const isHighRisk = input.churnProbability >= 0.10; // >10% churn is high risk
+    const isHighRisk = input.churnProbability >= 0.1; // >10% churn is high risk
     const targetScope = normalizeScope(input.targetScope);
     const targetDef = roomForScope(targetScope);
     const events: SwarmDeliberationEvent[] = [];

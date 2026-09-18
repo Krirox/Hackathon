@@ -130,7 +130,10 @@ export const PRE_CSRF_FAMILY_MAX = 10;
 
 export function parsePreCsrfFamily(cookieValue: string | undefined): string[] {
   if (!cookieValue) return [];
-  return cookieValue.split('.').map((t) => t.trim()).filter(Boolean);
+  return cookieValue
+    .split('.')
+    .map((t) => t.trim())
+    .filter(Boolean);
 }
 
 export function addPreCsrfToken(existing: string | undefined, token: string, max = PRE_CSRF_FAMILY_MAX): string {

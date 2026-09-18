@@ -22,7 +22,9 @@ const flag = (name) => {
 
 const baseUrl = (flag('--base-url') ?? '').replace(/\/$/, '');
 if (!baseUrl) {
-  console.error('usage: node scripts/verify-topology.mjs --base-url <https://alb-or-http://task:3100> [--email E --password P] [--expect-ready true|false]');
+  console.error(
+    'usage: node scripts/verify-topology.mjs --base-url <https://alb-or-http://task:3100> [--email E --password P] [--expect-ready true|false]',
+  );
   process.exit(2);
 }
 const email = flag('--email');
@@ -41,7 +43,11 @@ const healthz = await fetch(`${baseUrl}/healthz`, { headers: { accept: 'applicat
 check('healthz reachable through entry point', healthz.ok, `HTTP ${healthz.status}`);
 const live = healthz.ok ? await healthz.json() : {};
 if (healthz.ok) {
-  check('healthz reports ok+alive', live.ok === true && live.alive === true, JSON.stringify({ ok: live.ok, alive: live.alive }));
+  check(
+    'healthz reports ok+alive',
+    live.ok === true && live.alive === true,
+    JSON.stringify({ ok: live.ok, alive: live.alive }),
+  );
   check('healthz names its listen target', typeof live.listen === 'string' && live.listen.length > 0, live.listen);
   console.log(`info - served by ${live.listen} proto=${live.proto ?? '?'} viaProxy=${live.viaProxy ?? '?'}`);
 }
@@ -50,12 +56,15 @@ if (healthz.ok) {
 // A direct (non-LB) task answers http; through an HTTPS ALB with TRUST_PROXY
 // the task must report https — otherwise secure-cookie/session assumptions
 // silently break behind the load balancer.
-const fwd = await fetch(`${baseUrl}/healthz`, { headers: { 'X-Forwarded-Proto': 'https', 'X-Forwarded-For': '203.0.113.7' } });
+const fwd = await fetch(`${baseUrl}/healthz`, {
+  headers: { 'X-Forwarded-Proto': 'https', 'X-Forwarded-For': '203.0.113.7' },
+});
 if (fwd.ok) {
   const body = await fwd.json();
   const isHttpsEntry = baseUrl.startsWith('https://');
   console.log(`info - with X-Forwarded-Proto: https the task reports proto=${body.proto} viaProxy=${body.viaProxy}`);
-  if (isHttpsEntry) check('task honors X-Forwarded-Proto from the entry point', body.proto === 'https', `proto=${body.proto}`);
+  if (isHttpsEntry)
+    check('task honors X-Forwarded-Proto from the entry point', body.proto === 'https', `proto=${body.proto}`);
   else console.log('info - direct-URL probe only; the https assertion applies when --base-url is the ALB (see docs)');
 }
 
@@ -64,7 +73,11 @@ const pill = await fetch(`${baseUrl}/api/health`);
 check('public pill reachable', pill.ok, `HTTP ${pill.status}`);
 if (pill.ok) {
   const body = await pill.json();
-  check('pill reports reachability only', body.ok === true && !('readiness' in body), JSON.stringify(Object.keys(body)));
+  check(
+    'pill reports reachability only',
+    body.ok === true && !('readiness' in body),
+    JSON.stringify(Object.keys(body)),
+  );
 }
 
 // 4. Authenticated readiness (optional): proves dependency truth through
@@ -84,7 +97,7 @@ if (email && password) {
       body: new URLSearchParams({ csrf, email, password }),
       redirect: 'manual',
     });
-    for (const c of (login.headers.getSetCookie?.() ?? [])) jar.push(c.split(';')[0]);
+    for (const c of login.headers.getSetCookie?.() ?? []) jar.push(c.split(';')[0]);
     check('login succeeds', login.status === 303 || login.status === 302, `HTTP ${login.status}`);
     const metrics = await fetch(`${baseUrl}/api/metrics`, { headers: { cookie: jar.join('; ') } });
     check('authenticated metrics reachable', metrics.ok, `HTTP ${metrics.status}`);
@@ -93,7 +106,8 @@ if (email && password) {
       const readiness = body.readiness;
       check('readiness report present', Boolean(readiness) && Array.isArray(readiness.checks));
       if (readiness) {
-        for (const c of readiness.checks) console.log(`info - readiness ${c.name}: ${c.status}${c.detail ? ` — ${c.detail}` : ''}`);
+        for (const c of readiness.checks)
+          console.log(`info - readiness ${c.name}: ${c.status}${c.detail ? ` — ${c.detail}` : ''}`);
         const db = readiness.checks.find((c) => c.name === 'database');
         console.log(`info - overall ready=${readiness.ready}`);
         if (expectReady !== undefined) {

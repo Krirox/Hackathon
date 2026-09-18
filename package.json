@@ -28,6 +28,7 @@
     "node": "22.x"
   },
   "dependencies": {
+    "@noble/curves": "^2.4.0",
     "pg": "^8.23.0",
     "zod": "^4.5.4"
   },

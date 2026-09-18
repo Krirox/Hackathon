@@ -618,7 +618,11 @@ T('F15: simulated traces never satisfy mining thresholds — exclusion is by con
     false,
     'no simulated intent is ever mined:',
   );
-  eq(mined.some((m) => m.intent === 'real.pattern.y'), false, 'real traces below threshold still wait:');
+  eq(
+    mined.some((m) => m.intent === 'real.pattern.y'),
+    false,
+    'real traces below threshold still wait:',
+  );
   // A simulated run plus two real successes cannot pool into a candidate: the
   // simulated rows do not count toward ANY intent's threshold.
   const withOneMoreReal = await mineCandidates(db, TEN, 3);

@@ -550,7 +550,10 @@ export async function executeResearchRun(
     for (;;) {
       let timedOut = false;
       const loser = await Promise.race([
-        searchPromise.then(() => 'done' as const, (e) => Promise.reject(e)),
+        searchPromise.then(
+          () => 'done' as const,
+          (e) => Promise.reject(e),
+        ),
         new Promise<'poll'>((r) => {
           const t = setTimeout(() => {
             timedOut = true;

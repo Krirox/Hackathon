@@ -645,7 +645,12 @@ export class OrganizationalCompiler {
       // only be PROMOTED through genuine cross-model transfer tests, so a
       // `simulated:` intent should never even be here — the filter is
       // defense in depth, not the primary gate.
-      .all(tenant, card.intent.startsWith('simulated:') ? '\u0000no-simulated-intent' : card.intent, cardId, window)) as {
+      .all(
+        tenant,
+        card.intent.startsWith('simulated:') ? '\u0000no-simulated-intent' : card.intent,
+        cardId,
+        window,
+      )) as {
       outcome: string;
     }[];
     if (rows.length < 10) return { drifting: false, ewma: 1, samples: rows.length, demoted: false };

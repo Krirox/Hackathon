@@ -605,13 +605,32 @@ ${renderSourceHealthCard(state)}</div>`
 <p class="sub">Your first ingested evidence can start the Ship-to-Result fan-out.</p>
 <form method="post" action="/setup/start-release"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Start release workflow</button></form></section>`
       : '';
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Setup — organization activation</title>
-<style>body{font-family:system-ui,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0;padding:24px;max-width:720px}
-form{display:grid;gap:10px}input,select{padding:8px;border:1px solid #E4E4E1;border-radius:6px}
-button{padding:8px 14px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer}
-.err{color:#B91C1C}.sub{color:#6B7280;font-size:12px}.card{border:1px solid #E4E4E1;border-radius:10px;padding:16px;background:#fff;margin:16px 0}</style>
+  const roomsSection = `<section id="rooms"><h2>Rooms</h2>
+<p class="sub">Choose which autonomous rooms are active and tune their mandate, autonomy, spend ceiling, and connected data feeds.</p>
+<p><a href="/setup/rooms">Open room provisioning</a></p></section>`;
+  const dataSection = `<section id="data"><h2>Data portability &amp; retention</h2>
+<p class="sub">Download your reality ledger export, cryptographic audit history, or manage GDPR Article 17 erasure.</p>
+<p><a href="/console/data">Open Data &amp; Retention</a></p></section>`;
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup — organization activation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:800px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+h1{font-size:26px;font-weight:600;letter-spacing:-0.02em;margin:12px 0 8px 0;color:#0A0F14}
+h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:20px 0 10px;color:#111827}
+a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
+form{display:grid;gap:16px}
+input,select{padding:10px 12px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:14px;color:#0A0F14;background:#fff;transition:border-color .15s,box-shadow .15s}
+input:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}
+label{font-size:13px;font-weight:500;color:#374151;display:grid;gap:4px;margin-bottom:8px}
+button{padding:10px 18px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;font-family:inherit;font-size:14px;transition:background .15s ease}
+button:hover{background:#0B4A45}
+.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:13px;line-height:1.4}
+.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+code{font-family:'JetBrains Mono',monospace;font-size:12px;background:#F3F4F6;padding:2px 6px;border-radius:4px}
+section{background:#fff;border:1px solid #E4E4E1;border-radius:10px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+</style>
 </head><body>
-<p class="sub"><a href="${esc(home)}">← Dashboard</a></p>
+<p class="sub"><a href="${esc(home)}">← Dashboard</a> · <a href="/setup/rooms">Autonomous Agent Rooms &amp; Autonomy Tiers</a> · <a href="/console/data">Data Portability &amp; Retention →</a></p>
 <h1>Guided setup</h1>
 <p class="sub">Configure source, accountable human, scope, approval policy, and budget. Sample walkthrough data is always labeled and kept in scope <code>${esc(SAMPLE_SCOPE)}</code>.</p>
 ${msg}
@@ -639,5 +658,7 @@ ${healthCard}
 </form>
 ${syncForm}
 ${workflowForm}
+${roomsSection}
+${dataSection}
 </body></html>`;
 }

@@ -12,7 +12,8 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
   {
     id: 'fintech',
     name: 'FinTech & Capital Markets',
-    description: 'Autonomous counterparty risk hedging, Stripe billing sync, EU AI Act compliance, and warehouse verification.',
+    description:
+      'Autonomous counterparty risk hedging, Stripe billing sync, EU AI Act compliance, and warehouse verification.',
     scopes: ['core', 'risk', 'compliance', 'finance', 'data'],
   },
   {
@@ -30,7 +31,8 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
   {
     id: 'custom',
     name: 'Custom (Modular Opt-In)',
-    description: 'Minimal footprint. Opt in only to the specific rooms relevant to your business to avoid room clutter.',
+    description:
+      'Minimal footprint. Opt in only to the specific rooms relevant to your business to avoid room clutter.',
     scopes: ['core'],
   },
   {
@@ -65,6 +67,7 @@ export async function renderRoomsSetupPage(
   tenant: string,
   csrfToken: string,
   notice?: string,
+  home = '/',
 ): Promise<string> {
   const configs: RoomConfig[] = [];
   for (const def of CANONICAL_ROOMS) {
@@ -72,7 +75,7 @@ export async function renderRoomsSetupPage(
   }
 
   const noticeHtml = notice
-    ? `<div style="background:#064E3B;border:1px solid #10B981;color:#A7F3D0;padding:12px 16px;border-radius:8px;margin-bottom:24px;">✓ ${esc(notice)}</div>`
+    ? `<div style="background:#FFFFFF;border:1px solid #0F5C57;color:#0B4A45;padding:12px 16px;border-radius:8px;margin-bottom:24px;">✓ ${esc(notice)}</div>`
     : '';
 
   const roomCardsHtml = configs
@@ -83,44 +86,44 @@ export async function renderRoomsSetupPage(
       const sors = cfg.connectedSoRs ?? [...def.defaultSoRs];
 
       return `
-      <div style="border:1px solid #374151;background:#1F2937;border-radius:8px;padding:18px;margin-bottom:16px;">
+      <div style="border:1px solid #E4E4E1;background:#FFFFFF;border-radius:8px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div style="display:flex;align-items:center;gap:12px;">
-            <input type="checkbox" id="room_active_${esc(cfg.scope)}" name="active_${esc(cfg.scope)}" value="1" ${isChecked} ${isCore ? 'disabled checked' : ''} style="width:19px;height:19px;accent-color:#10B981;cursor:pointer;">
-            <label for="room_active_${esc(cfg.scope)}" style="font-weight:600;font-size:16px;color:#F9FAFB;cursor:pointer;">
+            <input type="checkbox" id="room_active_${esc(cfg.scope)}" name="active_${esc(cfg.scope)}" value="1" ${isChecked} ${isCore ? 'disabled checked' : ''} style="width:19px;height:19px;accent-color:#0F5C57;cursor:pointer;">
+            <label for="room_active_${esc(cfg.scope)}" style="font-weight:600;font-size:16px;color:#0A0F14;cursor:pointer;">
               🟢 #${esc(cfg.name)}
-              <span style="font-size:12px;font-weight:normal;color:#9CA3AF;margin-left:6px;">(scope:${esc(cfg.scope)})</span>
-              ${isCore ? '<span style="font-size:11px;background:#374151;color:#10B981;padding:2px 6px;border-radius:4px;margin-left:6px;">Mandatory Root</span>' : ''}
+              <span style="font-size:12px;font-weight:normal;color:#6B7280;margin-left:6px;">(scope:${esc(cfg.scope)})</span>
+              ${isCore ? '<span style="font-size:11px;background:#E4E4E1;color:#0F5C57;padding:2px 6px;border-radius:4px;margin-left:6px;">Mandatory Root</span>' : ''}
             </label>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <span style="background:#374151;color:#D1D5DB;font-size:12px;padding:3px 8px;border-radius:4px;">🤖 ${esc(cfg.agentName)}</span>
+            <span style="background:#E4E4E1;color:#4B5563;font-size:12px;padding:3px 8px;border-radius:4px;">🤖 ${esc(cfg.agentName)}</span>
           </div>
         </div>
 
-        <p style="color:#D1D5DB;font-size:14px;margin:0 0 12px 0;">${esc(def.duties)}</p>
+        <p style="color:#4B5563;font-size:14px;margin:0 0 12px 0;">${esc(def.duties)}</p>
 
-        <details style="background:#111827;border-radius:6px;padding:12px 16px;border:1px solid #374151;">
-          <summary style="font-size:13px;color:#60A5FA;cursor:pointer;font-weight:600;user-select:none;">
+        <details style="background:#FAFAF8;border-radius:6px;padding:12px 16px;border:1px solid #E4E4E1;">
+          <summary style="font-size:13px;color:#0F5C57;cursor:pointer;font-weight:600;user-select:none;">
             ⚙️ Tune Room Behavior & Mandate (Mission, Autonomy, Quotas & Data Feeds)
           </summary>
           
           <div style="margin-top:16px;display:grid;grid-template-columns:1fr;gap:16px;">
             <!-- 1. Mission Prompt -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#E5E7EB;margin-bottom:6px;">
+              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
                 🎯 Mission Prompt (Natural Language Mandate):
               </label>
-              <textarea name="mission_${esc(cfg.scope)}" rows="2" style="width:100%;background:#1F2937;color:#F9FAFB;border:1px solid #4B5563;border-radius:4px;padding:8px;font-size:13px;font-family:monospace;box-sizing:border-box;">${esc(cfg.mission)}</textarea>
-              <div style="font-size:11px;color:#9CA3AF;margin-top:4px;">Custom instruction defining the autonomous agent's mandate, constraints, and target outcomes.</div>
+              <textarea name="mission_${esc(cfg.scope)}" rows="2" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;font-family:monospace;box-sizing:border-box;">${esc(cfg.mission)}</textarea>
+              <div style="font-size:11px;color:#6B7280;margin-top:4px;">Custom instruction defining the autonomous agent's mandate, constraints, and target outcomes.</div>
             </div>
 
             <!-- 2. Autonomy Tier -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#E5E7EB;margin-bottom:6px;">
+              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
                 🛡️ Autonomy Level:
               </label>
-              <select name="autonomy_${esc(cfg.scope)}" style="width:100%;background:#1F2937;color:#F9FAFB;border:1px solid #4B5563;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
+              <select name="autonomy_${esc(cfg.scope)}" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
                 <option value="autonomous" ${cfg.autonomy === 'autonomous' ? 'selected' : ''}>Autonomous — Agents execute end-to-end without pausing.</option>
                 <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default) — Routine work is autonomous; yellow review gates (🟡) trigger on high spend (> $250), sensitive actions, or low confidence.</option>
                 <option value="supervised" ${cfg.autonomy === 'supervised' ? 'selected' : ''}>Supervised — Every state change requires explicit human sign-off (coord.settle).</option>
@@ -130,37 +133,37 @@ export async function renderRoomsSetupPage(
             <!-- 3. Financial Guardrails -->
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
               <div>
-                <label style="display:block;font-size:12px;font-weight:600;color:#E5E7EB;margin-bottom:6px;">
+                <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
                   💵 Monthly Spend Ceiling ($):
                 </label>
-                <input type="number" name="budget_${esc(cfg.scope)}" value="${cfg.budgetCeilingDollars}" min="50" max="50000" style="width:100%;background:#1F2937;color:#F9FAFB;border:1px solid #4B5563;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
-                <div style="font-size:11px;color:#9CA3AF;margin-top:4px;">Hard stop limit. Breaching halts the room immediately.</div>
+                <input type="number" name="budget_${esc(cfg.scope)}" value="${cfg.budgetCeilingDollars}" min="50" max="50000" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;">Hard stop limit. Breaching halts the room immediately.</div>
               </div>
               <div>
-                <label style="display:block;font-size:12px;font-weight:600;color:#E5E7EB;margin-bottom:6px;">
+                <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
                   🪙 Monthly Token Quota:
                 </label>
-                <input type="number" name="tokens_${esc(cfg.scope)}" value="${cfg.budgetCeilingTokens}" min="100000" step="500000" style="width:100%;background:#1F2937;color:#F9FAFB;border:1px solid #4B5563;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
-                <div style="font-size:11px;color:#9CA3AF;margin-top:4px;">Total LLM token budget before yellow/red alerts trigger.</div>
+                <input type="number" name="tokens_${esc(cfg.scope)}" value="${cfg.budgetCeilingTokens}" min="100000" step="500000" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;">Total LLM token budget before yellow/red alerts trigger.</div>
               </div>
             </div>
 
             <!-- 4. Connected Systems of Record (SoR) -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#E5E7EB;margin-bottom:8px;">
+              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:8px;">
                 🔌 Connected Systems of Record (SoR Data Feeds):
               </label>
-              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;background:#1F2937;padding:10px;border-radius:6px;border:1px solid #374151;">
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;background:#FFFFFF;padding:10px;border-radius:6px;border:1px solid #E4E4E1;">
                 ${AVAILABLE_SORS.map(
                   (sor) => `
-                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#D1D5DB;cursor:pointer;">
-                    <input type="checkbox" name="sor_${esc(cfg.scope)}_${esc(sor.id)}" value="1" ${sors.includes(sor.id) ? 'checked' : ''} style="accent-color:#10B981;">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#4B5563;cursor:pointer;">
+                    <input type="checkbox" name="sor_${esc(cfg.scope)}_${esc(sor.id)}" value="1" ${sors.includes(sor.id) ? 'checked' : ''} style="accent-color:#0F5C57;">
                     <span>${esc(sor.label)}</span>
                   </label>
                 `,
                 ).join('')}
               </div>
-              <div style="font-size:11px;color:#9CA3AF;margin-top:4px;">Selects which evidence collectors and diff streams pipe real-time ground truth into this room.</div>
+              <div style="font-size:11px;color:#6B7280;margin-top:4px;">Selects which evidence collectors and diff streams pipe real-time ground truth into this room.</div>
             </div>
           </div>
         </details>
@@ -174,15 +177,19 @@ export async function renderRoomsSetupPage(
   <meta charset="utf-8">
   <title>Room Provisioning & Tuning Wizard · Vital</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111827; color: #F9FAFB; margin: 0; padding: 32px 16px; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #FAFAF8; color: #0A0F14; margin: 0; padding: 32px 16px; line-height: 1.5; letter-spacing: -0.011em; -webkit-font-smoothing: antialiased; }
     .container { max-width: 900px; margin: 0 auto; }
-    h1 { font-size: 26px; margin: 0 0 8px 0; color: #F9FAFB; }
-    p.sub { color: #9CA3AF; margin: 0 0 24px 0; font-size: 15px; line-height: 1.5; }
-    .preset-btn { background: #1F2937; color: #F9FAFB; border: 1px solid #374151; padding: 12px 14px; border-radius: 6px; cursor: pointer; text-align: left; font-size: 13px; transition: all 0.15s; }
-    .preset-btn:hover { background: #374151; border-color: #4B5563; }
-    .submit-btn { background: #10B981; color: #064E3B; font-weight: 700; border: none; padding: 14px 28px; border-radius: 6px; cursor: pointer; font-size: 15px; }
-    .submit-btn:hover { background: #059669; color: #FFFFFF; }
+    h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px 0; color: #0A0F14; }
+    p.sub { color: #6B7280; margin: 0 0 24px 0; font-size: 14px; line-height: 1.5; }
+    .preset-btn { background: #FFFFFF; color: #0A0F14; border: 1px solid #E4E4E1; padding: 14px 16px; border-radius: 8px; cursor: pointer; text-align: left; font-size: 13px; transition: all 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+    .preset-btn:hover { background: #F9F9F8; border-color: #0F5C57; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.04); }
+    .submit-btn { background: #0F5C57; color: #FFFFFF; font-weight: 600; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; transition: background 0.15s ease, transform 0.1s ease; }
+    .submit-btn:hover { background: #0B4A45; color: #FFFFFF; }
+    .submit-btn:active { transform: translateY(1px); }
   </style>
 </head>
 <body>
@@ -195,17 +202,17 @@ export async function renderRoomsSetupPage(
     ${noticeHtml}
 
     <!-- Quick Preset Bundles -->
-    <div style="background:#1F2937;border:1px solid #374151;border-radius:8px;padding:18px;margin-bottom:28px;">
+    <div style="background:#FFFFFF;border:1px solid #E4E4E1;border-radius:8px;padding:18px;margin-bottom:28px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;font-size:15px;color:#F9FAFB;">⚡ Quick-Start Preset Bundles</h3>
-        <span style="font-size:12px;color:#9CA3AF;">Click to auto-select relevant rooms</span>
+        <h3 style="margin:0;font-size:15px;color:#0A0F14;">⚡ Quick-Start Preset Bundles</h3>
+        <span style="font-size:12px;color:#6B7280;">Click to auto-select relevant rooms</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:10px;">
         ${INDUSTRY_PRESETS.map(
           (p) => `
           <button type="button" class="preset-btn" onclick="applyPreset('${esc(p.id)}')">
-            <strong style="color:#60A5FA;">${esc(p.name)}</strong>
-            <div style="font-size:12px;color:#9CA3AF;margin-top:6px;line-height:1.4;">${esc(p.description)}</div>
+            <strong style="color:#0F5C57;">${esc(p.name)}</strong>
+            <div style="font-size:12px;color:#6B7280;margin-top:6px;line-height:1.4;">${esc(p.description)}</div>
           </button>
         `,
         ).join('')}
@@ -216,14 +223,14 @@ export async function renderRoomsSetupPage(
       <input type="hidden" name="csrf" value="${esc(csrfToken)}">
       
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-        <h3 style="margin:0;font-size:16px;color:#F9FAFB;">📋 Room Selection & Configuration Roster</h3>
-        <span style="font-size:12px;color:#9CA3AF;">Uncheck rooms to avoid workspace clutter</span>
+        <h3 style="margin:0;font-size:16px;color:#0A0F14;">📋 Room Selection & Configuration Roster</h3>
+        <span style="font-size:12px;color:#6B7280;">Uncheck rooms to avoid workspace clutter</span>
       </div>
 
       ${roomCardsHtml}
 
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:32px;padding-top:20px;border-top:1px solid #374151;">
-        <a href="/console" style="color:#9CA3AF;text-decoration:none;font-size:14px;">← Back to Mission Control</a>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:32px;padding-top:20px;border-top:1px solid #E4E4E1;">
+        <a href="${esc(home)}" style="color:#6B7280;text-decoration:none;font-size:14px;">← Back to the console</a>
         <button type="submit" class="submit-btn">Save & Deploy Configured Rooms</button>
       </div>
     </form>

@@ -929,9 +929,9 @@ T('FLOW-022: runtime drill engages the real halt path, verifies effects, and rel
     true,
     'authorization flows again after release:',
   );
-  const rows = (await db
-    .prepare("SELECT detail FROM audit_log WHERE action = 'RUNTIME_HALT_DRILL'")
-    .all()) as { detail: string }[];
+  const rows = (await db.prepare("SELECT detail FROM audit_log WHERE action = 'RUNTIME_HALT_DRILL'").all()) as {
+    detail: string;
+  }[];
   eq(rows.length, 1);
   const detail = JSON.parse(String(rows[0]?.detail)) as {
     mode: string;
@@ -955,7 +955,17 @@ T('FLOW-022: drill CLI separates policy-only from runtime evidence', async () =>
         encoding: 'utf8',
         timeout: 30_000,
       });
-    const signup = run(['signup', '--tenant', 'drilltenant', '--email', 'o@d.test', '--password', 'long-enough-pw-1', '--db', dbPath]);
+    const signup = run([
+      'signup',
+      '--tenant',
+      'drilltenant',
+      '--email',
+      'o@d.test',
+      '--password',
+      'long-enough-pw-1',
+      '--db',
+      dbPath,
+    ]);
     eq(signup.status, 0, `signup seeds the drill tenant: ${signup.stderr}`);
     const policy = run(['drill', '--policy-only', '--tenant', 'drilltenant', '--db', dbPath]);
     eq(policy.status, 0, `policy-only drill passes: ${policy.stderr}`);

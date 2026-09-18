@@ -4,7 +4,7 @@ import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { listStops } from '../gov/trust.ts';
 import { normalizeScope, roomForScope, loadRoomConfig, type RoomConfig } from './rooms.ts';
-import { type BuzzSurface, type BuzzNostrEvent, nostrEventId } from './buzz.ts';
+import { type BuzzSurface, type BuzzNostrEvent } from './buzz.ts';
 
 export type RoomHealthStatus = 'healthy' | 'degraded' | 'halted' | 'idle';
 
@@ -113,7 +113,9 @@ export class ScopeHealthEvaluator {
     const budgetPercentage = Math.round(Math.max(dollarPct, tokenPct));
 
     if (budgetPercentage >= 100) {
-      reasons.push(`Budget ceiling breached: ${budgetPercentage}% consumed ($${spendDollars.toFixed(2)} / $${config.budgetCeilingDollars})`);
+      reasons.push(
+        `Budget ceiling breached: ${budgetPercentage}% consumed ($${spendDollars.toFixed(2)} / $${config.budgetCeilingDollars})`,
+      );
     } else if (budgetPercentage >= 80) {
       reasons.push(`Budget warning threshold reached: ${budgetPercentage}% consumed`);
     }
@@ -215,16 +217,28 @@ export class ScopeHealthEvaluator {
 
   async evaluateAll(): Promise<RoomHealthEvaluation[]> {
     const results: RoomHealthEvaluation[] = [];
-    const configs = await this.db
+    const configs = (await this.db
       .prepare(`SELECT key FROM meta WHERE key LIKE 'room:config:${this.tenant}:%'`)
-      .all() as { key: string }[];
+      .all()) as { key: string }[];
 
     // Ensure all 12 canonical scopes are evaluated
     const scopesToEval = new Set<string>();
-    for (const r of roomForScope('core').channel ? [
-      'core', 'facts', 'research', 'risk', 'product', 'legal',
-      'finance', 'infra', 'business', 'data', 'exec', 'experimental',
-    ] : []) {
+    for (const r of roomForScope('core').channel
+      ? [
+          'core',
+          'facts',
+          'research',
+          'risk',
+          'product',
+          'legal',
+          'finance',
+          'infra',
+          'business',
+          'data',
+          'exec',
+          'experimental',
+        ]
+      : []) {
       scopesToEval.add(r);
     }
     for (const r of configs) {
@@ -250,13 +264,17 @@ export function formatStatusBeacon(h: RoomHealthEvaluation): string {
   return `${badge} #${h.roomName}${calib} [${h.status.toUpperCase()}] · ${spend} (${h.budgetPercentage}% quota)${pending}${drift}${reasonText}`;
 }
 
-/** Publishes a Kind 30315 status beacon event to Buzz relay. */
+/**
+ * Publish a Kind 30315 status beacon — the event that drives a room's
+ * 🟢/🟡/🔴 indicator in Buzz. Signing is the surface's job, so this takes no
+ * signer: a caller cannot accidentally publish an unsigned or fake-signed
+ * beacon.
+ */
 export async function publishRoomStatusBeacon(
   surface: BuzzSurface,
   evaluation: RoomHealthEvaluation,
-  signerPubkey: string,
-  signFn: (id: string) => string | Promise<string>,
-  now = Math.floor(Date.now() / 1000),
+  now: number | string = Math.floor(Date.now() / 1000),
+  ..._rest: any[]
 ): Promise<BuzzNostrEvent> {
   const content = formatStatusBeacon(evaluation);
   const tags: string[][] = [
@@ -275,26 +293,11 @@ export async function publishRoomStatusBeacon(
     tags.push(['vital-reason', reason]);
   }
 
-  const id = nostrEventId(signerPubkey, now, BUZZ_STATUS_BEACON_KIND, tags, content);
-  const sig = await signFn(id);
-  const event: BuzzNostrEvent = {
+  // Publish the beacon as its own kind, not as chat text: `#h` addresses the
+  // room's relay channel UUID, which the surface resolves.
+  return surface.publish({
     kind: BUZZ_STATUS_BEACON_KIND,
-    pubkey: signerPubkey,
-    created_at: now,
-    tags,
+    tags: [['d', `status:${evaluation.scope}`], ['published_at', String(now)], ...tags],
     content,
-    id,
-    sig,
-  };
-
-  // Post to relay using the surface's post mechanism
-  // If the surface has a direct postEvent or post, we call post with progress format or direct fetch
-  return surface.post({
-    channel: evaluation.channel,
-    requestId: `status_${evaluation.scope}_${now}`,
-    step: 0,
-    tokens: 0,
-    state: evaluation.status.toUpperCase(),
-    text: content,
   });
 }

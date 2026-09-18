@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
-import { type BuzzSurface, type BuzzNostrEvent, nostrEventId } from './buzz.ts';
+import { type BuzzSurface } from './buzz.ts';
 import { roomForScope, normalizeScope, loadRoomConfig, type RoomConfig } from './rooms.ts';
 import { ScopeHealthEvaluator } from './health.ts';
 
@@ -86,17 +86,53 @@ export class LiveCanvasSynchronizer {
   private async renderRiskMonitorCanvas(config: RoomConfig, health: any, at: string): Promise<string> {
     // 1. Exposure table
     const exposures = [
-      { counterparty: 'Apex Clearing Corp', exposure: '$1,420,000', variance: '+14.2%', status: '🟡 ELEVATED', limit: '$1,500,000' },
-      { counterparty: 'Goldman Sachs Exec', exposure: '$890,000', variance: '+2.1%', status: '🟢 NOMINAL', limit: '$2,000,000' },
-      { counterparty: 'Citadel Securities', exposure: '$410,000', variance: '-1.4%', status: '🟢 NOMINAL', limit: '$1,000,000' },
-      { counterparty: 'Prime Custody Ltd', exposure: '$940,000', variance: '+19.8%', status: '🔴 REVIEW GATE', limit: '$800,000' },
+      {
+        counterparty: 'Apex Clearing Corp',
+        exposure: '$1,420,000',
+        variance: '+14.2%',
+        status: '🟡 ELEVATED',
+        limit: '$1,500,000',
+      },
+      {
+        counterparty: 'Goldman Sachs Exec',
+        exposure: '$890,000',
+        variance: '+2.1%',
+        status: '🟢 NOMINAL',
+        limit: '$2,000,000',
+      },
+      {
+        counterparty: 'Citadel Securities',
+        exposure: '$410,000',
+        variance: '-1.4%',
+        status: '🟢 NOMINAL',
+        limit: '$1,000,000',
+      },
+      {
+        counterparty: 'Prime Custody Ltd',
+        exposure: '$940,000',
+        variance: '+19.8%',
+        status: '🔴 REVIEW GATE',
+        limit: '$800,000',
+      },
     ];
 
     // 2. Active Procedure Cards
     let procedureRows = [
-      { card: 'rebalance-counterparty-risk', intent: 'hedge:exposure', tier: 'WORKFLOW', ewma: '0.042', status: '🟢 PROMOTED' },
+      {
+        card: 'rebalance-counterparty-risk',
+        intent: 'hedge:exposure',
+        tier: 'WORKFLOW',
+        ewma: '0.042',
+        status: '🟢 PROMOTED',
+      },
       { card: 'detect-delta-drift', intent: 'audit:delta', tier: 'WORKFLOW', ewma: '0.068', status: '🟡 DRIFT_ALERT' },
-      { card: 'liquidate-uncollateralized', intent: 'action:liquidate', tier: 'HUMAN', ewma: '1.000', status: '⚪ SUPERVISED' },
+      {
+        card: 'liquidate-uncollateralized',
+        intent: 'action:liquidate',
+        tier: 'HUMAN',
+        ewma: '1.000',
+        status: '⚪ SUPERVISED',
+      },
     ];
 
     if (this.compiler) {
@@ -134,7 +170,9 @@ export class LiveCanvasSynchronizer {
       `## 1. Real-Time Counterparty Credit Exposure`,
       `| Counterparty | Live Exposure | Variance | Limit Ceiling | Gate Status |`,
       `| :--- | :--- | :--- | :--- | :--- |`,
-      ...exposures.map((e) => `| **${e.counterparty}** | ${e.exposure} | \`${e.variance}\` | ${e.limit} | ${e.status} |`),
+      ...exposures.map(
+        (e) => `| **${e.counterparty}** | ${e.exposure} | \`${e.variance}\` | ${e.limit} | ${e.status} |`,
+      ),
       '',
       `## 2. Active Procedure Cards & Cognitive Drift Tracking`,
       `| Skill Card ID | Intent | Execution Tier | Drift EWMA | Operational Status |`,
@@ -158,7 +196,14 @@ export class LiveCanvasSynchronizer {
         `SELECT id, subject, statement, status, confidence, created_at FROM claims
          WHERE tenant = ? ORDER BY seq DESC LIMIT 6`,
       )
-      .all(this.tenant)) as { id: string; subject: string; statement: string; status: string; confidence: number; created_at: string }[];
+      .all(this.tenant)) as {
+      id: string;
+      subject: string;
+      statement: string;
+      status: string;
+      confidence: number;
+      created_at: string;
+    }[];
 
     const dagGraph = [
       '     ┌────────────────────────────────────────────────┐',
@@ -189,7 +234,10 @@ export class LiveCanvasSynchronizer {
       `| Claim ID | Subject | Statement | Status | Confidence |`,
       `| :--- | :--- | :--- | :--- | :--- |`,
       ...(claims.length > 0
-        ? claims.map((c) => `| \`[${c.id}]\` | \`${c.subject}\` | ${c.statement} | \`${c.status}\` | \`${(c.confidence ?? 1).toFixed(2)}\` |`)
+        ? claims.map(
+            (c) =>
+              `| \`[${c.id}]\` | \`${c.subject}\` | ${c.statement} | \`${c.status}\` | \`${(c.confidence ?? 1).toFixed(2)}\` |`,
+          )
         : ['| `[clm_canonical_root]` | `system` | Canonical reality ledger initialized | `ACCEPTED` | `1.00` |']),
       '',
       `## 3. Epistemic Health Indicators`,
@@ -266,11 +314,13 @@ export class LiveCanvasSynchronizer {
   }
 
   /** Publishes or updates the live Canvas event on the Buzz Nostr relay in place */
-  async publishCanvas(rawScope: string, signerPubkey: string, signFn: (id: string) => string | Promise<string>): Promise<LiveCanvasState> {
+  async publishCanvas(rawScope: string): Promise<LiveCanvasState> {
     const canvas = await this.generateCanvas(rawScope);
     if (!this.surface) return canvas;
 
     const createdAt = canvas.version;
+    // Addressable canvas: `d` is stable per room so re-publishing repins one
+    // document instead of piling up copies.
     const tags: string[][] = [
       ['d', `canvas:${canvas.scope}`],
       ['h', canvas.channel],
@@ -279,27 +329,9 @@ export class LiveCanvasSynchronizer {
       ['published_at', String(createdAt)],
     ];
 
-    const id = nostrEventId(signerPubkey, createdAt, BUZZ_CANVAS_KIND, tags, canvas.markdown);
-    const sig = await signFn(id);
-    const event: BuzzNostrEvent = {
-      kind: BUZZ_CANVAS_KIND,
-      pubkey: signerPubkey,
-      created_at: createdAt,
-      tags,
-      content: canvas.markdown,
-      id,
-      sig,
-    };
-
-    // Post to relay using surface
-    void this.surface.post({
-      channel: canvas.channel,
-      requestId: `canvas_${canvas.scope}_${createdAt}`,
-      step: 0,
-      tokens: 0,
-      state: 'PINNED_CANVAS',
-      text: canvas.markdown,
-    }).catch(() => {/* non-fatal */});
+    // The surface signs with the room agent's real key; a canvas that cannot
+    // be signed must surface as a failure, not be silently dropped.
+    await this.surface.publish({ kind: BUZZ_CANVAS_KIND, tags, content: canvas.markdown });
 
     return canvas;
   }

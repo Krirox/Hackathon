@@ -56,8 +56,33 @@ export function requestPhase(state: string, humanMinutes: number): string {
 
 export function detailDocument(title: string, body: string, opts: ReviewOptions): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Vital</title>
-<style>body{font:16px system-ui;margin:24px;max-width:960px}pre{white-space:pre-wrap;overflow-wrap:anywhere}label{display:block;margin:12px 0}textarea{width:100%;min-height:100px}input,button,textarea{font:inherit}article{border:1px solid #ccc;padding:16px;margin:16px 0}nav a{margin-right:16px}dt{font-weight:bold}dd{margin-bottom:12px}a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100}a.skip-link:focus{left:0}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto}.table-wrap{overflow-x:auto;max-width:100%}.error-summary{border:2px solid #B91C1C;border-radius:8px;padding:12px;margin:12px 0;background:#FEF2F2}.success{border:2px solid #0F7A3D;border-radius:8px;padding:12px;margin:12px 0;background:#F0FDF4}@media (max-width:640px){body{margin:12px}form{max-width:100%}input,textarea,select,button{min-height:44px}}@media (max-width:600px){article{padding:12px}}</style>
-</head><body><a class="skip-link" href="#main">Skip to main content</a><a href="${esc(opts.home ?? '/')}">Back to console</a><main id="main"><h1>${esc(title)}</h1><p>Signed in as ${esc(opts.actor)}</p>${body}</main></body></html>`;
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px;line-height:1.5;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:28px 20px;max-width:960px;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+h1{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin:16px 0 8px}
+h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:20px 0 8px}
+a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
+body>a:first-of-type+a{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:#fff;border:1px solid #E4E4E1;border-radius:6px;font-size:13px;font-weight:500;color:#0F5C57;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,0.03)}
+body>a:first-of-type+a:hover{background:#F3F4F6;border-color:#D1D5DB;text-decoration:none}
+pre{font-family:'JetBrains Mono',monospace;font-size:12px;background:#F5F5F3;border:1px solid #E4E4E1;border-radius:6px;padding:12px 14px;white-space:pre-wrap;overflow-wrap:anywhere}
+code{font-family:'JetBrains Mono',monospace;font-size:12px;background:#F3F4F6;padding:2px 5px;border-radius:4px}
+label{display:block;margin:12px 0;font-weight:500;font-size:13px;color:#374151}
+input,button,textarea,select{font-family:inherit;font-size:13px}
+input,textarea,select{width:100%;box-sizing:border-box;border:1px solid #E4E4E1;border-radius:6px;padding:9px 12px;background:#fff;color:#0A0F14;transition:border-color .15s,box-shadow .15s}
+input:focus,textarea:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}
+textarea{min-height:100px}
+button{background:#0F5C57;color:#fff;font-weight:600;padding:9px 16px;border-radius:6px;border:0;cursor:pointer;transition:background .15s ease}
+button:hover{background:#0B4A45}
+button:disabled{opacity:0.6;cursor:not-allowed}
+article{border:1px solid #E4E4E1;border-radius:10px;padding:20px;margin:16px 0;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+nav a{margin-right:16px}dt{font-weight:600;color:#374151}dd{margin-bottom:12px}
+a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100;border-radius:0 0 6px 0}a.skip-link:focus{left:0}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}
+table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto}.table-wrap{overflow-x:auto;max-width:100%}
+.error-summary{border:1px solid #FCA5A5;border-radius:8px;padding:12px 16px;margin:12px 0;background:#FEF2F2;color:#991B1B}
+.success{border:1px solid #86EFAC;border-radius:8px;padding:12px 16px;margin:12px 0;background:#F0FDF4;color:#166534}
+@media (max-width:640px){body{margin:0;padding:16px}form{max-width:100%}input,textarea,select,button{min-height:44px}}
+@media (max-width:600px){article{padding:14px}}</style>
+</head><body><a class="skip-link" href="#main">Skip to main content</a><a href="${esc(opts.home ?? '/')}">Back to console</a><main id="main"><h1>${esc(title)}</h1><p style="color:#6B7280;font-size:13px">Signed in as <strong style="color:#0A0F14">${esc(opts.actor)}</strong></p>${body}</main></body></html>`;
 }
 
 export async function requestDetail(
@@ -120,8 +145,8 @@ export async function requestDetail(
 <p>Some cited evidence is historical. Refresh binds this request to current claim replacements without rewriting past decisions.</p>
 <form method="post" action="/api/requests/${esc(encodeURIComponent(id))}/refresh-evidence" data-review-action="refresh-evidence">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
-<button type="submit" disabled>Refresh evidence and re-review</button></form>
-<p data-review-status role="status" aria-live="polite"></p></article><noscript>JavaScript is required to refresh evidence.</noscript><script>${REVIEW_SCRIPT}</script></section>`;
+<button type="submit">Refresh evidence and re-review</button></form>
+<p data-review-status role="status" aria-live="polite"></p></article><noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript><script>${REVIEW_SCRIPT}</script></section>`;
   } else if (staleEvidence) {
     refreshForm =
       '<p>Some cited evidence is historical. This request is no longer pending, so its evidence references stay frozen.</p>';
@@ -136,7 +161,7 @@ export async function requestDetail(
   const phase = requestPhase(r.state, r.bid.humanMinutes);
   return detailDocument(
     'Request evidence',
-    `<h2>${esc(r.goal)}</h2><p><strong>${esc(phase)}</strong> · ${esc(r.state)} · ${esc(r.id)}</p>
+    `${opts.notice ? `<div class="success" role="status"><p><strong>${esc(opts.notice)}</strong></p></div>` : ''}<h2>${esc(r.goal)}</h2><p><strong>${esc(phase)}</strong> · ${esc(r.state)} · ${esc(r.id)}</p>
 ${decision ? `<p><a href="/console/decisions/${esc(encodeURIComponent(decision.id))}">View approval receipt</a> — approval to begin work, not final-deliverable authorization or evidence of execution or measurement.</p>` : ''}
 ${deliverable}
 ${refreshForm}
@@ -243,8 +268,8 @@ export async function claimDetail(
 <label>Unit<input name="unit" value="${esc(c.unit ?? '')}"></label>
 ${operatorFields(opts, id, 'correct')}
 <label><input name="confirmed" type="checkbox" required>I reviewed the replacement statement and value</label>
-<button type="submit" disabled>Save correction</button></form><p data-review-status role="status" aria-live="polite"></p></article>
-<a href="#" data-review-refresh>Refresh claim</a><noscript>JavaScript is required to submit a correction.</noscript></section><script>${REVIEW_SCRIPT}</script>`;
+<button type="submit">Save correction</button></form><p data-review-status role="status" aria-live="polite"></p></article>
+<a href="#" data-review-refresh>Refresh claim</a><noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript></section><script>${REVIEW_SCRIPT}</script>`;
   } else if (chain.current) {
     form = `<p>This is historical evidence. <a href="${esc(claimDetailUrl(chain.current.id, returnCtx))}">Correct the current claim (${esc(chain.current.id)})</a> instead.</p>`;
   } else {

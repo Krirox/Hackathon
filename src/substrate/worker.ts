@@ -11,6 +11,7 @@ import { CognitiveRouter } from '../router/router.ts';
 import { OrganizationalCompiler, mineCandidates } from '../compiler/compiler.ts';
 import type { RoutingClass } from '../core/types.ts';
 import { watchRun, type BuzzSurface } from '../talk/buzz.ts';
+import { evaluateDispatch } from '../talk/enforce.ts';
 
 export interface ApplicationWorkerOptions {
   tenant: string;
@@ -346,6 +347,20 @@ export class ApplicationWorker {
           if (!request) continue;
           if (state === 'ADMITTED' && requiresHumanApproval(request)) continue;
 
+          // Room-config enforcement: the autonomy tier and budget ceilings an
+          // operator set in the wizard bind here, in the dispatch path — not
+          // just in display code. A refusal is recorded as a worker error so
+          // the operator can see why work is not moving.
+          const roomDecision = await evaluateDispatch(this.db, this.tenant, request);
+          if (!roomDecision.allowed) {
+            const msg = `[worker:ROOM_GATE] req=${reqId} scope=${targetScope} code=${roomDecision.code} ${roomDecision.reason}`;
+            if (!this.errors.includes(msg)) {
+              this.errors.push(msg);
+              this.lastError = msg;
+            }
+            continue;
+          }
+
           let command = goal;
           let groundedClaimRefs = [...claimRefs];
           let approvedSpec: ExecutionSpec | undefined;
@@ -494,7 +509,9 @@ export class ApplicationWorker {
                 const buzzCoords = this.buzz.channelFor(reqId, request);
                 if (buzzCoords) {
                   const handle = watchRun(
-                    () => { /* progress subscription: runner already ran */ },
+                    () => {
+                      /* progress subscription: runner already ran */
+                    },
                     this.buzz.surface,
                     { channel: buzzCoords.channel, threadRoot: buzzCoords.threadRoot, requestId: reqId },
                   );

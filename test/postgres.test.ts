@@ -152,7 +152,9 @@ T('placeholder rewriting never touches a ? inside a string literal', () => {
 // both transactions observe the same rows under READ COMMITTED, and only
 // the conditional UPDATE decides who owns what.
 
-const pgTwo = async (): Promise<[Awaited<ReturnType<typeof openPostgres>>, Awaited<ReturnType<typeof openPostgres>>]> => {
+const pgTwo = async (): Promise<
+  [Awaited<ReturnType<typeof openPostgres>>, Awaited<ReturnType<typeof openPostgres>>]
+> => {
   const a = openPostgres(url!);
   const b = openPostgres(url!);
   try {
@@ -175,9 +177,9 @@ pgT('F07: two connections racing migrate() on a fresh database both succeed, one
     await dbA.prepare('DELETE FROM meta WHERE key = ?').run('schema_version');
     await dbA.prepare('DELETE FROM meta WHERE key = ?').run('spent_mirrors_backfilled');
     await Promise.all([migrate(dbA), migrate(dbB)]);
-    const stamps = (await dbA.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?').get(
-      'additive-list-v6',
-    )) as { n: number };
+    const stamps = (await dbA
+      .prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?')
+      .get('additive-list-v6')) as { n: number };
     eq(Number(stamps.n), 1, 'exactly one journal stamp after the race:');
     const version = (await dbA.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')) as {
       value: string;
@@ -186,9 +188,9 @@ pgT('F07: two connections racing migrate() on a fresh database both succeed, one
     // A third sequential re-run stays idempotent.
     await migrate(dbA);
     await migrate(dbB);
-    const stampsAfter = (await dbA.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?').get(
-      'additive-list-v6',
-    )) as { n: number };
+    const stampsAfter = (await dbA
+      .prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE name = ?')
+      .get('additive-list-v6')) as { n: number };
     eq(Number(stampsAfter.n), 1, 're-run does not duplicate the stamp:');
   } finally {
     await dbA.close();
