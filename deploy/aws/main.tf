@@ -59,8 +59,8 @@ data "aws_availability_zones" "available" {
 locals {
   name           = var.project
   azs            = slice(data.aws_availability_zones.available.names, 0, var.az_count)
-  core_image     = var.core_image != "" ? var.core_image : "public.ecr.aws/docker/library/busybox:latest"
-  executor_image = var.executor_image != "" ? var.executor_image : "public.ecr.aws/docker/library/busybox:latest"
+  core_image     = var.core_image
+  executor_image = var.executor_image
 }
 
 # ------------------------------------------------------------- networking ----
@@ -280,6 +280,46 @@ resource "aws_secretsmanager_secret_version" "operator" {
   secret_string = var.operator_secret
 }
 
+# Buzz agent identities + review tokens + day-0 claiming. All conditional:
+# absent when empty, so a stack without them fails closed (no identity, no
+# review tokens, gated claiming) instead of running on defaults.
+resource "aws_secretsmanager_secret" "agent_master_key" {
+  count = var.buzz_agent_master_key == "" ? 0 : 1
+  name  = "${local.name}/buzz-agent-master-key"
+}
+resource "aws_secretsmanager_secret_version" "agent_master_key" {
+  count         = var.buzz_agent_master_key == "" ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.agent_master_key[0].id
+  secret_string = var.buzz_agent_master_key
+}
+resource "aws_secretsmanager_secret" "review_secret" {
+  count = var.vital_review_secret == "" ? 0 : 1
+  name  = "${local.name}/review-secret"
+}
+resource "aws_secretsmanager_secret_version" "review_secret" {
+  count         = var.vital_review_secret == "" ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.review_secret[0].id
+  secret_string = var.vital_review_secret
+}
+resource "aws_secretsmanager_secret" "bootstrap_password" {
+  count = var.bootstrap_password == "" ? 0 : 1
+  name  = "${local.name}/bootstrap-password"
+}
+resource "aws_secretsmanager_secret_version" "bootstrap_password" {
+  count         = var.bootstrap_password == "" ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.bootstrap_password[0].id
+  secret_string = var.bootstrap_password
+}
+resource "aws_secretsmanager_secret" "setup_secret" {
+  count = var.setup_secret == "" ? 0 : 1
+  name  = "${local.name}/setup-secret"
+}
+resource "aws_secretsmanager_secret_version" "setup_secret" {
+  count         = var.setup_secret == "" ? 0 : 1
+  secret_id     = aws_secretsmanager_secret.setup_secret[0].id
+  secret_string = var.setup_secret
+}
+
 resource "random_password" "db" {
   length  = 32
   special = false
@@ -482,10 +522,15 @@ resource "aws_iam_policy" "ecs_execution_secrets" {
           aws_secretsmanager_secret.serper.arn,
           aws_secretsmanager_secret.gemini.arn,
           aws_secretsmanager_secret.novita.arn
-        ], aws_secretsmanager_secret.operator[*].arn, var.enable_buzz ? [
-          aws_secretsmanager_secret.buzz_db_url[0].arn,
-          aws_secretsmanager_secret.buzz_redis_url[0].arn,
-          aws_secretsmanager_secret.buzz_relay_key[0].arn
+          ], aws_secretsmanager_secret.operator[*].arn,
+          aws_secretsmanager_secret.agent_master_key[*].arn,
+          aws_secretsmanager_secret.review_secret[*].arn,
+          aws_secretsmanager_secret.bootstrap_password[*].arn,
+          aws_secretsmanager_secret.setup_secret[*].arn,
+          var.enable_buzz ? [
+            aws_secretsmanager_secret.buzz_db_url[0].arn,
+            aws_secretsmanager_secret.buzz_redis_url[0].arn,
+            aws_secretsmanager_secret.buzz_relay_key[0].arn
         ] : [])
       }
     ]
@@ -691,6 +736,10 @@ resource "aws_ecs_task_definition" "core" {
         # on direct/loopback serving — clients could spoof both.
         { name = "TRUST_PROXY", value = "1" },
         { name = "VITAL_TENANT", value = "acme" },
+        # Day-0 claiming only: empty (default) leaves web signup gated on a
+        # public bind. Set once, claim the owner (forced password change),
+        # then rotate (unset + re-apply).
+        { name = "VITAL_BOOTSTRAP_EMAIL", value = var.bootstrap_email },
         { name = "VITAL_WITH_WORKER", value = "1" },
         { name = "TALK_SURFACE", value = "buzz" },
         { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" },
@@ -698,7 +747,7 @@ resource "aws_ecs_task_definition" "core" {
         { name = "ARTIFACT_BUCKET", value = aws_s3_bucket.artifacts.bucket },
         { name = "AWS_REGION", value = var.region },
         { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
-      ], var.enable_buzz ? [
+        ], var.enable_buzz ? [
         { name = "BUZZ_RELAY_URL", value = local.buzz_discovery }
       ] : [])
       secrets = concat(
@@ -713,6 +762,18 @@ resource "aws_ecs_task_definition" "core" {
         ],
         var.operator_secret == "" ? [] : [
           { name = "VITAL_OPERATOR_SECRET", valueFrom = aws_secretsmanager_secret.operator[0].arn }
+        ],
+        var.buzz_agent_master_key == "" ? [] : [
+          { name = "BUZZ_AGENT_MASTER_KEY", valueFrom = aws_secretsmanager_secret.agent_master_key[0].arn }
+        ],
+        var.vital_review_secret == "" ? [] : [
+          { name = "VITAL_REVIEW_SECRET", valueFrom = aws_secretsmanager_secret.review_secret[0].arn }
+        ],
+        var.bootstrap_password == "" ? [] : [
+          { name = "VITAL_BOOTSTRAP_PASSWORD", valueFrom = aws_secretsmanager_secret.bootstrap_password[0].arn }
+        ],
+        var.setup_secret == "" ? [] : [
+          { name = "VITAL_SETUP_SECRET", valueFrom = aws_secretsmanager_secret.setup_secret[0].arn }
         ]
       )
       logConfiguration = {

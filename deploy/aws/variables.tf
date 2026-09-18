@@ -16,17 +16,27 @@ variable "az_count" {
   type        = number
   default     = 2
 }
-
 variable "core_image" {
   description = "ECR image URI for vital-core (deploy workflow pushes this), e.g. 123456789012.dkr.ecr.eu-central-1.amazonaws.com/vital-core:sha"
   type        = string
   default     = ""
+
+  validation {
+    condition     = length(var.core_image) > 0
+    error_message = "core_image must be a real ECR URI — the busybox fallback was removed so a misconfigured apply cannot deploy a dead service. The deploy workflow passes -var core_image explicitly."
+  }
 }
+
 
 variable "executor_image" {
   description = "ECR image URI for the Lambda executor container"
   type        = string
   default     = ""
+
+  validation {
+    condition     = length(var.executor_image) > 0
+    error_message = "executor_image must be a real ECR URI (see core_image)."
+  }
 }
 
 variable "jcode_image" {

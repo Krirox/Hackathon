@@ -28,6 +28,14 @@ gemini_api_key     = "CHANGEME"
 novita_api_key     = "CHANGEME"
 # Console mutation gate (empty = ungated dev only). Pilot: set via TF_VAR_operator_secret.
 # operator_secret = "CHANGEME"
+# Buzz agent identities + review tokens (empty = fail closed: no publishing identity, dead webhook approve path).
+# buzz_agent_master_key via TF_VAR_buzz_agent_master_key (32+ hex chars)
+# vital_review_secret via TF_VAR_vital_review_secret (random 16+ chars)
+# Day-0 owner claiming (set once, claim, force-change password, then unset + re-apply to rotate).
+# bootstrap_email = "owner@example.com"
+# bootstrap_password via TF_VAR_bootstrap_password
+# Deliberate web-claim authorization on non-loopback clients (empty = default gate).
+# setup_secret via TF_VAR_setup_secret
 # ALB HTTPS (empty = HTTP-forward dev only). Pilot: ACM cert ARN.
 # acm_certificate_arn = ""
 # Private ALB posture (keep deployment private first — F01):

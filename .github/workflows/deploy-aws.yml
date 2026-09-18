@@ -60,6 +60,11 @@ jobs:
           TF_VAR_novita_api_key: ${{ secrets.TF_VAR_NOVITA_API_KEY }}
           TF_VAR_operator_secret: ${{ secrets.TF_VAR_OPERATOR_SECRET }}
           TF_VAR_buzz_relay_private_key: ${{ secrets.TF_VAR_BUZZ_RELAY_PRIVATE_KEY }}
+          TF_VAR_buzz_agent_master_key: ${{ secrets.TF_VAR_BUZZ_AGENT_MASTER_KEY }}
+          TF_VAR_vital_review_secret: ${{ secrets.TF_VAR_VITAL_REVIEW_SECRET }}
+          TF_VAR_bootstrap_email: ${{ secrets.TF_VAR_BOOTSTRAP_EMAIL }}
+          TF_VAR_bootstrap_password: ${{ secrets.TF_VAR_BOOTSTRAP_PASSWORD }}
+          TF_VAR_setup_secret: ${{ secrets.TF_VAR_SETUP_SECRET }}
         run: |
           if [ -n "${{ secrets.TF_BACKEND_BUCKET }}" ]; then
             terraform init -input=false \
