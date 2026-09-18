@@ -2839,6 +2839,41 @@ export function startConsoleServer(
             : `Not a room command: ${command.slice(0, 60)}`;
           return redirect(res, `${back}?notice=${encodeURIComponent(notice.slice(0, 200))}`);
         }
+        const buzzReact = path.match(/^\/console\/buzz\/([^/]+)\/react$/);
+        if (method === 'POST' && buzzReact) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const call = await parseCall(req);
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const scope = decodeURIComponent(buzzReact[1]!);
+          const messageId = String(call.fields.messageId ?? '').trim().slice(0, 64);
+          const emoji = String(call.fields.emoji ?? '').trim().slice(0, 8);
+          if (!messageId || !emoji) return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}`);
+          const { toggleReaction } = await import('./buzz.ts');
+          await toggleReaction(db, tenant, messageId, emoji, auth.user.id, at);
+          await auditConsole(db, tenant, by(auth.user), 'buzz.react', `msg:${messageId}`, at, emoji);
+          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(messageId)}`);
+        }
+        const buzzReply = path.match(/^\/console\/buzz\/([^/]+)\/reply$/);
+        if (method === 'POST' && buzzReply) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          const call = await parseCall(req);
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          const scope = decodeURIComponent(buzzReply[1]!);
+          const parentId = String(call.fields.parentId ?? '').trim().slice(0, 64) || null;
+          const content = String(call.fields.content ?? '').trim().slice(0, 500);
+          if (!content) return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}`);
+          const { createLocalReply } = await import('./buzz.ts');
+          const byName = auth.user.email.split('@')[0] ?? auth.user.email;
+          const newId = await createLocalReply(db, tenant, scope, parentId, byName, content, at);
+          await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
+          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(newId)}`);
+        }
         const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
         if (method === 'GET' && learningCard) {
           const auth = await sessionOf();
@@ -5005,6 +5040,59 @@ export function startConsoleServer(
                 error: e.message,
                 ...(e.detail ?? {}),
               });
+              return;
+            }
+            json(res, 409, { ok: false, error: (e as Error).message });
+          }
+          return;
+        }
+
+        // Human curation: promote a CANDIDATE claim to VERIFIED so cited
+        // work can proceed to approval. Only roles that may approve may
+        // verify — verification is what makes evidence approvable.
+        const verify = path.match(/^\/api\/claims\/([^/]+)\/verify$/);
+        if (method === 'POST' && verify) {
+          const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, true)) return;
+          if (!keyAuth && !authorized(req))
+            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            bodyError(res, e);
+            return;
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          if (!atLeast(auth.user.role, approverMin))
+            return json(res, 403, {
+              ok: false,
+              error: `verifying requires ${approverMin} (you are ${auth.user.role})`,
+            });
+          let id: string;
+          try {
+            id = decodeURIComponent(verify[1]!);
+          } catch {
+            json(res, 400, { ok: false, error: 'malformed claim id' });
+            return;
+          }
+          const who = by(auth.user);
+          const identity = keyAuth ? await verifyingKey(req, id, 'verify', who) : {};
+          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+          try {
+            const claim = await ledger.verifyClaim(tenant, id, who, at);
+            await auditConsole(db, tenant, who, 'console.verify', `claim:${id}`, at);
+            json(res, 200, {
+              ok: true,
+              id: claim.id,
+              status: claim.status,
+              ...(keyAuth ? { by: who, ...identity } : {}),
+            });
+          } catch (e) {
+            if (e instanceof LedgerError && e.code === 'MISSING_CLAIM') {
+              json(res, 404, { ok: false, error: (e as Error).message });
               return;
             }
             json(res, 409, { ok: false, error: (e as Error).message });

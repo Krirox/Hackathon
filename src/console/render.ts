@@ -348,7 +348,7 @@ export function buildConsoleNav(home: string, availability: Partial<NavAvailabil
     items.push({ key: 'workflows', label: 'Workflows', href: '/console/workflows' });
   }
   if (open.buzz) {
-    items.push({ key: 'buzz', label: 'Buzz', href: '/console/buzz' });
+    items.push({ key: 'buzz', label: 'Workspace', href: '/console/buzz' });
   }
   if (open.digest) {
     items.push({ key: 'digest', label: 'Digest', href: '/console/digest' });

@@ -320,6 +320,20 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     reviewed_by            TEXT
   )`,
   'CREATE INDEX IF NOT EXISTS ix_watch_contracts_tenant ON watch_contracts(tenant, state)',
+  // Buzz chat: persistent reactions (Image 1 ✅ 1 bar) + threaded replies
+  // Local fallback when relay unavailable. Relay messages stay on relay;
+  // these tables back the UI when surface is null and cache reaction counts.
+  `CREATE TABLE IF NOT EXISTS buzz_reactions (
+    tenant TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL,
+    user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant, message_id, user_id, emoji))`,
+  `CREATE INDEX IF NOT EXISTS ix_buzz_reactions_msg ON buzz_reactions(tenant, message_id)`,
+  `CREATE TABLE IF NOT EXISTS buzz_messages (
+    id TEXT PRIMARY KEY, tenant TEXT NOT NULL, scope TEXT NOT NULL,
+    parent_id TEXT, author TEXT NOT NULL, content TEXT NOT NULL,
+    created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ix_buzz_messages_scope ON buzz_messages(tenant, scope, created_at)`,
+  `CREATE INDEX IF NOT EXISTS ix_buzz_messages_parent ON buzz_messages(tenant, parent_id)`,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */

@@ -70,7 +70,7 @@ ${sampleBanner}
 <details><summary>Evidence (${r.claimRefs.length} references)</summary><ul>${evidence.join('') || '<li>No evidence references</li>'}</ul>${r.claimRefs.length > 20 ? `<p>Only the first 20 references are shown. <a href="/console/requests/${esc(encodeURIComponent(r.id))}">Inspect all evidence before approving.</a></p>` : ''}</details>
 ${forms}<p role="status" aria-live="polite" data-review-status></p></article>`);
   }
-  return `<section id="pending-review"><h2>Pending review (${pending.length})</h2>
+  return `<section id="pending-review" class="review-root"><h2>Pending review (${pending.length})</h2>
 <p>Signed in as ${esc(opts.actor)}. Approval records a decision to BEGIN work, not final-deliverable authorization or evidence of execution or measurement.</p>
 <nav aria-label="Review pages">${page > 0 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page - 1}#pending-review">Previous reviews</a>` : ''} Page ${page + 1} of ${Math.max(1, Math.ceil(pending.length / 100))} ${pending.length > (page + 1) * 100 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page + 1}#pending-review">Next reviews</a>` : ''}</nav>
 <noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript>
@@ -82,7 +82,11 @@ ${forms}<p role="status" aria-live="polite" data-review-status></p></article>`);
 // Static script: tenant, request, evidence, and credentials are never interpolated into JavaScript.
 export const REVIEW_SCRIPT = `
 (() => {
-  const root = document.getElementById('pending-review');
+  // Every review section on the page gets its own wiring: a claim page can
+  // carry both a correction and a verification section, and the deliverable
+  // section lives under its own id. A single getElementById root left every
+  // section but the first permanently disabled.
+  const roots = document.querySelectorAll('.review-root');
   let storage = null;
   try { storage = sessionStorage; } catch { /* private mode / tests */ }
   const draftKey = (form) => 'vital:draft:' + form.action;
@@ -95,6 +99,7 @@ export const REVIEW_SCRIPT = `
     if (reason) draft.reason = String(reason);
     if (Object.keys(draft).length) storage.setItem(draftKey(form), JSON.stringify(draft));
   };
+  roots.forEach(root => {
   const restoreDrafts = () => {
     if (!storage) return;
     root.querySelectorAll('form[data-review-action]').forEach(form => {
@@ -237,6 +242,16 @@ export const REVIEW_SCRIPT = `
         status.textContent = 'Revision requested — submit an updated deliverable tied to this workflow before final approval.';
         return;
       }
+      if (action === 'verify') {
+        if (!result.ok || typeof result.id !== 'string') throw new Error('Unexpected verification response. Refresh to check the claim.');
+        card.dataset.settled = 'true';
+        status.textContent = 'Evidence verified as human-curated. Cited work can now proceed to approval — refresh to see the updated status. ';
+        const link = document.createElement('a');
+        link.href = '/console/claims/' + encodeURIComponent(result.id);
+        link.textContent = 'View verified claim';
+        status.appendChild(link);
+        return;
+      }
       const expected = action === 'approve' ? 'ACCEPTED' : 'DECLINED';
       if (result.state !== expected) throw new Error('Unexpected state. Refresh to check the request.');
       card.dataset.settled = 'true';
@@ -257,5 +272,6 @@ export const REVIEW_SCRIPT = `
       card.dataset.busy = 'false'; card.removeAttribute('aria-busy');
       if (card.dataset.settled !== 'true') controls.forEach(control => { control.disabled = false; });
     }
+  });
   });
 })();`;

@@ -275,7 +275,7 @@ ${CLAIM_CITE_SCRIPT}
       })
     : '';
 
-  return `<section id="deliverable-review" class="card" data-review-request="${esc(requestId)}">
+  return `<section id="deliverable-review" class="card review-root" data-review-request="${esc(requestId)}">
 <h2>Deliverable preview (${esc(version.kind)} · ${esc(version.deliverableSchema)})</h2>
 <p>Version ${version.version} · ${esc(version.status)} · ${versionLinks}</p>
 ${externalNote}

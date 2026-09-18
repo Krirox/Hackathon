@@ -338,7 +338,7 @@ T('F02: review client treats successful declines as success and restores control
     ]);
     let sent: { headers: Record<string, string>; body: string; credentials: string } | undefined;
     runInNewContext(REVIEW_SCRIPT, {
-      document: { getElementById: () => root },
+      document: { getElementById: () => root, querySelectorAll: () => [root] },
       HTMLFormElement: Form,
       FormData: class {
         get(key: string) {
@@ -3019,6 +3019,56 @@ T('FLOW-004: browser receipt verification shows deleted/retained/deferred/failed
     eq(unknown.status, 404, 'unknown slug is not-found, not success:');
     const unscoped = await fetch(`${base_}/api/erasure/receipt`, { headers: session.headers });
     eq(unscoped.status, 400, 'missing slug is rejected:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-014: human verification curates candidate evidence into approvable state', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const candidate = await ledger.append({
+    tenant: TEN,
+    subject: 'release:notes',
+    kind: 'OBSERVATION',
+    statement: 'draft notes mention faster sync',
+    confidence: 0.5,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'sync:files',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  eq(candidate.status, 'CANDIDATE');
+  const { request } = await coord.submit(
+    base({ id: 'rq-verify', goal: 'review curated evidence', claimRefs: [candidate.id], bid: { humanMinutes: 5 } }),
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const verify = (id: string, headers = session.headers) =>
+      fetch(`${base_}/api/claims/${encodeURIComponent(id)}/verify`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: '{}',
+      });
+    eq((await fetch(`${base_}/api/claims/${candidate.id}/verify`, { method: 'POST' })).status, 401);
+    const first = await verify(candidate.id);
+    eq(first.status, 200);
+    eq(((await first.json()) as { status: string }).status, 'VERIFIED');
+    eq((await verify(candidate.id)).status, 200, 're-verifying is idempotent:');
+    const approved = await (
+      await fetch(`${base_}/api/requests/${request.id}/approve`, {
+        method: 'POST',
+        headers: { ...session.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestUpdatedAt: (await coord.get(TEN, request.id))!.updatedAt }),
+      })
+    ).json();
+    eq((approved as { state: string }).state, 'ACCEPTED', 'curated evidence is approvable:');
+    const missing = await verify('clm_missing');
+    eq(missing.status, 404);
   } finally {
     await server.close();
     await db.close();

@@ -1,4 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
+import { jsonNumber } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -126,7 +127,7 @@ export class ScopeHealthEvaluator {
       .prepare(
         `SELECT COUNT(*) as n FROM requests
          WHERE tenant = ? AND target_scope = ? AND state IN ('PROPOSED', 'ADMITTED')
-         AND json_extract(bid_json, '$.humanMinutes') > 0`,
+         AND ${jsonNumber(this.db.engine, 'bid_json', 'humanMinutes')} > 0`,
       )
       .get(this.tenant, scope)) as { n: number } | undefined;
     pendingApprovals = Number(pRow?.n ?? 0);

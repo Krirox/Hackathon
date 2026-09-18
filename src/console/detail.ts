@@ -141,7 +141,7 @@ export async function requestDetail(
   const refreshable = ['ADMITTED', 'DEFERRED', 'ACCEPTED'].includes(r.state);
   let refreshForm = '';
   if (staleEvidence && refreshable) {
-    refreshForm = `<section id="pending-review"><article data-review-request="${esc(id)}">
+    refreshForm = `<section id="pending-review" class="review-root"><article data-review-request="${esc(id)}">
 <p>Some cited evidence is historical. Refresh binds this request to current claim replacements without rewriting past decisions.</p>
 <form method="post" action="/api/requests/${esc(encodeURIComponent(id))}/refresh-evidence" data-review-action="refresh-evidence">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
@@ -256,7 +256,7 @@ export async function claimDetail(
   }
   let form: string;
   if (canCorrect) {
-    form = `<section id="pending-review"><article data-review-request="${esc(id)}"><h2>Correct claim</h2>
+    form = `<section id="pending-review" class="review-root"><article data-review-request="${esc(id)}"><h2>Correct claim</h2>
 <p>This creates a replacement claim and retains this version. Request evidence references are not silently rewritten.</p>
 <form method="post" action="/api/claims/${esc(encodeURIComponent(id))}/correct" data-review-action="correct" data-claim-seq="${c.seq}">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
@@ -275,6 +275,17 @@ ${operatorFields(opts, id, 'correct')}
   } else {
     form = '<p>This is historical evidence. Follow its supersession links to correct the current claim.</p>';
   }
+  const verifyForm =
+    c.status === 'CANDIDATE'
+      ? `<section id="verify-evidence" class="review-root"><article data-review-request="${esc(id)}"><h2>Verify this evidence</h2>
+<p>Human curation: verifying marks this candidate as reviewed, so cited work can proceed to approval. Only roles that may approve may verify.</p>
+<form method="post" action="/api/claims/${esc(encodeURIComponent(id))}/verify" data-review-action="verify">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+${operatorFields(opts, id, 'verify')}
+<label><input type="checkbox" name="confirmed" required> I reviewed this evidence and vouch for its accuracy</label>
+<button type="submit" disabled>Verify evidence</button></form><p data-review-status role="status" aria-live="polite"></p></article>
+<noscript>JavaScript is required to verify evidence.</noscript></section>`
+      : '';
   let lineage = '';
   if (chain.history.length > 1) {
     lineage = `<h2>Supersession lineage</h2><ul>${chain.history
@@ -296,7 +307,7 @@ ${operatorFields(opts, id, 'correct')}
     `${statusBanner}<p><code>${esc(c.id)}</code> · ${esc(c.kind)} · ${esc(c.status)} · seq ${c.seq}</p>
 <h2>Statement</h2><pre>${esc(c.statement)}</pre><h2>Value and unit</h2><pre>${dump({ value: c.value, unit: c.unit })}</pre>
 <p>Source: ${source}</p>${lineage}${affectedHtml}<h2>Full claim and provenance</h2><pre>${dump(c)}</pre>
-<h2>Evidence history (${links.length})</h2>${pagination(claimUrl(id), currentPage, links.length, nav.returnTo)}<ul>${history || '<li>No linked claims.</li>'}</ul>${form}`,
+<h2>Evidence history (${links.length})</h2>${pagination(claimUrl(id), currentPage, links.length, nav.returnTo)}<ul>${history || '<li>No linked claims.</li>'}</ul>${form}${verifyForm}`,
     opts,
   );
 }
