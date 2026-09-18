@@ -303,3 +303,37 @@ variable "buzz_hostname" {
   type        = string
   default     = ""
 }
+
+variable "buzz_agent_master_key" {
+  description = "Hex master secret (32+ hex chars) deriving all room agent identities (BUZZ_AGENT_MASTER_KEY). Empty = Buzz publishing fails closed (no identity). Set via TF_VAR_buzz_agent_master_key, never in git."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "vital_review_secret" {
+  description = "Random 16+ chars signing review-card approve/decline tokens (VITAL_REVIEW_SECRET). Empty = review tokens cannot verify (webhook approve path dead). Set via TF_VAR_vital_review_secret, never in git."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "bootstrap_email" {
+  description = "Day-0 owner email for first-run claiming (VITAL_BOOTSTRAP_EMAIL). Empty = no bootstrap owner; web signup on a public bind stays gated. Rotate (change password + unset + re-apply) after claiming."
+  type        = string
+  default     = ""
+}
+
+variable "bootstrap_password" {
+  description = "Day-0 owner password, forced to change at first login (VITAL_BOOTSTRAP_PASSWORD). Empty = no bootstrap owner. Set via TF_VAR_bootstrap_password, never in git. Rotate after claiming."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "setup_secret" {
+  description = "Deliberate authorization for web organization claiming on non-loopback clients (VITAL_SETUP_SECRET). Empty = default gate behavior. Set via TF_VAR_setup_secret, never in git."
+  type        = string
+  sensitive   = true
+  default     = ""
+}

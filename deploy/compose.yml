@@ -28,6 +28,11 @@ services:
       VITAL_TENANT: ${VITAL_TENANT:-acme}
       VITAL_OPERATOR_SECRET: ${VITAL_OPERATOR_SECRET:-}
       VITAL_OPERATOR_KEYS: ${VITAL_OPERATOR_KEYS:-}
+      # First-run owner bootstrap (forced password change at first login).
+      # Empty (default) = web signup claims an unprovisioned console, exactly
+      # like production without bootstrap credentials behind the ALB gate.
+      VITAL_BOOTSTRAP_EMAIL: ${VITAL_BOOTSTRAP_EMAIL:-}
+      VITAL_BOOTSTRAP_PASSWORD: ${VITAL_BOOTSTRAP_PASSWORD:-}
     ports:
       - '127.0.0.1:3100:3100'
     depends_on:
@@ -36,7 +41,7 @@ services:
     # E2E-17: liveness only — readiness (DB, worker, integrations) is
     # asserted by scripts/verify-topology.mjs, never by this probe.
     healthcheck:
-      test: ['CMD-SHELL', 'node -e "fetch(`http://127.0.0.1:3100/healthz`).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"']
+      test: ['CMD-SHELL', "node -e \"fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 3
