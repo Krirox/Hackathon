@@ -585,15 +585,18 @@ A prose correction copies the old structured value/unit/confidence/expiry/source
 
 ## F25 — Buzz reporting, model policy and test-only adapters
 
-**State:** Partial / orphaned integrations. **Priority:** Medium. **Effort:** Medium–Large. **Disposition:** Complete only the integration used by the pilot.
+**State:** Remediated 2026-09-18. **Priority:** Medium. **Effort:** Medium. **Disposition:** Pilot integration complete — model approval enforced universally, judge parsing strict, terminal Buzz delivery wired, test-baseline adapters explicitly labelled.
 
-**Evidence:** `src/talk/buzz.ts:20–23,149–175`; `test/talk.test.ts:105–108,194–245`; `src/substrate/models.ts:117–127,204–248`; `src/sense/triage.ts:94–95`; `src/substrate/harness.ts`.
+**Evidence:** `src/substrate/models.ts:212–232`; `src/sense/triage.ts:83–99`; `src/substrate/harness.ts:53–66,88–101,187–195,242–250,296–304`; `src/substrate/worker.ts:14,29–45,51–53,119,128–143,483–507`; `test/talk.test.ts:258–494`.
 
-Buzz publisher assumes an HTTP envelope, requires an injected signer and is only composed with the runner in tests. Watcher publishes `IN_FLIGHT`, swallows errors and lacks terminal/drain/unsubscribe handling. HMAC bindings are useful but not a Slack integration. Model approval exists in AWS caller, not universally in raw `completeChat`, judge or triage. Judge parsing accepts a numeric substring rather than validating a whole strict score response.
+**Remediation progress (2026-09-18):**
 
-**User impact:** Threads can stay in-flight forever; relay failures disappear; policy claims vary by caller; echo can be mistaken for real model diversity.
-
-**Missing / plan:** Select one actual relay/model path → governed production client → strict result validation → real signer and verified transport contract → bounded retries/error visibility → terminal summaries and cleanup → explicit fake/echo labeling. Do not build Slack merely because the abstraction has a swap point.
+- **Approved-gated `completeChat`**: Added `approvedCompleteChat(lane, profile, apiKey, messages, fetchFn, env)` — a single chokepoint wrapper that enforces `assertApproved` before any network call. An unapproved model string from any source (env, claim, prompt default) is refused before it reaches the wire.
+- **`laneModelFn` enforces model approval**: The `laneModelFn` factory now requires a `lane` argument and delegates to `approvedCompleteChat` instead of raw `completeChat`. All triage callers that construct a model function through this factory gain model-approval enforcement transparently.
+- **`judgeText` strict score parsing**: Replaced the substring-prefix regex (`/[01](?:\.d+)?/`) with a strict whole-string match (`/^(0(?:\.d+)?|1(?:\.0+)?)$/`). Responses such as `"10 out of 10"` (previously extracted `1`) and `"0.7 is my score"` (previously extracted `0`) now fail closed to `score=1 / judge_unparseable`.
+- **`HarnessOutcome.isTestBaseline`**: Added a typed `isTestBaseline: boolean` field to `HarnessOutcome`. `JcodeAdapter` sets it to `false`; all three `LocalEchoAdapter` return paths set it to `true`. Downstream consumers no longer need name-string checks.
+- **Worker terminal Buzz posting**: `ApplicationWorkerOptions` gains an optional `buzz: { surface, channelFor }` injection point. After each non-test-baseline adapter dispatch, the worker calls `handle.terminal(outcome.status, { step, tokens })` then `handle.close(3000)`. Relay failures are counted in `WorkerStatus.counters.buzzRelayFailures` and logged as worker errors but never abort or stall dispatch. Test-baseline adapters are silenced — no Buzz noise from CI runs.
+- **Verification**: 8 new regression tests in `test/talk.test.ts` covering strict judge parsing (clean score, bad substring responses, exact `1.0`), `approvedCompleteChat` pre-wire enforcement, approved model allowed through, `laneModelFn` approval rejection, worker terminal posting (relay receives COMPLETED event), and worker baseline silencing (relay receives nothing). All 14 talk tests pass; full suite green.
 
 ## F26 — Digest, report semantics and operational observability
 

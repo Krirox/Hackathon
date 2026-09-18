@@ -9,6 +9,7 @@ import {
   type AuthorizeResult,
   type TrustState,
 } from './raci.ts';
+import { enqueueOutbox } from '../substrate/scheduler.ts';
 
 /**
  * Governance plane, part 2 (TODO §3.3): Trust Ledger, honeytasks, kill switches.
@@ -121,6 +122,14 @@ export async function recordTrustOutcome(
       // The notification persists as an AUTOMATION_SELF_HALT audit row in
       // the same transaction — the audit log is the delivery fallback.
       await recordSelfHalt(db, tenant, scope, actionClass, 'honeytask miss — automatic freeze', 'trust', [], now);
+      // Also persist a durable outbox row so the outbox worker can deliver
+      // the notification with retries, backoff, and lease-based restart recovery.
+      await enqueueOutbox(db, tenant, 'automation-self-halt', {
+        scope,
+        actionClass,
+        reason: outcome.honeyMiss ? 'honeytask miss — automatic freeze' : 'automation self-halt',
+        affected: [],
+      }, { now });
       return;
     }
     if (outcome.override === true || !outcome.clean) {
@@ -748,6 +757,15 @@ export async function recordSelfHalt(
     JSON.stringify({ reason, affected, detectedAt: at }),
     at,
   );
+  // Persist a durable outbox row so the outbox worker can deliver
+  // the notification with retries, backoff, and lease-based restart recovery.
+  await enqueueOutbox(db, tenant, 'automation-self-halt', {
+    scope,
+    actionClass,
+    reason,
+    detectedAt: at,
+    affected,
+  }, { now: at });
   return notification;
 }
 

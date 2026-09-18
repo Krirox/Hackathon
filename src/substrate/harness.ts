@@ -58,6 +58,10 @@ export interface HarnessOutcome {
   tools: string[];
   usage: { input: number; output: number };
   permissions: { tool: string; decision: string }[];
+  /** True when the outcome came from a test-baseline adapter (LocalEchoAdapter
+   *  or mock harnesses). Downstream consumers (worker dispatch, transfer gates)
+   *  must not treat test-baseline completions as cross-model quality evidence. */
+  isTestBaseline: boolean;
 }
 
 export interface HarnessAdapter {
@@ -96,6 +100,7 @@ export class JcodeAdapter implements HarnessAdapter {
       tools: out.toolCalls.map((t) => t.name),
       usage: out.usage,
       permissions: out.permissions.map((p) => ({ tool: p.toolName, decision: p.decision })),
+      isTestBaseline: false,
     };
   }
 }
@@ -187,6 +192,7 @@ export class LocalEchoAdapter implements HarnessAdapter {
         tools: [],
         usage: { input: 0, output: 0 },
         permissions: [{ tool: 'execute', decision: 'deny' }],
+        isTestBaseline: true,
       };
     }
 
@@ -242,6 +248,7 @@ export class LocalEchoAdapter implements HarnessAdapter {
         tools: [],
         usage: { input: 0, output: 0 },
         permissions: [],
+        isTestBaseline: true,
       };
     }
     const transcript = `echo(${req.targetScope}): ${task.command}`;
@@ -296,6 +303,7 @@ export class LocalEchoAdapter implements HarnessAdapter {
       tools: [],
       usage: { input: transcript.length, output: 0 },
       permissions: [],
+      isTestBaseline: true,
     };
   }
 }

@@ -751,7 +751,14 @@ function teamPage(
     now?: string;
     confirmations?: Map<string, DisableConfirmation>;
     stops?: StopDisplay[];
-    selfHalts?: { action: string; actor: string; target: string; detail: string | null; at: string }[];
+    selfHalts?: {
+      action: string;
+      actor: string;
+      target: string;
+      detail: string | null;
+      at: string;
+      outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
+    }[];
     policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
   },
 ): string {
@@ -902,13 +909,22 @@ ${entries || '<p class="sub">No active stops.</p>'}${selfHaltEntries(selfHalts)}
 }
 
 function selfHaltEntries(
-  selfHalts?: { action: string; actor: string; target: string; detail: string | null; at: string }[],
+  selfHalts?: {
+    action: string;
+    actor: string;
+    target: string;
+    detail: string | null;
+    at: string;
+    outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
+  }[],
 ): string {
   if (!selfHalts || selfHalts.length === 0) return '';
   const items = selfHalts
     .map(
       (h) =>
-        `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${h.detail ? ` — ${esc(h.detail.slice(0, 200))}` : ''}</li>`,
+        `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${h.detail ?
+          ` — ${esc(h.detail.slice(0, 200))}` : ''}${h.outboxStatus ?
+          ` · outbox: ${esc(h.outboxStatus.status)} attempts=${esc(String(h.outboxStatus.attempts))} nextAt=${esc(h.outboxStatus.nextAt)}` : ''}</li>`,
     )
     .join('');
   return `<h3>Recent automation self-halts</h3>
@@ -2317,10 +2333,32 @@ export function startConsoleServer(
           }
           const stops = await describeStops(db, tenant);
           const haltEvidence = await listHaltEvidence(db, tenant);
+          // Query outbox for automation-self-halt rows and pair with audit entries.
+          const outboxRows = (await db.prepare(
+            `SELECT id, status, attempts, next_at FROM outbox WHERE tenant = ? AND kind = 'automation-self-halt' ORDER BY id DESC LIMIT 5`,
+          )
+            .all(tenant)) as { id: string; status: string; attempts: number; next_at: string }[];
+          const outboxStatus = new Map<string, { status: string; attempts: number; nextAt: string }>();
+          for (const r of outboxRows) {
+            outboxStatus.set(r.id, { status: r.status, attempts: r.attempts, nextAt: r.next_at });
+          }
           const selfHalts = haltEvidence.real
             .filter((h) => h.action === 'AUTOMATION_SELF_HALT' || h.action === 'TRUST_FROZEN')
             .slice(-5)
-            .reverse();
+            .reverse()
+            .map((h) => {
+              const ob = outboxStatus.get(h.detail ?? '');
+              return {
+                action: h.action,
+                actor: h.actor,
+                target: h.target,
+                detail: h.detail,
+                at: h.at,
+                outboxStatus: ob
+                  ? { status: ob.status, attempts: ob.attempts, nextAt: ob.nextAt }
+                  : { status: 'unknown', attempts: 0, nextAt: '' },
+              };
+            });
           let operatorMode: 'signature' | 'secret' | 'session' = 'session';
           if (keyAuth) operatorMode = 'signature';
           else if (operatorSecret) operatorMode = 'secret';

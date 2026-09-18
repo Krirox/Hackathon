@@ -210,6 +210,24 @@ export function assertApproved(profile: ModelProfile, lane: string, env: NodeJS.
   }
 }
 
+/**
+ * Approved-gated chat completion. The single chokepoint for judge and
+ * triage callers: enforces `assertApproved` before any network call so an
+ * unapproved model string — from env, a claim, or any other origin —
+ * never reaches the wire. Pass `env` to override in tests.
+ */
+export async function approvedCompleteChat(
+  lane: string,
+  profile: ModelProfile,
+  apiKey: string,
+  messages: ChatMessage[],
+  fetchFn: FetchFn,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ChatResult> {
+  assertApproved(profile, lane, env);
+  return completeChat(profile, apiKey, messages, fetchFn);
+}
+
 // ------------------------------------------------------- model-judge backend ----
 
 const JUDGE_PROMPT =
@@ -242,7 +260,11 @@ export async function judgeText(
   } catch {
     return { score: 1, flags: ['judge_error'] };
   }
-  const m = out.match(/[01](?:\.\d+)?/);
+  // Strict whole-string match: the judge must reply with ONLY a number in
+  // [0,1]. A substring match (e.g. "10 out of 10" → 1, or "0.7 is my
+  // score" → 0) gives a confidently wrong answer. Anything that is not
+  // purely a number in range fails closed to score=1 / judge_unparseable.
+  const m = out.match(/^(0(?:\.\d+)?|1(?:\.0+)?)$/);
   if (!m) return { score: 1, flags: ['judge_unparseable'] };
   const score = Math.max(0, Math.min(1, Number(m[0])));
   return { score, flags: score >= 0.5 ? ['model_judge'] : [] };

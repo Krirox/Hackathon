@@ -1,5 +1,5 @@
 import type { ModelProfile } from '../substrate/models.ts';
-import { completeChat } from '../substrate/models.ts';
+import { approvedCompleteChat } from '../substrate/models.ts';
 
 /**
  * L1 triage (TODO §6.2): dedup is structural (fingerprints), novelty is a
@@ -80,8 +80,12 @@ export async function triageSignal(
   return { category, entities, confidence };
 }
 
-/** Default model function: the lane client. Wire once, use everywhere. */
+/** Default model function: the lane client. Wire once, use everywhere.
+ *  Passing `lane` enforces the approved-model registry before any network
+ *  call — an unapproved model string can never reach the wire through this
+ *  factory regardless of how the profile was constructed. */
 export function laneModelFn(
+  lane: string,
   fetchFn: (
     url: string,
     init: { method: string; headers: Record<string, string>; body: string },
@@ -92,5 +96,5 @@ export function laneModelFn(
   }>,
 ): ModelFn {
   return (profile, apiKey, messages) =>
-    completeChat(profile, apiKey, messages, fetchFn).then((r) => ({ text: r.text }));
+    approvedCompleteChat(lane, profile, apiKey, messages, fetchFn).then((r) => ({ text: r.text }));
 }
