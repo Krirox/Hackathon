@@ -4,6 +4,7 @@ import { ScopeHealthEvaluator, type RoomHealthEvaluation } from '../talk/health.
 import { RoomBudgetTracker, type BudgetGasGauge } from '../talk/budget-gauge.ts';
 import { LiveCanvasSynchronizer } from '../talk/canvas.ts';
 import type { BuzzSurface } from '../talk/buzz.ts';
+import type { Coordinator } from '../coord/coordinator.ts';
 import { listUsers } from '../core/auth.ts';
 
 /**
@@ -320,6 +321,7 @@ export async function renderBuzzRoom(
   surface?: BuzzSurface | null,
   notice?: string,
   currentUserId?: string,
+  coord?: Coordinator,
 ): Promise<string | null> {
   const scope = normalizeScope(rawScope);
   const def = roomForScope(scope);
@@ -336,6 +338,26 @@ export async function renderBuzzRoom(
   const canvas = await canvasSync.generateCanvas(scope);
   const users = await listUsers(db, tenant);
   const userOptions = users.map((u) => `<option value="@${esc(u.name)} (${esc(u.email)})"></option>`).join('');
+  const pendingForRoom: { id: string; goal: string; updatedAt: string }[] = [];
+  if (coord) {
+    try {
+      const allPending = await coord.list(tenant, { state: 'ADMITTED' });
+      for (const r of allPending) {
+        if (r.bid.humanMinutes > 0) pendingForRoom.push({ id: r.id, goal: r.goal, updatedAt: r.updatedAt });
+      }
+    } catch {}
+  }
+  const reviewReqs = new Map<string, { updatedAt: string; state: string }>();
+  if (coord) {
+    for (const m of thread.messages) {
+      if (m.isReviewCard && m.requestId) {
+        try {
+          const r = await coord.get(tenant, m.requestId);
+          if (r) reviewReqs.set(m.requestId, { updatedAt: r.updatedAt, state: r.state });
+        } catch {}
+      }
+    }
+  }
 
   const fmtClock = (unixSeconds: number) => {
     const d = new Date(unixSeconds * 1000);
@@ -368,6 +390,31 @@ export async function renderBuzzRoom(
     out = out.replace(/\[([^\]]+)\]/g, '<code style="background:#F4F7F5;padding:1px 4px;border-radius:4px;">$1</code>');
     return out;
   };
+  const pendingHtml = pendingForRoom
+    .map(
+      (r) => `<li style="display:flex;gap:10px;padding:12px;border:1px solid #FDE68A;background:#FFFBEB;border-radius:10px;margin:8px 0;list-style:none;">
+    <div style="width:32px;height:32px;border-radius:999px;background:#FEF3C7;display:grid;place-items:center;flex-shrink:0;">⚠️</div>
+    <div style="flex:1;min-width:0;">
+      <div style="font-weight:600;font-size:13px;white-space:pre-wrap;">${esc(r.goal)} <span style="font-size:11px;color:#6B7280;">· <code>${esc(r.id)}</code></span></div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+        <form data-review-action="approve" action="/api/requests/${esc(r.id)}/approve" method="post" style="display:inline-flex;gap:6px;align-items:center;">
+          <input type="hidden" name="csrf" value="${esc(csrf)}">
+          <input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
+          <label style="display:inline-flex;gap:4px;align-items:center;font-size:11px;"><input type="checkbox" name="confirmed" required> reviewed</label>
+          <button type="submit" disabled style="padding:4px 10px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;font-size:11px;">Approve</button>
+        </form>
+        <form data-review-action="decline" action="/api/requests/${esc(r.id)}/decline" method="post" style="display:inline-flex;gap:6px;align-items:center;">
+          <input type="hidden" name="csrf" value="${esc(csrf)}">
+          <input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
+          <input type="text" name="reason" placeholder="Decline reason" required style="padding:4px 6px;border:1px solid #D1D5DB;border-radius:6px;font-size:11px;width:140px;">
+          <button type="submit" disabled style="padding:4px 10px;border:0;border-radius:6px;background:#6B7280;color:#fff;font-weight:600;cursor:pointer;font-size:11px;">Decline</button>
+        </form>
+      </div>
+      <p role="status" aria-live="polite" data-review-status style="font-size:11px;margin-top:6px;"></p>
+    </div>
+  </li>`,
+    )
+    .join('\n');
   const reactionMap = await getReactions(
     db,
     tenant,
@@ -436,6 +483,29 @@ export async function renderBuzzRoom(
       const bubble = isCard
         ? `<div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:10px;padding:10px 12px;"><div style="white-space:pre-wrap;font-size:13px;line-height:1.5;">${linkify(m.content.slice(0, 700))}</div>${cardExtra}</div>`
         : `<div style="white-space:pre-wrap;font-size:13.5px;line-height:1.5;color:#111827;">${linkify(m.content.slice(0, 700))}</div>`;
+      const reviewActions =
+        isCard && m.requestId
+          ? (() => {
+              const req = reviewReqs.get(m.requestId!);
+              const updatedAt = req?.updatedAt ?? '';
+              const isDone = req ? req.state !== 'ADMITTED' : false;
+              if (isDone) return `<div style="font-size:11px;color:#6B7280;margin-top:6px;">Request ${esc(req!.state)} — <a href="/console/requests/${esc(m.requestId!)}" style="color:#0F5C57;">view</a></div>`;
+              return `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;">
+          <form data-review-action="approve" action="/api/requests/${esc(m.requestId!)}/approve" method="post" style="display:inline-flex;gap:6px;align-items:center;">
+            <input type="hidden" name="csrf" value="${esc(csrf)}">
+            <input type="hidden" name="requestUpdatedAt" value="${esc(updatedAt)}">
+            <label style="display:inline-flex;gap:4px;align-items:center;font-size:11px;"><input type="checkbox" name="confirmed" required> reviewed</label>
+            <button type="submit" disabled style="padding:4px 10px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;font-size:11px;">Approve</button>
+          </form>
+          <form data-review-action="decline" action="/api/requests/${esc(m.requestId!)}/decline" method="post" style="display:inline-flex;gap:6px;align-items:center;">
+            <input type="hidden" name="csrf" value="${esc(csrf)}">
+            <input type="hidden" name="requestUpdatedAt" value="${esc(updatedAt)}">
+            <input type="text" name="reason" placeholder="Decline reason" required style="padding:4px 6px;border:1px solid #D1D5DB;border-radius:6px;font-size:11px;width:140px;">
+            <button type="submit" disabled style="padding:4px 10px;border:0;border-radius:6px;background:#6B7280;color:#fff;font-weight:600;cursor:pointer;font-size:11px;">Decline</button>
+          </form>
+        </div><p role="status" aria-live="polite" data-review-status style="font-size:11px;margin-top:6px;"></p>`;
+            })()
+          : '';
       const replies = byRoot.get(m.id) ?? [];
       const visibleReplies = replies.slice(0, 3);
       const hiddenCount = replies.length - visibleReplies.length;
@@ -468,6 +538,7 @@ export async function renderBuzzRoom(
   <div style="flex:1;min-width:0;">
     <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;"><span style="font-weight:600;font-size:13px;">${esc(who)}</span><span style="font-size:11px;color:#6B7280;">${esc(time)}</span>${m.requestId ? `<span style="font-size:11px;color:#6B7280;">· <code>${esc(m.requestId.slice(0, 10))}</code></span>` : ''}</div>
     <div style="margin-top:3px;">${bubble}</div>
+    ${reviewActions}
     ${reactions}
     ${replyHtml}
     <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:8px;">
@@ -480,8 +551,9 @@ export async function renderBuzzRoom(
 </li>`;
     })
     .join('\n');
+  const combined = pendingHtml + messages;
   const threadList =
-    messages ||
+    combined ||
     `<li style="list-style:none;padding:18px;text-align:center;color:#6B7280;">
   <div style="font-size:13px;">No messages yet in #${esc(def.name)}</div>
   <div style="font-size:12px;margin-top:4px;">Agents will post progress here. Try <code>/status</code> below.</div>
@@ -509,7 +581,7 @@ export async function renderBuzzRoom(
   ${gates}
   ${health.reasons.length > 0 ? `<div style="margin-top:8px;font-size:12px;color:#B45309;">${health.reasons.map((r) => `⚠ ${esc(r)}`).join('<br>')}</div>` : ''}
   <div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;margin-top:14px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
-    <div style="max-height:62vh;overflow:auto;padding:4px 16px;">
+    <div class="review-root" style="max-height:62vh;overflow:auto;padding:4px 16px;">
       <ul style="padding:0;margin:0;">${threadList}</ul>
     </div>
     <div style="border-top:1px solid #E5E7EB;padding:10px 12px;background:#F9FAFB;position:relative;">
