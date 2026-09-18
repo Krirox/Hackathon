@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /login
+Disallow: /console/
+
+Sitemap: https://vital.company/sitemap.xml
