@@ -29,12 +29,24 @@ export interface TransferTask {
   maxTokens: number;
   deliverableSchema?: string;
   now?: string;
+  /**
+   * Independent quality assertion on outcome / transcript / deliverable.
+   * If provided, transport completion alone is insufficient: this callback
+   * must pass for the transfer run to be marked as passed.
+   */
+  assertQuality?: (
+    outcome: HarnessOutcome,
+  ) => Promise<{ pass: boolean; score: number; reason?: string }> | { pass: boolean; score: number; reason?: string };
 }
 
 export interface AdapterRun {
   adapter: string;
   status: HarnessOutcome['status'];
   recorded: boolean;
+  kind?: 'cross_model' | 'harness_smoke';
+  passed?: boolean;
+  score?: number;
+  model?: string | null;
 }
 
 export async function runCrossModelEvidence(
@@ -51,6 +63,17 @@ export async function runCrossModelEvidence(
   const now = task.now ?? new Date().toISOString();
   const out: AdapterRun[] = [];
   for (const adapter of adapters) {
+    const isBaseline = Boolean(
+      adapter.isTestBaseline ||
+      adapter.category === 'test-baseline' ||
+      adapter.category === 'smoke' ||
+      adapter.name === 'local-echo',
+    );
+    // F18: Reclassify test-baseline/mock harnesses as harness smoke evidence,
+    // not authentic cross-model intelligence.
+    const kind = isBaseline ? 'harness_smoke' : 'cross_model';
+    const modelIdentity = adapter.model ?? adapter.name;
+
     try {
       const { request } = await coord.submit({
         tenant,
@@ -66,13 +89,24 @@ export async function runCrossModelEvidence(
       });
       if (!request) {
         await comp.recordTransfer(card, {
-          kind: 'cross_model',
+          kind,
           variant: adapter.name,
           passed: false,
           score: 0,
           ranAt: now,
+          cardVersion: card.version,
+          evaluator: 'harness-transfer',
+          model: isBaseline ? null : modelIdentity,
         });
-        out.push({ adapter: adapter.name, status: 'DENIED', recorded: true });
+        out.push({
+          adapter: adapter.name,
+          status: 'DENIED',
+          recorded: true,
+          kind,
+          passed: false,
+          score: 0,
+          model: isBaseline ? null : modelIdentity,
+        });
         continue;
       }
       const outcome = await adapter.run(tenant, request.id, {
@@ -82,25 +116,64 @@ export async function runCrossModelEvidence(
         maxDollars: task.maxDollars,
         maxTokens: task.maxTokens,
       });
-      const passed = outcome.status === 'COMPLETED';
+
+      let passed = outcome.status === 'COMPLETED';
+      let score = passed ? 1 : 0;
+      if (passed && task.assertQuality) {
+        try {
+          const assertion = await task.assertQuality(outcome);
+          passed = Boolean(assertion.pass);
+          if (typeof assertion.score === 'number') {
+            score = assertion.score;
+          } else {
+            score = passed ? 1 : 0;
+          }
+        } catch (_assertErr) {
+          passed = false;
+          score = 0;
+        }
+      }
+
       await comp.recordTransfer(card, {
-        kind: 'cross_model',
+        kind,
         variant: adapter.name,
         passed,
-        score: passed ? 1 : 0,
+        score,
         ranAt: now,
+        cardVersion: card.version,
+        evaluator: task.assertQuality ? 'quality-assertion' : 'transport-smoke',
+        model: isBaseline ? null : modelIdentity,
       });
-      out.push({ adapter: adapter.name, status: outcome.status, recorded: true });
+      out.push({
+        adapter: adapter.name,
+        status: outcome.status,
+        recorded: true,
+        kind,
+        passed,
+        score,
+        model: isBaseline ? null : modelIdentity,
+      });
     } catch (_err) {
       // F18: Exceptions bank negative transfer results rather than aborting silently
       await comp.recordTransfer(card, {
-        kind: 'cross_model',
+        kind,
         variant: adapter.name,
         passed: false,
         score: 0,
         ranAt: now,
+        cardVersion: card.version,
+        evaluator: 'harness-transfer',
+        model: isBaseline ? null : modelIdentity,
       });
-      out.push({ adapter: adapter.name, status: 'FAILED', recorded: true });
+      out.push({
+        adapter: adapter.name,
+        status: 'FAILED',
+        recorded: true,
+        kind,
+        passed: false,
+        score: 0,
+        model: isBaseline ? null : modelIdentity,
+      });
     }
   }
   return out;

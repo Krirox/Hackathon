@@ -1,6 +1,7 @@
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import { approvalMessage } from '../gov/operator.ts';
+import { SAMPLE_REQUEST_PREFIX, SAMPLE_SCOPE } from './activation.ts';
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -46,6 +47,7 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
           .map((action) => {
             return `<form data-review-action="${action}" action="/api/requests/${esc(encodeURIComponent(r.id))}/${action}" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
 ${action === 'decline' ? '<label>Decline reason <textarea name="reason" required maxlength="2000"></textarea></label>' : ''}
 ${operatorFields(opts, r.id, action)}
 <label><input type="checkbox" name="confirmed" required> ${action === 'approve' ? 'I reviewed the evidence and approve beginning work on this request' : 'I confirm this request should be declined'}</label>
@@ -54,7 +56,12 @@ ${operatorFields(opts, r.id, action)}
           })
           .join('')
       : `<p>Review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
+    const sampleBanner =
+      r.id.startsWith(SAMPLE_REQUEST_PREFIX) || r.originScope === SAMPLE_SCOPE
+        ? `<p style="background:#B45309;color:#0A0F14;padding:8px;border-radius:6px;font-weight:700">SAMPLE WALKTHROUGH — labeled demo data in scope ${esc(SAMPLE_SCOPE)}, not customer evidence.</p>`
+        : '';
     cards.push(`<article class="card" data-review-request="${esc(r.id)}">
+${sampleBanner}
 <h3><a href="/console/requests/${esc(encodeURIComponent(r.id))}">${esc(r.goal)}</a></h3><p><code>${esc(r.id)}</code> · ${esc(r.originScope)} → ${esc(r.targetScope)}</p>
 <p>Deliverable: ${esc(r.deliverableSchema)} · Deadline: ${esc(r.bid.deadline)}</p>
 <p>Budget: ${r.bid.dollars} dollars · ${r.bid.tokens} tokens · ${r.bid.humanMinutes} human minutes</p>
@@ -74,16 +81,44 @@ ${forms}<p role="status" aria-live="polite" data-review-status></p></article>`);
 export const REVIEW_SCRIPT = `
 (() => {
   const root = document.getElementById('pending-review');
+  let storage = null;
+  try { storage = sessionStorage; } catch { /* private mode / tests */ }
+  const draftKey = (form) => 'vital:draft:' + form.action;
+  const saveDraft = (form, fields) => {
+    if (!storage) return;
+    const draft = {};
+    const statement = fields.get('statement');
+    const reason = fields.get('reason');
+    if (statement) draft.statement = String(statement);
+    if (reason) draft.reason = String(reason);
+    if (Object.keys(draft).length) storage.setItem(draftKey(form), JSON.stringify(draft));
+  };
+  const restoreDrafts = () => {
+    if (!storage) return;
+    root.querySelectorAll('form[data-review-action]').forEach(form => {
+      const raw = storage.getItem(draftKey(form));
+      if (!raw) return;
+      try {
+        const draft = JSON.parse(raw);
+        const statement = form.querySelector('[name="statement"]');
+        const reason = form.querySelector('[name="reason"]');
+        if (statement && draft.statement) statement.value = draft.statement;
+        if (reason && draft.reason) reason.value = draft.reason;
+      } catch { /* ignore corrupt drafts */ }
+    });
+  };
+  restoreDrafts();
   root.querySelectorAll('button[type="submit"]').forEach(button => { button.disabled = false; });
-  root.querySelector('[data-review-refresh]').addEventListener('click', event => {
+  const refresh = root.querySelector('[data-review-refresh]');
+  if (refresh) refresh.addEventListener('click', event => {
     event.preventDefault(); location.reload();
   });
   root.addEventListener('submit', async event => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !form.matches('[data-review-action]')) return;
     event.preventDefault();
-    const card = form.closest('[data-review-request]');
-    if (card.dataset.busy === 'true' || card.dataset.settled === 'true' || !form.reportValidity()) return;
+    const card = form.closest('[data-review-request]') || form.closest('#deliverable-review');
+    if (!card || card.dataset.busy === 'true' || card.dataset.settled === 'true' || !form.reportValidity()) return;
     const fields = new FormData(form);
     const status = card.querySelector('[data-review-status]');
     const action = form.dataset.reviewAction;
@@ -106,20 +141,98 @@ export const REVIEW_SCRIPT = `
         method: 'POST', credentials: 'same-origin', headers,
         body: JSON.stringify(action === 'correct' ? {
                   statement: fields.get('statement'),
+                  expectedSeq: Number(fields.get('expectedSeq') ?? form.dataset.claimSeq),
                   ...(fields.get('valueMode') === 'number' ? { value: fields.get('value'), unit: fields.get('unit') || null } : {}),
                   ...(fields.get('valueMode') === 'clear' ? { value: null, unit: null } : {}),
-                } : { reason: fields.get('reason') || '' }), signal: abort.signal,
+                } : action === 'refresh-evidence' ? {}
+                : action === 'approve-deliverable' ? { fingerprint: fields.get('fingerprint') || '' }
+                : action === 'request-changes' ? { notes: fields.get('notes') || '' }
+                : {
+                  reason: fields.get('reason') || '',
+                  requestUpdatedAt: fields.get('requestUpdatedAt') || undefined,
+                }), signal: abort.signal,
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Request failed (' + response.status + ')');
+      if (!response.ok) {
+        if (response.status === 401 && result.code === 'SESSION_EXPIRED') {
+          saveDraft(form, fields);
+          const link = document.createElement('a');
+          link.href = result.loginUrl || '/login?reason=expired';
+          link.textContent = 'Sign in to continue';
+          status.textContent = (result.error || 'Your session expired.') + ' ';
+          status.appendChild(link);
+          status.appendChild(document.createTextNode(' — your draft is preserved. Submit again after signing in.'));
+          return;
+        }
+        if (action === 'correct' && result.conflict) {
+          const parts = [result.error || 'Another editor saved first.'];
+          if (result.diff) parts.push('Winner: "' + result.diff.after + '" (was "' + result.diff.before + '").');
+          if (result.preservedDraft) {
+            const draft = form.querySelector('[name="statement"]');
+            if (draft) draft.value = result.preservedDraft.statement;
+          }
+          if (result.winner && result.winner.id) {
+            const winner = document.createElement('a');
+            winner.href = '/console/claims/' + encodeURIComponent(result.winner.id);
+            winner.textContent = 'View winning correction';
+            status.textContent = parts.join(' ') + ' Your draft is preserved. ';
+            status.appendChild(winner);
+          } else {
+            status.textContent = parts.join(' ') + ' Your draft is preserved — refresh, then retry on the current claim.';
+          }
+          return;
+        }
+        if (response.status === 409 && result.requiresReReview === true) {
+          saveDraft(form, fields);
+          const parts = [result.error || 'Changed since you loaded this review.'];
+          if (Array.isArray(result.diff)) {
+            for (const line of result.diff) {
+              if (typeof line === 'string' && line) parts.push(line);
+            }
+          }
+          if (result.preservedDraft && typeof result.preservedDraft.reason === 'string') {
+            const reason = form.querySelector('[name="reason"]');
+            if (reason) reason.value = result.preservedDraft.reason;
+          }
+          status.textContent = parts.join(' ') + ' Your input is preserved — refresh, review the changes, and submit again.';
+          return;
+        }
+        throw new Error(result.error || 'Request failed (' + response.status + ')');
+      }
+      if (storage) storage.removeItem(draftKey(form));
       if (action === 'correct') {
         if (!result.ok || typeof result.supersededBy !== 'string') throw new Error('Unexpected correction response. Refresh to check the claim.');
         card.dataset.settled = 'true';
-        status.textContent = 'Correction saved. ' + (result.evalCaseId ? 'Regression case recorded. ' : 'Regression capture is pending; contact an operator. ');
+        let msg = 'Correction saved. ' + (result.evalCaseId ? 'Regression case recorded. ' : 'Regression capture is pending; contact an operator. ');
+        if (Array.isArray(result.affectedRequests) && result.affectedRequests.length > 0) {
+          msg += result.affectedRequests.length + ' pending request(s) may need evidence refresh. ';
+        }
+        status.textContent = msg;
         const link = document.createElement('a');
         link.href = '/console/claims/' + encodeURIComponent(result.supersededBy);
         link.textContent = 'View corrected claim';
         status.appendChild(link);
+        return;
+      }
+      if (action === 'refresh-evidence') {
+        card.dataset.settled = 'true';
+        status.textContent = 'Evidence refreshed to current claim replacements. Re-review before approving.';
+        return;
+      }
+      if (action === 'approve-deliverable') {
+        card.dataset.settled = 'true';
+        status.textContent = 'Final deliverable approved for this asset version. ';
+        if (typeof result.decisionId === 'string') {
+          const link = document.createElement('a');
+          link.href = '/console/decisions/' + encodeURIComponent(result.decisionId);
+          link.textContent = 'View publication receipt';
+          status.appendChild(link);
+        }
+        return;
+      }
+      if (action === 'request-changes') {
+        card.dataset.settled = 'true';
+        status.textContent = 'Revision requested — submit an updated deliverable tied to this workflow before final approval.';
         return;
       }
       const expected = action === 'approve' ? 'ACCEPTED' : 'DECLINED';

@@ -435,13 +435,14 @@ T('cross-model evidence runs the same intent on every harness and banks it', asy
       runs.every((r) => r.status === 'COMPLETED' && r.recorded),
       true,
     );
-    const ev = (await comp.transferResults(TEN, card.id)).filter((t) => t.kind === 'cross_model');
-    eq(ev.length, 2);
-    eq(
-      ev.every((t) => t.passed),
-      true,
-      'both harnesses proved the transfer:',
-    );
+    const evModel = (await comp.transferResults(TEN, card.id)).filter((t) => t.kind === 'cross_model');
+    const evSmoke = (await comp.transferResults(TEN, card.id)).filter((t) => t.kind === 'harness_smoke');
+    eq(evModel.length, 1, 'jcode banks authentic cross_model transfer:');
+    eq(evModel[0]!.variant, 'jcode');
+    eq(evModel[0]!.passed, true);
+    eq(evSmoke.length, 1, 'local-echo is reclassified as harness_smoke, not cross_model:');
+    eq(evSmoke[0]!.variant, 'local-echo');
+    eq(evSmoke[0]!.passed, true);
   });
   let code = '';
   try {
@@ -562,4 +563,377 @@ T('F18: adapter exceptions bank negative transfer results instead of aborting', 
   const crashTest = transferRows.find((t) => t.variant === 'crashing-model');
   eq(crashTest?.passed, false);
   eq(crashTest?.score, 0);
+});
+
+T('F18: runCardSuite automatically banks linked regression gate evidence with evalRunId and cardVersion', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_ev_link', 'SUCCESS', 0.95);
+  const card = await comp.compile({ ...cardInput(['tr_ev_link']), evalRef: 'suite_linked' });
+
+  await addCase(db, {
+    tenant: TEN,
+    capability: 'compiler',
+    suite: 'suite_linked',
+    input: { x: 1 },
+    expect: { y: 2 },
+    kind: 'unit',
+  });
+
+  const suiteRun = await runCardSuite(db, comp, TEN, card.id, 'evaluator_v1', () => ({ pass: true }), NOW);
+  eq(suiteRun.passed, 1);
+  eq(suiteRun.failed, 0);
+
+  const transfers = await comp.transferResults(TEN, card.id);
+  const regTest = transfers.find((t) => t.kind === 'regression');
+  eq(Boolean(regTest), true, 'regression test was automatically banked');
+  eq(regTest?.variant, 'suite_linked');
+  eq(regTest?.passed, true);
+  eq(regTest?.evalRunId, suiteRun.id, 'linked to eval run id');
+  eq(regTest?.cardVersion, card.version, 'bound to card version');
+  eq(regTest?.evaluator, 'evaluator_v1', 'recorded evaluator identity');
+
+  // Now advance to QUARANTINE then SHADOW — should succeed without manual recordTransfer!
+  eq((await comp.attemptAdvance(TEN, card.id, 'QUARANTINE')).ok, true);
+  const shadowAdv = await comp.attemptAdvance(TEN, card.id, 'SHADOW');
+  eq(shadowAdv.ok, true, 'promotes to SHADOW using linked eval suite evidence');
+});
+
+T('F18: harness_smoke evidence from LocalEchoAdapter does not satisfy cross_model gate', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_smoke_gate', 'SUCCESS', 0.95);
+  const card = await comp.compile({ ...cardInput(['tr_smoke_gate']), evalRef: 'smoke_suite' });
+
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'x',
+    kind: 'OBSERVATION',
+    statement: 'ground',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: {
+      sourceUri: 'u',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'e',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+
+  // Run cross-model evidence with ONLY LocalEchoAdapter (test baseline)
+  const runs = await runCrossModelEvidence(coord, comp, TEN, card.id, [new LocalEchoAdapter(db, ledger, coord)], {
+    originScope: 'marketing',
+    targetScope: 'engineering',
+    command: 'smoke test',
+    claimIds: [clm.id],
+    onBehalfOf: 'human:priya',
+    maxDollars: 1,
+    maxTokens: 10_000,
+    now: NOW,
+  });
+
+  eq(runs.length, 1);
+  eq(runs[0]!.kind, 'harness_smoke');
+  eq(runs[0]!.status, 'COMPLETED');
+
+  // Also record passing regression test so that doesn't block
+  await comp.recordTransfer(card, { kind: 'regression', variant: 'smoke_suite', passed: true, score: 1, ranAt: NOW });
+
+  // Advance to QUARANTINE and SHADOW
+  eq((await comp.attemptAdvance(TEN, card.id, 'QUARANTINE')).ok, true);
+  eq((await comp.attemptAdvance(TEN, card.id, 'SHADOW')).ok, true);
+
+  // Attempt to advance to BOUNDED_PILOT: harness_smoke alone MUST NOT satisfy cross_model!
+  const pilotAdv = await comp.attemptAdvance(TEN, card.id, 'BOUNDED_PILOT', {
+    shadowRuns: 30,
+    shadowSuccessRate: 0.95,
+  });
+  eq(pilotAdv.ok, false);
+  eq(
+    pilotAdv.reasons.some((r) => r.includes('cross-model transfer test required')),
+    true,
+  );
+});
+
+T('F18: independent quality assertion fails transfer test even if harness transport COMPLETED', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_qa', 'SUCCESS', 0.95);
+  const card = await comp.compile(cardInput(['tr_qa']));
+
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'x',
+    kind: 'OBSERVATION',
+    statement: 'ground',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: {
+      sourceUri: 'u',
+      sourceTier: 'SYSTEM_OF_RECORD',
+      extractor: 'e',
+      extractorVersion: '1',
+      retrievedAt: NOW,
+    },
+  });
+
+  // Mock adapter representing a model whose transport succeeds
+  const mockModelAdapter: HarnessAdapter = {
+    name: 'real-model-1',
+    category: 'model',
+    isTestBaseline: false,
+    model: 'model-xyz',
+    async run(_tenant, reqId) {
+      return {
+        adapter: 'real-model-1',
+        requestId: reqId,
+        status: 'COMPLETED',
+        transcript: 'Generated hallucinated or garbage output',
+        tools: [],
+        usage: { input: 100, output: 50 },
+        permissions: [],
+      };
+    },
+  };
+
+  // Run with quality assertion that fails because output was inadequate
+  const runs = await runCrossModelEvidence(coord, comp, TEN, card.id, [mockModelAdapter], {
+    originScope: 'marketing',
+    targetScope: 'engineering',
+    command: 'test command',
+    claimIds: [clm.id],
+    onBehalfOf: 'human:priya',
+    maxDollars: 1,
+    maxTokens: 10_000,
+    now: NOW,
+    assertQuality: async (outcome) => {
+      const pass = outcome.transcript.includes('CORRECT_ANSWER');
+      return { pass, score: pass ? 1.0 : 0.2, reason: 'output did not match expected structure' };
+    },
+  });
+
+  eq(runs.length, 1);
+  eq(runs[0]!.status, 'COMPLETED');
+  eq(runs[0]!.passed, false, 'marked failed due to quality assertion');
+  eq(runs[0]!.score, 0.2);
+
+  const transfer = (await comp.transferResults(TEN, card.id)).find((t) => t.variant === 'real-model-1');
+  eq(transfer?.passed, false, 'persisted as failed test');
+  eq(transfer?.score, 0.2);
+  eq(transfer?.evaluator, 'quality-assertion');
+  eq(transfer?.model, 'model-xyz');
+});
+
+T('F18: attemptAdvance derives shadow and pilot statistics from persisted traces when omitted', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_derive', 'SUCCESS', 0.95);
+  const card = await comp.compile({ ...cardInput(['tr_derive']), evalRef: 'derive_suite' });
+
+  await comp.recordTransfer(card, { kind: 'regression', variant: 'derive_suite', passed: true, score: 1, ranAt: NOW });
+  await comp.recordTransfer(card, { kind: 'cross_model', variant: 'real_model', passed: true, score: 1, ranAt: NOW });
+  await comp.recordTransfer(card, { kind: 'data_regime', variant: 'regime_1', passed: true, score: 1, ranAt: NOW });
+
+  eq((await comp.attemptAdvance(TEN, card.id, 'QUARANTINE')).ok, true);
+  eq((await comp.attemptAdvance(TEN, card.id, 'SHADOW')).ok, true);
+
+  // Without any traces seeded, attemptAdvance without explicit evidence fails with 0 runs
+  const failPilot = await comp.attemptAdvance(TEN, card.id, 'BOUNDED_PILOT');
+  eq(failPilot.ok, false);
+  eq(
+    failPilot.reasons.some((r) => r.includes('need ≥20 shadow runs, got 0')),
+    true,
+  );
+
+  // Seed 25 traces (24 SUCCESS, 1 FAILURE -> 96% success rate)
+  for (let i = 0; i < 25; i++) {
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        `tr_shadow_${i}`,
+        TEN,
+        'marketing',
+        'x',
+        card.intent,
+        '[]',
+        'MODEL',
+        i === 0 ? 'FAILURE' : 'SUCCESS',
+        '{}',
+        card.id,
+        0.95,
+        NOW,
+      );
+  }
+
+  // Now advance to BOUNDED_PILOT without passing explicit evidence -> derives from traces!
+  const pilotAdv = await comp.attemptAdvance(TEN, card.id, 'BOUNDED_PILOT');
+  eq(pilotAdv.ok, true, 'shadow statistics successfully derived from persisted traces');
+
+  // For PROMOTED, requires 50 WORKFLOW tier runs
+  const failPromote = await comp.attemptAdvance(TEN, card.id, 'PROMOTED');
+  eq(failPromote.ok, false);
+  eq(
+    failPromote.reasons.some((r) => r.includes('need ≥50 pilot runs, got 0')),
+    true,
+  );
+
+  // Seed 55 WORKFLOW traces for pilot (54 SUCCESS, 1 FAILURE -> 98% success rate)
+  for (let i = 0; i < 55; i++) {
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        `tr_pilot_${i}`,
+        TEN,
+        'marketing',
+        'x',
+        card.intent,
+        '[]',
+        'WORKFLOW',
+        i === 0 ? 'FAILURE' : 'SUCCESS',
+        '{}',
+        card.id,
+        0.95,
+        NOW,
+      );
+  }
+
+  // Advance to PROMOTED without passing explicit evidence -> derives from WORKFLOW traces!
+  const promoteAdv = await comp.attemptAdvance(TEN, card.id, 'PROMOTED');
+  eq(promoteAdv.ok, true, 'pilot statistics successfully derived from persisted traces');
+});
+
+T('F18: attemptAdvance validates referenced evalRunId against suite and pass status', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_eval_ref', 'SUCCESS', 0.95);
+  const card = await comp.compile({ ...cardInput(['tr_eval_ref']), evalRef: 'eval_suite_target' });
+
+  // Record passing regression test
+  await comp.recordTransfer(card, {
+    kind: 'regression',
+    variant: 'eval_suite_target',
+    passed: true,
+    score: 1,
+    ranAt: NOW,
+  });
+  eq((await comp.attemptAdvance(TEN, card.id, 'QUARANTINE')).ok, true);
+
+  // 1. Missing eval run ID fails
+  const missingAdv = await comp.attemptAdvance(TEN, card.id, 'SHADOW', { evalRunId: 'evr_nonexistent' });
+  eq(missingAdv.ok, false);
+  eq(
+    missingAdv.reasons.some((r) => r.includes('referenced eval run evr_nonexistent not found')),
+    true,
+  );
+
+  // 2. Eval run for wrong suite fails
+  await db
+    .prepare(
+      'INSERT INTO eval_runs (id, tenant, suite, target, passed, failed, detail_json, ran_at) VALUES (?,?,?,?,?,?,?,?)',
+    )
+    .run('evr_wrong_suite', TEN, 'other_suite', 't', 1, 0, '[]', NOW);
+  const wrongSuiteAdv = await comp.attemptAdvance(TEN, card.id, 'SHADOW', { evalRunId: 'evr_wrong_suite' });
+  eq(wrongSuiteAdv.ok, false);
+  eq(
+    wrongSuiteAdv.reasons.some((r) => r.includes('is for suite other_suite, expected eval_suite_target')),
+    true,
+  );
+
+  // 3. Eval run with failures fails
+  await db
+    .prepare(
+      'INSERT INTO eval_runs (id, tenant, suite, target, passed, failed, detail_json, ran_at) VALUES (?,?,?,?,?,?,?,?)',
+    )
+    .run('evr_failed', TEN, 'eval_suite_target', 't', 1, 2, '[]', NOW);
+  const failedRunAdv = await comp.attemptAdvance(TEN, card.id, 'SHADOW', { evalRunId: 'evr_failed' });
+  eq(failedRunAdv.ok, false);
+  eq(
+    failedRunAdv.reasons.some((r) => r.includes('eval run evr_failed failed')),
+    true,
+  );
+
+  // 4. Valid passing eval run succeeds
+  await db
+    .prepare(
+      'INSERT INTO eval_runs (id, tenant, suite, target, passed, failed, detail_json, ran_at) VALUES (?,?,?,?,?,?,?,?)',
+    )
+    .run('evr_passed', TEN, 'eval_suite_target', 't', 3, 0, '[]', NOW);
+  const validAdv = await comp.attemptAdvance(TEN, card.id, 'SHADOW', { evalRunId: 'evr_passed' });
+  eq(validAdv.ok, true);
+});
+
+T('F23: skill_transfer_tests records tenant and isolates results by tenant', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_iso', 'SUCCESS', 0.95);
+  const card = await comp.compile(cardInput(['tr_iso']));
+
+  await comp.recordTransfer(card, {
+    kind: 'regression',
+    variant: 'v1',
+    passed: true,
+    score: 1,
+    ranAt: NOW,
+  });
+
+  // Verify the row in skill_transfer_tests holds tenant = TEN directly
+  const row = (await db
+    .prepare('SELECT tenant, card_id, kind, passed FROM skill_transfer_tests WHERE card_id = ?')
+    .get(card.id)) as { tenant: string; card_id: string; kind: string; passed: number };
+  eq(row.tenant, TEN);
+  eq(row.card_id, card.id);
+
+  // Tenant-scoped queries return evidence; another tenant gets nothing
+  const ownResults = await comp.transferResults(TEN, card.id);
+  eq(ownResults.length, 1);
+  const foreignResults = await comp.transferResults('other-tenant', card.id);
+  eq(foreignResults.length, 0);
+
+  // Spoofed tenant card cannot record transfer against a foreign card
+  const spoofedCard = { ...card, tenant: 'attacker' };
+  await rejects(
+    async () =>
+      comp.recordTransfer(spoofedCard, {
+        kind: 'regression',
+        variant: 'v1',
+        passed: true,
+        score: 1,
+        ranAt: NOW,
+      }),
+    'UNKNOWN_CARD',
+  );
+});
+
+T('F23: cardRevisions records durable revision lineage on compile, advance, and scope expansion', async () => {
+  const { db, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_rev', 'SUCCESS', 0.95);
+  const card = await comp.compile(cardInput(['tr_rev']));
+
+  // Rev 1: COMPILED
+  let revs = await comp.cardRevisions(TEN, card.id);
+  eq(revs.length, 1);
+  eq(revs[0]!.version, 1);
+  eq(revs[0]!.action, 'CARD_COMPILED');
+  eq(revs[0]!.state, 'CANDIDATE');
+
+  // Rev 2: advance to QUARANTINE
+  await comp.attemptAdvance(TEN, card.id, 'QUARANTINE');
+  revs = await comp.cardRevisions(TEN, card.id);
+  eq(revs.length, 2);
+  eq(revs[1]!.version, 2);
+  eq(revs[1]!.state, 'QUARANTINE');
+  eq(revs[1]!.action, 'CARD_QUARANTINE');
+
+  // Verify describeCard returns the revisions
+  const desc = await describeCard(comp, TEN, card.id);
+  eq(desc.revisions?.length, 2);
+  eq(desc.revisions?.[0]?.version, 1);
+  eq(desc.revisions?.[1]?.version, 2);
 });

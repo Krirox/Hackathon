@@ -3,87 +3,77 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>VITAL — The Autonomous Enterprise</title>
-<meta name="description" content="Vital is the grounding and reflex layer for the sovereign agent stack. Grounded, budgeted, attributable, safely executable AI."/>
-<!-- Point these at the Vital console (defaults assume the console on the same origin or localhost:3100) -->
-<meta name="vital-console-url" content="http://127.0.0.1:3100"/>
+<title>VITAL — Governed Ship-to-Result</title>
+<meta name="description" content="Vital closes the release loop with cited assets, human approval, frozen decisions, and measured outcomes — the grounding layer for production agents, not an autonomous company OS."/>
+<!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
+<meta name="vital-console-url" content=""/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css"/>
 <!-- Three.js 3D Engine (served locally from assets/three.min.js) -->
-<script src="assets/three.min.js"></script>
+<script src="app.js" defer></script>
+<script src="assets/three.min.js" defer></script>
+<script src="graphics.js" defer></script>
 </head>
 <body>
 <!-- Matrix Background Canvas -->
-<canvas id="bg-canvas"></canvas>
+<a class="skip-link" href="#top">Skip to content</a>
+<noscript><div class="noscript-note"><p><strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval &#8594; measured outcome. Vital is the accountability layer for agent work.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="/login">Sign in to your console (existing members)</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>All content and contact paths on this page work without JavaScript. Sign in is invite-only and names its bound organization on login.</p></div></noscript>
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
 <div class="bg-vignette" aria-hidden="true"></div>
-
-<!-- Initial Loader Screen -->
-<div id="loader">
-  <div class="loader-logo">VITAL<sup>®</sup></div>
-  <div class="loader-line"><span></span></div>
-  <div class="loader-sub">GROUNDING · BUDGETING · ATTESTING</div>
-</div>
 
 <!-- Header Navigation Bar -->
 <header id="site-header">
   <a class="pill" href="#top">‹ HOME ›</a>
-  <button class="brand" id="menu-btn" aria-label="menu">
+  <button class="brand" id="menu-btn" type="button" aria-label="Open menu" aria-controls="overlay" aria-haspopup="dialog" aria-expanded="false" hidden>
     <span>vital ›</span>
     <span class="burger"><i></i><i></i></span>
   </button>
-  <nav class="header-nav">
-    <a data-console data-console-path="/login" href="/login" class="nav-signin">Sign in</a>
-    <a class="cta-contact" data-console data-console-path="/signup" href="/signup">
-      <span>Contact Us</span>
+  <nav class="header-nav" aria-label="Account and contact">
+    <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
+    <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+      <span>Contact</span>
       <span class="cta-accent-icon">›</span>
     </a>
   </nav>
 </header>
 
 <!-- Fullscreen Menu Overlay -->
-<nav id="overlay" aria-hidden="true">
-  <button id="overlay-close" aria-label="Close menu">CLOSE ×</button>
-  <div class="overlay-links">
+<dialog id="overlay" aria-label="Site menu">
+  <button id="overlay-close" type="button" aria-label="Close menu" autofocus>CLOSE ×</button>
+  <nav class="overlay-links" aria-label="Main navigation">
     <a href="#top">Home</a>
     <a href="#statement">Thesis</a>
     <a href="#platform">Platform</a>
     <a href="#systems">Subsystems</a>
     <a href="#wedge">The Wedge</a>
-    <a data-console data-console-path="/login" href="/login">Console</a>
-  </div>
-  <div class="overlay-foot">VITAL — THE LIVING COMPANY · 212/212 TESTS GREEN · MIT CORE</div>
-</nav>
+    <a data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
+    <a href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry" data-cta="contact">Contact</a>
+  </nav>
+  <div class="overlay-foot">VITAL — GOVERNED SHIP-TO-RESULT · MIT CORE</div>
+</dialog>
 
-<main id="top">
-<!-- =========================================================================
-     FIRST TWO SCROLL EXPERIENCES: UNIFIED CINEMATIC 3D STORY
-     Scroll 0: Hero / Landing View (3D element submerged in lower-center)
-     Scroll 1: 3D element smoothly reveals and migrates toward the right
-     Scroll 2: Second Story Section (Left Text from idea.md + Right 3D Object)
-     Exit: Particle background fades out completely to 0%
-     ========================================================================= -->
+<main id="top" tabindex="-1">
 <div class="story-experience-track" id="story-track">
   <div class="story-sticky-viewport" id="story-viewport">
 
-    <!-- 3D Gyroscopic Rings Stage (Lives continuously across Hero and Story Section) -->
-    <div class="stage-3d-wrapper" id="stage-3d-wrapper">
-      <div id="canvas-3d-container"></div>
-    </div>
-
-    <!-- 1. Hero Overlay (Scroll 0 -> fades out on scroll) -->
     <div class="hero-overlay" id="hero-overlay">
       <div class="hero-content">
         <div class="badge-wrap">
           <div class="eyebrow-badge">
             <span class="badge-pulse-dot"></span>
-            <span>VITAL / REIMAGINE THE ENTERPRISE</span>
+            <span>VITAL / SHIP-TO-RESULT WEDGE</span>
           </div>
         </div>
         
-        <h1 class="hero-title">The Autonomous Enterprise</h1>
-        <p class="hero-subtitle">AI-first by design. Faster sharper decisions, real execution, built for what comes next.</p>
+        <h1 class="hero-title">Governed release workflow</h1>
+        <p class="hero-subtitle">Detect a change → cited assets → human approval → measured outcome. Vital is the accountability layer for agent work — not an autonomous company OS.</p>
+        <div class="cta-actions hero-actions">
+          <a class="cta-btn" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in to your console</a>
+        </div>
+        <p class="signin-note" data-signin-note>Sign in is for existing members of a provisioned console, which names its bound organization on login. Membership is invite-only — new pilots start via a walkthrough request.</p>
       </div>
 
       <!-- Scroll Down Indicator -->
@@ -116,49 +106,51 @@
             Companies have information systems, not an intelligence-and-action system. The gap is not "AI that can think" — it is AI whose thinking is <em>grounded, budgeted, attributable, and safely executable</em>.
           </p>
 
-          <div class="interactive-prompt">
+          <div class="interactive-prompt" hidden>
             <span>Click Each Layer to Find Out More</span>
             <span class="prompt-arrow">›</span>
           </div>
 
           <div class="layer-selector-tabs" id="layer-tabs">
-            <button class="layer-tab active" data-layer="1" type="button" aria-label="Layer 01 Reality Ledger">
+            <button class="layer-tab" data-layer="1" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
               <span class="layer-num">01</span>
-              <div class="layer-info">
-                <h4>CLAIM · Reality Ledger</h4>
-                <p>Append-only typed claims. No model may create FACT. Contradiction is an event, never silence.</p>
-              </div>
+              <span class="layer-info">
+                <span class="layer-title">CLAIM · Reality Ledger</span>
+                <span class="layer-description">Append-only typed claims. No model may create FACT. Contradiction is an event, never silence.</span>
+              </span>
               <span class="tab-indicator">◈</span>
             </button>
 
-            <button class="layer-tab" data-layer="2" type="button" aria-label="Layer 02 Cognitive Router">
+            <button class="layer-tab" data-layer="2" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
               <span class="layer-num">02</span>
-              <div class="layer-info">
-                <h4>COMPUTE · Router &amp; Compiler</h4>
-                <p>REFLEX → WORKFLOW → MODEL → HUMAN. Procedures graduate quarantine → shadow → pilot → promoted.</p>
-              </div>
+              <span class="layer-info">
+                <span class="layer-title">COMPUTE · Router &amp; Compiler</span>
+                <span class="layer-description">REFLEX → WORKFLOW → MODEL → HUMAN. Procedures graduate quarantine → shadow → pilot → promoted.</span>
+              </span>
               <span class="tab-indicator">◈</span>
             </button>
 
-            <button class="layer-tab" data-layer="3" type="button" aria-label="Layer 03 Coordination Surface">
+            <button class="layer-tab" data-layer="3" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
               <span class="layer-num">03</span>
-              <div class="layer-info">
-                <h4>TALK · Coordination Surface</h4>
-                <p>Typed QUERY / REQUEST / NOTICE. Budgeted, refusable, replayable. Chat is a projection — never the store.</p>
-              </div>
+              <span class="layer-info">
+                <span class="layer-title">TALK · Coordination Surface</span>
+                <span class="layer-description">Typed QUERY / REQUEST / NOTICE. Budgeted, refusable, replayable. Chat is a projection — never the store.</span>
+              </span>
               <span class="tab-indicator">◈</span>
             </button>
           </div>
         </div>
 
-        <!-- Right Side Anchor: Positioning the interactive floating card beside the 3D element -->
         <div class="story-stage-anchor" id="story-stage-anchor">
-          <div id="floating-layer-card" class="floating-layer-card" title="Click to cycle layers">
+          <div class="stage-3d-wrapper" id="stage-3d-wrapper" aria-hidden="true">
+            <div id="canvas-3d-container"></div>
+          </div>
+          <div id="floating-layer-card" class="floating-layer-card" role="status" aria-atomic="true">
             <div class="card-status-line">
               <span class="card-pulse-dot"></span>
-              <span class="card-tag" id="card-tag">The Enterprise</span>
+              <span class="card-tag" id="card-tag">Governed workflow</span>
             </div>
-            <p class="card-description" id="card-description">Reinvents and runs the sovereign corporation.</p>
+            <p class="card-description" id="card-description">Human approval, frozen decisions, and replayable evidence on every release.</p>
           </div>
         </div>
       </div>
@@ -167,27 +159,25 @@
   </div>
 </div>
 
-<!-- =========================================================================
-     SECTION 3: NORMAL WEBSITE CONTENT (NO PARTICLE BACKGROUND)
-     ========================================================================= -->
 <!-- 01 — THESIS -->
 <section class="dark statement" id="statement">
   <div class="section-container">
     <p class="section-label">01 — THESIS</p>
-    <h2 class="reveal">A new generation of intelligent systems.<br/><strong>Build. Automate. Understand.</strong></h2>
-    <p class="lede reveal">Companies have information systems, not an intelligence-and-action system. Vital closes the loop on specific changes — <em>grounded, budgeted, attributable, safely executable</em> — and proves it with a number: <span class="num">intelligence cost per good decision.</span></p>
+    <h2 class="reveal">Ground specific changes.<br/><strong>Approve. Execute. Measure.</strong></h2>
+    <p class="lede reveal">Companies have information systems, not an intelligence-and-action system. Vital closes the loop on specific changes — <em>grounded, budgeted, attributable, safely executable</em> — and tracks <span class="num">intelligence cost per good decision.</span></p>
+    <p class="proof-legend reveal"><span class="proof-tag shipped">Shipped</span> core invariants in code · <span class="proof-tag demo">Demo</span> illustration below · <span class="proof-tag pilot">Pilot target</span> pre-registered metric · <span class="proof-tag roadmap">Roadmap</span> planned surface</p>
     <div class="stats-grid">
       <div class="stat-box reveal">
         <b class="stat-num">95%</b>
-        <span>of GenAI pilots show no P&amp;L return — MIT</span>
+        <span class="proof-note">market research · GenAI pilots with no P&amp;L return — MIT</span>
       </div>
       <div class="stat-box reveal">
         <b class="stat-num">40%</b>
-        <span>of agentic projects face cancellation — Gartner</span>
+        <span class="proof-note">market research · agentic projects facing cancellation — Gartner</span>
       </div>
       <div class="stat-box reveal">
-        <b class="stat-num lime">212/212</b>
-        <span>core tests green · real sockets · real sqlite</span>
+        <b class="stat-num lime">Core</b>
+        <span class="proof-note">engineering tests verify ledger/coord invariants — not business lift or pilot outcomes</span>
       </div>
     </div>
   </div>
@@ -198,8 +188,8 @@
   <div class="media reveal-scale">
     <img src="https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?q=80&w=1800&auto=format&fit=crop" alt="City infrastructure at night" loading="lazy"/>
     <div class="media-cap">
-      <span>SHIP-TO-RESULT · LIVE RUNTIME LOOP</span>
-      <span class="live">● REC</span>
+      <span>SHIP-TO-RESULT · ILLUSTRATED WALKTHROUGH</span>
+      <span class="demo-label">DEMO · NOT LIVE DATA</span>
     </div>
   </div>
 </section>
@@ -209,16 +199,16 @@
   <div class="section-container">
     <div class="grid3">
       <div class="grid-card reveal">
-        <h4>Increase Performance. Operate in Real Time.</h4>
-        <p>Deterministic reflexes carry the bulk of traffic. Frontier models see only what passes the materiality gate — under 1% of arrivals.</p>
+        <h4>Ship faster with human gates.</h4>
+        <p><span class="proof-tag shipped">Shipped</span> Deterministic reflexes carry the bulk of traffic. Frontier models see only what passes the materiality gate — under 1% of arrivals.</p>
       </div>
       <div class="grid-card reveal">
-        <h4>From AI Experiments to AI-Run Operations.</h4>
-        <p>Every decision freezes a Context Bundle. Replay why it was made, what it cost, and what happened — queryable, not archaeology.</p>
+        <h4>From pilots to governed operations.</h4>
+        <p><span class="proof-tag shipped">Shipped</span> Every decision freezes a Context Bundle. Replay why it was made, what it cost, and what happened — queryable, not archaeology.</p>
       </div>
       <div class="grid-card reveal">
         <h4>Built Around Outcomes, Not Use Cases.</h4>
-        <p>No OUTCOME without a comparison basis. Holdouts, pre-registration, and cost roll-up per decision.</p>
+        <p><span class="proof-tag shipped">Shipped</span> No OUTCOME without a comparison basis. Holdouts, pre-registration, and cost roll-up per decision.</p>
       </div>
     </div>
   </div>
@@ -241,7 +231,7 @@
       <div class="sys reveal">
         <span class="sys-index">05</span>
         <div>
-          <h3>World Sense</h3>
+          <h3>World Sense <span class="proof-tag roadmap">Roadmap</span></h3>
           <p>Genome → Watch Contract. L0 collect, L1 triage, L2 reason. Corroboration ≥ 2 before escalation.</p>
         </div>
         <em class="sys-arrow">→</em>
@@ -250,7 +240,7 @@
         <span class="sys-index">06</span>
         <div>
           <h3>Governance</h3>
-          <p>R/A/I matrix per action × scope. Honeytasks, sampling, kill switches drilled quarterly. Art. 14 ready.</p>
+          <p><span class="proof-tag shipped">Shipped</span> R/A/I matrix per action × scope. Honeytasks, sampling, kill switches drilled quarterly. Designed for effective human oversight — not a compliance certification.</p>
         </div>
         <em class="sys-arrow">→</em>
       </div>
@@ -272,7 +262,8 @@
   <div class="section-container">
     <p class="section-label">04 — THE WEDGE</p>
     <h2 class="reveal">Ship-to-Result.<br/><strong>One loop. One number.</strong></h2>
-    <p class="lede reveal">A product change is detected → verified summary → affected segments → drafted assets → human approval in-room → execution → measured outcome → ledger. −50% ship-to-launch time. −40% human hours. Claim error &lt;1%.</p>
+    <p class="lede reveal"><span class="proof-tag shipped">Shipped</span> A product change is detected → verified summary → affected segments → drafted assets → human approval → execution → measured outcome → ledger.</p>
+    <p class="lede reveal pilot-targets"><span class="proof-tag pilot">Pilot targets</span> −50% ship-to-launch time · −40% human hours per launch · customer-facing claim error &lt;1%. Agreed before each pilot — not guaranteed results.</p>
     <ol class="steps-list reveal">
       <li class="active"><span class="step-num">01</span> Detect</li>
       <li><span class="step-num">02</span> Verify</li>
@@ -288,17 +279,19 @@
   <div class="section-container">
     <div class="cta-box reveal">
       <h2>Run one loop.<br/>Prove it with a number.</h2>
+      <p class="lede">Self-hosted Ship-to-Result on your infrastructure. We help you deploy, wire sources, and run a measured pilot — not a hosted subscription product.</p>
       <div class="cta-actions">
-        <a class="cta-btn big" data-console data-console-path="/signup" href="/signup">
-          <span>Create your organization</span>
+        <a class="cta-btn big" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">
+          <span>Request a pilot walkthrough</span>
           <span class="arrow">→</span>
         </a>
-        <a class="secondary-btn" data-console data-console-path="/login" href="/login">
-          Sign in to the console
+        <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">
+          Sign in to your console
         </a>
       </div>
+      <p class="signin-note" data-signin-note>Existing members sign in to a provisioned console that names its bound organization — membership is invite-only, with no public registration.</p>
       <p id="console-status" role="status">● console status unknown</p>
-      <p class="contact-mono">prefer a walkthrough? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. that is a finding, not a failure.</p>
+      <p class="contact-mono">Questions or deployment planning? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. That is a finding, not a failure.</p>
     </div>
   </div>
 </section>
@@ -325,6 +318,5 @@
   </div>
 </footer>
 
-<script src="app.js"></script>
 </body>
 </html>

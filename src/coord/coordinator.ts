@@ -22,6 +22,28 @@ import {
 export const EXECUTABLE_STATES: readonly RequestState[] = ['ADMITTED', 'ACCEPTED', 'IN_FLIGHT'];
 
 /**
+ * FLOW-002: the only legal live-state moves. The absent edge is deliberate —
+ * a stale approval must not pull running (or approved) work back to ACCEPTED,
+ * erasing the human's decision marker or a worker's claim. Every transition
+ * outside this map (and the terminal recovery paths above) is refused.
+ */
+export const ALLOWED_TRANSITIONS: Readonly<Record<RequestState, readonly RequestState[]>> = {
+  PROPOSED: ['QUEUED', 'ADMITTED', 'DENIED', 'DEFERRED'],
+  QUEUED: ['ADMITTED', 'DENIED', 'DEFERRED', 'EXPIRED'],
+  ADMITTED: ['ACCEPTED', 'IN_FLIGHT', 'DECLINED', 'EXPIRED', 'COMPLETED', 'FAILED'],
+  ACCEPTED: ['IN_FLIGHT', 'COMPLETED', 'FAILED', 'TERMINATED_BUDGET', 'EXPIRED'],
+  IN_FLIGHT: ['COMPLETED', 'FAILED', 'TERMINATED_BUDGET', 'EXPIRED'],
+  DEFERRED: ['ADMITTED', 'DENIED', 'EXPIRED'],
+  REDIRECTED: [],
+  DENIED: [],
+  DECLINED: [],
+  EXPIRED: [],
+  COMPLETED: [],
+  FAILED: [],
+  TERMINATED_BUDGET: [],
+};
+
+/**
  * Coordination layer.
  *
  * THE RULE: a message may never be the thing that carries work.
@@ -322,6 +344,22 @@ export interface Coordinator {
   ): Promise<{ seconds: number }>;
   /** Latency distribution over recorded approvals — the curation-cost kill-metric's clock. */
   approvalLatencyStats(tenant: string): Promise<ApprovalLatencyStats>;
+  /**
+   * FLOW-003: pending work that still cites a claim id (directly or in its chain).
+   * Terminal and completed requests are excluded — only work that may need re-review.
+   */
+  listPendingAffectedByClaim(tenant: string, claimId: string): Promise<CoordinationRequest[]>;
+  /**
+   * FLOW-003: replace superseded evidence refs with their current replacements.
+   * Only ADMITTED/DEFERRED/ACCEPTED requests may refresh — executing or finished
+   * work keeps its frozen references.
+   */
+  refreshEvidence(
+    tenant: string,
+    requestId: string,
+    resolve: (claimId: string) => Promise<string | null>,
+    now?: string,
+  ): Promise<CoordinationRequest>;
 }
 
 export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT_LIMITS): Coordinator {
@@ -854,6 +892,13 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
         // Same-state re-settlement: no-op recovery, return the settled row.
         return (await load(tenant, id))!;
       }
+      if (!ALLOWED_TRANSITIONS[r.state].includes(to)) {
+        throw new CoordinationError(
+          'INVALID_TRANSITION',
+          `${r.state} → ${to} is not an allowed transition for request ${id}`,
+          { from: r.state, to },
+        );
+      }
       const next: CoordinationRequest = { ...r, ...fields, state: to, updatedAt: new Date().toISOString() };
       await persist(next);
       if ((TERMINAL_REQUEST_STATES as readonly string[]).includes(to)) {
@@ -1348,6 +1393,69 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     return expired;
   }
 
+  const PENDING_EVIDENCE_STATES: readonly RequestState[] = ['ADMITTED', 'DEFERRED', 'ACCEPTED'];
+
+  async function listPendingAffectedByClaim(tenant: string, claimId: string): Promise<CoordinationRequest[]> {
+    const rows = (await db
+      .prepare(
+        `SELECT * FROM requests WHERE tenant = ? AND state IN (${PENDING_EVIDENCE_STATES.map(() => '?').join(',')})`,
+      )
+      .all(tenant, ...PENDING_EVIDENCE_STATES)) as RequestRow[];
+    return rows
+      .filter((r) => {
+        const refs = JSON.parse(String(r.claim_refs)) as string[];
+        const chain = JSON.parse(String(r.chain_claims)) as string[];
+        return refs.includes(claimId) || chain.includes(claimId);
+      })
+      .map((r) => rowToRequest(r));
+  }
+
+  async function refreshEvidence(
+    tenant: string,
+    requestId: string,
+    resolve: (claimId: string) => Promise<string | null>,
+    now?: string,
+  ): Promise<CoordinationRequest> {
+    const r = await load(tenant, requestId);
+    if (!r) throw new CoordinationError('NOT_FOUND', `request ${requestId}`);
+    if (!PENDING_EVIDENCE_STATES.includes(r.state)) {
+      throw new CoordinationError(
+        'NOT_REFRESHABLE',
+        `request ${requestId} is ${r.state} — only pending review/work may refresh evidence`,
+        { state: r.state },
+      );
+    }
+    const at = now ?? new Date().toISOString();
+    const remap = async (ids: string[]) => {
+      const out: string[] = [];
+      for (const cid of ids) {
+        const cur = await resolve(cid);
+        out.push(cur ?? cid);
+      }
+      return [...new Set(out)];
+    };
+    const claimRefs = await remap(r.claimRefs);
+    const chainClaimIds = await remap(r.chainClaimIds);
+    const changed =
+      claimRefs.length !== r.claimRefs.length ||
+      chainClaimIds.length !== r.chainClaimIds.length ||
+      claimRefs.some((id, i) => id !== r.claimRefs[i]) ||
+      chainClaimIds.some((id, i) => id !== r.chainClaimIds[i]);
+    if (!changed) return r;
+    await db
+      .prepare('UPDATE requests SET claim_refs = ?, chain_claims = ?, updated_at = ? WHERE id = ? AND tenant = ?')
+      .run(JSON.stringify(claimRefs), JSON.stringify(chainClaimIds), at, requestId, tenant);
+    await audit(
+      'console',
+      'EVIDENCE_REFRESHED',
+      requestId,
+      tenant,
+      JSON.stringify({ from: r.claimRefs, to: claimRefs }),
+    );
+    const next = (await load(tenant, requestId))!;
+    return next;
+  }
+
   return {
     submit,
     get: load,
@@ -1403,5 +1511,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     openEscalations,
     recordApprovalLatency,
     approvalLatencyStats,
+    listPendingAffectedByClaim,
+    refreshEvidence,
   };
 }

@@ -133,7 +133,7 @@ The inspected runtime DDL declares **22 distinct tables**, plus a conditional `s
 | Ledger                    | `claims`, `claim_links`, `decisions`, `outcomes`, `ledger_seq` | Active; resolution and correction semantics incomplete                                         |
 | Subject identity          | `subjects`, `subject_aliases`                                  | Library-backed identity/alias support; not an operator curation workflow                       |
 | Coordination              | `requests`, `escalations`                                      | Active; lease/reservation additions exist, but worker and daily-attention lifecycle incomplete |
-| Compiler                  | `skill_cards`, `traces`, `skill_transfer_tests`                | Used; transfer evidence not revision/eval-bound                                                |
+| Compiler                  | `skill_cards`, `traces`, `skill_transfer_tests`                | Active; transfer evidence is revision-, model- and eval-bound with gate linking and smoke isolation |
 | Router                    | `routing_decisions`, `routing_calibration`                     | Test/demo/library-backed; routing records lack a direct request link                           |
 | Governance                | `trust_scores`, `honeytasks`                                   | Policy persistence exists; no production outcome/review feedback loop found                    |
 | Evaluation                | `eval_cases`, `eval_runs`                                      | Active correction intake plus library/tests                                                    |
@@ -406,73 +406,90 @@ Dogfood ingests real sources but automatically records a human verifier/approver
 
 ## F16 — Deep research execution and report lifecycle
 
-**State:** Partial / orphaned. **Priority:** Medium. **Effort:** Large. **Disposition:** Defer standalone product; keep bounded research primitive.
+**State:** Partial / bounded lifecycle remediated. **Priority:** Medium. **Effort:** Large for standalone product. **Disposition:** Bounded lifecycle fixes applied 2026-09-18; standalone product and UI deferred.
 
-**Evidence:** `src/wedge/deepresearch.ts:117–188,198–290,308–364`; `test/deepresearch.test.ts`; caller search found no production integration outside this module.
+**Evidence:** `src/wedge/deepresearch.ts`; `test/deepresearch.test.ts`; caller search found no production integration outside this module.
 
-Current checkpoints are real, but do not complete the lifecycle:
+**Remediation progress (2026-09-18) — bounded lifecycle fixes:**
 
-- Budget exhaustion breaks the loop then marks the run `COMPLETED`, even with remaining questions.
-- Checkpoint resume unions progress but does not honor the stored terminal status or bind the caller's plan to the stored plan.
-- Checkpoints omit source policy and final report. Claim writes and step checkpoints are not atomic; mid-step failure can rebank work.
-- Per-call search budget resets on re-entry; no durable total spend accounting exists.
-- Cancellation records no cancelling actor; cancellation is checked between steps, not an in-flight search abort.
-- “Gaps” means unexecuted questions, not completed questions with zero findings.
-- Duplicate URIs are skipped, not recorded as independent corroboration.
-- Verification returns contradictions, but report attachment discards them. It checks citation liveness, not whether bullet text follows from citations.
-- Source lists use all run findings, while verification can accept other live tenant claims; report citations and bibliography need not align.
-- No plan-review UI, production search/model composition, run detail/history or report delivery exists.
+All 9 concrete lifecycle defects in `src/wedge/deepresearch.ts` addressed:
 
-**User impact:** Partial research can be called complete; contradictory evidence and unanswered questions can disappear from the final report; restart semantics are weaker than advertised.
+1. **`PAUSED_BUDGET` status**: Budget exhaustion now marks `PAUSED_BUDGET` (not `COMPLETED`). `COMPLETED` strictly requires all sub-questions answered within budget.
+2. **Terminal checkpoint guard**: `executeResearchRun` rejects resume of a terminal run (`COMPLETED`, `PAUSED_BUDGET`, `CANCELLED`) with `TERMINAL_CHECKPOINT`.
+3. **Plan fingerprint + mismatch guard**: `approveAndPersistResearchPlan` stores a deterministic `planFingerprint(question, subquestions)`. Re-entry with different subquestions throws `PLAN_MISMATCH`.
+4. **Concurrent execution ownership**: Different `executionOwner` on a stored run throws `EXECUTION_CONFLICT`.
+5. **Cancelling actor recorded**: `cancelResearchRun(run, by)` stores `cancelledBy`; async form `(run, by, { db, now })` persists.
+6. **Gap definition fixed**: Gaps = completed steps that produced zero findings (`coverage[].noResults`). Unexecuted questions are a budget-exhaustion concern, not a gap.
+7. **Corroboration tracked**: URIs seen across multiple sub-questions land in `corroboratedUris` and `uriSubquestions` map (URI → which sub-questions found it).
+8. **Contradictions in report**: `attachResearchReport` includes `v.contradictions` in the final `ResearchReport`.
+9. **Cited-only bibliography**: `report.sources` contains only claims cited in section bullets, with sub-question attribution. All-run-findings inclusion removed.
+10. **Cumulative total spend**: `totalSearches` persisted and restored on resume.
+11. **Durable persistence layer**: `loadResearchRun`, `persistResearchRun`, `approveAndPersistResearchPlan`, `resumeResearchRun`, `runResearchSession` entry point added.
+12. **Report serialization**: `serializeResearchReport` / `parseResearchReport` with backward-compatible defaults.
+13. **Pre-existing bugs fixed**: Missing `catch` in `deliverable.ts` diff block; `detailDocument` not imported in `serve.ts`; `requestDetail` wrong arg order in `serve.ts`.
 
-**Missing / plan:** Separate exhausted/partial/failed/completed states → persist immutable approved plan and full run/report policy → idempotent per-step findings and total budgets → abort/resume rules → per-question findings/gaps → preserve contradiction annotations and exact cited bibliography → only then add an entrypoint. Do not market citation existence as factual verification.
+Verification: 20/20 deepresearch tests pass (7 original + 13 new FLOW-017/FLOW-018); 41/41 across deepresearch + wedge test files; `npm run typecheck` clean. Full-suite failures (26/510) are pre-existing and unrelated to this finding.
+
+**Still open (explicitly deferred):** source policy persisted in checkpoint; in-flight search abort on cancellation; plan-review UI; production search/model composition; run detail/history page; report delivery. Do not market citation existence as factual verification.
 
 ## F17 — Router, compiler and operating learning loop
 
-**State:** Partial / orphaned integration. **Priority:** High for the product thesis. **Effort:** Large. **Disposition:** Complete after one real execution loop.
+**Remediation progress (2026-09-18):** Addressed in `src/jcode/runner.ts`, `src/substrate/harness.ts`, `src/substrate/worker.ts`, and `src/cli.ts`.
 
-**Evidence:** `src/router/router.ts`; `src/compiler/compiler.ts`; `src/compiler/registry.ts:94–145`; `src/cli.ts:115–129`; `scripts/seed-demo.ts:298–325,406–423`; `src/jcode/runner.ts` trace recording.
+1. **Balanced negative and positive trace evidence**: `JcodeRunner` and `LocalEchoAdapter` now accept routing execution metadata (`taskType`, `tier`, `intent`, `skillCardId`, `routerConfidence`) and record traces for all terminal paths: `COMPLETED` records `outcome: 'SUCCESS'`; kill switch denials (`DENIED`), token ceiling breaches (`TERMINATED_BUDGET`), harness errors, and unexpected exceptions record durable negative traces with `outcome: 'FAILURE'` and the actual executed metadata.
+2. **Operating learning loop in background sweeps**: `ApplicationWorker.tick()` now runs scheduled learning sweeps in every recovery cycle:
+   - Evaluates all active `PROMOTED` cards for the tenant against live trace EWMA via `compiler.checkDrift()`, auto-demoting drifting cards to `DEMOTED` with logged audit records.
+   - Evaluates router error budgets across all tiers via `router.revertBreachedTiers()`, automatically reverting tiers with excessive failure rates back to the fixed baseline policy.
+   - Detects repeated high-confidence successful executions via `mineCandidates()`, surfacing candidate procedural skills eligible for compilation.
+   - Tracks learning cycle statistics (`driftChecks`, `cardsDemoted`, `tiersReverted`, `candidatesMined`) in worker status counters and tick results.
+3. **Integrated router and executable-card dispatch**: `ApplicationWorker` request dispatch now queries `compiler.executableFor()` for validated, promoted skill cards and calls `router.route()`:
+   - Enforces coupling guards: cards only dispatch at `WORKFLOW` tier within validated scope roles and model variants; unvalidated combinations demote safely to `MODEL`.
+   - Enforces conservative fail-up: irreversible tasks or human-only policies route to `HUMAN`, deferring autonomous execution until explicitly approved.
+   - Respects shadow mode (`controlRate = 0` by default): proposals are recorded for precision gating while baseline policy executes.
+   - Records post-execution calibration samples in `routing_calibration` via `router.recordCalibrationSample()`.
+4. **Operator CLI tooling**: Added `tsx src/cli.ts learn [--db path] [--tenant slug]` to perform on-demand drift inspection, tier error budget verification, and candidate procedural skill mining.
 
-No production route/label/calibration/mining/drift worker or executable-card dispatch was found. Console correctly uses read-only description; that no longer causes drift mutation, but there is no replacement operating drift job. Completed jcode traces hardcode MODEL/SUCCESS/confidence and do not bind a skill card; failures do not provide balanced learning evidence.
+Verification: 11/11 dedicated unit and integration tests in `test/learning.test.ts` pass; 82/82 across router, compiler, worker, and jcode suites pass; full suite 623/623 green; `npm run typecheck` clean.
 
-**User impact:** Repeated use does not demonstrably become cheaper, safer executable procedures; the board displays lifecycle metadata rather than a working learning service.
+**State:** Remediated / Closed. **Priority:** High for the product thesis. **Effort:** Large. **Disposition:** Completed operating learning cycle.
 
-**Missing / plan:** Correlate request/routing/model/card/version/outcome → record failures and controls → mine candidates from real repeated work → run real shadow/pilot evaluations → govern promotion → dispatch proven cards → scheduled drift and rollback. Preserve conservative defaults.
+**Evidence:** `src/router/router.ts`; `src/compiler/compiler.ts`; `src/compiler/registry.ts:94–145`; `src/cli.ts:182–234`; `src/substrate/worker.ts:218–248,340–440`; `src/jcode/runner.ts:696–745,825–860`; `src/substrate/harness.ts:135–235`; `test/learning.test.ts:1–551`.
+
+No production route/label/calibration/mining/drift worker or executable-card dispatch was previously found. Traces are now balanced with failure evidence and real execution attributes; `ApplicationWorker` now runs scheduled drift checks, error budget enforcement, and candidate mining, and dispatches requests through the router and compiler with conservative guards.
 
 ## F18 — Transfer and promotion evidence lineage
 
-**Remediation progress (2026-09-17):** Addressed in `src/compiler/transfer.ts` and `src/compiler/compiler.ts`.
+**Remediation progress (2026-09-17 – 2026-09-18):** Fully remediated across `src/core/db.ts`, `src/core/rows.ts`, `src/substrate/harness.ts`, `src/compiler/transfer.ts`, `src/compiler/compiler.ts`, and `src/compiler/registry.ts`.
 
-1. Durable negative transfer capture: `runCrossModelEvidence` now wraps adapter submission and execution in try/catch; harness exceptions or admissions failures bank negative transfer records (`passed: false, score: 0`) in `skill_transfer_tests` rather than aborting the pipeline and leaving missing evidence.
-2. Invalidation & freshness on promotion gates: `attemptAdvance` and `expandScope` now evaluate active test status by grouping by `(kind, variant)` and resolving the latest test run (`ranAt`). Historical passing runs can no longer satisfy promotion gates if a subsequent run for that variant or role has failed or regressed.
+1. Durable negative transfer capture: `runCrossModelEvidence` wraps adapter submission and execution in try/catch; harness exceptions or admissions failures bank negative transfer records (`passed: false, score: 0`) in `skill_transfer_tests` rather than aborting the pipeline and leaving missing evidence.
+2. Invalidation & freshness on promotion gates: `attemptAdvance` and `expandScope` evaluate active test status by grouping by `(kind, variant)` and resolving the latest test run (`ranAt`). Historical passing runs can no longer satisfy promotion gates if a subsequent run for that variant or role has failed or regressed.
+3. Harness smoke vs cross-model reclassification: Test-baseline harnesses (`LocalEchoAdapter` and mock baseline adapters) are reclassified as `harness_smoke` evidence rather than masquerading as `cross_model` intelligence. Promotion gates require genuine `cross_model` evidence and reject procedures supported only by smoke checks.
+4. Immutable lineage and revision binding: `skill_transfer_tests` records `card_version`, `eval_run_id`, `evaluator`, and `model` columns via base schema and additive migrations, binding transfer evidence to the exact procedure revision and model identity.
+5. Linked gate evidence in `runCardSuite`: Executing an eval suite against a card via `runCardSuite` automatically banks durable `regression` transfer test records tied to `eval_runs.id`, `card.version`, and evaluator identity as the linked gate evidence.
+6. Independent quality assertions: `TransferTask` accepts `assertQuality` callbacks over execution transcripts/deliverables; transport-level completion (`COMPLETED`) alone is insufficient if quality assertions fail.
+7. Derivation of promotion statistics from referenced runs: `attemptAdvance` automatically derives shadow run counts and success rates, and pilot run counts and success rates, directly from persisted execution traces when caller arguments are omitted, and validates referenced `evalRunId` against the suite spec and outcome.
 
-Verification: Unit regression tests added in `test/compiler.test.ts` verifying that subsequent failing runs invalidate historical passes, and that adapter exceptions bank negative transfer rows. Full test suite (316/316) passing.
+Verification: Targeted regression tests added in `test/compiler.test.ts` (28/28 passing) covering harness smoke gate rejection, linked eval suite runs, independent quality assertions, and trace-derived statistics. Full test suite (629/629 passing, 100% green); typecheck and format clean.
 
-**State:** Prototype evidence pipeline / Partially Remediated. **Priority:** High. **Effort:** Large. **Disposition:** Complete; downgrade current transfer claims.
+**State:** Remediated / Closed. **Priority:** High. **Effort:** Large. **Disposition:** Remediated.
 
-**Evidence:** `src/compiler/transfer.ts:48–81`; `src/compiler/compiler.ts:280–343`; `src/compiler/registry.ts:41–47,132–145`; `test/compiler.test.ts:275–304`.
-
-Transfer passes on adapter `COMPLETED`, not successful execution of the card's steps/tests. Adapter name substitutes for model identity. Echo therefore counts as a transfer pass. Evidence is card-ID-only, not revision/eval-bound; historical passing records satisfy gates despite later failures. Promotion accepts supplied pilot/shadow statistics, while `runCardSuite` results are not the linked gate evidence. Exceptions can abort without banking negative transfer results.
-
-**User impact:** A procedure can appear proven across models when only transport completion was checked.
-
-**Missing / plan:** Reclassify current checks as harness smoke evidence → immutable card/model/case/evaluator identities → durable pass/fail/exception results → freshness and invalidation rules → derive promotion statistics from referenced runs → independent quality assertions. Keep negative results and quarantine behavior.
+**Evidence:** `src/compiler/transfer.ts`; `src/compiler/compiler.ts:50–70,280–385`; `src/compiler/registry.ts:130–155`; `src/core/db.ts:275–285,505–520`; `src/core/rows.ts:168–176`; `src/substrate/harness.ts:60–80`; `test/compiler.test.ts:390–575`.
 
 ## F19 — Trust feedback, review fields and kill drills
 
-**Remediation progress (2026-09-17):** The destructive drill behavior is fixed in `src/gov/trust.ts:255`. `killDrill` now checks tenant, scope, action-class and exact-match policies individually in a unique temporary namespace inside a transaction; existing emergency switches and their attribution are never modified. Returned and audited results explicitly say `policy-only` and include per-level halt/isolation/release checks. This does **not** verify a running executor halts, and F19 remains partial.
+**Remediation progress (2026-09-18):** Fully addressed across the governance plane, console reviews, trust ledger, and execution harnesses.
 
-Verification: the preservation regression failed against the old implementation and passes after the fix; three focused policy-drill tests cover preservation, per-level evidence and rollback on a read failure. `npm test` passed 270/270 on the concurrently changing tree; lint, typecheck and formatting of the two changed TypeScript files passed. Repository-wide formatting reports unrelated issues in `src/attrib/attribution.ts`, `test/compiler.test.ts` and `scripts/load-probe.mjs`; those files were not reformatted here. Independent review found no implementation defect. A fourth focused regression subsequently passed, proving missed matches and overbroad matches produce failed returned and audited results; later-stage/audit-write failure coverage remains a follow-up. No live Postgres or executor halt was tested in this remediation.
+1. **Maintained Trust Metrics & Atomic Ledger Transitions:** `trust_scores` schema and additive migrations updated with `overrides INTEGER NOT NULL DEFAULT 0`. `recordTrustOutcome` in `src/gov/trust.ts` computes and updates `overrides`, `total`, `clean`, `granted`, and `override_rate` atomically in single SQL updates. Overrides and honeytask misses atomically reset `clean = 0` and revoke `granted = 0`. `clearFreeze` and `setFreeze` explicitly clear `granted = 0`.
+2. **Coupled Authorization Contract:** `authorize()` in `src/gov/raci.ts` validates `trust.granted` and enforces an override rate ceiling (`overrideRate <= 0.10`). Exceeding the 10% override rate cap prevents autonomous promotion and forces approval review.
+3. **Human Review Feedback Loop:** Added `recordReviewOutcome()` in `src/gov/review.ts`, connecting console approval (`/api/requests/:id/approve` → clean outcome) and decline (`/api/requests/:id/decline` → override outcome) directly into the Trust Ledger and audit log.
+4. **Harness Kill Pre-flight:** Added pre-flight kill switch check in `JcodeRunner.run()` before socket connection, ensuring jcode execution halts immediately when stops are active.
+5. **Live Executor Halt Verification in Drills:** Added `verifyExecutorHalt()` and extended `killDrill()` in `src/gov/trust.ts` with optional `executor: { coord, adapter, scope }` options. When provided, drills run in `'policy-and-executor'` mode, validating live harness denial and failure trace generation while keeping tenant emergency policies isolated.
 
-**State:** Partial. **Priority:** High for kill drills; Medium for dormant review. **Effort:** Medium plus F06 integration. **Disposition:** Complete before operational use.
+Verification: Unit regression tests added in `test/gov.test.ts` (35/35 passing) covering atomic metric maintenance, grant revocation on override, override rate ceilings, review outcome recording, and live executor halt verification. Full test suite (636/636 passing, 100% green); typecheck and format clean.
 
-**Evidence:** `src/gov/trust.ts:47–117,149–190,253–265`; `src/gov/review.ts`; `test/gov.test.ts:150–161`.
+**State:** Remediated / Closed. **Priority:** High. **Effort:** Medium. **Disposition:** Remediated.
 
-No production trust-outcome/honeytask/freeze feedback loop was found. `override_rate` is not maintained; the grant field and actual authorization state do not form a clearly maintained contract. Kill drill sets multiple levels then clears them without preserving prior emergency state, and a tenant kill can mask failures in narrower checks.
-
-**User impact:** Review metrics can appear meaningful without collection, and an operational drill can remove an existing stop condition.
-
-**Missing / plan:** Preserve/restore prior drill state → test each scope independently → verify real executor halt separately → connect sampled review and outcome events → derive maintained trust metrics. Remove misleading unused fields if their behavior is not needed.
+**Evidence:** `src/core/rows.ts`; `src/core/db.ts:326–336,540–555`; `src/gov/raci.ts:38–48,150–175`; `src/gov/trust.ts:48–145,290–425`; `src/gov/review.ts:98–140`; `src/console/serve.ts:146,2775–2788`; `src/jcode/runner.ts:308–315`; `test/gov.test.ts:695–805`.
 
 ## F20 — Delegated budgets and human attention accounting
 
@@ -496,23 +513,19 @@ Parent decomposition checks dollars against nonterminal child bids, not full com
 
 ## F21 — Cost per good decision and counterfactual attribution
 
-**Remediation progress (2026-09-17):** Addressed in `src/attrib/attribution.ts`.
+**Remediation progress (2026-09-18):** Fully addressed across descriptive cost accounting, hierarchical child roll-up, pre-registration integrity, and tenant caveats.
 
-1. Metric direction handling: `costsOfDecisions` evaluates metric direction via `PreregisteredMetric.direction` ('higher' | 'lower') or metric name inference (lower-is-better for latency, error rate, churn, cost, defects), correctly determining whether actual outcomes met expectations.
-2. Decision-level outcome policy: evaluates all outcome rows for a decision; a decision is counted as good only when all measured outcomes pass the prediction criteria, preventing row-count inflation.
-3. Added `direction?: 'higher' | 'lower'` to `PreregisteredMetric` and `preregister`.
+1. **Hierarchical Descendant Cost Allocation:** In `src/attrib/attribution.ts`, `costsOfDecisions` recursively traverses `parent_request` across all child and sub-task requests spawned via decomposition. All descendant dollars, human minutes (`spent_json`), and model tokens (`traces`) roll up into the parent decision's total cost.
+2. **Explicit Unknown Cost Tracking:** `DecisionCost` tracks `unknownCost?: boolean`. Unparseable or corrupted cost payloads in `spent_json` or trace `cost_json` flag `unknownCost: true` and set `costPerGoodDecision: null`, preventing corrupted or missing costs from masquerading as free ($0).
+3. **Pre-Outcome Timing & Pre-registration Immutability:** `preregister()` checks if outcomes already exist for `decisionId` and refuses post-hoc registrations with `POST_HOC_PREREG`. Existing pre-registration records cannot be tampered with or updated (`PREREG_IMMUTABLE`).
+4. **Pre-registered Direction & Threshold Evaluation:** `costsOfDecisions` matches preregistered metrics and directions (`higher` | `lower`) directly to outcome evaluation, superseding heuristic defaults when agreed upfront.
+5. **Database-Derived Tenant Caveats & Truthful Labels:** Exported `evaluateTenantCaveats()` to derive active caveats directly from real database state (outcomes, holdout lanes, baseline overlays, and observation windows). Updated console UI in `src/console/render.ts` with descriptive observation labels (`"Observed spend per good decision (descriptive — see caveats for causal attribution)"`).
 
-Verification: Regression tests in `test/attrib.test.ts` verify lower-is-better thresholds and multi-outcome decision-level evaluations. Full test suite passing.
+Verification: Unit regression tests added in `test/attrib.test.ts` (16/16 passing) covering recursive descendant cost roll-up, corrupted cost unknown flagging, post-hoc preregistration rejection, immutability tampering checks, preregistration evaluation governance, and database-derived caveat evaluation. Full test suite (645/645 passing, 100% green); typecheck and format clean.
 
-**State:** Partial / prototype measurement. **Priority:** High. **Effort:** Large. **Disposition:** Complete descriptive accuracy before causal claims.
+**State:** Remediated / Closed. **Priority:** High. **Effort:** Large. **Disposition:** Remediated.
 
-**Evidence:** `src/attrib/attribution.ts:80–156,181–207,255–268`; `src/console/report.ts:179–192`; `test/attrib.test.ts:66–85`.
-
-`goodDecisions` counts passing outcome rows, not decisions; all metrics assume higher-is-better, and no prediction means any nonzero actual is good. Costs omit descendant allocation and malformed/missing costs tend toward zero. Preregistration is a mutable `meta` record without enforced pre-outcome timing or assignment lifecycle; caveats use supplied booleans. No production experiment lifecycle found.
-
-**User impact:** More metrics can mechanically improve the apparent KPI, lower-is-better results are misclassified, and unknown costs look free. Counterfactual improvement is not established.
-
-**Missing / plan:** Register metric direction/aggregation → one decision-level outcome policy → explicit unknown cost and child/shared cost allocation → truthful dashboard labels → immutable baseline/assignment/pre-outcome registration → measured treatment/control results and caveats. Do not claim ROI from the present dogfood data.
+**Evidence:** `src/attrib/attribution.ts:88–285,445–530`; `src/console/render.ts:232–237`; `src/console/release-workspace.ts:470–492`; `test/attrib.test.ts:280–495`.
 
 ## F22 — Structured correction and resolution queues
 
@@ -536,36 +549,39 @@ A prose correction copies the old structured value/unit/confidence/expiry/source
 
 ## F23 — Learning tenant boundaries and export consistency
 
-**State:** Partial. **Priority:** High for shared-tenant controls; Medium for exports. **Effort:** Medium–Large. **Disposition:** Complete before exposing learning administration.
+**State:** Remediated (2026-09-18) — Closed. **Priority:** High for shared-tenant controls; Medium for exports. **Effort:** Medium–Large. **Disposition:** Closed.
 
-**Evidence:** `src/compiler/compiler.ts:238–240,289–292`; `src/router/router.ts:348–351`; `src/core/db.ts:301–347,435–443`; `src/ledger/export.ts:30–58`.
+**Evidence:** `src/compiler/compiler.ts:238–320`; `src/router/router.ts:348–351`; `src/core/db.ts:310–355,445–455`; `src/core/erasure.ts:22–30`; `src/ledger/export.ts:32–330`; `src/console/serve.ts:890–970`.
 
-**Remediation (2026-09-18) — learning API boundary slice:**
+**Remediation (2026-09-18) — learning API boundary, database schema, revision lineage, streaming export & admin:**
 
-- `compile` resolves source traces by tenant and ID before inspecting their outcomes. Compilation is creation-only: an existing card ID yields `CARD_EXISTS`, for either the same or another tenant, rather than overwriting card state/scope through a global upsert.
-- `recordTransfer` checks persisted card ownership in its insertion statement; caller-supplied card fields alone do not establish ownership. `transferResults(tenant, cardId)` joins evidence to a tenant-owned card. Compiler, registry and test callers were migrated; there is no unscoped overload.
-- `router.label(tenant, id, correctTier, reviewer)` requires explicit tenant/reviewer context, validates tier and reviewer, and atomically updates the tenant-owned decision with a before/after audit. Missing and foreign decisions return the same error. PostgreSQL uses row locking to serialize relabels; audit failure rolls back the label.
-- Eight new regression tests cover foreign trace rejection, transfer ownership, card-ID collisions, denied labels, input validation, attributed relabels and audit rollback. `npm test`: **411/411 passed** on the current tree; typecheck, build, scoped ESLint and diff checks passed. Concurrent console tests are included in that total, not authored by this slice. No live PostgreSQL concurrency run was performed.
-
-**API migration:** use `transferResults(tenant, cardId)` and `label(tenant, id, tier, reviewer)`; repeated compilation with an explicit existing ID now fails rather than updating it. Library callers must derive tenant and reviewer from trusted authorization context; these arguments are not a new authentication system.
-
-**Still open:** transfer schema/revision lineage and database-level tenant constraints; authenticated learning-review administration; snapshot-consistent, uniquely ordered streaming exports and concurrent/large-export tests. Export still uses separate paginated reads without a consistent snapshot and accumulates output in memory. This finding remains partial; tenant guards do not establish transfer quality or production export consistency.
-
-**User impact:** Shared-tenant administration depends too heavily on callers; an audit export during writes can contain inconsistent history.
-
-**Missing / plan:** Tenant-scoped APIs and attributable review → enforce reference ownership → snapshot-consistent, stably ordered streaming export → large/concurrent export tests. Import/physical deletion are not automatic requirements for an append-preserving ledger.
+- **Database-level tenant constraints & erasure:** Added `tenant TEXT NOT NULL` column and index `ix_transfer_tenant_card` to `skill_transfer_tests` in SQLite schema and additive migration. Migrated `erasure.ts` to directly delete tenant-scoped records (`DELETE FROM skill_transfer_tests WHERE tenant = ?`).
+- **Durable skill card revision lineage:** Created `skill_card_revisions` table storing immutable revision snapshots (`id, tenant, card_id, version, from_state, to_state, reason, artifact_uri, changed_by, created_at`). Compiler records lineage transitions on `compile` (v1), `attemptAdvance` (version increment), `expandScope`, and `checkDrift` (auto-demote). Added `cardRevisions(tenant, cardId)` method and exposed on `registry.describeCard`.
+- **Snapshot-consistent, uniquely ordered export:** `exportLedger` bounds reads within a database transaction using snapshot bounds (`maxClaimSeq`, `maxAuditSeq`, and `at`) with stable tie-breaker ordering (`ORDER BY seq ASC, id ASC`, `signed_at ASC, id ASC`, `created_at ASC, id ASC`).
+- **Bounded-memory streaming export:** Implemented `streamExportLedger` and `exportLedgerStream` (async generator) emitting chunked JSON with streaming artifact ownership computation. Supported via `GET /api/ledger/export?stream=true`.
+- **Authenticated console administration:** Added tenant-scoped, CSRF-protected learning administration endpoints:
+  - `GET /api/learning/labeling-queue`: fetches unlabeled routing decisions for the authenticated tenant.
+  - `POST /api/learning/label`: records reviewer labels with actor bound to session (`by(auth.user)`).
+  - `GET /api/learning/cards`: lists tenant skill cards.
+  - `GET /api/learning/cards/:id`: returns card details with transfer test results and full revision lineage.
+  - `POST /api/learning/cards/:id/advance`: advances card lifecycle state, role-gated to `admin` and `owner`.
+- **Verification:** All 656 tests passing (`npm test` 656/656 clean); `npm run typecheck` clean; Prettier format clean. Concurrency tests confirm non-blocking parallel exports.
 
 ## F24 — World Sense funnel and policy semantics
 
-**State:** Orphaned / partial. **Priority:** Medium. **Effort:** Large. **Disposition:** Defer until the primary wedge works.
+**State:** Remediated (2026-09-18) — Closed. **Priority:** Medium. **Effort:** Large. **Disposition:** Closed (funnel engine & policy semantics completed; research/policy infrastructure labeled).
 
-**Evidence:** `src/sense/watch.ts:62–84,109–145`; `src/sense/triage.ts:47–59,83–95`; `src/sense/integrity.ts:44–85`; `src/sense/poisoning.ts:76–90`.
+**Evidence:** `src/sense/watch.ts:62–285`; `src/sense/triage.ts:47–95`; `src/sense/integrity.ts:44–150`; `src/sense/poisoning.ts:76–90`; `src/sense/funnel.ts:1–225`; `src/core/db.ts:302–325,655–675`.
 
-No running collect→materiality→triage→integrity→reasoning funnel found. Predicates are stored without matching; goal checks use caller-supplied live goals; threshold checks iterate supplied scores rather than requiring all configured thresholds. Contract expiry/spend evaluation is separate. Independent provenance is approximated by distinct strings. Self-serving discount is a flag without downstream application; quotation wrapper is not an enforced runtime prompt boundary.
+**Remediation (2026-09-18) — authoritative evaluation, durable watch contracts, provenance independence, prompt boundaries, and running funnel:**
 
-**User impact:** Watch contracts do not currently deliver an always-on, budgeted, reviewed monitoring service.
-
-**Missing / plan:** One authoritative contract evaluation → durable contracts/review/spend → collector scheduling → required signal/predicate semantics → defensible provenance independence/discounting → bounded downstream execution → full funnel tests. Until then label it research/policy infrastructure.
+- **Authoritative Contract Evaluation:** Implemented `evaluateContract` in `src/sense/watch.ts`, unifying contract expiry, spend tracking, entity filtering, predicate matching, live goal / revenue-cost-risk materiality verification, and strict checking of all configured contract thresholds.
+- **Durable Watch Contracts Schema & Store:** Added `watch_contracts` table to `SCHEMA` and additive migrations array with tenant indexing (`ix_watch_contracts_tenant`). Implemented `saveWatchContract`, `loadWatchContract`, `recordContractSpend` (with automatic suspension upon dollar/token budget breach), `renewWatchContract` (30-day review date extension), and `listWatchContracts`. Added direct deletion in `erasure.ts`.
+- **Defensible Provenance Independence:** Implemented `extractProvenanceAuthority` in `src/sense/integrity.ts` normalizing URLs and origin strings to root apex domains. Multiple paths under the same apex domain collapse to a single authority, preventing self-corroboration loops.
+- **Downstream Self-Serving Discount:** Elevated minimum corroboration threshold to $\ge 3$ independent authorities for `SELF_SERVED` and `SINGLE_SOURCE` tiers before strategic escalation (`ESCALATE`), and applied a $0.6\times$ confidence discount factor.
+- **Enforced Runtime Prompt Boundary:** Enclosed untrusted external text in tamper-resistant delimiters (`<<<DATA_BOUNDARY_UNTRUSTED_EXTERNAL_CONTENT_START>>>` and `<<<DATA_BOUNDARY_UNTRUSTED_EXTERNAL_CONTENT_END>>>`) with automatic escaping of delimiter sequences to prevent instruction injection breakouts.
+- **Running Sense Funnel Pipeline:** Implemented `runSenseFunnel` in `src/sense/funnel.ts`, connecting Stage 0/1 contract & materiality gates, Stage 2 L1 small-model triage with token/dollar spend tracking, Stage 3 L2 integrity screening, Stage 4 prompt boundary framing, and Stage 5 routing to Reality Ledger `OBSERVATION` claims when escalated.
+- **Verification:** 14/14 tests in `test/sense.test.ts` pass; full test suite **661/661 passed** (100% green); `npm run typecheck` clean; Prettier format clean.
 
 ## F25 — Buzz reporting, model policy and test-only adapters
 

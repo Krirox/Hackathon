@@ -1,4 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
+import { mock } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, rejects } from './helpers.ts';
@@ -16,7 +19,19 @@ import {
   serperSearchCollector,
   settleInbox,
   stageToInbox,
+  type Collector,
 } from '../src/ingest/collectors.ts';
+import {
+  deriveIntegrationState,
+  getIntegrationHealth,
+  ingestErrorCode,
+  isCollectorDisabled,
+  lastInboxReceipt,
+  pollCollectorWithHealth,
+  setCollectorDisabled,
+  testFileDirectory,
+} from '../src/ingest/health.ts';
+import { runIngestionWorker } from '../src/ingest/worker.ts';
 import { createHmacSurface, statementHashOf, verifyClaimEnvelope } from '../src/talk/surface.ts';
 
 console.log('\n\x1b[1mIngestion — read-only collectors\x1b[0m');
@@ -190,7 +205,7 @@ T('human correction supersedes, links, and counts', async () => {
     authorType: 'system',
     provenance: sor(),
   });
-  const neu = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', DAY_LATER);
+  const { claim: neu } = await ledger.correctClaim(TEN, old.id, '$79', 'human:priya', DAY_LATER);
   eq(neu.statement, '$79');
   eq((await ledger.get(TEN, old.id))!.status, 'SUPERSEDED');
   eq(await ledger.correctionCount(TEN), 1);
@@ -619,4 +634,487 @@ T('F09: ingestInboxBatch claims, persists claims and settles inbox rows to DONE'
   const second = await ingestInboxBatch(db, ledger, TEN, c);
   eq(second.receipts.length, 0);
   eq(second.claimIds.length, 0);
+});
+
+console.log('\n\x1b[1mIngestion — standardized health (FLOW-016)\x1b[0m');
+
+T('FLOW-016: serper collector stages to inbox and advances checkpoint like file/github', async () => {
+  const { db } = await fresh();
+  const fetchFn = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      organic: [{ title: 'A', link: 'https://a.test', snippet: 'one' }],
+    }),
+  });
+  const c = serperSearchCollector('probe', { apiKey: 'k', fetchFn });
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 1);
+  const inbox = (await db.prepare('SELECT COUNT(*) AS n FROM ingest_inbox WHERE tenant = ?').get(TEN)) as { n: number };
+  eq(inbox.n, 1, 'staged before return:');
+  eq((await cursorGet(db, TEN, c.name)) !== null, true, 'checkpoint advanced:');
+  eq((await c.poll(db, NOW, TEN)).length, 1, 're-fetch same result:');
+  const inbox2 = (await db.prepare('SELECT COUNT(*) AS n FROM ingest_inbox WHERE tenant = ?').get(TEN)) as {
+    n: number;
+  };
+  eq(inbox2.n, 1, 'duplicate delivery collapses:');
+});
+
+T('FLOW-016: serper runs through the same worker as file collectors', async () => {
+  const { db, ledger } = await fresh();
+  const art = join(tmpdir(), `vital-flow016-${process.pid}`);
+  const fetchFn = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      organic: [{ title: 'Worker path', link: 'https://worker.test', snippet: 'via worker' }],
+    }),
+  });
+  const c = serperSearchCollector('worker probe', { apiKey: 'k', fetchFn });
+  const result = await runIngestionWorker(db, ledger, c, {
+    tenant: TEN,
+    scope: 'market',
+    artifactDir: art,
+    maxReceipts: 5,
+  });
+  eq([result.processed, result.failed, result.polled], [1, 0, true]);
+  eq((await ledger.get(TEN, result.claimIds[0]!))!.kind, 'OBSERVATION');
+});
+
+T('FLOW-016: empty serper result is an explicit empty receipt, not a silent success masquerade', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('empty', {
+    apiKey: 'k',
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => ({ organic: [] }) }),
+  });
+  const evs = await c.poll(db, NOW, TEN);
+  eq(evs.length, 0);
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.inbox.total, 0);
+  const derived = deriveIntegrationState({
+    configured: true,
+    disabled: false,
+    stats: health.inbox,
+    lastPoll: { at: NOW, ok: true, eventsFetched: 0, staged: 0, errorCode: null },
+    lastSuccessAt: NOW,
+    nowMs: Date.parse(NOW),
+    delayMs: 86_400_000,
+  });
+  eq(derived.state, 'empty');
+});
+
+T('FLOW-016: invalid serper credentials classify as unconfigured', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('no-key', {
+    apiKey: '',
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  });
+  let code = '';
+  try {
+    await pollCollectorWithHealth(db, TEN, c, NOW);
+  } catch (e) {
+    code = ingestErrorCode(e);
+  }
+  eq(code, 'UNCONFIGURED');
+});
+
+T('FLOW-016: provider rate limit surfaces rate_limited state', async () => {
+  const { db } = await fresh();
+  const c = serperSearchCollector('rate', {
+    apiKey: 'k',
+    fetchFn: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+  });
+  try {
+    await pollCollectorWithHealth(db, TEN, c, NOW);
+  } catch {
+    /* expected */
+  }
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.state, 'rate_limited');
+});
+
+T('FLOW-016: current poll failure remains visible after successful receipts', async () => {
+  const input = {
+    configured: true,
+    disabled: false,
+    stats: { pending: 0, claimed: 0, done: 2, failed: 0, total: 2 },
+    lastPoll: { at: DAY_LATER, ok: false, eventsFetched: 0, staged: 0, errorCode: 'PROVIDER_ERROR' },
+    lastSuccessAt: NOW,
+    nowMs: Date.parse(DAY_LATER),
+    delayMs: 86_400_000,
+  };
+  const failed = deriveIntegrationState(input);
+  eq(failed.state, 'failed');
+  eq(failed.detail.includes('upstream provider'), true);
+  eq(failed.detail.includes('2 source items already ingested'), true);
+  eq(deriveIntegrationState({ ...input, stats: { ...input.stats, pending: 1, total: 3 } }).state, 'failed');
+  eq(deriveIntegrationState({ ...input, configured: false }).state, 'unconfigured');
+  eq(deriveIntegrationState({ ...input, disabled: true }).state, 'disabled');
+  for (const [errorCode, state] of [
+    ['RATE_LIMITED', 'rate_limited'],
+    ['UNCONFIGURED', 'unconfigured'],
+    ['SOURCE_REJECTED', 'rejected'],
+    ['TIER_REJECTED', 'rejected'],
+    [null, 'failed'],
+  ] as const) {
+    eq(deriveIntegrationState({ ...input, lastPoll: { ...input.lastPoll, errorCode } }).state, state);
+  }
+  const recovered = { ...input, lastPoll: { ...input.lastPoll, ok: true, errorCode: null } };
+  const mixed = deriveIntegrationState({
+    ...recovered,
+    stats: { ...input.stats, failed: 1, total: 3 },
+  });
+  eq(mixed.state, 'failed');
+  eq(mixed.detail.includes('1 receipt failed'), true);
+  eq(mixed.detail.includes('2 source items already ingested'), true);
+  eq(deriveIntegrationState(recovered).state, 'ready');
+});
+
+T('FLOW-016: disabled collector refuses before staging', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-dis-'));
+  writeFileSync(join(dir, 'a.md'), 'x');
+  const c = fileDiffCollector('disabled', dir);
+  await setCollectorDisabled(db, TEN, c.name, true);
+  eq(await isCollectorDisabled(db, TEN, c.name), true);
+  await rejects(() => pollCollectorWithHealth(db, TEN, c, NOW), 'DISABLED');
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW });
+  eq(health.state, 'disabled');
+});
+
+T('FLOW-016: connection test previews readable files without staging', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-test-'));
+  writeFileSync(join(dir, 'notes.md'), 'hello');
+  const test = testFileDirectory(dir);
+  eq(test.ok, true);
+  eq(test.preview?.count, 1);
+  eq(test.preview?.samples[0]!.name, 'notes.md');
+});
+
+T('FLOW-016: duplicate delivery through worker remains idempotent', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-flow016-dup-'));
+  const art = join(tmpdir(), `vital-flow016-art-${process.pid}`);
+  writeFileSync(join(dir, 'once.md'), 'once');
+  const c = fileDiffCollector('dup', dir);
+  const first = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'x', artifactDir: art });
+  const second = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'x', artifactDir: art });
+  eq(first.processed, 1);
+  eq([second.processed, second.claimIds.length], [0, 0]);
+  eq(((await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE tenant = ?').get(TEN)) as { n: number }).n, 1);
+});
+
+T('FLOW-016: ground-tier collector refusal is explicit rejected evidence', async () => {
+  const { db, ledger } = await fresh();
+  const c = fileDiffCollector('evil-tier', tmpdir(), 'SYSTEM_OF_RECORD');
+  await rejects(
+    async () =>
+      await ingestEvents(db, ledger, TEN, c, [], {
+        owner: 's',
+        scope: 'x',
+        now: NOW,
+      }),
+    'INGEST_TIER',
+  );
+  eq(ingestErrorCode(new Error('[ingest:INGEST_TIER] bad')), 'TIER_REJECTED');
+});
+
+T('FLOW-016: receipt links exact tenant collector identity, never latest scope observation', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-exact-receipt-'));
+  try {
+    const c = fileDiffCollector('exact-receipt', dir);
+    const event = {
+      source: c.name,
+      uri: 'https://receipt.test/a',
+      eventId: 'a',
+      revision: 'r1',
+      fingerprint: 'receipt-a',
+      occurredAt: NOW,
+      summary: 'first',
+      payload: {},
+    };
+    await stageToInbox(db, TEN, c.name, [event], NOW);
+    const batch = await ingestInboxBatch(db, ledger, TEN, c, { scope: 'x', now: NOW, artifactDir: dir });
+    await ingestEvents(db, ledger, TEN, { ...c, name: 'unrelated' }, [{ ...event, fingerprint: 'other' }], {
+      owner: 'sync',
+      scope: 'x',
+      now: DAY_LATER,
+      artifactDir: dir,
+    });
+    eq((await lastInboxReceipt(db, TEN, c.name, 'x'))?.claimId, batch.claimIds[0]);
+    eq((await lastInboxReceipt(db, TEN, c.name, null))?.claimId, batch.claimIds[0]);
+    eq((await lastInboxReceipt(db, TEN, c.name, 'wrong-scope'))?.claimId, null);
+    const key = `ingest:seen:${TEN}:${c.name}:a:r1`;
+    const foreign = await ingestEvents(db, ledger, 'other-tenant', c, [event], {
+      owner: 'sync',
+      scope: 'x',
+      now: NOW,
+      artifactDir: dir,
+    });
+    for (const value of ['migrated', 'missing-claim', foreign[0]!]) {
+      await db.prepare('UPDATE meta SET value = ? WHERE key = ?').run(value, key);
+      eq((await lastInboxReceipt(db, TEN, c.name, 'x'))?.claimId, null);
+    }
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+    eq((await lastInboxReceipt(db, TEN, c.name, 'x'))?.claimId, null);
+    eq(await lastInboxReceipt(db, TEN, 'unknown-collector', 'x'), null);
+    await stageToInbox(db, TEN, c.name, [{ ...event, eventId: 'pending' }], DAY_LATER);
+    const pending = await lastInboxReceipt(db, TEN, c.name, 'x');
+    eq([pending?.status, pending?.claimId], ['PENDING', null]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: fingerprint deduplication persists an exact identity alias for receipt lookup', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-receipt-alias-'));
+  try {
+    const c = fileDiffCollector('alias', dir);
+    const event = {
+      source: c.name,
+      uri: 'https://receipt.test/alias',
+      eventId: 'first',
+      revision: 'v1',
+      fingerprint: 'same-content',
+      occurredAt: NOW,
+      summary: 'same',
+      payload: {},
+    };
+    const ids = await ingestEvents(db, ledger, TEN, c, [event], {
+      owner: 'sync',
+      scope: 'x',
+      now: NOW,
+      artifactDir: dir,
+    });
+    await stageToInbox(db, TEN, c.name, [{ ...event, eventId: 'second' }], DAY_LATER);
+    const batch = await ingestInboxBatch(db, ledger, TEN, c, { scope: 'x', now: DAY_LATER, artifactDir: dir });
+    eq(batch.claimIds.length, 0);
+    eq((await lastInboxReceipt(db, TEN, c.name, 'x'))?.claimId, ids[0]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: recovered polls clear active errors and freshness uses hours not milliseconds', async () => {
+  const { db } = await fresh();
+  let failing = true;
+  const c = serperSearchCollector('recovery', {
+    apiKey: 'k',
+    fetchFn: async () => ({
+      ok: !failing,
+      status: failing ? 429 : 200,
+      json: async () => ({ organic: [] }),
+    }),
+  });
+  await rejects(() => pollCollectorWithHealth(db, TEN, c, NOW), 'SERPER_FETCH');
+  eq((await getIntegrationHealth(db, TEN, c.name, { configured: true, now: NOW })).lastError?.code, 'RATE_LIMITED');
+  failing = false;
+  await pollCollectorWithHealth(db, TEN, c, DAY_LATER);
+  const later = new Date(Date.parse(DAY_LATER) + 25 * 3_600_000).toISOString();
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true, now: later });
+  eq([health.lastError, health.lastSuccessAt, health.freshnessSeconds], [null, DAY_LATER, 90_000]);
+  const derived = deriveIntegrationState({
+    configured: true,
+    disabled: false,
+    stats: { pending: 0, claimed: 0, done: 1, failed: 0, total: 1 },
+    lastPoll: health.lastPoll,
+    lastSuccessAt: DAY_LATER,
+    nowMs: Date.parse(later),
+    delayMs: 86_400_000,
+  });
+  eq(derived.state, 'delayed');
+  eq(derived.detail.includes('25h ago'), true);
+});
+
+T('FLOW-016: changed Serper snippet creates revised observation while duplicates stage zero', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-serper-revisions-'));
+  let snippet = 'first';
+  const c = serperSearchCollector('revision', {
+    apiKey: 'k',
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ organic: [{ title: 'Stable title', link: 'https://revision.test', snippet }] }),
+    }),
+  });
+  try {
+    const first = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'market', artifactDir: dir });
+    const duplicate = await pollCollectorWithHealth(db, TEN, c, DAY_LATER);
+    eq([duplicate.events.length, duplicate.staged], [1, 0]);
+    snippet = 'second';
+    const second = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'market', artifactDir: dir });
+    eq([first.claimIds.length, second.claimIds.length], [1, 1]);
+    eq(first.claimIds[0] !== second.claimIds[0], true);
+    eq((await ledger.get(TEN, second.claimIds[0]!))?.statement, 'Stable title — second');
+    eq((await pollCollectorWithHealth(db, TEN, c, DAY_LATER)).staged, 0);
+    eq((await getIntegrationHealth(db, TEN, c.name, { configured: true })).inbox.total, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: Serper legacy fingerprints preserve blanket dedupe and allow scoped content revisions', async () => {
+  const { db, ledger } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-serper-legacy-'));
+  const title = 'Legacy title';
+  const uri = 'https://legacy.test';
+  const fingerprint = createHash('sha256').update(`${uri}:${title}`).digest('hex');
+  const c = serperSearchCollector('legacy', {
+    apiKey: 'k',
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ organic: [{ title, link: uri, snippet: 'old' }] }),
+    }),
+  });
+  try {
+    const [event] = await c.poll(db, NOW, TEN);
+    const opts = { owner: 'sync', scope: 'market', now: NOW, artifactDir: dir };
+    const old = await ingestEvents(db, ledger, TEN, c, [{ ...event!, fingerprint }], opts);
+    await db
+      .prepare('DELETE FROM meta WHERE key = ?')
+      .run(`ingest:seen:${TEN}:${c.name}:${event!.eventId}:${event!.revision}`);
+    eq((await ingestEvents(db, ledger, TEN, c, [event!], opts)).length, 0);
+    const changed = {
+      ...event!,
+      fingerprint: 'new-content',
+      revision: 'new-revision',
+      payload: { title, snippet: 'new' },
+    };
+    eq((await ingestEvents(db, ledger, TEN, c, [changed], opts)).length, 1);
+    eq(old.length, 1);
+    await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(`ingest:seen:${fingerprint}`, old[0]!);
+    eq((await ingestEvents(db, ledger, 'other-tenant', c, [changed], opts)).length, 0);
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(`ingest:seen:${fingerprint}`);
+    await db
+      .prepare('INSERT INTO meta (key, value) VALUES (?, ?)')
+      .run(`ingest:seen:migrated-tenant:${c.name}:${fingerprint}`, 'migrated');
+    eq((await ingestEvents(db, ledger, 'migrated-tenant', c, [changed], opts)).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: staging reports are invocation-local across overlapping polls and partial failure', async () => {
+  const { db } = await fresh();
+  const event = {
+    source: 'local-report',
+    uri: 'https://staging.test',
+    fingerprint: 'local-fp',
+    occurredAt: NOW,
+    summary: 'local',
+    payload: {},
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let staged!: () => void;
+  const started = new Promise<void>((resolve) => {
+    staged = resolve;
+  });
+  let calls = 0;
+  const c: Collector = {
+    name: 'local-report',
+    sourceTier: 'SINGLE_SOURCE',
+    extractor: 'test',
+    extractorVersion: '1',
+    async poll(db, now, tenant = 'default') {
+      const first = ++calls === 1;
+      await stageToInbox(db, tenant, 'local-report', [event], now);
+      if (first) {
+        staged();
+        await gate;
+      }
+      return [event];
+    },
+  };
+  const first = pollCollectorWithHealth(db, TEN, c, NOW);
+  await started;
+  const second = await pollCollectorWithHealth(db, TEN, c, NOW);
+  release();
+  eq([(await first).staged, second.staged], [1, 0]);
+  const broken: Collector = {
+    ...c,
+    async poll(db, now, tenant = 'default') {
+      await stageToInbox(db, tenant, c.name, [{ ...event, revision: 'partial' }], now);
+      throw new Error('partial fetch');
+    },
+  };
+  await rejects(() => pollCollectorWithHealth(db, TEN, broken, DAY_LATER), 'partial fetch');
+  const health = await getIntegrationHealth(db, TEN, c.name, { configured: true });
+  eq([health.lastPoll?.ok, health.lastPoll?.staged, health.inbox.total], [false, 1, 2]);
+});
+
+T('FLOW-016: connection preview shares entry file-byte and total-byte bounds without effects', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-preview-bounds-'));
+  try {
+    writeFileSync(join(dir, 'a.txt'), 'éé');
+    writeFileSync(join(dir, 'b.txt'), 'four');
+    const limits = { maxEntries: 2, maxFileBytes: 4, maxTotalBytes: 8 };
+    eq(testFileDirectory(dir, limits).preview?.count, 2);
+    for (const [cap, code] of [
+      [{ ...limits, maxEntries: 1 }, 'ENTRY_LIMIT'],
+      [{ ...limits, maxFileBytes: 3 }, 'BYTE_LIMIT'],
+      [{ ...limits, maxTotalBytes: 7 }, 'BYTE_LIMIT'],
+      [{ ...limits, maxEntries: 0 }, 'BAD_LIMIT'],
+    ] as const) {
+      eq(testFileDirectory(dir, cap).code, code);
+      const c = fileDiffCollector('preview-bounds', dir, 'SINGLE_SOURCE', cap);
+      await rejects(() => c.poll(db, NOW, TEN), code);
+      eq(await cursorGet(db, TEN, c.name), null);
+    }
+    eq((await getIntegrationHealth(db, TEN, 'preview-bounds', { configured: true })).inbox.total, 0);
+    eq(testFileDirectory(join(dir, 'missing')).code, 'NOT_FOUND');
+    eq(testFileDirectory(join(dir, 'a.txt')).code, 'NOT_DIRECTORY');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: connection preview rejects root and entry symlinks like bounded polling', async () => {
+  const { db } = await fresh();
+  const dir = mkdtempSync(join(tmpdir(), 'vital-preview-links-'));
+  const target = mkdtempSync(join(tmpdir(), 'vital-preview-target-'));
+  try {
+    const link = join(dir, 'linked');
+    symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const limits = { maxEntries: 5, maxFileBytes: 20, maxTotalBytes: 40 };
+    for (const path of [dir, link]) {
+      eq(testFileDirectory(path, limits).code, 'SYMLINK');
+      const c = fileDiffCollector('links', path, 'SINGLE_SOURCE', limits);
+      await rejects(() => c.poll(db, NOW, TEN), 'SYMLINK');
+      eq(await cursorGet(db, TEN, c.name), null);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+T('FLOW-016: directory open and file read failures return sanitized structured connection errors', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vital-preview-read-'));
+  try {
+    writeFileSync(join(dir, 'a.txt'), 'read me');
+    for (const method of ['opendirSync', 'openSync', 'readSync'] as const) {
+      const stub = mock.method(fs, method, () => {
+        throw Object.assign(new Error('private source details'), { code: 'EACCES' });
+      });
+      syncBuiltinESMExports();
+      try {
+        const result = testFileDirectory(dir);
+        eq([result.ok, result.code], [false, 'NOT_READABLE']);
+        eq(JSON.stringify(result).includes('private source details'), false);
+      } finally {
+        stub.mock.restore();
+        syncBuiltinESMExports();
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

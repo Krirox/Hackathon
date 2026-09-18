@@ -1,4 +1,6 @@
 import type { Ledger } from '../ledger/ledger.ts';
+import type { AsyncDb } from '../core/db.ts';
+import { checkKill } from './trust.ts';
 import type { AutonomyVerdict } from './raci.ts';
 
 /**
@@ -147,4 +149,28 @@ export async function compensateReversible(
   });
 
   return { claimId: compClaim.id, compensated: true };
+}
+
+export async function assertNoHalt(db: AsyncDb, tenant: string, scope: string, actionClass: string): Promise<void> {
+  if (await checkKill(db, tenant, scope, actionClass)) {
+    throw new ActError(
+      'HALTED_WHEN_STOPPED',
+      `stop active for ${scope}/${actionClass} — recover via recoverStop first`,
+    );
+  }
+}
+
+export type ActFailure = 'rate-limit' | 'timeout-unknown' | 'dependency-outage' | 'denied' | 'needs-approval';
+
+export function actRetryGuidance(failure: ActFailure, actionClass: string): { retryable: boolean; strategy: string } {
+  if (failure === 'denied' || failure === 'needs-approval') {
+    return { retryable: false, strategy: 'explicit human decision only — refusals are never retried automatically' };
+  }
+  if (actionClass === 'ACT_IRREVERSIBLE') {
+    return { retryable: false, strategy: 'explicit human resubmission only — irreversible effects are never replayed' };
+  }
+  if (failure === 'timeout-unknown') {
+    return { retryable: true, strategy: 'reconcile-then-retry under the same idempotency key' };
+  }
+  return { retryable: true, strategy: 'bounded retry with backoff under the same idempotency key' };
 }

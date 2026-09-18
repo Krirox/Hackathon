@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { ingestInboxBatch, type Collector } from './collectors.ts';
+import { pollCollectorWithHealth } from './health.ts';
 
 export interface IngestionWorkerOptions {
   tenant: string;
@@ -102,7 +103,7 @@ export async function runIngestionWorker(
   if (canContinue()) {
     result.polled = true;
     try {
-      await collector.poll(db, new Date().toISOString(), tenant);
+      await pollCollectorWithHealth(db, tenant, collector, new Date().toISOString());
     } catch {
       result.errors.push('[ingest-worker:POLL_FAILED]');
     }

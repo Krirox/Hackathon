@@ -166,12 +166,29 @@ export type RoutingDecisionRow = {
 };
 
 export type SkillTransferTestRow = {
+  tenant: string;
   card_id: string;
+  card_version?: number;
   kind: string;
   variant: string;
   passed: number;
   score: number;
   ran_at: string;
+  eval_run_id?: string | null;
+  evaluator?: string | null;
+  model?: string | null;
+};
+
+export type SkillCardRevisionRow = {
+  tenant: string;
+  card_id: string;
+  version: number;
+  state: string;
+  scope_json: string;
+  action: string;
+  actor: string;
+  detail: string | null;
+  recorded_at: string;
 };
 
 export type TrustScoreRow = {
@@ -180,6 +197,7 @@ export type TrustScoreRow = {
   action_class: string;
   clean: number;
   total: number;
+  overrides?: number;
   override_rate: number;
   honey_misses: number;
   granted: number;
@@ -264,4 +282,24 @@ export type SubjectRow = {
   kind: string | null;
   aliases_json: string;
   created_at: string;
+};
+
+export type WatchContractRow = {
+  id: string;
+  tenant: string;
+  name: string;
+  state: string;
+  entities_json: string;
+  predicates_json: string;
+  goal_refs_json: string;
+  revenue_cost_risk_json: string;
+  thresholds_json: string;
+  max_dollars: number;
+  max_tokens: number;
+  spent_dollars: number;
+  spent_tokens: number;
+  compiled_at: string;
+  expires_at: string;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
 };

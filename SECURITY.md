@@ -49,19 +49,29 @@
   locks after 5 failures per (tenant, ip, email) and is rate-limited per
   source; signup/login/logout/reset land in `audit_log`. Tenant scoping is
   fixed at login and re-checked per request. Provisioning: a fresh console
-  is unprovisioned — /signup claims its ONE bound tenant (env credentials
-  can pre-provision headlessly), signup closes permanently once an owner
-  exists, and membership is invite-only thereafter. Team management is
-  role-gated: /team invite and disable require admin+, an admin cannot
-  disable an owner or themselves, disabled users' sessions die instantly,
-  and invited users are forced to change their password at first login.
-  Approvals additionally honor a configurable minimum role
-  (`--approver-role`, default `member`). Per-tenant GDPR erasure
-  (`src/core/erasure.ts`) is export-first — the portable record and the
-  deletion commit or roll back together — complete by store introspection
+  is unprovisioned — /signup claims its ONE bound tenant on loopback only,
+  unless `VITAL_SETUP_SECRET` is configured (then the secret is required even
+  locally); non-loopback clients without that secret cannot claim. Env
+  credentials can still pre-provision headlessly. Signup closes permanently
+  once an owner exists, and membership is invite-only thereafter. Team
+  management is role-gated with an explicit grant matrix: only owners may
+  invite owners; admins may invite members/admins; members may not invite.
+  An admin cannot disable an owner; the owner may disable anyone except
+  themselves; disabled users' sessions die instantly; invited users are
+  forced to change their password at first login and every other mutation
+  (approve, invite, disable, correct) is refused until they do. Approvals
+  additionally honor a configurable minimum role
+  (`--approver-role`, default `member`).   Per-tenant GDPR erasure (`src/core/erasure.ts`, FLOW-004) is export-first:
+  the in-memory portable record is always produced inside the erasure
+  transaction; optional `--export-to` writes and verifies a JSON file before
+  deletion commits (a write failure rolls back — deletion is never reported
+  without the requested export). Erasure is complete by store introspection
   (a future tenant-scoped table that skips erasure fails the test suite),
-  kills live sessions with the deleted users, and leaves a receipt under
-  `erased:<tenant>` naming the operator and the row counts. No seeded default
+  clears tenant-scoped `meta` (cursors, kill switches, dedupe markers),
+  removes unshared raw artifacts, kills live sessions with the deleted users,
+  blocks slug reuse while an `erased:<tenant>` receipt exists, and leaves a
+  receipt naming deleted, retained, deferred, and failed categories. Backups and
+  external object stores are explicitly out of scope. No seeded default
   credential exists anywhere.
 
 ## Explicitly not yet built (do not claim these)
@@ -69,15 +79,54 @@
 TLS termination and hardened deployment (the console binds loopback; put a
 reverse proxy in front for HTTPS — `Secure` cookies are wired via
 `secureCookies`), outbound email (password-reset tokens are issued through
-the CLI/API — there is no mailer), rate limiting beyond the per-source
-login/signup/health caps (per-instance in-process buckets — no shared-store
-limiting across replicas, and no trusted-XFF parsing yet), DB-level tenant
-separation (tenants are isolated in every query path and tested at the auth
-layer; no storage/index-level enforcement yet), PII classification, data
-residency, SOC 2 path. See `TODO.md` V2 backlog.
+`/forgot-password`, `vital reset-link`, or operator `vital passwd` — there is
+no mailer and email addresses are **not verified** before use as a recovery
+identifier), MFA/WebAuthn (identity is password +
+optional operator keys today; TOTP or WebAuthn would be the supported future
+addition, with recent-auth re-checks on sensitive operations), rate limiting
+beyond the per-source login/signup/health caps (per-instance in-process
+buckets — no shared-store limiting across replicas, and no trusted-XFF parsing
+yet), DB-level tenant separation (tenants are isolated in every query path
+and tested at the auth layer; no storage/index-level enforcement yet), PII
+classification, data residency, SOC 2 path. See `TODO.md` V2 backlog.
 
 ## Reporting
 
 Security issues: contact the repo owner directly (no public issue). Include
 the claim/decision/request IDs if the report concerns ledger integrity —
 replayability cuts both ways.
+
+## Status wording and support diagnostics
+
+A green liveness response must never be worded as proof of workflow
+readiness. Liveness (`liveness()` in `src/gov/trust.ts`) answers only
+process reachability; readiness (`checkReadiness` in the same module) checks
+required dependencies under per-check timeouts and reports
+optional-but-unconfigured integrations as `unconfigured-optional` instead
+of failing. Status surfaces that conflate the two mislead operators during
+an outage.
+
+User-facing failures carry an opaque support reference (`mintSupportRef`)
+correlated with a sanitized diagnostic excerpt (`correlateDiagnostic`):
+support locates the error by reference, never by guessing from timestamps,
+and secrets (tokens, passwords, keys, database URLs) are redacted by
+`sanitizeDiagnostic` before the excerpt is stored or shown. Support contact
+is the repo owner directly; triage needs the support reference, tenant
+slug, attempted action, and the readiness report at failure time.
+
+## Backup, export, and emergency stops
+
+Ledger export (`exportLedgerWithManifest` in `src/ledger/export.ts`) is
+read-only and carries a manifest naming contents and omissions per kind
+(snapshot, evidence package, backup reference). It is the portable second
+copy, not the backup strategy: point-in-time recovery plus the quarterly
+restore drill in `docs/deployment.md` remain the backup proof, and no
+immutable archival delivery is claimed. Ledger-history import is
+unsupported.
+
+Emergency stops (`setKill` / `recoverStop` in `src/gov/trust.ts`) are
+tenant/scope/action-class halt and audited recovery. Stops persist across
+restarts — there is no silent resume; recovery requires a recorded reason
+and lands in the audit log. Policy-check drills (`killDrill`) and real
+runtime halt drills (`runtimeHaltDrill`) are labeled by mode so drill
+evidence can never be mistaken for real halt evidence.

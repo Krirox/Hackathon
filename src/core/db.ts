@@ -275,6 +275,51 @@ export const ADDITIVE_MIGRATIONS: string[] = [
   // per submit. ALTERs are portable; the backfill below is engine-specific.
   `ALTER TABLE requests ADD COLUMN spent_tokens REAL NOT NULL DEFAULT 0`,
   `ALTER TABLE requests ADD COLUMN spent_dollars REAL NOT NULL DEFAULT 0`,
+  // F18: immutable card revision, eval run reference, evaluator, and model identity
+  // for transfer tests so evidence has full lineage.
+  'ALTER TABLE skill_transfer_tests ADD COLUMN card_version INTEGER',
+  'ALTER TABLE skill_transfer_tests ADD COLUMN eval_run_id TEXT',
+  'ALTER TABLE skill_transfer_tests ADD COLUMN evaluator TEXT',
+  'ALTER TABLE skill_transfer_tests ADD COLUMN model TEXT',
+  // F19: maintain override counts on trust scores
+  'ALTER TABLE trust_scores ADD COLUMN overrides INTEGER NOT NULL DEFAULT 0',
+  // F23: database-level tenant constraint on skill_transfer_tests and card revision lineage
+  "ALTER TABLE skill_transfer_tests ADD COLUMN tenant TEXT NOT NULL DEFAULT ''",
+  'CREATE INDEX IF NOT EXISTS ix_transfer_tenant_card ON skill_transfer_tests(tenant, card_id, card_version, kind, passed)',
+  `CREATE TABLE IF NOT EXISTS skill_card_revisions (
+    tenant       TEXT NOT NULL,
+    card_id      TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    state        TEXT NOT NULL,
+    scope_json   TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    actor        TEXT NOT NULL,
+    detail       TEXT,
+    recorded_at  TEXT NOT NULL,
+    PRIMARY KEY (tenant, card_id, version)
+  )`,
+  'CREATE INDEX IF NOT EXISTS ix_card_revisions ON skill_card_revisions(tenant, card_id, version DESC)',
+  // F24: durable watch contracts with budget, re-review dates, and spend tracking
+  `CREATE TABLE IF NOT EXISTS watch_contracts (
+    id                     TEXT PRIMARY KEY,
+    tenant                 TEXT NOT NULL,
+    name                   TEXT NOT NULL,
+    state                  TEXT NOT NULL,
+    entities_json          TEXT NOT NULL,
+    predicates_json        TEXT NOT NULL,
+    goal_refs_json         TEXT NOT NULL,
+    revenue_cost_risk_json TEXT NOT NULL,
+    thresholds_json        TEXT NOT NULL,
+    max_dollars            REAL NOT NULL,
+    max_tokens             INTEGER NOT NULL,
+    spent_dollars          REAL NOT NULL DEFAULT 0,
+    spent_tokens           INTEGER NOT NULL DEFAULT 0,
+    compiled_at            TEXT NOT NULL,
+    expires_at             TEXT NOT NULL,
+    reviewed_at            TEXT,
+    reviewed_by            TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS ix_watch_contracts_tenant ON watch_contracts(tenant, state)',
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */
@@ -502,14 +547,34 @@ CREATE INDEX IF NOT EXISTS ix_routing_tenant ON routing_decisions(tenant, labele
 CREATE INDEX IF NOT EXISTS ix_routing_type   ON routing_decisions(tenant, task_type, executed);
 
 CREATE TABLE IF NOT EXISTS skill_transfer_tests (
-  card_id TEXT NOT NULL,
-  kind    TEXT NOT NULL,
-  variant TEXT NOT NULL,
-  passed  INTEGER NOT NULL,
-  score   REAL NOT NULL,
-  ran_at  TEXT NOT NULL
+  tenant       TEXT NOT NULL,
+  card_id      TEXT NOT NULL,
+  card_version INTEGER,
+  kind         TEXT NOT NULL,
+  variant      TEXT NOT NULL,
+  passed       INTEGER NOT NULL,
+  score        REAL NOT NULL,
+  ran_at       TEXT NOT NULL,
+  eval_run_id  TEXT,
+  evaluator    TEXT,
+  model        TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_transfer_tenant_card ON skill_transfer_tests(tenant, card_id, card_version, kind, passed);
 CREATE INDEX IF NOT EXISTS ix_transfer_card ON skill_transfer_tests(card_id, kind, passed);
+
+CREATE TABLE IF NOT EXISTS skill_card_revisions (
+  tenant       TEXT NOT NULL,
+  card_id      TEXT NOT NULL,
+  version      INTEGER NOT NULL,
+  state        TEXT NOT NULL,
+  scope_json   TEXT NOT NULL,
+  action       TEXT NOT NULL,
+  actor        TEXT NOT NULL,
+  detail       TEXT,
+  recorded_at  TEXT NOT NULL,
+  PRIMARY KEY (tenant, card_id, version)
+);
+CREATE INDEX IF NOT EXISTS ix_card_revisions ON skill_card_revisions(tenant, card_id, version DESC);
 
 CREATE TABLE IF NOT EXISTS trust_scores (
   tenant        TEXT NOT NULL,
@@ -517,6 +582,7 @@ CREATE TABLE IF NOT EXISTS trust_scores (
   action_class  TEXT NOT NULL,
   clean         INTEGER NOT NULL DEFAULT 0,
   total         INTEGER NOT NULL DEFAULT 0,
+  overrides     INTEGER NOT NULL DEFAULT 0,
   override_rate REAL NOT NULL DEFAULT 0,
   honey_misses  INTEGER NOT NULL DEFAULT 0,
   granted       INTEGER NOT NULL DEFAULT 0,
@@ -588,6 +654,27 @@ CREATE TABLE IF NOT EXISTS routing_calibration (
   ok INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
   PRIMARY KEY (tenant, task_type, tier, model)
 );
+
+CREATE TABLE IF NOT EXISTS watch_contracts (
+  id                     TEXT PRIMARY KEY,
+  tenant                 TEXT NOT NULL,
+  name                   TEXT NOT NULL,
+  state                  TEXT NOT NULL,
+  entities_json          TEXT NOT NULL,
+  predicates_json        TEXT NOT NULL,
+  goal_refs_json         TEXT NOT NULL,
+  revenue_cost_risk_json TEXT NOT NULL,
+  thresholds_json        TEXT NOT NULL,
+  max_dollars            REAL NOT NULL,
+  max_tokens             INTEGER NOT NULL,
+  spent_dollars          REAL NOT NULL DEFAULT 0,
+  spent_tokens           INTEGER NOT NULL DEFAULT 0,
+  compiled_at            TEXT NOT NULL,
+  expires_at             TEXT NOT NULL,
+  reviewed_at            TEXT,
+  reviewed_by            TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_watch_contracts_tenant ON watch_contracts(tenant, state);
 `;
 
 /** The one schema, translated for Postgres (AUTOINCREMENT → BIGSERIAL). Zero drift by construction. */
@@ -625,6 +712,9 @@ export async function migrate(db: AsyncDb): Promise<void> {
   const stamped = (await db.prepare('SELECT name FROM schema_migrations WHERE name = ?').get(additiveName)) as
     { name: string } | undefined;
   if (stamped) {
+    for (const sql of ADDITIVE_MIGRATIONS) {
+      await applyAdditiveStatement(db, sql);
+    }
     await runBackfill(db);
     await stampVersion(db, '6');
     return;

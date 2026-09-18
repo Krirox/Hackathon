@@ -138,7 +138,10 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
     assert.equal((await ledger.get(tenant, claims[22]!.id))!.status, 'SUPERSEDED');
     await page.goto(`${origin}/console/claims/${claims[22]!.id}`);
     await expect(page.locator('form[data-review-action="correct"]')).toHaveCount(0);
-    await expect(page.getByRole('link', { name: replacementId, exact: true })).toBeVisible();
+    // The replacement is linked twice: once in the supersession lineage,
+    // once in the evidence-history link list.
+    await expect(page.getByRole('link', { name: replacementId, exact: true })).toHaveCount(2);
+    await expect(page.getByRole('link', { name: replacementId, exact: true }).first()).toBeVisible();
     assert.equal((await page.request.get(`${origin}/console/claims/${other.id}`)).status(), 404);
     await page.getByRole('link', { name: 'Back to console', exact: true }).click();
     for (const [id, action] of [
@@ -152,7 +155,32 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
       await decision.getByLabel('Operator secret', { exact: true }).fill('browser-operator');
       await decision.locator('[name="confirmed"]').check();
       await decision.getByRole('button').click();
-      await expect(card.getByRole('status')).toContainText(action === 'approve' ? 'Approved' : 'Declined');
+      if (action === 'approve') {
+        // The cited evidence changed under this review (claims[22] was
+        // corrected above): approval must refuse with a diff, not silently
+        // authorize the new content.
+        await expect(card.getByRole('status')).toContainText('STALE_EVIDENCE');
+        await expect(card.getByRole('status')).toContainText('superseded by');
+        await expect(card.getByRole('status')).toContainText('Your input is preserved');
+        // Re-review journey: refresh the request onto current evidence,
+        // then approve the rebound version explicitly.
+        await card.locator('h3 a').click();
+        await expect(page.getByRole('heading', { name: 'Request evidence', exact: true })).toBeVisible();
+        const refresh = page.locator('form[data-review-action="refresh-evidence"]');
+        await refresh.getByRole('button').click();
+        await expect(page.locator('[data-review-request="approve-me"]').getByRole('status')).toContainText(
+          'Evidence refreshed to current claim replacements. Re-review before approving.',
+        );
+        await page.getByRole('link', { name: 'Back to console', exact: true }).click();
+        const freshCard = page.locator('[data-review-request="approve-me"]');
+        const freshDecision = freshCard.locator('form[data-review-action="approve"]');
+        await freshDecision.getByLabel('Operator secret', { exact: true }).fill('browser-operator');
+        await freshDecision.locator('[name="confirmed"]').check();
+        await freshDecision.getByRole('button').click();
+        await expect(freshCard.getByRole('status')).toContainText('Approved');
+      } else {
+        await expect(card.getByRole('status')).toContainText('Declined');
+      }
       assert.equal((await coord.get(tenant, id))!.state, action === 'approve' ? 'ACCEPTED' : 'DECLINED');
       if (action === 'approve') {
         await expect(card.getByRole('status')).toContainText(
@@ -182,12 +210,21 @@ test('F02 browser: inspect all evidence, correct a value, approve and decline', 
         const bundle = frozen.locator('xpath=following-sibling::pre[1]');
         await expect(bundle).toBeVisible();
         assert.deepEqual(JSON.parse(await bundle.innerText()), receipt.bundle);
-        assert.deepEqual(receipt.bundle.claims.map((claim) => claim.id).sort(), claims.map((claim) => claim.id).sort());
-        // FLOW-002: correction does not yet rebind the request's original evidence reference.
-        const superseded = receipt.bundle.claims.find((claim) => claim.id === claims[22]!.id);
-        assert.ok(superseded);
-        assert.equal(superseded.status, 'SUPERSEDED');
-        assert.equal(superseded.statement, 'Metric 22: 10 ms');
+        // FLOW-002: the request was refreshed onto current evidence before
+        // approval, so the frozen bundle cites the replacement — never the
+        // superseded version the first review saw.
+        assert.deepEqual(
+          receipt.bundle.claims.map((claim) => claim.id).sort(),
+          claims
+            .map((claim) => claim.id)
+            .filter((cid) => cid !== claims[22]!.id)
+            .concat([replacementId])
+            .sort(),
+        );
+        const rebound = receipt.bundle.claims.find((claim) => claim.id === replacementId);
+        assert.ok(rebound);
+        assert.equal(rebound.statement, 'Metric 22: 25 ms');
+        assert.ok(!receipt.bundle.claims.some((claim) => claim.id === claims[22]!.id));
         assert.equal(JSON.parse(receipt.action).approvalStage, 'begin-work');
         await page.getByRole('link', { name: id, exact: true }).click();
         await expect(page).toHaveURL(`${origin}/console/requests/${id}`);
