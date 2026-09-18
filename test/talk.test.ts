@@ -10,6 +10,10 @@ import {
   watchRun,
   type BuzzNostrEvent,
 } from '../src/talk/buzz.ts';
+import { judgeText, approvedCompleteChat, devProfile } from '../src/substrate/models.ts';
+import { laneModelFn } from '../src/sense/triage.ts';
+import { ApplicationWorker } from '../src/substrate/worker.ts';
+import type { HarnessAdapter, HarnessTask, HarnessOutcome } from '../src/substrate/harness.ts';
 console.log('\n\x1b[1mTalk surface — the ledger survives a swap\x1b[0m');
 
 T('a claim bound on one surface verifies; the ledger stores only the opaque binding', async () => {
@@ -246,6 +250,243 @@ T('a live run streams progress into the originating thread', async () => {
       }
       eq((await coord.get(TEN, request.id))!.spent.tokens, 1500, 'the mid-run flow persisted the spend:');
     });
+  } finally {
+    await relay.close();
+  }
+});
+
+// ---------------------------------------------------- F25 tests ----
+
+T('F25: judgeText strict score: whole-number-only responses score correctly', async () => {
+  const stubFetch = async (_url: string, _init: unknown) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ candidates: [{ content: { parts: [{ text: '0.2' }] } }], usageMetadata: {} }),
+  });
+  const result = await judgeText({ profile: devProfile(), apiKey: 'k', fetchFn: stubFetch as never }, 'benign text');
+  eq(result.score, 0.2);
+  eq(result.flags.length, 0, 'score below 0.5 has no flags:');
+});
+
+T('F25: judgeText strict score: substring responses are unparseable — no prefix extraction', async () => {
+  // "10 out of 10" used to extract "1" from the regex prefix match.
+  // "0.7 is my score" used to extract "0" (prefix of 0.7).
+  // Both must now fail closed to score=1 / judge_unparseable.
+  for (const badResponse of ['10 out of 10', '0.7 is my score', 'sure, 0.3', '  1.5 ', '2', 'benign']) {
+    const stubFetch = async (_url: string, _init: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: badResponse }] } }], usageMetadata: {} }),
+    });
+    const result = await judgeText({ profile: devProfile(), apiKey: 'k', fetchFn: stubFetch as never }, 'some text');
+    eq(result.score, 1, `bad response "${badResponse}" should fail closed:`);
+    eq(result.flags.includes('judge_unparseable') || result.flags.includes('model_judge'), true);
+  }
+});
+
+T('F25: judgeText strict score: score=1.0 exact string scores 1 with model_judge flag', async () => {
+  const stubFetch = async (_url: string, _init: unknown) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ candidates: [{ content: { parts: [{ text: '1.0' }] } }], usageMetadata: {} }),
+  });
+  const result = await judgeText({ profile: devProfile(), apiKey: 'k', fetchFn: stubFetch as never }, 'injected text');
+  eq(result.score, 1);
+  eq(result.flags.includes('model_judge'), true);
+});
+
+T('F25: approvedCompleteChat enforces model approval before network — unapproved model throws', async () => {
+  let networkHit = false;
+  const stubFetch = async () => {
+    networkHit = true;
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const unapprovedProfile = { ...devProfile(), model: 'rogue-model-xyz' };
+  await rejects(
+    async () =>
+      approvedCompleteChat('dev', unapprovedProfile, 'k', [{ role: 'user', text: 'hi' }], stubFetch as never, {
+        APPROVED_DEV_MODELS: 'gemini-3.8-flash',
+      }),
+    'UNAPPROVED_MODEL',
+  );
+  eq(networkHit, false, 'unapproved model must not touch the wire:');
+});
+
+T('F25: approvedCompleteChat allows approved model through', async () => {
+  let networkHit = false;
+  const stubFetch = async () => {
+    networkHit = true;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2 },
+      }),
+    };
+  };
+  const approvedProfile = { ...devProfile(), model: 'gemini-3.8-flash' };
+  const result = await approvedCompleteChat(
+    'dev',
+    approvedProfile,
+    'k',
+    [{ role: 'user', text: 'hi' }],
+    stubFetch as never,
+    { APPROVED_DEV_MODELS: 'gemini-3.8-flash' },
+  );
+  eq(networkHit, true, 'approved model reaches the wire:');
+  eq(result.text, 'ok');
+});
+
+T('F25: laneModelFn rejects unapproved model before any network call', async () => {
+  let networkHit = false;
+  const stubFetch = async () => {
+    networkHit = true;
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const modelFn = laneModelFn('dev', stubFetch as never);
+  const unapproved = { ...devProfile(), model: 'forbidden-model' };
+  await rejects(
+    () => modelFn(unapproved, 'key', [{ role: 'user', text: 'test' }]),
+    'UNAPPROVED_MODEL',
+  );
+  eq(networkHit, false, 'forbidden model never reaches the wire:');
+});
+
+T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures are non-fatal', async () => {
+  const relay = await fakeRelay();
+  try {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'task',
+      kind: 'OBSERVATION',
+      statement: 'do work',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'agent:w',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    const { request } = await coord.submit(
+      base({ id: 'buzz1', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }),
+    );
+
+    // Inject a non-baseline adapter that completes the request without a real harness
+    const fakeAdapter: HarnessAdapter = {
+      name: 'fake-model',
+      category: 'model',
+      isTestBaseline: false,
+      async run(_tenant: string, reqId: string, _task: HarnessTask): Promise<HarnessOutcome> {
+        await coord.claimExecution(TEN, reqId, 'fake-model:worker', new Date().toISOString());
+        await coord.complete(TEN, reqId, { claims: [clm.id], cost: { tokens: 42 } });
+        return {
+          adapter: 'fake-model',
+          requestId: reqId,
+          status: 'COMPLETED',
+          transcript: 'done',
+          tools: ['write_file'],
+          usage: { input: 10, output: 5 },
+          permissions: [],
+          isTestBaseline: false,
+        };
+      },
+    };
+
+    const buzzSurface = createBuzzSurface({
+      relayUrl: relay.url,
+      signer: { pubkey: 'worker-key', sign: (id) => `sig:${id.slice(0, 8)}` },
+      fetchFn: async (url, init) => {
+        const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+        return { ok: res.ok, status: res.status, text: () => res.text() };
+      },
+    });
+
+    const worker = new ApplicationWorker(db, ledger, coord, {
+      tenant: TEN,
+      adapter: fakeAdapter,
+      dispatchRequests: true,
+      relayOutbox: false,
+      enableLearningLoop: false,
+      sweepIntervalMs: 99_999,
+      buzz: {
+        surface: buzzSurface,
+        channelFor: () => ({ channel: 'chan-engineering', threadRoot: 'root-ev' }),
+      },
+    });
+
+    await worker.tick();
+
+    // Wait for async Buzz fire-and-forget posts to drain
+    for (let i = 0; i < 50 && relay.received.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    eq(relay.received.length >= 1, true, `at least one terminal Buzz event must be posted (got ${relay.received.length}):`);
+    const last = relay.received[relay.received.length - 1]!;
+    eq(
+      last.body.event.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
+      true,
+      'terminal event names the request:',
+    );
+    eq(
+      last.body.event.tags.some((t) => t[0] === 'vital-request' && (t[2] === 'COMPLETED' || t[2] === 'FAILED')),
+      true,
+      'terminal event carries terminal state:',
+    );
+    eq(worker.status().counters.buzzRelayFailures, 0, 'no relay failures on success:');
+  } finally {
+    await relay.close();
+  }
+});
+
+T('F25: worker skips Buzz posting for test-baseline adapters', async () => {
+  const relay = await fakeRelay();
+  try {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'task',
+      kind: 'OBSERVATION',
+      statement: 'baseline task',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'agent:w',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    await coord.submit(base({ id: 'buzz2', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }));
+
+    const buzzSurface = createBuzzSurface({
+      relayUrl: relay.url,
+      signer: { pubkey: 'worker-key', sign: (id) => `sig:${id.slice(0, 8)}` },
+      fetchFn: async (url, init) => {
+        const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+        return { ok: res.ok, status: res.status, text: () => res.text() };
+      },
+    });
+
+    // LocalEchoAdapter is a test-baseline; Buzz should be silenced for it
+    const worker = new ApplicationWorker(db, ledger, coord, {
+      tenant: TEN,
+      dispatchRequests: true,
+      relayOutbox: false,
+      enableLearningLoop: false,
+      sweepIntervalMs: 99_999,
+      buzz: {
+        surface: buzzSurface,
+        channelFor: () => ({ channel: 'chan-engineering' }),
+      },
+    });
+
+    await worker.tick();
+    await new Promise((r) => setTimeout(r, 80));
+
+    eq(relay.received.length, 0, 'test-baseline adapter must not post to Buzz relay:');
   } finally {
     await relay.close();
   }

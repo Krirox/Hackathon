@@ -10,6 +10,7 @@ import { runJob, type ExecutorJob } from '../aws/executor.ts';
 import { CognitiveRouter } from '../router/router.ts';
 import { OrganizationalCompiler, mineCandidates } from '../compiler/compiler.ts';
 import type { RoutingClass } from '../core/types.ts';
+import { watchRun, type BuzzSurface } from '../talk/buzz.ts';
 
 export interface ApplicationWorkerOptions {
   tenant: string;
@@ -30,6 +31,17 @@ export interface ApplicationWorkerOptions {
   router?: CognitiveRouter;
   compiler?: OrganizationalCompiler;
   enableLearningLoop?: boolean;
+  /**
+   * Optional Buzz surface for live progress and terminal summaries.
+   * `channelFor` maps a requestId to channel/threadRoot (return null to
+   * skip Buzz for that request). Relay failures are non-fatal: they are
+   * counted in WorkerStatus.counters.buzzRelayFailures and logged as
+   * worker errors but never stall or abort dispatch.
+   */
+  buzz?: {
+    surface: BuzzSurface;
+    channelFor(requestId: string): { channel: string; threadRoot?: string } | null;
+  };
 }
 
 export interface WorkerStatus {
@@ -53,6 +65,8 @@ export interface WorkerStatus {
     cardsDemoted: number;
     tiersReverted: number;
     candidatesMined: number;
+    /** Buzz relay failures (fire-and-forget; non-fatal to dispatch). */
+    buzzRelayFailures: number;
   };
 }
 
@@ -102,6 +116,7 @@ export class ApplicationWorker {
   readonly router: CognitiveRouter;
   readonly compiler: OrganizationalCompiler;
   private readonly enableLearningLoop: boolean;
+  private readonly buzz?: ApplicationWorkerOptions['buzz'];
 
   private stopped = false;
   private startedAt: number | null = null;
@@ -125,6 +140,7 @@ export class ApplicationWorker {
     cardsDemoted: 0,
     tiersReverted: 0,
     candidatesMined: 0,
+    buzzRelayFailures: 0,
   };
 
   constructor(
@@ -153,6 +169,7 @@ export class ApplicationWorker {
     this.router = options.router ?? new CognitiveRouter(this.db);
     this.compiler = options.compiler ?? new OrganizationalCompiler(this.db);
     this.enableLearningLoop = options.enableLearningLoop ?? true;
+    this.buzz = options.buzz;
 
     if (options.adapter) {
       this.adapter = options.adapter;
@@ -459,6 +476,35 @@ export class ApplicationWorker {
                 skillCardId: boundSkillCardId,
                 routerConfidence: routeDecision.shadow ? 0.5 : 0.9,
               });
+
+              // F25: Post terminal Buzz summary. Skip test-baseline adapters
+              // (no operator-visible thread noise from CI runs). Relay
+              // failures are counted but never fatal to dispatch.
+              if (this.buzz && !outcome.isTestBaseline) {
+                const buzzCoords = this.buzz.channelFor(reqId);
+                if (buzzCoords) {
+                  const handle = watchRun(
+                    () => { /* progress subscription: runner already ran */ },
+                    this.buzz.surface,
+                    { channel: buzzCoords.channel, threadRoot: buzzCoords.threadRoot, requestId: reqId },
+                  );
+                  try {
+                    await handle.terminal(outcome.status, {
+                      step: outcome.tools.length,
+                      tokens: outcome.usage.input + outcome.usage.output,
+                    });
+                  } catch {
+                    /* terminal resolves null on relay failure, never throws */
+                  }
+                  await handle.close(3000);
+                  if (handle.failures > 0) {
+                    this.counters.buzzRelayFailures += handle.failures;
+                    const msg = `[worker:BUZZ_RELAY_FAILED] req=${reqId} failures=${handle.failures} last=${handle.lastError ?? '?'}`;
+                    this.lastError = msg;
+                    this.errors.push(msg);
+                  }
+                }
+              }
 
               await this.router.recordCalibrationSample(
                 this.tenant,

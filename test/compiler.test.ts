@@ -698,6 +698,7 @@ T('F18: independent quality assertion fails transfer test even if harness transp
         tools: [],
         usage: { input: 100, output: 50 },
         permissions: [],
+        isTestBaseline: false,
       };
     },
   };
