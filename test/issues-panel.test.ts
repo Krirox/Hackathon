@@ -12,7 +12,21 @@ import {
   TEAMS,
   DEFAULT_TEAM,
 } from '../src/core/auth.ts';
-import { listIssues, createIssue, moveIssue, updateIssue, addComment, syncIssues } from '../src/console/issues.ts';
+import {
+  listIssues,
+  createIssue,
+  moveIssue,
+  updateIssue,
+  addComment,
+  syncIssues,
+  saveGitHubSyncConfig,
+  getGitHubSyncConfig,
+  getGitHubPushError,
+  markGitHubSyncError,
+  unlinkGitHubSyncConfig,
+  pushUpdateToGitHub,
+} from '../src/console/issues.ts';
+import { isSealed, secretsKeyFromEnv } from '../src/core/secrets.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
 /**
@@ -304,4 +318,165 @@ T('non-engineer owner gets 403; engineer member gets the board', async () => {
   }
   void base;
   void sor;
+});
+
+T('stored GitHub tokens seal under VITAL_SECRETS_KEY and fail loudly without it', async () => {
+  const { db } = await fresh();
+  const previous = process.env.VITAL_SECRETS_KEY;
+  try {
+    // Unkeyed: legacy plaintext behaviour preserved.
+    delete process.env.VITAL_SECRETS_KEY;
+    eq(secretsKeyFromEnv(), null, 'no key configured:');
+    await saveGitHubSyncConfig(db, TEN, 'o/r', 'ghp_plain', 'human:owner', NOW);
+    const plain = await getGitHubSyncConfig(db, TEN);
+    eq(plain!.token, 'ghp_plain', 'unkeyed save reads back:');
+    eq(isSealed(plain!.token), false, 'unkeyed rows are plaintext:');
+
+    // Keyed: sealed at rest, transparent on read.
+    process.env.VITAL_SECRETS_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    await saveGitHubSyncConfig(db, TEN, 'o/r', 'ghp_secret', 'human:owner', NOW);
+    const raw = (await db.prepare('SELECT token FROM github_project_sync WHERE tenant = ?').get(TEN)) as {
+      token: string;
+    };
+    eq(isSealed(raw.token), true, 'sealed at rest:');
+    eq(raw.token.includes('ghp_secret'), false, 'ciphertext leaks no plaintext:');
+    const opened = await getGitHubSyncConfig(db, TEN);
+    eq(opened!.token, 'ghp_secret', 'opens with the key:');
+
+    // Wrong key: loud failure, never silent garbage.
+    process.env.VITAL_SECRETS_KEY = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    let threw = '';
+    try {
+      await getGitHubSyncConfig(db, TEN);
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    eq(threw.includes('TOKEN_UNSEALABLE'), true, 'wrong key fails loudly:');
+
+    // Missing key: loud failure, never unauthenticated sync.
+    delete process.env.VITAL_SECRETS_KEY;
+    let missing = '';
+    try {
+      await getGitHubSyncConfig(db, TEN);
+    } catch (e) {
+      missing = (e as Error).message;
+    }
+    eq(missing.includes('TOKEN_SEALED'), true, 'missing key fails loudly:');
+
+    // Bad key material rejected at parse time.
+    process.env.VITAL_SECRETS_KEY = 'short';
+    let bad = '';
+    try {
+      secretsKeyFromEnv();
+    } catch (e) {
+      bad = (e as Error).message;
+    }
+    eq(bad.includes('BAD_KEY'), true, 'malformed key refused:');
+  } finally {
+    if (previous === undefined) delete process.env.VITAL_SECRETS_KEY;
+    else process.env.VITAL_SECRETS_KEY = previous;
+    await db.close();
+  }
+});
+
+T('an external push failure is visible, and unlinking stops every outbound write', async () => {
+  const { db } = await fresh();
+  await saveGitHubSyncConfig(db, TEN, 'acme/board', 'ghp_live', 'human:owner', NOW);
+  eq((await getGitHubSyncConfig(db, TEN))!.status, 'linked');
+
+  // A push that GitHub refuses is recorded: status flips, the reason is durable,
+  // and the failure is readable by the dialog that shows it.
+  await markGitHubSyncError(db, TEN, {
+    kind: 'issue.update',
+    target: 'issue:iss_1',
+    error: 'GitHub API error (401): Bad credentials',
+    at: NOW,
+  });
+  const afterFailure = await getGitHubSyncConfig(db, TEN);
+  eq(afterFailure!.status, 'error', 'a failed push is not silent:');
+  const recorded = await getGitHubPushError(db, TEN);
+  eq(recorded!.kind, 'issue.update');
+  eq(recorded!.error.includes('401'), true, 'the reason survives for the operator:');
+
+  // Unlink: the repo and the token are forgotten, and the record of the failure
+  // goes with them — it described a link that no longer exists.
+  const removed = await unlinkGitHubSyncConfig(db, TEN, 'human:owner', NOW);
+  eq(removed!.repo, '', 'the repository is forgotten:');
+  eq(removed!.token, null, 'and so is the credential:');
+  eq(removed!.status, 'unlinked');
+  eq(await getGitHubPushError(db, TEN), null, 'the stale failure clears with the link:');
+  const raw = (await db.prepare('SELECT repo, token, status FROM github_project_sync WHERE tenant = ?').get(TEN)) as {
+    repo: string;
+    token: string | null;
+    status: string;
+  };
+  eq(raw.token, null, 'nothing is left in the token column at rest:');
+  eq(raw.status, 'unlinked');
+
+  // Every push refuses afterwards, because the guard is the repo itself.
+  const issue = await createIssue(
+    db,
+    TEN,
+    { title: 'unlink check', description: '' },
+    { userId: 'u', email: 'e@acme.test' },
+    NOW,
+  );
+  const result = await pushUpdateToGitHub(db, TEN, issue, {
+    fetchFn: (() => Promise.reject(new Error('must not be called'))) as unknown as typeof fetch,
+  });
+  eq(result.ok, false);
+  eq(result.error, 'no repo linked', 'an unlinked tenant never reaches GitHub:');
+
+  // Re-linking works and clears the unlinked state.
+  const relinked = await saveGitHubSyncConfig(db, TEN, 'acme/board', 'ghp_new', 'human:owner', NOW);
+  eq(relinked.status, 'linked');
+  eq(relinked.repo, 'acme/board');
+  await db.close();
+});
+
+T('the unlink route is CSRF-checked, engineer-gated, and audited', async () => {
+  const ctx = await seeded();
+  const { db, ledger, coord, comp, owner } = ctx;
+  // The board is department-gated, not role-gated: put the owner on engineering
+  // so a 403 later in this test can only mean the token or the link.
+  await setUserTeam(db, TEN, owner.id, 'engineering', { userId: owner.id, role: owner.role }, NOW);
+  await saveGitHubSyncConfig(db, TEN, 'acme/board', null, 'human:owner', NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await engineerSession(server.port, OWNER.email, OWNER.password)();
+    const noToken = await fetch(`${base_}/console/issues/github/unlink`, {
+      method: 'POST',
+      headers: { cookie: session.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'csrf=',
+      redirect: 'manual',
+    });
+    eq(noToken.status, 403, 'an unlink without the token is refused:');
+    eq((await getGitHubSyncConfig(db, TEN))!.status, 'linked', 'and the link survives the refusal:');
+
+    const unlinked = await fetch(`${base_}/console/issues/github/unlink`, {
+      method: 'POST',
+      headers: { cookie: session.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${session.csrf}`,
+      redirect: 'manual',
+    });
+    const unlinkedBody = await unlinked.text();
+    eq(unlinked.status, 200, `unlink refused: ${unlinkedBody.slice(0, 200)}`);
+    eq((JSON.parse(unlinkedBody) as { ok: boolean }).ok, true);
+    eq((await getGitHubSyncConfig(db, TEN))!.status, 'unlinked');
+    const audited = (await db
+      .prepare("SELECT detail FROM audit_log WHERE tenant = ? AND action = 'github.unlink' ORDER BY seq DESC LIMIT 1")
+      .get(TEN)) as { detail: string | null } | undefined;
+    eq(audited !== undefined, true, 'the unlink is audited:');
+    eq(audited!.detail, 'unlinked acme/board', 'and the audit line names what was disconnected:');
+
+    const config = (await (
+      await fetch(`${base_}/console/issues/github/config`, { headers: { cookie: session.cookie } })
+    ).json()) as { config: { repo: string; status: string } | null };
+    eq(config.config?.status, 'unlinked');
+    eq(config.config?.repo, '');
+  } finally {
+    await server.close();
+    await db.close();
+  }
 });

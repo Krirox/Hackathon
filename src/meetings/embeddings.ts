@@ -29,6 +29,15 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  * Semantically similar texts naturally yield high cosine similarity (>0.7), while
  * unrelated texts yield low similarity (<0.3).
  */
+/**
+ * Hash-based term vectors: lexical retrieval, not semantic similarity.
+ *
+ * Every token is projected to a fixed vector by hashing (plus a crude suffix
+ * strip for `-ing`/`-ment`/`-ed`), so two chunks score alike when they share
+ * *words* — synonyms score zero. It is deterministic, dependency-free, and good
+ * enough for "find the part of the meeting that mentions deploy", which is why it
+ * is the default; it is not an embedding model and the interface copy says so.
+ */
 export class DeterministicEmbeddingProvider implements EmbeddingProvider {
   name = 'deterministic-embeddings';
   readonly dimensions: number;
@@ -125,10 +134,12 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
   ) {}
 
   async embedText(text: string): Promise<number[]> {
-    const url = `${this.baseUrl}/models/${this.model}:embedContent?key=${this.apiKey}`;
+    // API key travels in the header, never the query string: URLs land in
+    // proxy and access logs, headers do not.
+    const url = `${this.baseUrl}/models/${this.model}:embedContent`;
     const res = await this.fetchFn(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
       body: JSON.stringify({
         model: `models/${this.model}`,
         content: { parts: [{ text }] },

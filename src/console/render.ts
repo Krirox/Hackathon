@@ -272,6 +272,7 @@ export type NavKey =
   | 'buzz'
   | 'digest'
   | 'learning'
+  | 'review'
   | 'audit'
   | 'settings'
   | 'data'
@@ -288,6 +289,7 @@ export interface NavAvailability {
   buzz: boolean;
   digest: boolean;
   learning: boolean;
+  review: boolean;
   audit: boolean;
   settings: boolean;
   data: boolean;
@@ -326,6 +328,7 @@ export function buildConsoleNav(home: string, availability: Partial<NavAvailabil
     buzz: false,
     digest: true,
     learning: false,
+    review: false,
     audit: false,
     settings: false,
     data: false,
@@ -360,6 +363,9 @@ export function buildConsoleNav(home: string, availability: Partial<NavAvailabil
   }
   if (open.learning) {
     items.push({ key: 'learning', label: 'Learning', href: '/console/learning' });
+  }
+  if (open.review) {
+    items.push({ key: 'review', label: 'Code review', href: '/console/review' });
   }
   if (open.audit) {
     items.push({ key: 'audit', label: 'Audit', href: '/console/audit' });

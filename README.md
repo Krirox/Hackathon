@@ -203,6 +203,8 @@ Other specialized wedges included:
 - **Feature Request Trace (`src/wedge/feature.ts`)**: Synthesizes customer requests into PRDs and testable engineering plans.
 - **Agentic Deep Research (`src/wedge/deepresearch.ts`)**: Multi-step plan $\rightarrow$ human approve $\rightarrow$ scoped web crawl $\rightarrow$ cited report.
 
+These three are library work with passing tests, not user paths: no console route, CLI command or worker handler runs them today (AUDIT.md §5 defers them behind the Ship-to-Result slice). The Rooms Setup preset that carried their names now says so in the interface.
+
 ---
 
 ## The Core Subsystems
@@ -371,7 +373,7 @@ Competitors and attackers can deliberately poison blogs, publish fake changelogs
 Located in `src/talk/`. Implemented for [Buzz](https://buzz.xyz) (Nostr-based protocol with cryptographic public/private keys) with seamless swap-safety to Slack.
 
 - **Cryptographic Personas:** Every room agent and human holds a verified keypair.
-- **Tamper-Evident Envelopes:** Claims, requests, and approvals are bound to cryptographic signatures (`src/talk/surface.ts`). Tampering with payload bytes immediately fails validation.
+- **Signed envelopes (spike, not wired):** `src/talk/surface.ts` implements signed envelopes over the ledger's opaque payload, and the spike's result is real — the binding needs no ledger change, so Buzz is swappable for Slack. **Nothing in the console, worker or CLI signs or verifies through `TalkSurface` today**, so this is a design proof, not a live integrity guarantee. Disposition in AUDIT.md §5.
 - **Channels as Projections:** Chat channels render human-readable threads with evidence chips, but the conversation history in chat is **never** the system of record. The Reality Ledger remains the sole source of truth.
 
 ---
@@ -380,7 +382,7 @@ Located in `src/talk/`. Implemented for [Buzz](https://buzz.xyz) (Nostr-based pr
 
 Located in `src/substrate/` and `src/jcode/`.
 - **Manifest-Rebuildable Sandboxes:** Sandboxes contain tools and temporary files, but persistence is never trust-bearing. A compromised sandbox can be destroyed and rebuilt from an immutable manifest in seconds.
-- **Egress Proxy Security:** Capability-token proxy (`src/substrate/egress-proxy.ts`) enforces strict domain allowlists and blocks loopback and cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`).
+- **Egress Policy:** every model and outbound decision passes one decision core (`src/substrate/egress.ts`) that denies non-allowlisted domains and blocks loopback and cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`). A forward proxy that enforces the same policy for a sandbox (`src/substrate/egress-proxy.ts`) is implemented and tested, but **no deployment starts it yet** — sandboxes are not pointed at it, so enforcement happens at the decision call rather than at the socket. Disposition in AUDIT.md §5.
 - **jcode Integration:** Vital communicates with [jcode](https://github.com/1jehuang/jcode) (1,198 Rust files) as a sibling process over the Harness-API protocol (NDJSON over Unix sockets) rather than embedding it as an internal library. Permission requests stream back to Vital's R/A/I policy engine, ensuring agents cannot grant themselves permissions.
 
 ---
@@ -539,7 +541,7 @@ npm install
 # Verify TypeScript type safety (must be 0 errors)
 npm run typecheck
 
-# Run the complete test suite (<!-- vital:testcount -->787/787 tests green<!-- /vital:testcount -->)
+# Run the complete test suite (<!-- vital:testcount -->875/875 tests green<!-- /vital:testcount -->)
 npm test
 ```
 
@@ -686,9 +688,11 @@ Vital's performance is falsifiable and measurable against pre-registered commitm
 
 ## Current State
 
-<!-- vital:testcount -->787/787 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
+<!-- vital:testcount -->875/875 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
 
-- **Verified subsystems:** Reality Ledger (Invariants I1–I7), Context Bundles, Replay, Attention Coordinator, Cognitive Router, Organizational Compiler with Transfer Testing, R/A/I Matrix, Honeytasks, Emergency Stops, World Sense Funnel, Adversarial Integrity Gate, Ship-to-Result Wedge, Churn & Feature Loops, Agentic Deep Research, Talk Surface Cryptographic Binding, jcode Harness-API Protocol v1, Authenticated Web Console (Signup, Login, CSRF, RBAC, Review Queue, Rooms Setup, Team Roster, Audit Log, Learning Board, GDPR Erasure), and Marketing Site.
+- **Verified and reachable** (a console route, CLI command or worker handler runs it): Reality Ledger (Invariants I1–I7), Context Bundles, Replay, Attention Coordinator, Cognitive Router, R/A/I Matrix, Honeytasks, Emergency Stops, jcode Harness-API Protocol v1, Authenticated Web Console (Signup, Login, CSRF, RBAC, Review Queue, Rooms Setup, Team Roster, Audit Log, Learning Board, GDPR Erasure), and Marketing Site.
+- **Tested primitives, not wired to a product surface:** World Sense Funnel, Adversarial Integrity Gate, Ship-to-Result Wedge, Churn & Feature Loops, Agentic Deep Research, Talk Surface cryptographic binding, the egress forward proxy, cross-model transfer testing, and the serverless microVM labels. Each is covered by tests and documented as a prototype; none is reachable from a user path yet. AUDIT.md carries the per-module disposition, and this line is written to agree with it.
+- **One closed loop with an open end:** skill cards are *consumed* at runtime (the worker asks the compiler for an executable card before routing), but nothing in production compiles a card yet — mining surfaces candidates, and compilation stays an explicit, gated act with no exposed trigger. Until that lands the WORKFLOW tier cannot fire on a real tenant.
 - **Upstream absorption:** Narrowed, provenance-pinned leaf modules from QM (`governor.ts`, `ship-gate.ts`, `command-policy.ts`, `crypto.ts`, `objects.ts`, `errors.ts`, `safe-regex.ts`) verified by `scripts/verify-provenance.mjs`.
 
 ---

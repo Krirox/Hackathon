@@ -268,6 +268,15 @@ export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const LOCKOUT_THRESHOLD = 5;
 /** How long a locked key stays locked, and when attempt counters reset. */
 export const LOCKOUT_MS = 15 * 60 * 1000;
+/**
+ * Per-account spray cap: failed logins for one email across ALL source IPs
+ * before the account locks. Higher than LOCKOUT_THRESHOLD so a single-IP
+ * burst still trips first, but a distributed spray cannot exceed this many
+ * guesses per window. Same window as LOCKOUT_MS.
+ */
+export const ACCOUNT_LOCKOUT_THRESHOLD = 20;
+/** Failed second-factor attempts per account before the MFA step locks. */
+export const MFA_LOCKOUT_THRESHOLD = 10;
 /** Minimum accepted password length — length beats composition rules. */
 export const MIN_PASSWORD_LENGTH = 12;
 
@@ -286,11 +295,18 @@ export async function uninstallAuthSchema(db: AsyncDb, names?: string[]): Promis
 
 // ----------------------------------------------------------------- helpers ----
 
+/**
+ * Pinned scrypt cost: explicit so a Node default change can never silently
+ * weaken stored passwords. maxmem is pinned alongside N/r/p because Node
+ * refuses the hash when the parameters exceed its default 32MB ceiling.
+ */
+const SCRYPT_OPTIONS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
+
 export function hashPassword(password: string): string {
   if (password.length < MIN_PASSWORD_LENGTH)
     throw new AuthError('WEAK_PASSWORD', `password must be at least ${MIN_PASSWORD_LENGTH} characters`);
   const salt = randomBytes(16).toString('hex');
-  const hash = scryptSync(password, salt, 64).toString('hex');
+  const hash = scryptSync(password, salt, 64, SCRYPT_OPTIONS).toString('hex');
   return `scrypt$${salt}$${hash}`;
 }
 
@@ -298,7 +314,7 @@ export function verifyPassword(password: string, stored: string): boolean {
   const parts = stored.split('$');
   if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
   const [, salt, expected] = parts as [string, string, string];
-  const actual = scryptSync(password, salt, 64).toString('hex');
+  const actual = scryptSync(password, salt, 64, SCRYPT_OPTIONS).toString('hex');
   const a = Buffer.from(actual, 'hex');
   const b = Buffer.from(expected, 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
@@ -890,7 +906,7 @@ export async function disableUser(
   }
   const out = await db.prepare('UPDATE users SET disabled = 1 WHERE tenant = ? AND id = ?').run(tenant, userId);
   if (out.changes === 0) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
-  await db.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now, userId);
+  await db.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND tenant = ? AND revoked_at IS NULL').run(now, userId, tenant);
   await audit(
     db,
     tenant,
@@ -1151,41 +1167,96 @@ export async function verifyLoginCredentials(
 ): Promise<User> {
   const email = input.email.trim().toLowerCase();
   const key = `${input.tenant}|${input.ip ?? '-'}|${email}`;
+  // Second bucket without the IP: caps distributed spray at
+  // ACCOUNT_LOCKOUT_THRESHOLD guesses per account per window. The `acct:`
+  // prefix keeps it disjoint from per-source keys even for empty IPs.
+  const accountKey = `acct:${input.tenant}|${email}`;
   const day = dayOf(now);
+  const bump = async (bucketKey: string, threshold: number): Promise<string | null> => {
+    const row = (await db
+      .prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?')
+      .get(bucketKey, day)) as { fails: number } | undefined;
+    const fails = (row?.fails ?? 0) + 1;
+    const lockedUntil = fails >= threshold ? new Date(Date.parse(now) + LOCKOUT_MS).toISOString() : null;
+    if (row)
+      await db
+        .prepare('UPDATE login_attempts SET fails = ?, locked_until = ?, updated_at = ? WHERE key = ? AND day = ?')
+        .run(fails, lockedUntil, now, bucketKey, day);
+    else
+      await db
+        .prepare('INSERT INTO login_attempts (key, day, fails, locked_until, updated_at) VALUES (?, ?, ?, ?, ?)')
+        .run(bucketKey, day, fails, lockedUntil, now);
+    return lockedUntil;
+  };
+  const lockedMessage = async (bucketKey: string): Promise<string | null> => {
+    const attempt = (await db
+      .prepare('SELECT fails, locked_until FROM login_attempts WHERE key = ? AND day = ?')
+      .get(bucketKey, day)) as { fails: number; locked_until: string | null } | undefined;
+    return attempt?.locked_until && attempt.locked_until > now ? attempt.locked_until : null;
+  };
   const fail = async (detail: string, action = 'auth.login_failed'): Promise<never> => {
     await db.transaction(async () => {
-      const row = (await db.prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?').get(key, day)) as
-        { fails: number } | undefined;
-      const fails = (row?.fails ?? 0) + 1;
-      const lockedUntil = fails >= LOCKOUT_THRESHOLD ? new Date(Date.parse(now) + LOCKOUT_MS).toISOString() : null;
-      if (row)
-        await db
-          .prepare('UPDATE login_attempts SET fails = ?, locked_until = ?, updated_at = ? WHERE key = ? AND day = ?')
-          .run(fails, lockedUntil, now, key, day);
-      else
-        await db
-          .prepare('INSERT INTO login_attempts (key, day, fails, locked_until, updated_at) VALUES (?, ?, ?, ?, ?)')
-          .run(key, day, fails, lockedUntil, now);
+      await bump(key, LOCKOUT_THRESHOLD);
+      await bump(accountKey, ACCOUNT_LOCKOUT_THRESHOLD);
       await audit(db, input.tenant, email, action, 'login', now, detail);
     });
     throw new AuthError('BAD_CREDENTIALS', 'invalid credentials');
   };
 
-  const attempt = (await db
-    .prepare('SELECT fails, locked_until FROM login_attempts WHERE key = ? AND day = ?')
-    .get(key, day)) as { fails: number; locked_until: string | null } | undefined;
-  if (attempt?.locked_until && attempt.locked_until > now)
-    throw new AuthError('LOCKED', `too many failed attempts — locked until ${attempt.locked_until}`);
+  const lockedUntil = (await lockedMessage(key)) ?? (await lockedMessage(accountKey));
+  if (lockedUntil)
+    throw new AuthError('LOCKED', `too many failed attempts — locked until ${lockedUntil}`);
 
   const user = (await db.prepare('SELECT * FROM users WHERE tenant = ? AND email = ?').get(input.tenant, email)) as
-    Row | undefined;
+    | Row
+    | undefined;
   if (!user) await fail(`no user ${email}`);
   const u = rowToUser(user as Row);
   if (u.disabled) await fail(`disabled user ${email}`);
   if (!verifyPassword(input.password, String((user as Row).password_hash))) await fail(`bad password for ${email}`);
 
   await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(key);
+  await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(accountKey);
   return u;
+}
+
+/**
+ * Per-account second-factor throttle. The MFA step previously throttled by
+ * IP only, so rotating source IPs gave unlimited TOTP guesses against an
+ * account whose password was already known. Failures are counted per
+ * (tenant, user); success clears the bucket.
+ */
+export async function checkMfaLockout(db: AsyncDb, tenant: string, userId: string, now: string): Promise<void> {
+  const day = dayOf(now);
+  const row = (await db
+    .prepare('SELECT locked_until FROM login_attempts WHERE key = ? AND day = ?')
+    .get(`mfa:${tenant}|${userId}`, day)) as { locked_until: string | null } | undefined;
+  if (row?.locked_until && row.locked_until > now) {
+    throw new AuthError('LOCKED', `too many failed attempts — locked until ${row.locked_until}`);
+  }
+}
+
+export async function recordMfaFailure(db: AsyncDb, tenant: string, userId: string, now: string): Promise<void> {
+  const day = dayOf(now);
+  const bucketKey = `mfa:${tenant}|${userId}`;
+  const row = (await db.prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?').get(bucketKey, day)) as
+    | { fails: number }
+    | undefined;
+  const fails = (row?.fails ?? 0) + 1;
+  const lockedUntil = fails >= MFA_LOCKOUT_THRESHOLD ? new Date(Date.parse(now) + LOCKOUT_MS).toISOString() : null;
+  if (row)
+    await db
+      .prepare('UPDATE login_attempts SET fails = ?, locked_until = ?, updated_at = ? WHERE key = ? AND day = ?')
+      .run(fails, lockedUntil, now, bucketKey, day);
+  else
+    await db
+      .prepare('INSERT INTO login_attempts (key, day, fails, locked_until, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(bucketKey, day, fails, lockedUntil, now);
+  await audit(db, tenant, userId, 'auth.mfa_failed', 'login', now, `second factor rejected (${fails} recent failures)`);
+}
+
+export async function clearMfaFailures(db: AsyncDb, tenant: string, userId: string): Promise<void> {
+  await db.prepare('DELETE FROM login_attempts WHERE key = ?').run(`mfa:${tenant}|${userId}`);
 }
 
 /**
@@ -1748,14 +1819,23 @@ export async function assertRecentAuthForSensitiveOp(
   userId: string,
   now: string,
   windowMs = MFA_RECENT_AUTH_WINDOW_MS,
+  presentingSessionCreatedAt?: string,
 ): Promise<void> {
-  const session = (await db
-    .prepare(
-      'SELECT created_at FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1',
-    )
-    .get(userId)) as { created_at: string } | undefined;
-  if (!session) throw new AuthError('REAUTH_REQUIRED', 'recent authentication required for sensitive operation');
-  if (Date.parse(now) - Date.parse(session.created_at) > windowMs) {
+  // Bind to the PRESENTING session, never the user's newest one: otherwise a
+  // days-old stolen session passes whenever the victim recently signed in on
+  // another device. Callers without a session fall back to the newest live
+  // session (legacy behaviour, still better than no check).
+  const createdAt =
+    presentingSessionCreatedAt ??
+    (
+      (await db
+        .prepare(
+          'SELECT created_at FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1',
+        )
+        .get(userId)) as { created_at: string } | undefined
+    )?.created_at;
+  if (!createdAt) throw new AuthError('REAUTH_REQUIRED', 'recent authentication required for sensitive operation');
+  if (Date.parse(now) - Date.parse(createdAt) > windowMs) {
     throw new AuthError('REAUTH_REQUIRED', 'session too old; re-authenticate to proceed');
   }
 }

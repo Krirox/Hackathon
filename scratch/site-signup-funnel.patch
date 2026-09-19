@@ -1,0 +1,108 @@
+diff --git a/site/_redirects b/site/_redirects
+index ee53fe7..dfac98f 100644
+--- a/site/_redirects
++++ b/site/_redirects
+@@ -6,6 +6,7 @@
+ # (login/index.html already resolves as a directory index on every static host —
+ # this rule just skips the extra 301 hop.)
+ /login    /login/index.html   200
++/signup   /signup/index.html  200
+ 
+ # One canonical entry point.
+ /index.html   /   301
+diff --git a/site/index.html b/site/index.html
+index 651dcc4..2fcad80 100644
+--- a/site/index.html
++++ b/site/index.html
+@@ -40,7 +40,7 @@
+ <body>
+ <!-- Matrix Background Canvas -->
+ <a class="skip-link" href="#top">Skip to content</a>
+-<noscript><div class="noscript-note"><p><strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval &#8594; measured outcome. Vital is the accountability layer for agent work.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="/login">Sign in to your console (existing members)</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>All content and contact paths on this page work without JavaScript. Sign in is invite-only and names its bound organization on login.</p></div></noscript>
++<noscript><div class="noscript-note"><p><strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval &#8594; measured outcome. Vital is the accountability layer for agent work.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="/signup">Create an account</a> &middot; <a href="/login">Sign in to your console</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>All content and contact paths on this page work without JavaScript. Sign in names its bound organization on login.</p></div></noscript>
+ <canvas id="bg-canvas" aria-hidden="true"></canvas>
+ <div class="bg-vignette" aria-hidden="true"></div>
+ <div class="fx-grain" aria-hidden="true"></div>
+@@ -55,7 +55,8 @@
+       <span class="burger"><i></i><i></i></span>
+     </button>
+     <nav class="header-nav" aria-label="Account and contact">
+-      <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
++      <a class="nav-signin" href="/signup" data-cta="signup" aria-label="Create an account">Sign up</a>
++      <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console">Sign in</a>
+       <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+         <span>Contact</span>
+         <span class="cta-accent-icon">›</span>
+@@ -73,7 +74,8 @@
+     <a href="#platform">Platform</a>
+     <a href="#systems">Subsystems</a>
+     <a href="#wedge">The Wedge</a>
+-    <a data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
++    <a href="/signup" data-cta="signup">Sign up</a>
++    <a data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console">Sign in</a>
+     <a href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry" data-cta="contact">Contact</a>
+   </nav>
+   <div class="overlay-foot">VITAL — GOVERNED SHIP-TO-RESULT · MIT CORE</div>
+@@ -109,9 +111,9 @@
+         <p class="hero-subtitle">Detect a change → cited assets → human approval → measured outcome. Vital is the accountability layer for agent work — not an autonomous company OS.</p>
+         <div class="cta-actions hero-actions">
+           <a class="cta-btn" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough <span class="arrow" aria-hidden="true">→</span></a>
+-          <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in to your console</a>
++          <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console">Sign in to your console</a>
++          <a class="secondary-btn" href="/signup" data-cta="signup">Create an account</a>
+         </div>
+-        <p class="signin-note" data-signin-note>Sign in is for existing members of a provisioned console, which names its bound organization on login. Membership is invite-only — new pilots start via a walkthrough request.</p>
+       </div>
+ 
+       <!-- Scroll Down Indicator -->
+@@ -323,11 +325,13 @@
+           <span>Request a pilot walkthrough</span>
+           <span class="arrow">→</span>
+         </a>
+-        <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">
++        <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console">
+           Sign in to your console
+         </a>
++        <a class="secondary-btn" href="/signup" data-cta="signup">
++          Create an account
++        </a>
+       </div>
+-      <p class="signin-note" data-signin-note>Existing members sign in to a provisioned console that names its bound organization — membership is invite-only, with no public registration.</p>
+       <p id="console-status" role="status">● console status unknown</p>
+       <p class="contact-mono">Questions or deployment planning? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. That is a finding, not a failure.</p>
+     </div>
+diff --git a/site/login/index.html b/site/login/index.html
+index 15e1899..0c60f21 100644
+--- a/site/login/index.html
++++ b/site/login/index.html
+@@ -4,7 +4,7 @@
+ <meta charset="utf-8"/>
+ <meta name="viewport" content="width=device-width,initial-scale=1"/>
+ <title>Sign in — VITAL</title>
+-<meta name="description" content="Sign in to a provisioned Vital console. Membership is invite-only and each console names its bound organization on login."/>
++<meta name="description" content="Sign in to your Vital console. New accounts start on the sign-up page; each console names its bound organization on login."/>
+ <meta name="robots" content="noindex,follow"/>
+ <meta name="color-scheme" content="dark"/>
+ <meta name="theme-color" content="#111111"/>
+@@ -20,7 +20,7 @@
+ </head>
+ <body class="utility-page">
+ <a class="skip-link" href="#top">Skip to content</a>
+-<noscript><div class="noscript-note"><p><strong>Sign in happens on your own console.</strong> Vital is self-hosted: the public site holds no sessions and no credentials. Co-hosted deployments answer <code>/login</code> on this origin; split deployments answer it on their own console origin.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="../">Back to the site</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>Membership is invite-only, and each console names its bound organization on login.</p></div></noscript>
++<noscript><div class="noscript-note"><p><strong>Sign in happens on your own console.</strong> Vital is self-hosted: the public site holds no sessions and no credentials. Co-hosted deployments answer <code>/login</code> on this origin; split deployments answer it on their own console origin.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="../">Back to the site</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>New accounts start on the <a href="../signup/">sign-up page</a>, and each console names its bound organization on login.</p></div></noscript>
+ <div class="bg-vignette" aria-hidden="true"></div>
+ <div class="fx-grain" aria-hidden="true"></div>
+ 
+@@ -53,10 +53,11 @@
+         <span>Request a pilot walkthrough</span>
+         <span class="arrow" aria-hidden="true">→</span>
+       </a>
++      <a class="secondary-btn" href="../signup/">Create an account</a>
+       <a class="secondary-btn" href="../">Back to the site</a>
+     </div>
+ 
+-    <p class="signin-note">Membership is invite-only, with no public registration. Existing members who cannot reach their console should contact their own operator — we hold no accounts on your behalf.</p>
++    <p class="signin-note">New accounts start on the <a href="../signup/">sign-up page</a>. Existing members who cannot reach their console should contact their own operator — we hold no accounts on your behalf.</p>
+ 
+     <dl class="utility-facts">
+       <div>

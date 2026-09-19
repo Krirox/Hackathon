@@ -37,8 +37,13 @@
   `src/vendor/qm/governor.ts`): imported packs enter at QUARANTINE,
   transfer tests gate promotion, drift auto-demotes, loops quarantine on
   consecutive failures or undeclared ship actions.
-- **Talk binding integrity** (`src/talk/surface.ts`): claim ↔ envelope
-  binding is tamper-evident; tampering fails loudly.
+- **Talk binding integrity — spike, not enforced** (`src/talk/surface.ts`):
+  claim ↔ envelope binding is tamper-evident *where it is used*, which today is
+  only the test suite. No console, worker or CLI path signs or verifies through
+  `TalkSurface`, so treat this as a design proof rather than a control. Listed here
+  rather than omitted so the gap is legible: the ledger stores one opaque string,
+  and the binding is not the thing protecting a claim today — the ledger's own
+  append-only invariants are.
 - **Human-surface authentication** (`src/core/auth.ts`,
   `src/console/serve.ts`): the console is session-gated — no session, no
   page, no approval. Passwords are salted scrypt with a 12-char floor;

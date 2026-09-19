@@ -2,6 +2,7 @@ import type { AsyncDb } from '../core/db.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { cardEvaluationEvidence, describeCardReadOnly } from '../compiler/registry.ts';
 import type { CognitiveRouter } from '../router/router.ts';
+import { COMPILE_MIN_SUCCESSES, type CompileCandidate } from './learning-actions.ts';
 
 /**
  * FINAL-004: the human surface for learning review.
@@ -10,7 +11,9 @@ import type { CognitiveRouter } from '../router/router.ts';
  * (`/api/learning/cards/:id`), which render as an unstyled blob in a browser.
  * These are read/act pages: the labeling queue labels a routing decision, and
  * a card page shows why a card is not trusted yet. Linking evidence never
- * promotes a card — promotion still runs only through the transfer path.
+ * promotes a card — promotion runs only through the transfer path, which this
+ * module can now *queue* (see routes/learning.ts) rather than only describe.
+ * Compilation is likewise reachable: `renderCompilePage` below.
  */
 
 const esc = (s: string): string =>
@@ -75,12 +78,12 @@ export async function renderLearningPage(
   );
   const cardRows =
     cards.length === 0
-      ? '<p class="sub">No skill cards yet. Cards appear after repeated successful procedures are mined.</p>'
+      ? '<p class="sub">No skill cards yet. Mining surfaces intents worth compiling; <a href="/console/learning/compile">compile one</a> to create the first card.</p>'
       : `<table class="stacked"><thead><tr class="sub"><th align="left">card</th><th align="left">intent</th><th align="left">state</th><th align="left">trust gaps</th></tr></thead><tbody>${cardRowList.join('')}</tbody></table>`;
 
   return `<p class="sub"><a href="/console/workflows">← Workflows</a></p>
 <h1>Learning review</h1>
-<p class="sub">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card.</p>
+<p class="sub">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card — <a href="/console/learning/compile">compile a mined candidate</a>, and queue transfer evidence from a card's page.</p>
 ${labeledNotice(opts.notice)}
 <h2>Labeling queue (${queue.length})</h2>
 ${queueRows}
@@ -88,11 +91,69 @@ ${queueRows}
 ${cardRows}`;
 }
 
+export interface CompilePageOptions {
+  csrf: string;
+  home: string;
+  error?: string;
+  notice?: string;
+}
+
+/**
+ * The compile form for mined candidates.
+ *
+ * Each candidate states what the evidence supports (scopes, models, tiers, the
+ * traces that would be cited) and, when it cannot be compiled, why not. The
+ * fields the operator fills in describe a procedure — the evidence fields are
+ * shown as fact, not offered as input.
+ */
+export function renderCompilePage(candidates: CompileCandidate[], opts: CompilePageOptions): string {
+  const notice = opts.notice ? `<p class="sub" role="status">${esc(opts.notice)}</p>` : '';
+  const error = opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : '';
+  if (candidates.length === 0) {
+    return `<p class="sub"><a href="/console/learning">← Learning review</a></p>
+<h1>Compile a skill card</h1>
+${notice}${error}
+<div class="v-empty"><h3>No candidates yet</h3>
+<p>Compilation starts from repeated successes: an intent the router did not doubt, traced successfully at least ${COMPILE_MIN_SUCCESSES} times. Nothing has met that bar for this tenant yet.</p>
+<p><a class="v-btn v-btn-secondary v-btn-sm" href="/console/learning">Back to learning review</a></p></div>`;
+  }
+  const rows = candidates
+    .map((c) => {
+      if (c.blocked) {
+        return `<article class="card"><h3>${esc(c.intent)}</h3>
+<p class="sub">${c.repeats} successes · ${(c.successRate * 100).toFixed(0)}% of traces</p>
+<p class="err">Not compilable: ${esc(c.blocked)}</p></article>`;
+      }
+      return `<article class="card"><h3>${esc(c.intent)}</h3>
+<p class="sub">${c.repeats} successes · ${(c.successRate * 100).toFixed(0)}% of traces · traces ${esc(c.traceIds.join(', '))}</p>
+<p class="sub">Scopes: ${esc(c.scopes.join(', ') || 'none')} · models: ${esc(c.originModels.join(', ') || 'none')} · tiers: ${esc(c.tiers.join(', ') || 'none')}</p>
+<form method="post" action="/console/learning/compile">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<input type="hidden" name="intent" value="${esc(c.intent)}">
+<label>Scope <select name="scope">${c.scopes.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select></label>
+<label>Tier validated at <select name="tier">${c.tiers.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}</select></label>
+<label>Preconditions (one per line) <textarea name="predicates" rows="2" required placeholder="a release summary exists and is cited"></textarea></label>
+<label>Steps (one per line) <textarea name="steps" rows="3" required placeholder="read the cited claims&#10;draft the copy&#10;check every bullet against a live claim"></textarea></label>
+<label>Success tests (one per line) <textarea name="tests" rows="2" required placeholder="every bullet cites a live claim"></textarea></label>
+<label>Tool grants (comma separated) <input name="toolGrants" placeholder="read_file, write_file"></label>
+<button type="submit">Compile candidate</button>
+<p class="sub">The card enters CANDIDATE. Trace ids, models and tier come from the evidence above and are re-checked server-side.</p>
+</form></article>`;
+    })
+    .join('\n');
+  return `<p class="sub"><a href="/console/learning">← Learning review</a></p>
+<h1>Compile a skill card</h1>
+<p class="sub">Compiling turns repeated successful traces into a procedure the router may use. It enters CANDIDATE — promotion still requires transfer evidence and drift watching.</p>
+${notice}${error}
+${rows}`;
+}
+
 export async function renderLearningCardPage(
   db: AsyncDb,
   comp: OrganizationalCompiler,
   tenant: string,
   cardId: string,
+  opts: { csrf?: string; notice?: string; error?: string } = {},
 ): Promise<string | null> {
   const card = await comp.get(tenant, cardId).catch(() => null);
   if (!card) return null;
@@ -120,14 +181,33 @@ export async function renderLearningCardPage(
           )
           .join('')}</ul>`;
 
+  // The action that closes the gap this page describes. Without it the panel
+  // said "run transfer" and offered nothing to press.
+  const transferForm = opts.csrf
+    ? `<h3>Run a transfer test</h3>
+<p class="sub">Queued as a durable outbox job: the harnesses that produce transfer evidence are attached to a worker, not to this server. A run that fails is recorded as a failed transfer — negative evidence counts.</p>
+<form method="post" action="/console/learning/cards/${esc(encodeURIComponent(card.id))}/transfer-test">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<label>Target scope <input name="targetScope" required placeholder="a scope other than ${esc(card.originScope)}"></label>
+<label>Task command <input name="command" required value="${esc(card.intent)}"></label>
+<label>Claim refs (comma separated, at least one) <input name="claimIds" required placeholder="clm_..., clm_..."></label>
+<label>Dollar ceiling <input name="maxDollars" type="number" step="0.01" required value="2"></label>
+<label>Token ceiling <input name="maxTokens" type="number" required value="20000"></label>
+<button type="submit">Queue transfer test</button>
+</form>`
+    : '';
+  const notice = opts.notice ? `<p class="sub" role="status">${esc(opts.notice)}</p>` : '';
+  const error = opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : '';
   return `<p class="sub"><a href="/console/learning">← Learning review</a></p>
 <h1>${esc(card.intent)}</h1>
 <p><code>${esc(card.id)}</code> · ${esc(card.state)} · v${card.version} · ${esc(card.trustTier)}</p>
+${notice}${error}
 <p class="sub">${esc(evidence.evidenceOnly)}</p>
 <h2>Why not trusted yet</h2>
 ${gaps}
 <h2>Transfer tests</h2>
 ${transfers}
+${transferForm}
 <h2>Evaluation runs${evidence.evalRef ? ` (${esc(evidence.evalRef)})` : ''}</h2>
 ${runs}`;
 }

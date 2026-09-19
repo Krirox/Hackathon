@@ -1,28 +1,16 @@
-// Shell reads — the console's hot path, deduplicated per request.
+// Shell reads — the real numbers both shells draw, memoized per request.
 //
-// Measured on a seeded tenant before this existed (see the statement counts in
-// the same change):
-//
-//   GET /console/rooms  181 statements — evaluateAll() ran TWICE, because the
-//                       page asks for room health and then wrapInWorkspaceShell
-//                       asks for it again to draw the rail
-//   every shelled page  `listStops()` ran 13× — once per room evaluated
-//
-// The functions here are the same reads, keyed per request, so the second ask is
-// free. None of them is a cache in the invalidation sense: the entry dies with
-// the response, and `memo` is switched off entirely for a request that can write
-// (see core/request-cache.ts), so a handler that writes and re-renders still
-// reads fresh.
-//
-// Deliberately *not* here: any read whose result depends on arguments other than
-// the ones in the key. `roomHealth` takes no evaluator dependencies on purpose —
-// passing them would make the key a guess, and two callers with different
-// dependencies would silently share one evaluation.
+// The telemetry (dollars spent today, escalations, human minutes) and the
+// per-room recency are shared by the Console shell and the Workspace shell.
+// They live in shell-metrics.ts so neither shell imports the other; the memo
+// keys here keep a page that asks twice (shell + page body) paying once.
 
 import { memo } from '../core/request-cache.ts';
-import { ScopeHealthEvaluator, type RoomHealthEvaluation } from '../talk/health.ts';
-import { computeRoomRecency, computeShellMetrics, type ShellMetrics } from './workspace-shell.ts';
 import type { AsyncDb } from '../core/db.ts';
+import { ScopeHealthEvaluator, type RoomHealthEvaluation } from '../talk/health.ts';
+import { computeRoomRecency, computeShellMetrics, type ShellMetrics } from './shell-metrics.ts';
+
+export type { ShellMetrics } from './shell-metrics.ts';
 
 /**
  * Every canonical and custom room with its health, evaluated once per request.
@@ -31,9 +19,7 @@ import type { AsyncDb } from '../core/db.ts';
  * shelled page that shows rooms was paying for the full set twice.
  */
 export function roomHealth(db: AsyncDb, tenant: string): Promise<RoomHealthEvaluation[]> {
-  return memo(`shell:room-health:${tenant}`, () =>
-    new ScopeHealthEvaluator(db, tenant, {}).evaluateAll(),
-  );
+  return memo(`shell:room-health:${tenant}`, () => new ScopeHealthEvaluator(db, tenant, {}).evaluateAll());
 }
 
 /**
@@ -48,8 +34,9 @@ export function shellMetrics(
   tenant: string,
   caps: { escalationsPerDay?: number; humanMinutesPerDay?: number; dailyBudgetDollars?: number } = {},
 ): Promise<ShellMetrics> {
-  return memo(`shell:metrics:${tenant}:${caps.escalationsPerDay ?? ''}:${caps.humanMinutesPerDay ?? ''}:${caps.dailyBudgetDollars ?? ''}`, () =>
-    computeShellMetrics(db, tenant, caps),
+  return memo(
+    `shell:metrics:${tenant}:${caps.escalationsPerDay ?? ''}:${caps.humanMinutesPerDay ?? ''}:${caps.dailyBudgetDollars ?? ''}`,
+    () => computeShellMetrics(db, tenant, caps),
   );
 }
 
@@ -57,12 +44,6 @@ export function shellMetrics(
  * Minutes since the last message per room. One query per scope, so callers that
  * overlap (a rail and a page body asking about the same rooms) share the pass.
  */
-export function roomRecency(
-  db: AsyncDb,
-  tenant: string,
-  scopes: string[],
-): Promise<Record<string, number | null>> {
-  return memo(`shell:recency:${tenant}:${scopes.join(',')}`, () =>
-    computeRoomRecency(db, tenant, scopes),
-  );
+export function roomRecency(db: AsyncDb, tenant: string, scopes: string[]): Promise<Record<string, number | null>> {
+  return memo(`shell:recency:${tenant}:${scopes.join(',')}`, () => computeRoomRecency(db, tenant, scopes));
 }

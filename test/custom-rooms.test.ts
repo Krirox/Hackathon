@@ -1,6 +1,6 @@
 import { T, eq, TEN, NOW, fresh } from './helpers.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
-import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
+import { installAuthSchema, signupTenant, createInvitation, acceptInvitation } from '../src/core/auth.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
 import {
   createCustomRoom,
@@ -162,6 +162,65 @@ T('custom rooms: def resolution, config, and health rollups', async () => {
     eq(categoryForScope('infra'), 'product', 'canonical group mapping:');
     eq(categoryForScope('finance'), 'launch', 'canonical group mapping:');
   } finally {
+    await db.close();
+  }
+});
+
+T('room policy mutation requires admin: members refused, ceilings capped', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  const ownerRec = (await db.prepare("SELECT id FROM users WHERE tenant = ? AND email = ?").get(TEN, OWNER.email)) as {
+    id: string;
+  };
+  const { token: inviteToken } = await createInvitation(
+    db,
+    TEN,
+    { email: 'member@acme.test', name: 'Member', role: 'member', team: 'unassigned' },
+    { userId: ownerRec.id, role: 'owner' },
+    NOW,
+  );
+  await acceptInvitation(db, inviteToken, 'a-long-enough-password', NOW);
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    const loginAs = async (email: string, password: string) => {
+      const pre = await fetch(`${url}/login`, { redirect: 'manual' });
+      const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+      const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+      const loginRes = await fetch(`${url}/login`, {
+        method: 'POST',
+        headers: { cookie: preCookie },
+        body: `csrf=${preToken}&email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`,
+        redirect: 'manual',
+      });
+      if (loginRes.status !== 303) throw new Error(`login failed for ${email}: ${loginRes.status}`);
+      const cookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+      const homeRes = await fetch(`${url}/`, { headers: { cookie } });
+      if (homeRes.status !== 200) throw new Error(`home failed for ${email}: ${homeRes.status}`);
+      const home = await homeRes.text();
+      const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+      return { cookie, csrf };
+    };
+    const member = await loginAs('member@acme.test', 'a-long-enough-password');
+    const memberPost = await fetch(`${url}/setup/rooms`, {
+      method: 'POST',
+      headers: { cookie: member.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${member.csrf}&mission_general=member+rewrite`,
+      redirect: 'manual',
+    });
+    eq(memberPost.status, 403, 'member cannot mutate room policy:');
+
+    const owner = await loginAs(OWNER.email, OWNER.password);
+    const overCap = await fetch(`${url}/setup/rooms`, {
+      method: 'POST',
+      headers: { cookie: owner.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&budget_general=999999999`,
+      redirect: 'manual',
+    });
+    eq(overCap.status, 400, 'over-cap ceiling refused:');
+    const cfg = await loadRoomConfig(db, TEN, 'general');
+    eq(cfg.budgetCeilingDollars <= 100_000, true, 'ceiling unchanged by over-cap attempt:');
+  } finally {
+    await server.close();
     await db.close();
   }
 });

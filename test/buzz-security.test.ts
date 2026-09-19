@@ -361,3 +361,191 @@ T('a member reads rooms and chats, but governance commands stay admin-only', asy
     await server.close();
   }
 });
+
+const REVIEW_SECRET = 'a-32-char-review-secret-for-tests';
+const FUTURE_EXP = '2026-09-12T12:00:00.000Z';
+const PAST_EXP = '2026-09-01T12:00:00.000Z';
+
+function withReviewSecret<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.VITAL_REVIEW_SECRET;
+  process.env.VITAL_REVIEW_SECRET = REVIEW_SECRET;
+  return fn().finally(() => {
+    if (previous === undefined) delete process.env.VITAL_REVIEW_SECRET;
+    else process.env.VITAL_REVIEW_SECRET = previous;
+  });
+}
+
+T('a review token authorizes only its webhook decision, never halt or configure', async () => {
+  const { db, ledger, coord, comp, pending } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    await withReviewSecret(async () => {
+      const current = (await coord.get(TEN, pending.id))!;
+      const token = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'approve', {
+        expiresAt: FUTURE_EXP,
+        requestUpdatedAt: current.updatedAt,
+      });
+      const headers = { 'content-type': 'application/json' };
+      const halt = await fetch(`${url}/api/buzz/commands`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ command: '/halt scope:risk reason="token"', token }),
+      });
+      eq(halt.status, 401, 'a review token cannot engage the kill switch:');
+      eq((await describeStops(db, TEN)).length, 0, 'no stop was engaged:');
+
+      const configure = await fetch(`${url}/api/buzz/rooms/configure`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ scope: 'risk', mission: 'TOKEN REWRITE', token }),
+      });
+      eq(configure.status, 401, 'a review token cannot rewrite room policy:');
+      const cfg = await loadRoomConfig(db, TEN, 'risk');
+      eq(cfg.mission.includes('TOKEN REWRITE'), false, 'room policy untouched:');
+      eq((await coord.get(TEN, pending.id))!.state, 'ADMITTED', 'the request is still pending:');
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+T('webhook approve with a fresh bound token records a tenant-bound frozen-spec decision', async () => {
+  const { db, ledger, coord, comp, pending } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    await withReviewSecret(async () => {
+      const current = (await coord.get(TEN, pending.id))!;
+      const token = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'approve', {
+        expiresAt: FUTURE_EXP,
+        requestUpdatedAt: current.updatedAt,
+      });
+      const res = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', requestId: pending.id, token }),
+      });
+      eq(res.status, 200, 'fresh bound token approves:');
+      const result = (await res.json()) as Record<string, unknown>;
+      eq(result.state, 'ACCEPTED');
+      eq(typeof result.decisionId, 'string');
+      const decisionId = String(result.decisionId);
+      eq(decisionId.startsWith('dec_buzz_'), true, 'buzz decision id namespace:');
+      eq(decisionId.length > 20, true, 'full tenant-bound hash, not a 48-bit truncation:');
+      const stored = await ledger.getDecision(TEN, decisionId);
+      eq(stored !== null, true, 'decision persisted:');
+      const spec = JSON.parse(String(stored!.action)) as { fingerprint: string; requestId: string };
+      eq(typeof spec.fingerprint, 'string', 'frozen execution spec recorded:');
+      eq(spec.requestId, pending.id, 'spec bound to the request:');
+      eq(stored!.approvedBy, 'human:buzz-review-token', 'token approval attributed distinctly, never impersonated:');
+      eq((await coord.get(TEN, pending.id))!.state, 'ACCEPTED');
+
+      // Replay is idempotent: same receipt, no second decision, no state error.
+      const replay = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', requestId: pending.id, token }),
+      });
+      eq(replay.status, 200, 'replay succeeds:');
+      const replayed = (await replay.json()) as Record<string, unknown>;
+      eq(replayed.repeated, true, 'replay marked repeated:');
+      eq(replayed.decisionId, decisionId, 'replay returns the original receipt:');
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+T('webhook approve refuses expired and legacy tokens without state change', async () => {
+  const { db, ledger, coord, comp, pending } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    await withReviewSecret(async () => {
+      const current = (await coord.get(TEN, pending.id))!;
+      const expired = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'approve', {
+        expiresAt: PAST_EXP,
+        requestUpdatedAt: current.updatedAt,
+      });
+      const expiredRes = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', requestId: pending.id, token: expired }),
+      });
+      eq(expiredRes.status, 401, 'expired token refused:');
+      eq(((await expiredRes.json()) as { code?: string }).code, 'TOKEN_EXPIRED');
+
+      // Legacy shape: valid signature but no expiry/version binding.
+      const legacy = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'approve');
+      const legacyRes = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', requestId: pending.id, token: legacy }),
+      });
+      eq(legacyRes.status, 401, 'legacy token without expiry refused:');
+      eq((await coord.get(TEN, pending.id))!.state, 'ADMITTED', 'nothing was approved:');
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+T('webhook approve refuses a stale reviewed version with re-review guidance', async () => {
+  const { db, ledger, coord, comp, pending } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    await withReviewSecret(async () => {
+      const stale = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'approve', {
+        expiresAt: FUTURE_EXP,
+        requestUpdatedAt: '2000-01-01T00:00:00.000Z',
+      });
+      const res = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'approve', requestId: pending.id, token: stale }),
+      });
+      eq(res.status, 409, 'stale version refused:');
+      eq(((await res.json()) as { code?: string }).code, 'STALE_REVIEW');
+      eq((await coord.get(TEN, pending.id))!.state, 'ADMITTED', 'stale approval changed nothing:');
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+T('webhook decline enforces freshness and records the outcome', async () => {
+  const { db, ledger, coord, comp, pending } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    await withReviewSecret(async () => {
+      const current = (await coord.get(TEN, pending.id))!;
+      const token = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'decline', {
+        expiresAt: FUTURE_EXP,
+        requestUpdatedAt: current.updatedAt,
+      });
+      const res = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'decline', requestId: pending.id, token }),
+      });
+      eq(res.status, 200, 'fresh decline lands:');
+      eq((await coord.get(TEN, pending.id))!.state, 'DECLINED');
+
+      const staleToken = mintReviewToken(REVIEW_SECRET, TEN, pending.id, 'decline', {
+        expiresAt: FUTURE_EXP,
+        requestUpdatedAt: '2000-01-01T00:00:00.000Z',
+      });
+      const staleRes = await fetch(`${url}/api/buzz/webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'decline', requestId: pending.id, token: staleToken }),
+      });
+      eq(staleRes.status, 409, 'stale decline refused:');
+    });
+  } finally {
+    await server.close();
+  }
+});

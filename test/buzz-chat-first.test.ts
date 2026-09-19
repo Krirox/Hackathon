@@ -90,7 +90,7 @@ T('GET /console/dashboard serves full system dashboard with reality health, comp
     eq(dashRes.status, 200);
     const html = await dashRes.text();
     eq(html.includes('Reality health'), true);
-    eq(html.includes('id="vital-dashboard-btn"'), true);
+    eq(html.includes('id="console-workflows-btn"'), true);
     eq(html.includes('href="/console/dashboard"'), true);
     eq(html.includes('Workspace'), true);
   } finally {
@@ -111,7 +111,7 @@ T('GET /?view=dashboard renders full system dashboard', async () => {
     eq(res.status, 200);
     const html = await res.text();
     eq(html.includes('Reality health'), true);
-    eq(html.includes('id="vital-dashboard-btn"'), true);
+    eq(html.includes('id="console-workflows-btn"'), true);
   } finally {
     await server.close();
     await db.close();
@@ -507,11 +507,11 @@ T('/account renders in the console shell with one Chat button and no room list',
     eq(accountHtml.includes('Account and security'), true, 'renders account heading');
     eq(accountHtml.includes('Change password'), true, 'renders change password');
     eq(accountHtml.includes('Two-factor authentication'), true, 'renders MFA section');
-    eq(accountHtml.includes('vital-dashboard-btn'), true, 'embedded within workspace shell');
+    eq(accountHtml.includes('console-dashboard-btn'), true, 'embedded within the console shell');
     // Split contract: console pages link to chat exactly once (the topbar
     // Chat button) and never embed the room list — rooms live in the chat.
     eq(accountHtml.includes('id="go-to-chat-btn"'), true, 'one Chat button:');
-    eq(accountHtml.includes('class="ws-room"'), false, 'no room entries in the console sidebar:');
+    eq(accountHtml.includes('class="vc-room"'), false, 'no room entries in the console sidebar:');
   } finally {
     await server.close();
     await db.close();
@@ -535,7 +535,8 @@ T('surface split: the chat carries no Console tokens; the Console does', async (
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
-    const get = async (p: string) => await (await fetch(`http://127.0.0.1:${server.port}${p}`, { headers: { cookie } })).text();
+    const get = async (p: string) =>
+      await (await fetch(`http://127.0.0.1:${server.port}${p}`, { headers: { cookie } })).text();
 
     const chat = await get('/console/buzz/general');
     eq(chat.includes('--v-bg-0:'), false, 'chat carries no Console token definitions:');
@@ -555,6 +556,13 @@ T('surface split: the chat carries no Console tokens; the Console does', async (
     eq(console_.includes('--v-bg-0:'), true, 'console page carries the token definitions:');
     eq(console_.includes('data-theme='), true, 'console page carries the theme attribute:');
     eq(console_.includes('buzz-window'), false, 'console page does not render the Buzz shell:');
+    // Decoupling contract: the console chrome is the brand shell (vc-*), and
+    // no Buzz-derived id or class leaks into it from either shell.
+    eq(console_.includes('id="console-rail"'), true, 'console renders its own rail:');
+    eq(console_.includes('class="vc-window"'), true, 'console renders the brand glass shell:');
+    eq(console_.includes('buzz-workspace-sidebar'), false, 'no Buzz sidebar id in the console:');
+    eq(console_.includes('buzz-search-input'), false, 'no Buzz search id in the console:');
+    eq(/class="ws-/.test(console_), false, 'no ws-* chrome classes in the console:');
   } finally {
     await server.close();
     await db.close();

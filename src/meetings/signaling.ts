@@ -288,162 +288,240 @@ export class MeetingSignalingHub {
 // ------------------------------------------------ WebSocket Frame Protocol ----
 // Standard RFC 6455 WebSocket framing implementation using node:crypto without external dependencies
 
-export function createWebSocketUpgradeHandler(hub: MeetingSignalingHub) {
-  return (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+/** Server-resolved identity for a signaling socket. */
+export interface SignalingIdentity {
+  userId: string;
+  displayName: string;
+  tenant: string;
+  role: 'host' | 'participant';
+}
+
+export interface WebSocketUpgradeOptions {
+  /**
+   * Resolve the joining peer's identity from the request — session cookie,
+   * meeting membership, host role. Return null to refuse the upgrade.
+   *
+   * Identity used to come from the query string (userId / role params),
+   * which let anyone join any meeting as host. With no resolver installed
+   * the socket is now refused outright (fail closed) rather than trusting
+   * the client's self-declaration.
+   */
+  resolveIdentity?: (req: IncomingMessage) => Promise<SignalingIdentity | null>;
+  /** Max accepted WS payload bytes; oversized frames drop the socket. */
+  maxFrameBytes?: number;
+  /** Peers silent longer than this are reaped (client pings every 25s). */
+  idleTimeoutMs?: number;
+}
+
+const MAX_FRAME_BYTES_DEFAULT = 256 * 1024;
+const IDLE_TIMEOUT_MS_DEFAULT = 75_000;
+
+export function createWebSocketUpgradeHandler(hub: MeetingSignalingHub, options: WebSocketUpgradeOptions = {}) {
+  const maxFrameBytes = options.maxFrameBytes ?? MAX_FRAME_BYTES_DEFAULT;
+  const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS_DEFAULT;
+
+  return (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     const key = req.headers['sec-websocket-key'];
     if (!key) {
       socket.destroy();
       return;
     }
 
-    const acceptKey = createHash('sha1')
-      .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-      .digest('base64');
-
-    const headers = [
-      'HTTP/1.1 101 Switching Protocols',
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Accept: ${acceptKey}`,
-      '\r\n',
-    ];
-
-    socket.write(headers.join('\r\n'));
-
-    const url = new URL(req.url ?? '/', 'http://console');
-    const meetingId = url.searchParams.get('meetingId') ?? '';
-    const tenant = url.searchParams.get('tenant') ?? 'default';
-    const userId = url.searchParams.get('userId') ?? `anon_${randomUUID().slice(0, 6)}`;
-    const displayName = url.searchParams.get('name') ?? 'Guest';
-    const role = (url.searchParams.get('role') ?? 'participant') as 'host' | 'participant';
-
-    const peerId = `peer_${randomUUID().slice(0, 8)}`;
-
-    const sendFrame = (data: Buffer) => {
-      if (socket.destroyed) return;
-      const length = data.length;
-      let header: Buffer;
-      if (length <= 125) {
-        header = Buffer.alloc(2);
-        header[0] = 0x81; // FIN + text opcode
-        header[1] = length;
-      } else if (length <= 65535) {
-        header = Buffer.alloc(4);
-        header[0] = 0x81;
-        header[1] = 126;
-        header.writeUInt16BE(length, 2);
-      } else {
-        header = Buffer.alloc(10);
-        header[0] = 0x81;
-        header[1] = 127;
-        header.writeBigUInt64BE(BigInt(length), 2);
+    // Resolve identity BEFORE writing the handshake or touching the socket:
+    // Node pauses an upgraded connection's buffered bytes until the socket is
+    // resumed (which happens when the first 'data' listener attaches), so
+    // deferring openSocket to a later tick would stall pending frames.
+    // Resolution itself never writes to the socket, so it is safe to run
+    // while paused.
+    void (async () => {
+      let identity: SignalingIdentity | null;
+      try {
+        identity = options.resolveIdentity ? await options.resolveIdentity(req) : null;
+      } catch (err) {
+        console.error('[meeting-signaling] identity resolution failed:', err);
+        identity = null;
       }
-      socket.write(Buffer.concat([header, data]));
-    };
-
-    const peer: SignalingPeer = {
-      id: peerId,
-      userId,
-      displayName,
-      meetingId,
-      tenant,
-      role,
-      audioMuted: false,
-      videoMuted: false,
-      screenSharing: false,
-      send: (msg) => {
-        sendFrame(Buffer.from(JSON.stringify(msg)));
-      },
-      close: () => {
+      if (!identity) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
         socket.destroy();
-      },
-      lastSeenAt: Date.now(),
-    };
+        return;
+      }
+      openSocket(identity);
+    })();
 
-    // Register peer in room
-    void hub.handlePeerJoin(peer);
+    function openSocket(identity: SignalingIdentity): void {
+      const acceptKey = createHash('sha1')
+        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .digest('base64');
 
-    // Frame parser buffer
-    let buffer = Buffer.alloc(0);
-    if (head && head.length > 0) {
-      buffer = Buffer.concat([buffer, head]);
-    }
+      const headers = [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${acceptKey}`,
+        '\r\n',
+      ];
 
-    socket.on('data', (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (buffer.length >= 2) {
-        const firstByte = buffer[0]!;
-        const secondByte = buffer[1]!;
-        const opcode = firstByte & 0x0f;
-        const masked = Boolean(secondByte & 0x80);
-        let payloadLen = secondByte & 0x7f;
-        let offset = 2;
+      socket.write(headers.join('\r\n'));
 
-        if (payloadLen === 126) {
-          if (buffer.length < 4) return;
-          payloadLen = buffer.readUInt16BE(2);
-          offset = 4;
-        } else if (payloadLen === 127) {
-          if (buffer.length < 10) return;
-          payloadLen = Number(buffer.readBigUInt64BE(2));
-          offset = 10;
+      const url = new URL(req.url ?? '/', 'http://console');
+      const meetingId = url.searchParams.get('meetingId') ?? '';
+
+      const peerId = `peer_${randomUUID().slice(0, 8)}`;
+
+      const sendFrame = (data: Buffer) => {
+        if (socket.destroyed) return;
+        const length = data.length;
+        let header: Buffer;
+        if (length <= 125) {
+          header = Buffer.alloc(2);
+          header[0] = 0x81; // FIN + text opcode
+          header[1] = length;
+        } else if (length <= 65535) {
+          header = Buffer.alloc(4);
+          header[0] = 0x81;
+          header[1] = 126;
+          header.writeUInt16BE(length, 2);
+        } else {
+          header = Buffer.alloc(10);
+          header[0] = 0x81;
+          header[1] = 127;
+          header.writeBigUInt64BE(BigInt(length), 2);
         }
+        socket.write(Buffer.concat([header, data]));
+      };
 
-        let maskKey: Buffer | null = null;
-        if (masked) {
-          if (buffer.length < offset + 4) return;
-          maskKey = buffer.subarray(offset, offset + 4);
-          offset += 4;
+      const peer: SignalingPeer = {
+        id: peerId,
+        userId: identity.userId,
+        displayName: identity.displayName,
+        meetingId,
+        tenant: identity.tenant,
+        role: identity.role,
+        audioMuted: false,
+        videoMuted: false,
+        screenSharing: false,
+        send: (msg) => {
+          sendFrame(Buffer.from(JSON.stringify(msg)));
+        },
+        close: () => {
+          socket.destroy();
+        },
+        lastSeenAt: Date.now(),
+      };
+
+      // Reap sockets that stop answering keepalive pings: an identity is
+      // registered in the room (and blocks the meeting from auto-ending)
+      // until this fires or the socket errors.
+      const reaper = setInterval(() => {
+        for (const p of hub.getRoomPeers(meetingId)) {
+          if (Date.now() - p.lastSeenAt > idleTimeoutMs) {
+            void hub.handlePeerLeave(meetingId, p.id);
+            p.close();
+          }
         }
+      }, idleTimeoutMs);
+      reaper.unref?.();
 
-        if (buffer.length < offset + payloadLen) return;
+      // Frame parser buffer
+      let buffer = Buffer.alloc(0);
+      if (head && head.length > 0) {
+        buffer = Buffer.concat([buffer, head]);
+      }
 
-        const payload = buffer.subarray(offset, offset + payloadLen);
-        buffer = buffer.subarray(offset + payloadLen);
-
-        if (opcode === 0x08) {
-          // Close frame
-          socket.end();
+      socket.on('data', (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (buffer.length > maxFrameBytes) {
+          // A frame this large cannot be completed under the cap; the peer
+          // is either hostile or broken. Drop it with the partial buffer.
+          socket.destroy();
           return;
         }
+        while (buffer.length >= 2) {
+          const firstByte = buffer[0]!;
+          const secondByte = buffer[1]!;
+          const opcode = firstByte & 0x0f;
+          const masked = Boolean(secondByte & 0x80);
+          let payloadLen = secondByte & 0x7f;
+          let offset = 2;
 
-        if (opcode === 0x09) {
-          // Ping frame -> Pong frame
-          const pong = Buffer.alloc(2);
-          pong[0] = 0x8a;
-          pong[1] = 0;
-          socket.write(pong);
-          continue;
-        }
+          if (payloadLen === 126) {
+            if (buffer.length < 4) return;
+            payloadLen = buffer.readUInt16BE(2);
+            offset = 4;
+          } else if (payloadLen === 127) {
+            if (buffer.length < 10) return;
+            payloadLen = Number(buffer.readBigUInt64BE(2));
+            offset = 10;
+          }
 
-        if (masked && maskKey) {
-          for (let i = 0; i < payload.length; i++) {
-            const b = payload[i] ?? 0;
-            const k = maskKey[i % 4] ?? 0;
-            payload[i] = b ^ k;
+          if (payloadLen > maxFrameBytes) {
+            socket.destroy();
+            return;
+          }
+
+          let maskKey: Buffer | null = null;
+          if (masked) {
+            if (buffer.length < offset + 4) return;
+            maskKey = buffer.subarray(offset, offset + 4);
+            offset += 4;
+          }
+
+          if (buffer.length < offset + payloadLen) return;
+
+          const payload = buffer.subarray(offset, offset + payloadLen);
+          buffer = buffer.subarray(offset + payloadLen);
+
+          if (opcode === 0x08) {
+            // Close frame
+            socket.end();
+            return;
+          }
+
+          if (opcode === 0x09) {
+            // Ping frame -> Pong frame
+            const pong = Buffer.alloc(2);
+            pong[0] = 0x8a;
+            pong[1] = 0;
+            socket.write(pong);
+            continue;
+          }
+
+          if (masked && maskKey) {
+            for (let i = 0; i < payload.length; i++) {
+              const b = payload[i] ?? 0;
+              const k = maskKey[i % 4] ?? 0;
+              payload[i] = b ^ k;
+            }
+          }
+
+          if (opcode === 0x01) {
+            // Text frame
+            try {
+              const text = payload.toString('utf8');
+              const msg = JSON.parse(text) as SignalingMessage;
+              hub.handleMessage(peerId, msg);
+            } catch (err) {
+              console.error('[meeting-signaling] JSON decode error:', err);
+            }
           }
         }
+      });
 
-        if (opcode === 0x01) {
-          // Text frame
-          try {
-            const text = payload.toString('utf8');
-            const msg = JSON.parse(text) as SignalingMessage;
-            hub.handleMessage(peerId, msg);
-          } catch (err) {
-            console.error('[meeting-signaling] JSON decode error:', err);
-          }
-        }
-      }
-    });
+      socket.on('close', () => {
+        clearInterval(reaper);
+        void hub.handlePeerLeave(meetingId, peerId);
+      });
 
-    socket.on('close', () => {
-      void hub.handlePeerLeave(meetingId, peerId);
-    });
+      socket.on('error', () => {
+        clearInterval(reaper);
+        void hub.handlePeerLeave(meetingId, peerId);
+        socket.destroy();
+      });
 
-    socket.on('error', () => {
-      void hub.handlePeerLeave(meetingId, peerId);
-      socket.destroy();
-    });
+      // Register peer in room (after handlers are attached so a fast
+      // disconnect is still reaped correctly).
+      void hub.handlePeerJoin(peer);
+    };
   };
 }

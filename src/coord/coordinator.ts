@@ -304,8 +304,12 @@ export interface Coordinator {
   /**
    * Release IN_FLIGHT claims whose lease expired back to ADMITTED so a dead
    * worker's work becomes runnable again. Bounded per call, audited per row.
+   *
+   * `ids` narrows the sweep to named requests: the console's per-workflow
+   * "reclaim stalled legs" action releases only the leg the operator is looking
+   * at, instead of every expired lease in the tenant.
    */
-  reclaimStale(tenant: string, nowMs: number, limit?: number): Promise<string[]>;
+  reclaimStale(tenant: string, nowMs: number, limit?: number, ids?: readonly string[]): Promise<string[]>;
   /**
    * F03: move DEFERRED requests back to ADMITTED once their target scope
    * has concurrency headroom. The missing readmission loop — submit parks
@@ -1061,13 +1065,20 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
    * release is a CAS on (state, claimed_at) so a freshly re-claimed lease is
    * never stolen. Bounded per call, one audit row per release.
    */
-  async function reclaimStale(tenant: string, nowMs: number, limit = 100): Promise<string[]> {
+  async function reclaimStale(
+    tenant: string,
+    nowMs: number,
+    limit = 100,
+    ids?: readonly string[],
+  ): Promise<string[]> {
+    if (ids && ids.length === 0) return [];
+    const names = ids ? ` AND id IN (${ids.map(() => '?').join(',')})` : '';
     const rows = (await db
       .prepare(
         `SELECT id, claimed_at, lease_ms FROM requests
-          WHERE tenant = ? AND state = 'IN_FLIGHT' AND claimed_at IS NOT NULL LIMIT ?`,
+          WHERE tenant = ? AND state = 'IN_FLIGHT' AND claimed_at IS NOT NULL${names} LIMIT ?`,
       )
-      .all(tenant, limit)) as { id: string; claimed_at: string; lease_ms: number }[];
+      .all(tenant, ...(ids ?? []), limit)) as { id: string; claimed_at: string; lease_ms: number }[];
     const released: string[] = [];
     for (const row of rows) {
       const at = Date.parse(String(row.claimed_at));

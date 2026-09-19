@@ -1,13 +1,9 @@
 import type { RoomHealthEvaluation } from '../talk/health.ts';
-import type { ShellMetrics } from './workspace-shell.ts';
+import type { ShellMetrics } from './shell-metrics.ts';
 import { CANONICAL_ROOMS } from '../talk/rooms.ts';
 import { parseTeam } from '../core/auth.ts';
 import type { IssueRow } from './issues.ts';
-import {
-  renderDepartmentTabs,
-  renderDepartmentBanner,
-  type DashboardDepartment,
-} from './dashboard-views.ts';
+import { renderDepartmentTabs, renderDepartmentBanner, type DashboardDepartment } from './dashboard-views.ts';
 
 import { THEME_INIT_SCRIPT, THEME_TOGGLE_SCRIPT, themeStyleBlock, themeToggleButton } from './theme.ts';
 import { kpiCard, paletteHtml, sectionCard, shortcutHints, statusChip, type PaletteItem } from './components.ts';
@@ -38,7 +34,9 @@ export type DashboardTab =
   | 'feed';
 
 /** Collapse 9 legacy tabs → 6 primary. Old URLs keep working. */
-export function resolvePrimaryTab(tab: DashboardTab): 'home' | 'approvals' | 'ledger' | 'workflows' | 'governance' | 'activity' {
+export function resolvePrimaryTab(
+  tab: DashboardTab,
+): 'home' | 'approvals' | 'ledger' | 'workflows' | 'governance' | 'activity' {
   if (tab === 'approvals' || tab === 'coordination') return 'approvals';
   if (tab === 'ledger') return 'ledger';
   if (tab === 'workflows' || tab === 'compiler' || tab === 'evals' || tab === 'router') return 'workflows';
@@ -66,6 +64,8 @@ export interface OperationsDashboardOptions {
   compilerMetricsHtml: string;
   realityHtml: string;
   journeyHtml?: string;
+  /** Executor honesty banner: absent, stale, or a test-baseline adapter. */
+  executorHtml?: string;
   readinessHtml?: string;
   searchHtml?: string;
   activationHtml?: string;
@@ -94,6 +94,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     compilerMetricsHtml,
     realityHtml,
     journeyHtml,
+    executorHtml,
     readinessHtml,
     searchHtml,
     activationHtml,
@@ -111,18 +112,13 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     .slice(0, 2);
 
   // Honest fallbacks: missing data renders as "—", never an invented value.
-  const dollarsStr = metrics.dollarsToday > 0
-    ? `$${metrics.dollarsToday.toFixed(2)}`
-    : '—';
-  const escalationsStr = metrics.escalationsCap > 0
-    ? `${metrics.escalationsUsed}/${metrics.escalationsCap}`
-    : `${metrics.escalationsUsed}`;
+  const dollarsStr = metrics.dollarsToday > 0 ? `$${metrics.dollarsToday.toFixed(2)}` : '—';
+  const escalationsStr =
+    metrics.escalationsCap > 0 ? `${metrics.escalationsUsed}/${metrics.escalationsCap}` : `${metrics.escalationsUsed}`;
   const humanMinStr = fmtHumanMin(metrics.humanMinutesToday, metrics.humanMinutesCap);
   // Real configured daily ceiling (room policy the coordinator enforces).
   // An unconfigured ceiling renders as an em dash — never an invented limit.
-  const budgetStr = metrics.dailyBudgetCeiling > 0
-    ? `$${metrics.dailyBudgetCeiling.toFixed(0)} / day limit`
-    : '—';
+  const budgetStr = metrics.dailyBudgetCeiling > 0 ? `$${metrics.dailyBudgetCeiling.toFixed(0)} / day limit` : '—';
 
   const issueStateChip = (state: string): string => {
     if (state === 'DONE') return 'background:var(--v-tint-good-bg);color:var(--v-tint-good-ink);';
@@ -136,8 +132,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     return 'var(--v-muted)';
   };
 
-  const issuesSidebarHtml = parseTeam(userTeam) === 'engineering'
-    ? `\
+  const issuesSidebarHtml =
+    parseTeam(userTeam) === 'engineering'
+      ? `\
       <div class="issues-sidebar-section" style="border-top:1px solid var(--v-line);margin-top:10px;padding-top:10px;">
         <div class="rooms-header" style="padding:4px 12px 6px;border-bottom:none;">
           <div class="rooms-title" style="color:var(--v-accent);font-size:11.5px;">
@@ -174,7 +171,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
           }
         </div>
       </div>`
-    : '';
+      : '';
 
   const primary = resolvePrimaryTab(activeTab);
   const pendingTotal = evaluations.reduce((s, e) => s + (e.pendingApprovals || 0), 0);
@@ -186,19 +183,60 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
   let tabMainHtml: string;
   if (primary === 'home') {
     const kpis = [
-      kpiCard({ label: 'Needs human', value: String(pendingTotal), sub: `${escalationsStr} escalations used`, href: `/console/dashboard?tab=approvals`, linkLabel: 'Review →', tone: pendingTotal > 0 ? 'accent' : 'default', glyph: '!' }),
-      kpiCard({ label: 'Spend today', value: dollarsStr, sub: budgetStr === '—' ? 'no daily ceiling set' : budgetStr, href: `/console/dashboard?tab=governance`, linkLabel: 'Budget →', tone: 'default', glyph: '$' }),
-      kpiCard({ label: 'Rooms live', value: String(roomsLive), sub: stopsTotal > 0 ? `${stopsTotal} active stops` : 'no active stops', href: `/console/rooms`, linkLabel: 'Rooms →', tone: stopsTotal > 0 ? 'accent' : 'default', glyph: '#' }),
-      kpiCard({ label: 'Drifting cards', value: String(driftTotal), sub: `${humanMinStr} human min today`, href: `/console/dashboard?tab=workflows`, linkLabel: 'Compiler →', tone: driftTotal > 0 ? 'risk' : 'default', glyph: '~' }),
+      kpiCard({
+        label: 'Needs human',
+        value: String(pendingTotal),
+        sub: `${escalationsStr} escalations used`,
+        href: `/console/dashboard?tab=approvals`,
+        linkLabel: 'Review →',
+        tone: pendingTotal > 0 ? 'accent' : 'default',
+        glyph: '!',
+      }),
+      kpiCard({
+        label: 'Spend today',
+        value: dollarsStr,
+        sub: budgetStr === '—' ? 'no daily ceiling set' : budgetStr,
+        href: `/console/dashboard?tab=governance`,
+        linkLabel: 'Budget →',
+        tone: 'default',
+        glyph: '$',
+      }),
+      kpiCard({
+        label: 'Rooms live',
+        value: String(roomsLive),
+        sub: stopsTotal > 0 ? `${stopsTotal} active stops` : 'no active stops',
+        href: `/console/rooms`,
+        linkLabel: 'Rooms →',
+        tone: stopsTotal > 0 ? 'accent' : 'default',
+        glyph: '#',
+      }),
+      kpiCard({
+        label: 'Drifting cards',
+        value: String(driftTotal),
+        sub: `${humanMinStr} human min today`,
+        href: `/console/dashboard?tab=workflows`,
+        linkLabel: 'Compiler →',
+        tone: driftTotal > 0 ? 'risk' : 'default',
+        glyph: '~',
+      }),
     ].join('');
-    const roomRows = evaluations.slice(0, 6).map((e) => `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--v-line);font-size:12.5px;">
+    const roomRows =
+      evaluations
+        .slice(0, 6)
+        .map(
+          (
+            e,
+          ) => `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--v-line);font-size:12.5px;">
         <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">#${esc2(e.roomName ?? e.scope)}</span>
-        <span style="display:flex;gap:10px;align-items:center;">${statusChip(e.status)}<span class="v-sub">${e.pendingApprovals} pending</span></span></div>`).join('') || '<p class="v-sub">No rooms yet.</p>';
+        <span style="display:flex;gap:10px;align-items:center;">${statusChip(e.status)}<span class="v-sub">${e.pendingApprovals} pending</span></span></div>`,
+        )
+        .join('') || '<p class="v-sub">No rooms yet.</p>';
     tabMainHtml = `\
       <div class="compiler-header">
         <h1 class="compiler-title">Welcome back — ${esc2(tenantDisplay)}</h1>
         <p style="font-size:12.5px;color:var(--v-muted);margin:4px 0 0;">What needs attention, what the ledger knows, and what it cost. Light by default, keyboard-first.</p>
       </div>
+      ${executorHtml ? `<div style="margin-bottom:18px;">${executorHtml}</div>` : ''}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:18px;">${kpis}</div>
       <div style="margin-bottom:18px;">${reviewHtml ?? ''}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;margin-bottom:18px;">
@@ -403,7 +441,12 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
 
   const paletteItems: PaletteItem[] = [
     { label: 'Go to Home', hint: 'executive overview', href: `/console/dashboard?tab=home`, keys: 'g h' },
-    { label: 'Go to Approvals', hint: `${pendingTotal} pending`, href: `/console/dashboard?tab=approvals`, keys: 'g a' },
+    {
+      label: 'Go to Approvals',
+      hint: `${pendingTotal} pending`,
+      href: `/console/dashboard?tab=approvals`,
+      keys: 'g a',
+    },
     { label: 'Go to Ledger', hint: 'claims + context bundles', href: `/console/dashboard?tab=ledger`, keys: 'g l' },
     { label: 'Go to Workflows', hint: 'compiler board', href: `/console/dashboard?tab=workflows`, keys: 'g w' },
     { label: 'Go to Governance', hint: 'policy + spend', href: `/console/dashboard?tab=governance`, keys: 'g g' },
@@ -411,7 +454,11 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     { label: 'Go to Activity', hint: 'feed + milestones', href: `/console/dashboard?tab=activity` },
     { label: 'Go to Chat (Buzz)', hint: 'rooms workspace', href: `/console/buzz/engineering`, keys: 'g c' },
     { label: 'Toggle dark / light', hint: 'dark default', run: 'toggle-theme', keys: 't' },
-    ...roomsList.slice(0, 12).map((r) => ({ label: `Open #${r.name}`, hint: `${r.status || '—'} · ${r.time}`, href: `/console/buzz/${encodeURIComponent(r.scope)}` })),
+    ...roomsList.slice(0, 12).map((r) => ({
+      label: `Open #${r.name}`,
+      hint: `${r.status || '—'} · ${r.time}`,
+      href: `/console/buzz/${encodeURIComponent(r.scope)}`,
+    })),
   ];
 
   return `<!DOCTYPE html>
@@ -764,6 +811,14 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     .main-viewport .bar > i { display: block; height: 100%; background: var(--v-accent); border-radius: 3px; }
     .main-viewport h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 4px 0 8px; font-style: normal; }
     .main-viewport h2 { font-size: 15px; font-weight: 650; margin: 22px 0 10px; font-style: normal; }
+    /* Embedded theme components (activation panel, readiness, review) render
+       inside .main-viewport and carry their own .v-section-title / .v-card-title
+       classes. The generic h1/h2 rules above are sized for the dashboard's own
+       .compiler-title headings; without these overrides they inflate those
+       embedded headings to 30px and cram the eyebrow label into the title.
+       Restore the theme sizes (specificity 0,2,0 beats the 0,1,1 element rules). */
+    .main-viewport .v-section-title { font-size: 20px; margin: 0; }
+    .main-viewport .v-card-title { font-size: 15.5px; margin: 0; }
     .main-viewport table { border-collapse: collapse; width: 100%; font-size: 13px; background: var(--v-bg-1); border: 1px solid var(--v-line); border-radius: 12px; overflow: hidden; }
     .main-viewport th, .main-viewport td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--v-line); }
     .main-viewport th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--v-muted); }
@@ -875,7 +930,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
         </svg>
         <span>Ledger</span>
       </a>
-      <a href="/console/dashboard?tab=workflows" id="vital-dashboard-btn" class="rail-item ${primary === 'workflows' ? 'active' : ''}" title="Workflows and compiler (g w)">
+      <a href="/console/dashboard?tab=workflows" id="console-workflows-btn" class="rail-item ${primary === 'workflows' ? 'active' : ''}" title="Workflows and compiler (g w)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="16 3 21 3 21 8"></polyline>
           <line x1="4" y1="20" x2="21" y2="3"></line>
@@ -984,7 +1039,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       ${tabRightHtml}
     </aside>
   </div>
-  ${parseTeam(userTeam) === 'engineering' ? `<script>
+  ${
+    parseTeam(userTeam) === 'engineering'
+      ? `<script>
   (function(){
     var watermark = new Date().toISOString();
     var issuesSection = document.querySelector('.issues-sidebar-section');
@@ -1025,7 +1082,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     }
     setInterval(tick, 4000);
   })();
-  </script>` : ''}
+  </script>`
+      : ''
+  }
 ${paletteHtml(paletteItems)}
 <script>${THEME_TOGGLE_SCRIPT}</script>
 <script>(()=>{document.addEventListener('keydown',e=>{if(e.target&&/input|textarea|select/i.test(e.target.tagName))return;const k=e.key.toLowerCase();if(k==='?'){e.preventDefault();window.openVitalPalette&&window.openVitalPalette();}else if(k==='g'){const h=(ev)=>{const k2=ev.key.toLowerCase();document.removeEventListener('keydown',h);const map={h:'home',a:'approvals',l:'ledger',w:'workflows',g:'governance'};if(k2==='c'){location.href='/console/buzz/engineering';}else if(k2==='m'){location.href='/console/meetings';}else if(map[k2]){location.href='/console/dashboard?tab='+map[k2];}};document.addEventListener('keydown',h,{once:true});}else if(k==='t'){document.querySelector('[data-vital-theme-toggle]')?.click();}});})();</script>

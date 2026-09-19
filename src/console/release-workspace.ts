@@ -49,6 +49,64 @@ export interface WorkflowLegView {
   decisionId: string | null;
   reason: string | null;
   url: string | null;
+  /** True when nothing will advance this leg without human recovery. */
+  stalled: boolean;
+  /** Why it is stalled, in one sentence ready to render. */
+  stallDetail: string | null;
+}
+
+/**
+ * How long an accepted-but-unclaimed leg may wait before it is called stalled.
+ *
+ * Ten minutes is not a lease: it is the absence of one. A worker picks up
+ * ACCEPTED work within seconds of a tick, and the execution lease itself is
+ * 60s, so a leg nobody has claimed after ten minutes means no executor is
+ * taking work — the state the console used to render as a perpetual "in
+ * progress".
+ */
+export const UNCLAIMED_STALL_MS = 10 * 60_000;
+
+/** The lease columns the stall check needs, read straight from `requests`. */
+export interface LegLease {
+  state: string;
+  claimedAt: string | null;
+  leaseMs: number | null;
+  updatedAt: string;
+}
+
+/**
+ * Explain a leg that has stopped moving, or `null` when it is progressing.
+ *
+ * Two distinct stalls, deliberately distinguished:
+ * - `IN_FLIGHT` past `claimed_at + lease_ms` — an executor claimed the work and
+ *   died. The coordinator's own sweep would reclaim it, but only a running
+ *   worker performs that sweep, so a dead executor strands it.
+ * - `ACCEPTED` for longer than `UNCLAIMED_STALL_MS` — no executor ever picked it
+ *   up. Approving it looked successful and changed nothing.
+ */
+export function describeLegStall(
+  requestState: string | null,
+  lease: LegLease | null,
+  nowMs: number,
+  opts: { unclaimedMs?: number } = {},
+): string | null {
+  if (!requestState || !lease) return null;
+  if (requestState === 'IN_FLIGHT') {
+    const claimedAtMs = lease.claimedAt === null ? Number.NaN : Date.parse(lease.claimedAt);
+    if (!Number.isFinite(claimedAtMs)) return null;
+    const expiresAt = claimedAtMs + (lease.leaseMs ?? 60_000);
+    if (expiresAt > nowMs) return null;
+    const over = Math.max(0, Math.round((nowMs - expiresAt) / 1000));
+    return `the executor claimed this request ${Math.round((nowMs - claimedAtMs) / 1000)}s ago and its ${Math.round((lease.leaseMs ?? 60_000) / 1000)}s lease expired ${over}s ago — the worker holding it is gone.`;
+  }
+  if (requestState === 'ACCEPTED') {
+    const sinceMs = Date.parse(lease.updatedAt);
+    if (!Number.isFinite(sinceMs)) return null;
+    const waitedMs = nowMs - sinceMs;
+    if (waitedMs < (opts.unclaimedMs ?? UNCLAIMED_STALL_MS)) return null;
+    return `accepted ${Math.round(waitedMs / 60_000)}m ago and never claimed by an executor — no worker is picking up work.`;
+  }
+  return null;
 }
 
 export interface WorkflowTraceView {
@@ -96,6 +154,8 @@ export interface WorkflowWorkspaceView {
   canCancel: boolean;
   canPreregister: boolean;
   canCaptureOutcome: boolean;
+  /** Legs that nothing will advance without human recovery, if any. */
+  stalledLegs: { key: string; requestId: string | null; detail: string | null }[];
 }
 
 export interface WorkflowListItem {
@@ -207,6 +267,16 @@ function deriveBlockerAndNext(
       nextAction: 'Retry eligible legs or raise policy limits before retrying blocked legs',
     };
   }
+  // A stall outranks a pending review: work that looks approved but can never
+  // run is the failure this view exists to make visible, and "approve the next
+  // deliverable" would otherwise be the only thing the operator was told.
+  const stalled = legs.filter((l) => l.stalled);
+  if (stalled.length > 0) {
+    return {
+      blocker: `${stalled.map((l) => l.key).join(', ')} stalled — ${stalled[0]!.stallDetail ?? 'no executor is advancing it'}`,
+      nextAction: 'Reclaim the stalled legs, then resume fan-out',
+    };
+  }
   const pendingReview = legs.find((l) => l.requestState === 'ADMITTED');
   if (pendingReview) {
     return {
@@ -232,11 +302,51 @@ function deriveBlockerAndNext(
   return { blocker: null, nextAction: null };
 }
 
+/**
+ * Execution-lease facts for the legs of one workflow, in a single query.
+ *
+ * Read per workflow rather than per leg, and answered with an empty map on
+ * failure: a workflow page must still render when the lease columns are
+ * unreadable, and it must not claim a stall it could not verify.
+ */
+async function loadLegLeases(
+  db: AsyncDb,
+  tenant: string,
+  requestIds: string[],
+): Promise<Map<string, LegLease>> {
+  const out = new Map<string, LegLease>();
+  if (requestIds.length === 0) return out;
+  const placeholders = requestIds.map(() => '?').join(',');
+  const rows = (await db
+    .prepare(
+      `SELECT id, state, claimed_at, lease_ms, updated_at FROM requests
+        WHERE tenant = ? AND id IN (${placeholders})`,
+    )
+    .all(tenant, ...requestIds)) as {
+    id: string;
+    state: string;
+    claimed_at: string | null;
+    lease_ms: number | null;
+    updated_at: string;
+  }[];
+  for (const r of rows) {
+    out.set(String(r.id), {
+      state: String(r.state),
+      claimedAt: r.claimed_at === null ? null : String(r.claimed_at),
+      leaseMs: r.lease_ms === null ? null : Number(r.lease_ms),
+      updatedAt: String(r.updated_at),
+    });
+  }
+  return out;
+}
+
 async function hydrateLeg(
   coord: Coordinator,
   ledger: Ledger,
   tenant: string,
   leg: FanOutLegRecord,
+  leases: Map<string, LegLease>,
+  nowMs: number,
 ): Promise<WorkflowLegView> {
   let requestState: string | null = null;
   let decisionId: string | null = null;
@@ -246,6 +356,12 @@ async function hydrateLeg(
     const dec = await ledger.getDecisionByRequest(tenant, leg.requestId);
     decisionId = dec?.id ?? null;
   }
+  // The coordinator's own view is authoritative for state; the lease row is
+  // authoritative for time. A leg whose coordinator read failed is not called
+  // stalled — an unreadable request is a different problem, reported elsewhere.
+  const lease = leg.requestId ? (leases.get(leg.requestId) ?? null) : null;
+  const verifiedLease = lease && lease.state === requestState ? lease : null;
+  const stallDetail = describeLegStall(requestState, verifiedLease, nowMs);
   return {
     key: leg.key,
     goal: leg.goal,
@@ -255,6 +371,8 @@ async function hydrateLeg(
     decisionId,
     reason: leg.reason,
     url: leg.requestId ? `/console/requests/${encodeURIComponent(leg.requestId)}` : null,
+    stalled: stallDetail !== null,
+    stallDetail,
   };
 }
 
@@ -331,13 +449,19 @@ export async function buildWorkspaceView(
 
   const releaseId = run?.subject ?? overlay?.feature?.feature ?? id;
   const releaseStage = await getReleaseStage(db, tenant, releaseId);
-  const legs = run ? await Promise.all(run.legs.map((l) => hydrateLeg(coord, ledger, tenant, l))) : [];
+  const nowMs = Date.now();
+  const legRequestIds = (run?.legs ?? []).map((l) => l.requestId).filter((r): r is string => Boolean(r));
+  const leases = await loadLegLeases(db, tenant, legRequestIds);
+  const legs = run
+    ? await Promise.all(run.legs.map((l) => hydrateLeg(coord, ledger, tenant, l, leases, nowMs)))
+    : [];
   const decisionIds = [
     ...(run?.decisionId ? [run.decisionId] : []),
     ...legs.map((l) => l.decisionId).filter((d): d is string => Boolean(d)),
     ...(overlay?.feature?.decisionId ? [overlay.feature.decisionId] : []),
   ];
   const uniqueDecisionIds = [...new Set(decisionIds)];
+  const stalledLegs = legs.filter((l) => l.stalled);
   const outcomes = await loadOutcomesForDecisions(db, tenant, uniqueDecisionIds);
   const prereg = overlay?.preregId ? await getPrereg(db, tenant, overlay.preregId) : null;
   const lifecycle = deriveLifecycle(run, overlay, releaseStage, outcomes);
@@ -414,7 +538,14 @@ export async function buildWorkspaceView(
     traces,
     compilerCandidates,
     replay,
-    canRetry: Boolean(run && !overlay?.cancelledAt && (run.status === 'PARTIAL' || run.status === 'BLOCKED')),
+    // A stalled leg joins PARTIAL/BLOCKED as a retryable condition: without
+    // this, a run stuck IN_PROGRESS showed no retry affordance at all, which is
+    // how an approved release sat unexecuted with the page still saying "in
+    // progress".
+    canRetry: Boolean(
+      run && !overlay?.cancelledAt && (run.status === 'PARTIAL' || run.status === 'BLOCKED' || stalledLegs.length > 0),
+    ),
+    stalledLegs: stalledLegs.map((l) => ({ key: l.key, requestId: l.requestId, detail: l.stallDetail })),
     canCancel: Boolean(!overlay?.cancelledAt && lifecycle !== 'OUTCOME_VERIFIED'),
     canPreregister: Boolean(
       !overlay?.cancelledAt &&
@@ -547,16 +678,60 @@ export async function cancelWorkflow(
   });
 }
 
+/**
+ * The request ids of this workflow's stalled legs, newest evidence first.
+ *
+ * Exported because the reclaim is a coordinator write: callers pass these ids
+ * to `reclaimStale` so the operator's retry releases the legs they are looking
+ * at, not every expired lease in the tenant.
+ */
+export async function stalledLegRequestIds(
+  db: AsyncDb,
+  tenant: string,
+  workflowId: string,
+  opts: { now?: string } = {},
+): Promise<string[]> {
+  const run = await loadFanOutRun(db, tenant, workflowId);
+  if (!run) return [];
+  const ids = run.legs.map((l) => l.requestId).filter((r): r is string => Boolean(r));
+  const leases = await loadLegLeases(db, tenant, ids);
+  const nowMs = Date.parse(opts.now ?? new Date().toISOString());
+  const out: string[] = [];
+  for (const leg of run.legs) {
+    if (!leg.requestId) continue;
+    const lease = leases.get(leg.requestId) ?? null;
+    const stall =
+      leg.status === 'EXECUTING'
+        ? describeLegStall(lease?.state ?? null, lease, nowMs)
+        : null;
+    if (stall) out.push(leg.requestId);
+  }
+  return out;
+}
+
+/**
+ * Resume a workflow, reclaiming any expired execution lease first.
+ *
+ * Without the reclaim, "retry" was a no-op on exactly the case that needed it:
+ * a leg whose executor died stays IN_FLIGHT, so the sync in `resumeFanOutWorkflow`
+ * reports the same EXECUTING leg back and the operator is told the retry ran
+ * while nothing moved. The reclaim is the coordinator's own recovery path
+ * (audited per row, CAS on state + claimed_at), scoped to this workflow's legs.
+ */
 export async function retryWorkflow(
   db: AsyncDb,
   coord: Coordinator,
   tenant: string,
   workflowId: string,
-  opts: { retryBlocked?: boolean } = {},
-): Promise<FanOutWorkflowRun> {
+  opts: { retryBlocked?: boolean; now?: string } = {},
+): Promise<{ run: FanOutWorkflowRun; reclaimed: string[] }> {
   const overlay = await loadWorkspaceOverlay(db, tenant, workflowId);
   if (overlay?.cancelledAt) throw new Error('cannot retry a cancelled workflow');
-  return resumeFanOutWorkflow(db, coord, tenant, workflowId, opts);
+  const nowIso = opts.now ?? new Date().toISOString();
+  const stalled = await stalledLegRequestIds(db, tenant, workflowId, { now: nowIso });
+  const reclaimed = stalled.length > 0 ? await coord.reclaimStale(tenant, Date.parse(nowIso), stalled.length, stalled) : [];
+  const run = await resumeFanOutWorkflow(db, coord, tenant, workflowId, opts);
+  return { run, reclaimed };
 }
 
 export async function createFeatureWorkspace(
@@ -634,11 +809,17 @@ export function renderWorkflowDetailPage(
   const legs = view.legs
     .map(
       (l) =>
-        `<tr><td>${esc(l.key)}</td><td>${esc(l.status)}</td><td>${l.url ? `<a href="${esc(l.url)}">${esc(l.requestId ?? '')}</a>` : '—'}</td>
+        `<tr><td>${esc(l.key)}</td><td>${esc(l.status)}${l.stalled ? ' <span class="v-badge v-badge-risk"><span class="dot"></span>stalled</span>' : ''}</td><td>${l.url ? `<a href="${esc(l.url)}">${esc(l.requestId ?? '')}</a>` : '—'}</td>
 <td>${esc(l.requestState ?? '—')}</td><td>${l.decisionId ? `<a href="/console/decisions/${esc(encodeURIComponent(l.decisionId))}">${esc(l.decisionId)}</a>` : '—'}</td>
 <td>${esc(l.reason ?? '')}</td></tr>`,
     )
     .join('');
+  const stallHtml =
+    view.stalledLegs.length === 0
+      ? ''
+      : `<div class="card" id="stalled-legs"><h2>Stalled legs</h2>
+<p class="sub">These legs were approved and will not advance on their own — the executor that held them is gone, or none ever claimed them. Reclaiming releases the claim back to ADMITTED so an executor can pick the work up again.</p>
+<ul>${view.stalledLegs.map((l) => `<li><strong>${esc(l.key)}</strong> — ${esc(l.detail ?? 'not advancing')}</li>`).join('')}</ul></div>`;
   const outcomes = view.outcomes.length
     ? view.outcomes
         .map(
@@ -698,8 +879,9 @@ export function renderWorkflowDetailPage(
 <p class="sub">Execution complete ≠ business outcome verified. Outcomes require a pre-registered metric and explicit basis.</p></section>`);
   }
   if (view.canRetry) {
+    const label = view.stalledLegs.length > 0 ? 'Reclaim stalled legs and resume' : 'Retry eligible legs';
     forms.push(`<form method="post" action="/console/workflows/${esc(encodeURIComponent(view.id))}/retry" style="display:inline">
-<input type="hidden" name="csrf" value="${esc(opts.csrf)}"><button type="submit">Retry eligible legs</button></form>`);
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}"><button type="submit">${label}</button></form>`);
   }
   if (view.canCancel) {
     forms.push(`<form method="post" action="/console/workflows/${esc(encodeURIComponent(view.id))}/cancel" style="display:inline;margin-left:8px">
@@ -727,6 +909,7 @@ ${view.summary ? `<p>${esc(view.summary)}</p>` : ''}
 ${view.blocker ? `<p class="err">Blocker: ${esc(view.blocker)}</p>` : ''}
 ${view.nextAction ? `<p><strong>Next:</strong> ${esc(view.nextAction)}</p>` : ''}
 ${view.cancelled ? `<p class="err">Cancelled: ${esc(view.cancelReason ?? 'no reason recorded')}</p>` : ''}
+${stallHtml}
 <div class="card"><h2>Source evidence</h2><ul>${sources || '<li class="sub">No source claims linked</li>'}</ul></div>
 <div class="card"><h2>Fan-out legs</h2>
 <p class="sub">Fan-out status: ${esc(view.fanoutStatus ?? 'n/a')}${view.releaseStage ? ` · release stage ${esc(view.releaseStage.stage)}` : ''}</p>

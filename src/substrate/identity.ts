@@ -24,6 +24,12 @@ export interface ScopeGrant {
   grants: string[];
   issuedAt: string;
   expiresAt: string;
+  /**
+   * Request this token is bound to. Execution adapters must refuse tokens
+   * whose audience is missing or names a different request — otherwise a
+   * token minted for one run replays against any other run in the scope.
+   */
+  audience?: string;
 }
 
 const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
@@ -63,7 +69,28 @@ export function verifyScopeToken(secret: string, token: string, now: string): Sc
   }
   if (!grant.scope || !Array.isArray(grant.grants))
     throw new IdentityError('MALFORMED_TOKEN', 'scope token carries no scope/grants');
+  if (grant.grants.length === 0)
+    throw new IdentityError('MALFORMED_TOKEN', 'scope token carries no grants — a token that authorizes nothing verifies to nothing');
   if (now > grant.expiresAt)
     throw new IdentityError('EXPIRED_TOKEN', `scope "${grant.scope}" token lapsed at ${grant.expiresAt}`);
   return grant;
+}
+
+/**
+ * Bind a verified grant to the request being executed. Scope equality alone
+ * leaves cross-request replay open inside the scope; the audience closes it.
+ */
+export function assertTokenAudience(grant: ScopeGrant, requestId: string): void {
+  if (!grant.audience) {
+    throw new IdentityError(
+      'NO_AUDIENCE',
+      'scope token names no request — mint with audience set to the request id',
+    );
+  }
+  if (grant.audience !== requestId) {
+    throw new IdentityError(
+      'AUDIENCE_MISMATCH',
+      `scope token audience "${grant.audience}" does not match request "${requestId}"`,
+    );
+  }
 }

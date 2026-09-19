@@ -2,14 +2,15 @@ import { EventEmitter } from 'node:events';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import type { CoordinationRequest, RoutingClass } from '../core/types.ts';
+import type { CoordinationRequest, RoutingClass, SourceTier } from '../core/types.ts';
 import { JcodeClient, type JcodeClientOptions } from './client.ts';
 import type { PermissionDecision, ServerFrame } from './protocol.ts';
 import { isShellTool, screenShellCommand } from '../gov/shell.ts';
 import { getRates } from '../attrib/attribution.ts';
 import { FilesystemArtifactStore } from '../ingest/collectors.ts';
 import { checkKill, guardedAuthorize } from '../gov/trust.ts';
-import { verifyScopeToken } from '../substrate/identity.ts';
+import { verifyScopeToken, assertTokenAudience } from '../substrate/identity.ts';
+import { quoteExternal, formatQuotedPrompt } from '../sense/integrity.ts';
 import { verifySandbox, type Manifest } from '../substrate/sandbox.ts';
 import type { ScreenResult } from '../substrate/screen.ts';
 
@@ -346,6 +347,11 @@ export class JcodeRunner extends EventEmitter {
           `[jcode:IDENTITY] scope token scope "${grant.scope}" does not match target scope "${req.targetScope}"`,
         );
       }
+      try {
+        assertTokenAudience(grant, requestId);
+      } catch (e) {
+        throw new Error(`[jcode:IDENTITY] ${(e as Error).message}`, { cause: e });
+      }
     }
 
     // Scoped control: verify sandbox manifest before execution if requested
@@ -407,17 +413,32 @@ export class JcodeRunner extends EventEmitter {
       // non-fatal
     }
 
+    // Claim statements cross into model reasoning as QUOTED data, never as
+    // instructions: each carries its provenance chrome and inert-data
+    // delimiters, so a poisoned ledger statement cannot promote itself into
+    // a command. The task command itself stays the sole instruction.
+    const quoteClaim = (c: { kind: string; subject: string; id: string; statement: string; scope: string }) => {
+      const provenance = (c as { provenance?: { sourceUri?: string; sourceTier?: string } }).provenance;
+      const tier: SourceTier = (
+        ['SYSTEM_OF_RECORD', 'MEASURED', 'PRIMARY', 'CORROBORATED', 'SINGLE_SOURCE', 'SELF_SERVED'] as const
+      ).includes(provenance?.sourceTier as never)
+        ? (provenance!.sourceTier as SourceTier)
+        : 'SELF_SERVED';
+      return formatQuotedPrompt(
+        quoteExternal(
+          `[${c.kind}] (${c.subject}) [${c.id}]: ${c.statement}`,
+          typeof provenance?.sourceUri === 'string' && provenance.sourceUri ? provenance.sourceUri : `ledger:${c.id}`,
+          tier,
+        ),
+      );
+    };
     const blocks: string[] = [];
     if (contextClaims.length > 0) {
-      const contextLines = contextClaims
-        .map((c) => `- [${c.kind}] (${c.subject}) [${c.id}]: ${c.statement}`)
-        .join('\n');
+      const contextLines = contextClaims.map((c) => quoteClaim(c)).join('\n');
       blocks.push(`[Grounded Context]\n${contextLines}`);
     }
     if (crossRoomClaims.length > 0) {
-      const crossLines = crossRoomClaims
-        .map((c) => `- [${c.kind}] (${c.scope}) (${c.subject}) [${c.id}]: ${c.statement}`)
-        .join('\n');
+      const crossLines = crossRoomClaims.map((c) => quoteClaim(c)).join('\n');
       blocks.push(`[Cross-Room Evidence]\n${crossLines}`);
     }
     blocks.push(`[Instruction]\n${task.command}`);

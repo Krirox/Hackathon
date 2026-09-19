@@ -6,7 +6,7 @@ import { JcodeRunner, type PermissionPolicy } from '../jcode/runner.ts';
 import { validateExecutionAgainstSpec } from '../coord/execution-spec.ts';
 import type { JcodeClientOptions } from '../jcode/client.ts';
 import { checkKill } from '../gov/trust.ts';
-import { verifyScopeToken } from './identity.ts';
+import { verifyScopeToken, assertTokenAudience } from './identity.ts';
 import { verifySandbox, type Manifest } from './sandbox.ts';
 
 /**
@@ -220,6 +220,11 @@ export class LocalEchoAdapter implements HarnessAdapter {
           'SCOPE_MISMATCH',
           `scope token scope "${grant.scope}" does not match "${req.targetScope}"`,
         );
+      }
+      try {
+        assertTokenAudience(grant, requestId);
+      } catch (e) {
+        throw new HarnessError('AUDIENCE_MISMATCH', (e as Error).message);
       }
     }
 

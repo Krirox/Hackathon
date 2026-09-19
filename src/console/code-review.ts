@@ -123,7 +123,12 @@ function hunkHtml(doc: CodeReviewDoc, f: ChangedFile, h: ChangedFile['hunks'][nu
       else if (l.type === ' ') right += line(l.text, '', l.newNo, '  ', h.id);
     }
     if (f.status === 'A') left = `<div class="ln"><span class="no"></span><span class="tx mut">No file existed (new file).</span></div>`;
-    if (f.status === 'D') right = `<div class="ln"><span class="no"></span><span class="tx mut">FILE DELETED — <button class="btn" form="noop">Restore via Reject below</button></span></div>`;
+    // Was a `<button form="noop">Restore via Reject below</button>` — a button
+    // whose form was an empty hidden element with `onsubmit="return false"`, so
+    // clicking it did nothing at all. A control that cannot act is worse than a
+    // sentence that explains which control does; the real affordance is Reject
+    // All, which restores the baseline.
+    if (f.status === 'D') right = `<div class="ln"><span class="no"></span><span class="tx mut">FILE DELETED — restoring the baseline means rejecting the whole set (Reject All below); a single deleted file cannot be restored on its own.</span></div>`;
   }
   const decided = h.decision !== 'pending' ? ` <span class="mut">(${h.decision})</span>` : '';
   const attr = h.agentId ? esc(h.agentId) : 'Agent attribution unavailable';
@@ -208,8 +213,7 @@ ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value=
 <form method="post" style="display:inline" data-confirm="Reject ALL agent changes and restore baseline?"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="reject-all"><input type="hidden" name="confirm" value="1"><button class="btn dan" type="submit">Reject All</button></form>
 <span class="mut">reviewed by ${esc(user)}</span></div></div>
 <div class="steps" style="padding:8px 20px;border-bottom:1px solid var(--line);background:var(--v-bg-1)">${stepHtml}</div>
-<div class="layout"><div class="side-l"><b>CHANGED FILES</b> (${files.length})${sidebar}</div><div class="main">${main}</div><div class="side-r">${right}</div></div>
-<form id="noop" onsubmit="return false" style="display:none"></form>`;
+<div class="layout"><div class="side-l"><b>CHANGED FILES</b> (${files.length})${sidebar}</div><div class="main">${main}</div><div class="side-r">${right}</div></div>`;
   return shell(`Review ${doc.missionId}`, body);
 }
 

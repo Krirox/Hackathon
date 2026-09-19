@@ -24,7 +24,14 @@ import { installAuthSchema, signupTenant, inviteUser, listUsers, totpCode } from
 import { approvalMessage, generateOperatorKey, operatorKeyId, signApproval } from '../src/gov/operator.ts';
 import { seedTrace, cardInput } from './helpers.ts';
 import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
-import { buildWorkspaceView, loadWorkspaceOverlay } from '../src/console/release-workspace.ts';
+import {
+  buildWorkspaceView,
+  describeLegStall,
+  loadWorkspaceOverlay,
+  renderWorkflowDetailPage,
+  retryWorkflow,
+} from '../src/console/release-workspace.ts';
+import { saveFanOutRun, type FanOutWorkflowRun } from '../src/wedge/fanout-workflow.ts';
 import { fanOutWorkflow } from '../src/wedge/ship.ts';
 import { persistDeliverableVersion } from '../src/wedge/deliverable-artifact.ts';
 import { buildTenantJourney } from '../src/console/journey.ts';
@@ -3882,14 +3889,37 @@ T('FINAL-008: truthful password reset & email verification copy and operator ass
     eq(emailReq.includes('Outbound email is not configured'), true);
     eq(emailReq.includes('vital verify-link'), true);
 
-    // 5. With mailer configured: relabels to transactional mail delivery
+    // 5. No environment variable may turn those honest answers into a promise.
+    // This used to assert the reverse: `VITAL_MAILER_ENABLED=1` relabelled the
+    // pages to "Send reset email" / "Send verification link" — copy for a sender
+    // that does not exist in `src/`. A deployment could therefore switch a
+    // working operator flow into a false "check your inbox" on account recovery.
+    // The test now pins the honest direction: the flag changes nothing, because
+    // it was never a mailer.
     process.env.VITAL_MAILER_ENABLED = '1';
     try {
       const forgotWithMailer = await (await fetch(`${baseUrl}/forgot-password`)).text();
-      eq(forgotWithMailer.includes('Send reset email'), true);
+      eq(forgotWithMailer.includes('Send reset email'), false, 'no inbox promise from a flag:');
+      eq(forgotWithMailer.includes('Request operator reset link'), true);
+      eq(forgotWithMailer.includes('not configured'), true);
 
       const accountWithMailer = await (await fetch(`${baseUrl}/account`, { headers: owner.headers })).text();
-      eq(accountWithMailer.includes('Send verification link'), true);
+      eq(accountWithMailer.includes('Send verification link'), false, 'no inbox promise from a flag:');
+      eq(accountWithMailer.includes('vital verify-link'), true);
+
+      // And the POST answers honestly too (a reset request for a real address).
+      const pre = await fetch(`${baseUrl}/forgot-password`, { redirect: 'manual' });
+      const preCookies = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+      const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+      const forgotPost = await (
+        await fetch(`${baseUrl}/forgot-password`, {
+          method: 'POST',
+          headers: { cookie: preCookies, 'content-type': 'application/x-www-form-urlencoded' },
+          body: `csrf=${preToken}&email=owner%40acme.test`,
+        })
+      ).text();
+      eq(forgotPost.includes('has been sent to your inbox'), false, 'the POST does not claim a send:');
+      eq(forgotPost.includes('not configured'), true, 'it names the operator path instead:');
     } finally {
       delete process.env.VITAL_MAILER_ENABLED;
     }
@@ -4070,7 +4100,11 @@ T('FINAL-012: irreversible actions enforce destructiveConfirm and typed confirma
       body: JSON.stringify({ fingerprint: v.fingerprint, confirmText: 'WRONG' }),
     });
     eq(badApprove.status, 400);
-    eq((await badApprove.text()).includes('type PUBLISH to confirm external publication'), true);
+    // The refusal now names what approval actually does: it records an
+    // authorization, and the console itself publishes nothing.
+    const badApproveBody = await badApprove.text();
+    eq(badApproveBody.includes('type PUBLISH to confirm'), true);
+    eq(badApproveBody.includes('publishes nothing itself'), true, 'the copy does not imply a delivery:');
 
     // Attempt approval with typed PUBLISH confirmation
     const goodApprove = await fetch(`${baseUrl}/api/deliverables/${v.id}/approve`, {
@@ -4151,6 +4185,237 @@ T('FINAL-014: shared nav across authenticated pages and unified terminology', as
       const res = await fetch(`${baseUrl}${path}`, { headers: owner.headers });
       eq(res.status, 200, `${path} reachable`);
     }
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-015: a leg nothing will advance is named stalled and can be reclaimed', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+
+  // Pure classification first: both stalls, and the cases that must NOT be
+  // called stalls (a live lease, an unreadable clock).
+  const NOW_MS = Date.parse(NOW);
+  eq(describeLegStall('IN_FLIGHT', null, NOW_MS), null, 'no lease row, no claim of a stall:');
+  eq(
+    describeLegStall(
+      'IN_FLIGHT',
+      { state: 'IN_FLIGHT', claimedAt: NOW, leaseMs: 60_000, updatedAt: NOW },
+      NOW_MS,
+    ),
+    null,
+    'a lease still inside its window is not stalled:',
+  );
+  const dead = describeLegStall(
+    'IN_FLIGHT',
+    { state: 'IN_FLIGHT', claimedAt: '2026-01-01T00:00:00.000Z', leaseMs: 1000, updatedAt: NOW },
+    NOW_MS,
+  );
+  eq(dead !== null, true, 'an expired execution lease is stalled:');
+  eq(dead!.includes('lease expired'), true, 'the reason names the lease, not just the symptom:');
+  eq(
+    describeLegStall('ACCEPTED', { state: 'ACCEPTED', claimedAt: null, leaseMs: null, updatedAt: NOW }, NOW_MS),
+    null,
+    'an accepted leg inside the grace window is still progressing:',
+  );
+  const unclaimed = describeLegStall(
+    'ACCEPTED',
+    { state: 'ACCEPTED', claimedAt: null, leaseMs: null, updatedAt: '2026-01-01T00:00:00.000Z' },
+    NOW_MS,
+  );
+  eq(unclaimed !== null, true, 'an accepted leg no executor ever claimed is stalled:');
+  eq(describeLegStall('ADMITTED', null, NOW_MS), null, 'an admitted leg awaiting review is not stalled:');
+
+  // Now the real path: an executor claimed the leg and died holding the lease.
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'release:v1',
+    kind: 'OBSERVATION',
+    statement: 'release evidence',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const { request } = await coord.submit(base({ id: 'req-stall', goal: 'ship the release note', claimRefs: [clm.id] }));
+  await coord.claimExecution(TEN, request.id, 'worker-dead', '2026-01-01T00:00:00.000Z', 1000);
+
+  const run: FanOutWorkflowRun = {
+    id: 'wfr_stall',
+    tenant: TEN,
+    kind: 'ship',
+    claimIds: [clm.id],
+    onBehalfOf: 'human:owner',
+    now: NOW,
+    subject: 'release:v1',
+    summary: null,
+    legs: [
+      {
+        key: 'engineering',
+        originScope: 'product',
+        targetScope: 'engineering',
+        messageClass: 'REQUEST',
+        goal: 'ship the release note',
+        deliverableSchema: 'launch-copy.v1',
+        humanMinutes: 10,
+        requestId: request.id,
+        status: 'EXECUTING',
+        reason: null,
+        dedupedTo: null,
+        updatedAt: NOW,
+      },
+    ],
+    status: 'IN_PROGRESS',
+    decisionId: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  await saveFanOutRun(db, run);
+
+  const view = await buildWorkspaceView(db, ledger, coord, comp, TEN, run.id);
+  eq(view?.legs[0]!.stalled, true);
+  eq(view?.stalledLegs.length, 1);
+  eq(view?.stalledLegs[0]!.requestId, request.id);
+  eq(
+    view?.canRetry,
+    true,
+    'a stalled run offers recovery even while the fan-out status still says IN_PROGRESS:',
+  );
+  eq(view?.blocker?.includes('stalled'), true, 'the blocker names the stall:');
+
+  const html = renderWorkflowDetailPage(view!, { home: '/console/dashboard', csrf: 'csrf', actor: 'owner' });
+  eq(html.includes('Stalled legs'), true, 'the page shows a stall section:');
+  eq(html.includes('Reclaim stalled legs and resume'), true, 'and the button says what it will do:');
+
+  // Retry reclaims the dead executor's lease — otherwise "resume" would report
+  // success while the leg stayed EXECUTING forever.
+  const { reclaimed } = await retryWorkflow(db, coord, TEN, run.id, { now: '2026-02-01T00:00:00.000Z' });
+  eq(reclaimed.length, 1);
+  eq(reclaimed[0], request.id);
+  eq((await coord.get(TEN, request.id))?.state, 'ADMITTED', 'the reclaimed leg is runnable again:');
+
+  const after = await buildWorkspaceView(db, ledger, coord, comp, TEN, run.id);
+  eq(after?.stalledLegs.length, 0, 'nothing is stalled once the claim is released:');
+
+  await db.close();
+});
+
+T('learning actions: the compile form is owner-only, evidence-gated, and CSRF-checked', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'test:compile-route',
+    kind: 'OBSERVATION',
+    statement: 'release evidence',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'marketing',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  for (let i = 0; i < 3; i++) {
+    const { request } = await coord.submit(
+      base({ id: `req-route-${i}`, goal: `draft copy ${i}`, claimRefs: [clm.id] }),
+    );
+    await coord.claimExecution(TEN, request.id, 'jcode:worker', NOW, 60_000);
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(`tr_route_${i}`, TEN, request.id, 'marketing', 'launch.copy.draft', 'draft-launch-copy', '[]', 'MODEL', 'SUCCESS', '{}', null, 0.9, NOW);
+  }
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const page = await (await fetch(`${base_}/console/learning/compile`, { headers: owner.headers })).text();
+    eq(page.includes('Compile a skill card'), true);
+    eq(page.includes('draft-launch-copy'), true, 'the mined candidate is offered:');
+    eq(page.includes('jcode'), true, 'and the models the evidence came from are shown:');
+
+    // A body with no CSRF token never reaches the compiler.
+    const noToken = await fetch(`${base_}/console/learning/compile`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'intent=draft-launch-copy',
+      redirect: 'manual',
+    });
+    eq(noToken.status, 403, 'a mutating learning route requires the token:');
+    eq((await comp.list(TEN, {})).length, 0, 'and nothing was compiled:');
+
+    // A tier the evidence does not support is refused with the reason.
+    const wrongTier = await fetch(`${base_}/console/learning/compile`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&intent=draft-launch-copy&scope=marketing&tier=REFLEX&predicates=p&steps=s&tests=t&toolGrants=`,
+      redirect: 'manual',
+    });
+    eq(wrongTier.status, 303);
+    eq((wrongTier.headers.get('location') ?? '').includes('error='), true, 'refusal is carried back to the form:');
+    eq(decodeURIComponent(wrongTier.headers.get('location') ?? '').includes('not supported by this evidence'), true);
+
+    // The supported tier compiles, and the card lands in CANDIDATE.
+    const compiled = await fetch(`${base_}/console/learning/compile`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&intent=draft-launch-copy&scope=marketing&tier=MODEL&predicates=a+release+summary+exists&steps=read+the+claims%0Adraft+the+copy&tests=every+bullet+cites+a+claim&toolGrants=docs.read`,
+      redirect: 'manual',
+    });
+    eq(compiled.status, 303);
+    eq((compiled.headers.get('location') ?? '').includes('/console/learning/skl_'), true);
+    const cards = await comp.list(TEN, {});
+    eq(cards.length, 1);
+    eq(cards[0]!.state, 'CANDIDATE');
+    eq(cards[0]!.originModels, ['jcode']);
+
+    // The card page offers the transfer test, and refuses a same-scope run.
+    const cardPage = await (await fetch(`${base_}/console/learning/${cards[0]!.id}`, { headers: owner.headers })).text();
+    eq(cardPage.includes('Run a transfer test'), true, 'the page can now start the path it describes:');
+    const sameScope = await fetch(`${base_}/console/learning/cards/${cards[0]!.id}/transfer-test`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&targetScope=marketing&command=x&claimIds=${clm.id}&maxDollars=1&maxTokens=1000`,
+      redirect: 'manual',
+    });
+    eq(sameScope.status, 303);
+    eq(decodeURIComponent(sameScope.headers.get('location') ?? '').includes('cannot send work to itself'), true);
+    const outboxRows = await db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'transfer-test'").get();
+    eq(Number((outboxRows as { n: number }).n), 0, 'a refused request queues nothing:');
+
+    const queued = await fetch(`${base_}/console/learning/cards/${cards[0]!.id}/transfer-test`, {
+      method: 'POST',
+      headers: { ...owner.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${owner.csrf}&targetScope=engineering&command=draft+the+copy&claimIds=${clm.id}&maxDollars=1&maxTokens=1000`,
+      redirect: 'manual',
+    });
+    eq(queued.status, 303);
+    eq((queued.headers.get('location') ?? '').includes('queued='), true);
+    const after = await db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'transfer-test' AND status = 'PENDING'").get();
+    eq(Number((after as { n: number }).n), 1, 'the transfer test is durable:');
+
+    // Members cannot compile or queue anything.
+    await inviteUser(
+      db,
+      TEN,
+      { email: 'member-compile@acme.test', name: 'M', role: 'member', password: 'a-members-password-long' },
+      { userId: 'seed', role: 'owner' },
+      NOW,
+    );
+    const member = await formSession(server.port, 'member-compile@acme.test', 'a-members-password-long');
+    eq((await fetch(`${base_}/console/learning/compile`, { headers: member.headers })).status, 403);
+    const memberPost = await fetch(`${base_}/console/learning/cards/${cards[0]!.id}/transfer-test`, {
+      method: 'POST',
+      headers: { ...member.headers, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${member.csrf}&targetScope=engineering&command=x&claimIds=${clm.id}&maxDollars=1&maxTokens=1000`,
+      redirect: 'manual',
+    });
+    eq(memberPost.status, 403, 'a member cannot spend harness budget:');
   } finally {
     await server.close();
     await db.close();

@@ -1,4 +1,4 @@
-import { CANONICAL_ROOMS, loadRoomConfig, saveRoomConfig, type RoomConfig, type RoomAutonomy } from '../talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, saveRoomConfig, ROOM_BUDGET_MAX_DOLLARS, ROOM_BUDGET_MAX_TOKENS, type RoomConfig, type RoomAutonomy } from '../talk/rooms.ts';
 import type { AsyncDb } from '../core/db.ts';
 
 export interface PresetDefinition {
@@ -24,8 +24,14 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
   },
   {
     id: 'research',
-    name: 'Deep Research & Intelligence',
-    description: 'Real-time fact checking, competitor market crawls, and sandboxed prompt canary exploration.',
+    // Named for the scopes it creates, not for a workflow it cannot start: the
+    // deep-research pipeline (crawl → cited report) and the prompt-canary engine
+    // are library work with no dispatch path yet (README 'Current State'), so
+    // offering them as a room capability promised something the product could
+    // not run. The rooms are real; the pipeline is not wired.
+    name: 'Research scopes (pipeline not wired)',
+    description:
+      'Creates the fact-checking and research room scopes. The deep-research and market-crawl workflows are not wired yet — this preset lays out the rooms, not the pipeline.',
     scopes: ['core', 'facts', 'research', 'experimental'],
   },
   {
@@ -292,6 +298,16 @@ export async function handleRoomsSetupPost(
     const autonomy = formData[`autonomy_${def.scope}`] as RoomAutonomy | undefined;
     const budget = Number(formData[`budget_${def.scope}`]);
     const tokens = Number(formData[`tokens_${def.scope}`]);
+    // Ceilings gate the hard budget block: bound them so a fat finger (or a
+    // compromised admin session) cannot silently authorize unbounded spend.
+    if (Number.isFinite(budget) && budget > ROOM_BUDGET_MAX_DOLLARS) {
+      throw new Error(
+        `[rooms:BUDGET_TOO_HIGH] ${def.scope} ceiling $${budget} exceeds the $${ROOM_BUDGET_MAX_DOLLARS} cap`,
+      );
+    }
+    if (Number.isFinite(tokens) && tokens > ROOM_BUDGET_MAX_TOKENS) {
+      throw new Error(`[rooms:BUDGET_TOO_HIGH] ${def.scope} token ceiling exceeds the cap`);
+    }
 
     const selectedSors = AVAILABLE_SORS.filter((s) => formData[`sor_${def.scope}_${s.id}`] === '1').map((s) => s.id);
 

@@ -110,6 +110,14 @@ export interface RouteDef<Env> {
    * body. Required for every mutating method, enforced at boot.
    */
   body?: BodyPolicy;
+  /**
+   * Require a fully activated account (`mustChangePassword` cleared). Declared
+   * per route rather than applied to every session, because the legacy console
+   * was inconsistent about it and "now every route does it" is a behaviour change
+   * disguised as a refactor. The transport follows `surface`: a page redirects to
+   * the password form, an API caller gets 403 ACTIVATION_REQUIRED.
+   */
+  activation?: 'required';
   /** One line for the manifest (used by the route-table test). */
   note?: string;
   handler(ctx: RouteCtx<Env>): Promise<void> | void;
@@ -165,7 +173,16 @@ export function compilePattern(pattern: string): (path: string) => Record<string
       const param = PARAM_SEGMENT.exec(w);
       if (param) {
         if (g.length === 0) return null;
-        params[param[1]!] = decodeURIComponent(g);
+        // Never throw here. `decodeURIComponent('%zz')` raises URIError, and a
+        // throwing matcher turns an anonymous malformed path into a 500 (or an
+        // unhandled rejection) — a single-request denial of service from the
+        // public port. A segment that will not decode is handed over raw, and
+        // the handler that needs a real id validates it and answers 400.
+        try {
+          params[param[1]!] = decodeURIComponent(g);
+        } catch {
+          params[param[1]!] = g;
+        }
         continue;
       }
       if (w !== g) return null;
@@ -256,6 +273,9 @@ export function validateRoutes<Env>(routes: ReadonlyArray<RouteDef<Env>>): void 
     // would be a check that can never pass.
     if (route.body === 'csrf' && route.capability === 'public')
       problems.push(`${id} declares a CSRF check but is public (no session exists)`);
+    // Activation is a property of an account, so the route needs one.
+    if (route.activation === 'required' && route.capability === 'public')
+      problems.push(`${id} requires an activated account but is public`);
   }
   if (problems.length > 0) throw new Error(`[route-table] ${problems.join('; ')}`);
 }

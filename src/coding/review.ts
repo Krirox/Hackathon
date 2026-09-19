@@ -59,6 +59,31 @@ export async function getReview(db: AsyncDb, tenant: string, missionId: string):
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key(tenant, missionId))) as { value: string } | undefined;
   return row ? (JSON.parse(String(row.value)) as CodeReviewDoc) : null;
 }
+
+/**
+ * Every review opened for this tenant, newest first.
+ *
+ * The review UI was reachable only by typing `/console/review/<missionId>`:
+ * the document is keyed by mission, and nothing in the product listed the keys.
+ * An index over the same rows is what turns a URL-shaped tool into a page — and
+ * it stays honest about the empty case, because a tenant with no reviews has
+ * genuinely never opened one.
+ */
+export async function listReviews(db: AsyncDb, tenant: string): Promise<CodeReviewDoc[]> {
+  const rows = (await db.prepare('SELECT value FROM meta WHERE key LIKE ?').all(`review:${tenant}:%`)) as {
+    value: string;
+  }[];
+  const out: CodeReviewDoc[] = [];
+  for (const row of rows) {
+    try {
+      const doc = JSON.parse(String(row.value)) as CodeReviewDoc;
+      if (doc.tenant === tenant) out.push(doc);
+    } catch {
+      /* a corrupt row must not hide the readable ones */
+    }
+  }
+  return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
 async function save(db: AsyncDb, doc: CodeReviewDoc): Promise<CodeReviewDoc> {
   doc.updatedAt = new Date().toISOString();
   await db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')

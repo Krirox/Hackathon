@@ -160,7 +160,7 @@ Deliverable schema
 <input type="text" name="deliverableSchema" value="${esc(defaultSchema)}" required>
 </label>
 <label style="display:block;margin-bottom:0.5rem">
-<input type="checkbox" name="externalPublish"> External publication
+<input type="checkbox" name="externalPublish"> External publication (irreversible — approving it records the authorization; it is not posted or deployed by this console)
 </label>
 <button type="submit">Submit deliverable draft</button>
 </form>
@@ -203,13 +203,13 @@ ${addedHtml(diff)}
   let reviewForms: string;
   if (canReview) {
     const externalConfirm = version.externalPublish
-      ? `<label style="display:block;margin:0.5rem 0">Type <code>PUBLISH</code> to confirm irreversible action: <input type="text" name="confirmText" placeholder="PUBLISH" required></label>`
+      ? `<label style="display:block;margin:0.5rem 0">Type <code>PUBLISH</code> to confirm you are authorizing an irreversible external action — one that you (or an operator) carry out outside this console: <input type="text" name="confirmText" placeholder="PUBLISH" required></label>`
       : '';
     reviewForms = `<form data-review-action="approve-deliverable" action="/api/deliverables/${esc(encodeURIComponent(version.id))}/approve" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input type="hidden" name="fingerprint" value="${esc(version.fingerprint)}">
 ${operatorFields(opts, version.id, 'approve-deliverable')}
-<label><input type="checkbox" name="confirmed" required> I inspected this exact asset (v${version.version}, fingerprint <code>${esc(version.fingerprint.slice(0, 12))}…</code>) and approve publication</label>
+<label><input type="checkbox" name="confirmed" required> I inspected this exact asset (v${version.version}, fingerprint <code>${esc(version.fingerprint.slice(0, 12))}…</code>) and approve it${version.externalPublish ? ' — understanding that this records the authorization and publishes nothing by itself' : ''}</label>
 ${externalConfirm}
 <button type="submit">Approve deliverable</button>
 </form>
@@ -270,7 +270,11 @@ ${CLAIM_CITE_SCRIPT}
   const externalNote = version.externalPublish
     ? destructiveConfirm({
         target: 'External publication',
-        consequences: 'Irreversible action; approval records human-command authorization for external delivery.',
+        // Exactly what the code does: it writes a decision. An approval that reads
+        // like a deployment is the kind of copy that gets someone to approve
+        // something they believe already happened.
+        consequences:
+          'Irreversible action. Approving records human-command authorization in the ledger — this console does not publish, post, or deploy; the operator performs the external action outside it.',
         retained: 'Audit ledger and decision receipt',
       })
     : '';

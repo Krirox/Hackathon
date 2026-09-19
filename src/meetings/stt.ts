@@ -215,11 +215,21 @@ export class WhisperSttProvider implements SttProvider {
 export class LiveTranscriptManager {
   private sequence = 0;
 
+  /**
+   * `sttProvider` has no default on purpose.
+   *
+   * It used to default to `MockSttProvider`, which meant a production console
+   * could hold a test double on the live path and nothing said so — the same
+   * class of bug as the pipeline's mock default, one layer down. A manager with
+   * no provider is a *configuration* state: appending already-transcribed
+   * segments (what the browser does today) works fine, and asking it to
+   * transcribe audio refuses instead of inventing a transcript.
+   */
   constructor(
     private readonly db: AsyncDb,
     private readonly tenant: string,
     private readonly meetingId: string,
-    private readonly sttProvider: SttProvider = new MockSttProvider(),
+    private readonly sttProvider?: SttProvider,
   ) {}
 
   /**
@@ -253,11 +263,21 @@ export class LiveTranscriptManager {
 
   /**
    * Process an audio chunk directly through STT and append if recognized.
+   *
+   * Throws when no provider is configured. The alternative — returning null —
+   * looked like "nothing was said", which is indistinguishable from a working
+   * recognizer sitting in an empty room, and is how a silent misconfiguration
+   * survives a demo.
    */
   async processAudioChunk(
     chunk: Buffer | Uint8Array,
     context?: { speakerId: string; speakerName: string; offsetSec: number },
   ): Promise<TranscriptSegment | null> {
+    if (!this.sttProvider) {
+      throw new Error(
+        '[stt:NO_PROVIDER] no speech-to-text provider is configured for this meeting — live audio cannot be transcribed here',
+      );
+    }
     if (this.sttProvider.transcribeLiveChunk) {
       const seg = await this.sttProvider.transcribeLiveChunk(chunk, context);
       if (seg && seg.text.trim()) {

@@ -462,6 +462,14 @@ const configKey = (tenant: string, scope: string): string => `room:config:${tena
 /** Scopes active out-of-box: general + marketing (business) + eng (infra). Rest are user-made. */
 export const SEED_DEFAULT_SCOPES: readonly string[] = ['general', 'business', 'infra'];
 
+/**
+ * Hard bounds on room spend ceilings. Ceilings gate the budget block in
+ * enforce.ts, so an unbounded ceiling is an unbounded spend authorization —
+ * the setup surface refuses anything above these.
+ */
+export const ROOM_BUDGET_MAX_DOLLARS = 100_000;
+export const ROOM_BUDGET_MAX_TOKENS = 500_000_000;
+
 export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: string): Promise<RoomConfig> {
   const scope = normalizeScope(rawScope);
   const resolved =

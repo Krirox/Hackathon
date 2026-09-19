@@ -12,6 +12,7 @@ import {
   type ChatMessage,
 } from '../substrate/models.ts';
 import { decideEgress } from '../substrate/egress.ts';
+import { checkKill } from '../gov/trust.ts';
 import { getRates } from '../attrib/attribution.ts';
 
 /**
@@ -182,6 +183,29 @@ export async function runJob(
   // legal coordinator transition). Anything else non-live still throws.
   if (req.state !== 'ADMITTED' && req.state !== 'IN_FLIGHT' && req.state !== 'ACCEPTED' && req.state !== 'FAILED') {
     throw new Error(`[executor] request ${job.requestId} is ${req.state}, not admitted`);
+  }
+
+  // Emergency stop, checked BEFORE the claim and before any spend. This executor
+  // runs serverless and never passes through a harness adapter, so the
+  // adapter-level check that guards a local run cannot guard this one — without
+  // this, an operator's stop halts the worker and leaves Lambda spending money
+  // on the same scope. Checked here rather than deeper so the refusal also
+  // precedes `assertApproved` and the model call.
+  if (
+    (await checkKill(db, job.tenant, req.targetScope, '*')) ||
+    (await checkKill(db, job.tenant, '*', '*'))
+  ) {
+    const reason = `kill switch engaged for scope "${req.targetScope}"`;
+    // Terminal refusal, not a retry: a stop is an operator decision, and an
+    // SQS redelivery would spend exactly the money the stop was protecting. A
+    // request already in a state that cannot fail still ends the job — the
+    // reason travels in `error` either way.
+    try {
+      await coord.fail(job.tenant, job.requestId, reason);
+    } catch {
+      // Already terminal, or not failable from here: the refusal stands.
+    }
+    return { status: 'FAILED', claimIds: [], usage: { input: 0, output: 0 }, error: reason };
   }
 
   // F05: exclusive leased ownership BEFORE any spend. The atomic

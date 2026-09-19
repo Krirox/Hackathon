@@ -6,12 +6,16 @@ import type { CoordinationRequest } from '../core/types.ts';
 import { claimOutbox, settleOutbox, type OutboxRow } from './scheduler.ts';
 import { JcodeAdapter, LocalEchoAdapter, type HarnessAdapter } from './harness.ts';
 import { requiresHumanApproval, validateExecutionAgainstSpec, type ExecutionSpec } from '../coord/execution-spec.ts';
-import { runJob, type ExecutorJob } from '../aws/executor.ts';
+import { enqueueExecutorJob, runJob, type ExecutorJob } from '../aws/executor.ts';
 import { CognitiveRouter } from '../router/router.ts';
 import { OrganizationalCompiler, mineCandidates } from '../compiler/compiler.ts';
 import type { RoutingClass } from '../core/types.ts';
 import { watchRun, type BuzzSurface } from '../talk/buzz.ts';
 import { evaluateDispatch } from '../talk/enforce.ts';
+import { checkKill } from '../gov/trust.ts';
+import { runCrossModelEvidence } from '../compiler/transfer.ts';
+import { BUZZ_STATUS_KIND } from '../talk/buzz-surface.ts';
+import { loadDeliverableByRequest, persistDeliverableVersion } from '../wedge/deliverable-artifact.ts';
 
 export interface ApplicationWorkerOptions {
   tenant: string;
@@ -29,9 +33,35 @@ export interface ApplicationWorkerOptions {
     req: CoordinationRequest,
   ) => Promise<{ claims?: string[]; cost?: Partial<CoordinationRequest['spent']> }>;
   sqsSender?: (job: ExecutorJob) => Promise<void>;
+  /**
+   * Where MODEL-tier work runs.
+   *
+   * `local` (default) executes it here through the harness adapter. `cloud`
+   * writes a durable `executor-job` row instead, which the outbox relay delivers
+   * — to SQS when a sender is configured, otherwise to the same Lambda container
+   * handler in-process (`runJob`).
+   *
+   * This exists because the executor lane had a consumer and no producer:
+   * `enqueueExecutorJob` was called from nothing but tests, so the Lambda path,
+   * its Terraform, and the deployment doc described a lane that no product flow
+   * could ever feed. The seam is opt-in because switching where approved work
+   * executes is a deployment decision, not a refactor.
+   */
+  executorLane?: 'local' | 'cloud';
   router?: CognitiveRouter;
   compiler?: OrganizationalCompiler;
   enableLearningLoop?: boolean;
+  /**
+   * Harnesses a `transfer-test` job runs the card through.
+   *
+   * Separate from `adapter` because transfer evidence is about *breadth*: the
+   * point is running the same procedure on a second harness whose model differs.
+   * Defaults to the worker's own adapter, which is honest but narrow — with only
+   * a test-baseline harness attached the run records `harness_smoke`, not
+   * `cross_model`, and the cross-model promotion gate stays open. The worker
+   * says so in its errors rather than letting the row imply otherwise.
+   */
+  transferAdapters?: HarnessAdapter[];
   /**
    * Optional Buzz surface for live progress and terminal summaries.
    * `channelFor` maps a requestId to channel/threadRoot (return null to
@@ -60,6 +90,8 @@ export interface WorkerStatus {
     outboxSettled: number;
     outboxFailed: number;
     requestsDispatched: number;
+    /** MODEL-tier requests handed to the cloud executor lane instead of run here. */
+    requestsQueuedForCloud: number;
     requestsCompleted: number;
     requestsFailed: number;
     driftChecks: number;
@@ -86,6 +118,7 @@ export interface WorkerTickResult {
   outboxProcessed: number;
   outboxFailed: number;
   requestsDispatched: number;
+  requestsQueuedForCloud: number;
   requestsCompleted: number;
   requestsFailed: number;
 }
@@ -114,10 +147,12 @@ export class ApplicationWorker {
     req: CoordinationRequest,
   ) => Promise<{ claims?: string[]; cost?: Partial<CoordinationRequest['spent']> }>;
   private readonly sqsSender?: (job: ExecutorJob) => Promise<void>;
+  private readonly executorLane: 'local' | 'cloud';
   readonly router: CognitiveRouter;
   readonly compiler: OrganizationalCompiler;
   private readonly enableLearningLoop: boolean;
   private readonly buzz?: ApplicationWorkerOptions['buzz'];
+  private readonly transferAdapters: HarnessAdapter[];
 
   private stopped = false;
   private startedAt: number | null = null;
@@ -135,6 +170,7 @@ export class ApplicationWorker {
     outboxSettled: 0,
     outboxFailed: 0,
     requestsDispatched: 0,
+    requestsQueuedForCloud: 0,
     requestsCompleted: 0,
     requestsFailed: 0,
     driftChecks: 0,
@@ -167,6 +203,7 @@ export class ApplicationWorker {
     this.outboxHandler = options.outboxHandler;
     this.requestExecutor = options.requestExecutor;
     this.sqsSender = options.sqsSender;
+    this.executorLane = options.executorLane ?? 'local';
     this.router = options.router ?? new CognitiveRouter(this.db);
     this.compiler = options.compiler ?? new OrganizationalCompiler(this.db);
     this.enableLearningLoop = options.enableLearningLoop ?? true;
@@ -179,6 +216,160 @@ export class ApplicationWorker {
     } else {
       this.adapter = new LocalEchoAdapter(this.db, this.ledger, this.coord);
     }
+    this.transferAdapters = options.transferAdapters ?? [this.adapter];
+  }
+
+  /**
+   * Run one queued cross-model transfer test and bank its evidence.
+   *
+   * This is the other half of the learning loop: `compile()` can now mint a
+   * CANDIDATE card from the console, but a card only leaves quarantine with
+   * transfer evidence, and the harnesses that produce it live on a worker. So the
+   * console queues the run and this executes it — the same governed adapter path
+   * an ordinary request takes, including kill switches, because it goes through
+   * `adapter.run` rather than around it.
+   *
+   * Throws only for a malformed job. A harness failure is not an error here:
+   * `runCrossModelEvidence` banks negative transfer results, and a failed test is
+   * exactly the evidence the gate exists to record.
+   */
+  private async runTransferTest(row: OutboxRow, nowIso: string): Promise<void> {
+    const payload = (row.payload ?? {}) as {
+      cardId?: string;
+      originScope?: string;
+      targetScope?: string;
+      command?: string;
+      claimIds?: string[];
+      maxDollars?: number;
+      maxTokens?: number;
+      onBehalfOf?: string;
+    };
+    const cardId = payload.cardId?.trim();
+    if (!cardId) throw new Error('[worker:TRANSFER_TEST] job carries no cardId');
+    const targetScope = payload.targetScope?.trim() || payload.originScope?.trim();
+    if (!targetScope) throw new Error('[worker:TRANSFER_TEST] job carries no target scope');
+    const originScope = payload.originScope?.trim() || targetScope;
+    // Refused rather than run: a self-delegation fails inside the coordinator, and
+    // that failure would be banked as a FAILED transfer — evidence the card would
+    // carry for a configuration mistake. A malformed job belongs in the outbox's
+    // failure state, not in the card's trust record.
+    if (originScope === targetScope) {
+      throw new Error(
+        `[worker:TRANSFER_TEST] card=${cardId} origin and target scope are both ${targetScope}; a transfer must leave the card's own scope`,
+      );
+    }
+
+    const runs = await runCrossModelEvidence(
+      this.coord,
+      this.compiler,
+      this.tenant,
+      cardId,
+      this.transferAdapters,
+      {
+        originScope,
+        targetScope,
+        command: payload.command?.trim() || cardId,
+        claimIds: payload.claimIds ?? [],
+        onBehalfOf: payload.onBehalfOf?.trim() || `worker:${this.workerId}`,
+        maxDollars: payload.maxDollars ?? 2,
+        maxTokens: payload.maxTokens ?? 20_000,
+        now: nowIso,
+      },
+    );
+
+    // Baseline harnesses record `harness_smoke`, which does not satisfy the
+    // cross-model gate. Say so here: a transfer test that ran but cannot promote
+    // is a fact the operator needs, not a silent success.
+    if (!runs.some((r) => r.kind === 'cross_model')) {
+      const msg = `[worker:TRANSFER_SMOKE_ONLY] card=${cardId} — every attached harness is a test baseline, so the run recorded harness_smoke and the cross-model gate is still open`;
+      this.lastError = msg;
+      this.errors.push(msg);
+    }
+  }
+
+  /**
+   * Turn a completed run into a reviewable draft deliverable.
+   *
+   * Without this the last hop of the flagship loop was manual: an asynchronous run
+   * produced a claim, a trace and a snapshot, and the human was then asked to
+   * hand-draft the artifact before they could approve it. `ship.ts` drafts inline
+   * for the synchronous path; the worker never did, so anything executed in the
+   * background had no artifact to review and the ship loop could not close.
+   *
+   * Idempotent: an existing deliverable for the request is left untouched, so a
+   * redelivered run cannot stack versions. Non-fatal: the execution itself
+   * succeeded, so a drafting failure is reported through `errors` (visible in
+   * worker status) instead of failing the request that already did its work.
+   */
+  private async draftDeliverable(input: {
+    requestId: string;
+    deliverableSchema: string;
+    content: string;
+    claimIds: string[];
+    createdBy: string;
+    now: string;
+    isTestBaseline?: boolean;
+  }): Promise<void> {
+    try {
+      // An echo/test-baseline adapter is not a deliverable: drafting its 
+      // transcript would fill the review queue with the harness's own words.
+      if (input.isTestBaseline) return;
+      if (!input.content.trim()) {
+        throw new Error('run completed with an empty transcript — nothing to draft');
+      }
+      const existing = await loadDeliverableByRequest(this.db, this.tenant, input.requestId);
+      if (existing) return;
+      await persistDeliverableVersion(this.db, this.ledger, {
+        tenant: this.tenant,
+        requestId: input.requestId,
+        deliverableSchema: input.deliverableSchema,
+        content: input.content,
+        claimIds: input.claimIds,
+        createdBy: input.createdBy,
+        now: input.now,
+      });
+    } catch (err) {
+      const msg = `[worker:DRAFT_FAILED] req=${input.requestId} ${String(err).slice(0, 200)}`;
+      this.lastError = msg;
+      this.errors.push(msg);
+    }
+  }
+
+  /**
+   * Deliver a governance notice (`automation-self-halt`, `canary-sla-miss`).
+   *
+   * These are the governance system's own alarm bells. The halt one is a freeze:
+   * an operator who is not told about it cannot clear it, and the halt stands
+   * until someone does. The canary one is a degraded scope where an agent failed
+   * to notice a planted anomaly — the exact signal a supervisor must see. With no
+   * Buzz surface bound this throws, which leaves the outbox row FAILED and
+   * retrying rather than claiming a delivery that never happened. The durable
+   * audit row and the console panels are the in-product record either way, so the
+   * failure mode of this method is "loud", not "lost".
+   */
+  private async deliverNotice(row: OutboxRow): Promise<void> {
+    const payload = (row.payload ?? {}) as { scope?: string; actionClass?: string; reason?: string };
+    const scope = payload.scope ?? '*';
+    const summary =
+      row.kind === 'canary-sla-miss'
+        ? `Honeytask canary missed — scope ${scope}: ${payload.reason ?? 'canary SLA miss'}`
+        : `Automation frozen — scope ${scope}/${payload.actionClass ?? '*'}: ${payload.reason ?? 'self-halt'}`;
+    if (!this.buzz) {
+      throw new Error(`[worker:OUTBOX_UNDELIVERABLE] no Buzz surface bound: ${summary}`);
+    }
+    // Published as a status event rather than chat text, matching the status
+    // beacon the health sweeps emit: a halt is a state, and a state belongs in a
+    // kind that a client can filter for instead of in the conversation stream.
+    await this.buzz.surface.publish({
+      kind: BUZZ_STATUS_KIND,
+      tags: [
+        ['d', `${row.kind}:${scope}`],
+        ['vital-notice', row.kind],
+        ['vital-scope', scope],
+        ['vital-action-class', payload.actionClass ?? '*'],
+      ],
+      content: summary,
+    });
   }
 
   stop(): void {
@@ -210,7 +401,15 @@ export class ApplicationWorker {
     // write must never fail the tick it reports on.
     try {
       const { recordWorkerHeartbeat } = await import('../gov/trust.ts');
-      await recordWorkerHeartbeat(this.db, this.tenant, { workerId: this.workerId, now: nowIso });
+      await recordWorkerHeartbeat(this.db, this.tenant, {
+        workerId: this.workerId,
+        now: nowIso,
+        // Which executor is attached matters as much as being alive: the echo
+        // harness completes requests without doing work, and the console can only
+        // say so if the heartbeat carries it.
+        adapter: this.adapter.name,
+        baseline: this.adapter.isTestBaseline === true,
+      });
     } catch {
       /* heartbeat is observability, not work */
     }
@@ -220,6 +419,7 @@ export class ApplicationWorker {
       outboxProcessed: 0,
       outboxFailed: 0,
       requestsDispatched: 0,
+      requestsQueuedForCloud: 0,
       requestsCompleted: 0,
       requestsFailed: 0,
     };
@@ -291,6 +491,29 @@ export class ApplicationWorker {
               await this.sqsSender(row.payload as ExecutorJob);
             } else if (row.kind === 'executor-job') {
               await runJob(this.db, row.payload as ExecutorJob, process.env);
+            } else if (row.kind === 'automation-self-halt' || row.kind === 'canary-sla-miss') {
+              await this.deliverNotice(row);
+            } else if (row.kind === 'transfer-test') {
+              // Enqueued by the console (`/console/learning/cards/:id/transfer-test`).
+              // Handled here because the harnesses are attached to this process.
+              await this.runTransferTest(row, nowIso);
+            } else if (row.kind === 'scheduler-occurrence') {
+              // Not a delivery: `recordSchedulerOccurrence` documents this row as
+              // *the durable record* that a cron fired ("the in-memory registry
+              // stays the scheduling state, the outbox is the durable record"). A
+              // record has nothing to deliver, so acknowledging it here is the
+              // whole job — named explicitly so the next reader does not have to
+              // decide whether DONE was an oversight.
+            } else {
+              // Fail closed on a kind no handler owns. Settling it DONE reported a
+              // delivery that never happened, which is how every
+              // `automation-self-halt` row was swallowed: the governance system's
+              // own alarm was marked "delivered" by falling through this branch,
+              // with the DB as the only witness that it was not. A row nobody can
+              // deliver must stay FAILED and retrying so it is visible.
+              throw new Error(
+                `outbox: no handler for kind "${row.kind}" — refusing to settle it as delivered`,
+              );
             }
             await settleOutbox(this.db, [row.id], 'DONE', { owner: this.workerId });
             this.counters.outboxSettled += 1;
@@ -432,11 +655,64 @@ export class ApplicationWorker {
             continue;
           }
 
+          // Cloud execution lane: Lambda's handler is documented as REFLEX/
+          // WORKFLOW + short MODEL work, and a MODEL-tier request is exactly what
+          // it is for. The row is written before anything is claimed, so a crash
+          // between the decision and the delivery loses nothing, and only the
+          // cloud executor claims the request — never both.
+          if (this.executorLane === 'cloud' && routeDecision.tier === 'MODEL') {
+            try {
+              await enqueueExecutorJob(
+                this.db,
+                this.tenant,
+                {
+                  tenant: this.tenant,
+                  requestId: reqId,
+                  prompt: command,
+                  claimRefs: groundedClaimRefs,
+                  onBehalfOf,
+                },
+                { now: nowIso },
+              );
+              result.requestsDispatched += 1;
+              result.requestsQueuedForCloud += 1;
+              this.counters.requestsDispatched += 1;
+              this.counters.requestsQueuedForCloud += 1;
+            } catch (err) {
+              // A lane that cannot queue is a lane that silently does nothing; a
+              // failure to write the row is reported like any other worker error.
+              const msg = `[worker:CLOUD_ENQUEUE_FAILED] req=${reqId} ${(err as Error).message}`;
+              this.lastError = msg;
+              this.errors.push(msg);
+              result.requestsFailed += 1;
+              this.counters.requestsFailed += 1;
+            }
+            continue;
+          }
+
           result.requestsDispatched += 1;
           this.counters.requestsDispatched += 1;
 
           try {
             if (this.requestExecutor) {
+              // A custom executor never passes through a harness adapter, and the
+              // adapter is where the kill check normally happens (harness.ts).
+              // Guarding before the claim keeps one safety property across both
+              // execution paths: an engaged stop refuses the work before it is
+              // claimed, and therefore before it can spend.
+              if (
+                (await checkKill(this.db, this.tenant, targetScope, '*')) ||
+                (await checkKill(this.db, this.tenant, '*', '*'))
+              ) {
+                await this.coord.fail(
+                  this.tenant,
+                  reqId,
+                  `kill switch engaged for scope "${targetScope}"`,
+                );
+                result.requestsFailed += 1;
+                this.counters.requestsFailed += 1;
+                continue;
+              }
               const claimed = await this.coord.claimExecution(this.tenant, reqId, this.workerId, nowIso);
               let execSuccess = false;
               try {
@@ -589,6 +865,16 @@ export class ApplicationWorker {
               if (outcome.status === 'COMPLETED') {
                 this.counters.requestsCompleted += 1;
                 result.requestsCompleted += 1;
+                // EXECUTION → REVIEW: leave a draft a human can act on.
+                await this.draftDeliverable({
+                  requestId: reqId,
+                  deliverableSchema: request.deliverableSchema,
+                  content: outcome.transcript,
+                  claimIds: groundedClaimRefs,
+                  createdBy: onBehalfOf,
+                  now: nowIso,
+                  isTestBaseline: outcome.isTestBaseline,
+                });
               } else {
                 this.counters.requestsFailed += 1;
                 result.requestsFailed += 1;

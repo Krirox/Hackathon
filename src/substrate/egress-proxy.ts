@@ -6,7 +6,7 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
-import { decideEgress, type EgressPolicy } from './egress.ts';
+import { resolveAndDecideEgress, type EgressPolicy } from './egress.ts';
 
 /**
  * Egress forward proxy (TODO V2.1): the enforcement point for
@@ -49,10 +49,14 @@ export function startEgressProxy(
 ): Promise<EgressProxy> {
   const audit = opts.audit ?? (() => {});
   const now = opts.now ?? (() => new Date().toISOString());
-  const judge = (host: string, port: number, method: string): boolean => {
-    const d = decideEgress(host, policy);
+  const judge = async (host: string, port: number, method: string): Promise<{ ok: boolean; dialHost: string }> => {
+    const d = await resolveAndDecideEgress(host, policy);
     audit({ at: now(), host, port, method, verdict: d.verdict, reason: d.reason });
-    return d.verdict === 'allow';
+    if (d.verdict !== 'allow') return { ok: false, dialHost: host };
+    // Dial the checked address, not the hostname: DNS cannot rebind the
+    // connection between this decision and connect(). The Host header and
+    // TLS SNI still carry the original name (see call sites).
+    return { ok: true, dialHost: d.dialHost ?? host };
   };
 
   const server: Server = createServer();
@@ -64,6 +68,7 @@ export function startEgressProxy(
   });
 
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    void (async () => {
     // Proxy-form: GET http://host:port/path. Origin-form (GET /path) has
     // no authority and is refused — this proxy never guesses destinations.
     const raw = req.url ?? '';
@@ -87,14 +92,15 @@ export function startEgressProxy(
       return;
     }
     const { host, port } = hostPortFrom(target.host, target.protocol === 'http:' ? 80 : 443);
-    if (!judge(host, port, req.method ?? 'GET')) {
+    const judgement = await judge(host, port, req.method ?? 'GET');
+    if (!judgement.ok) {
       res.writeHead(403, { 'content-type': 'text/plain' });
       res.end('egress denied by policy');
       return;
     }
     const upstream = httpRequest(
       {
-        host,
+        host: judgement.dialHost,
         port,
         path: `${target.pathname}${target.search}`,
         method: req.method,
@@ -110,26 +116,34 @@ export function startEgressProxy(
       res.end('upstream unreachable');
     });
     req.pipe(upstream);
+    })().catch(() => {
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end('upstream unreachable');
+      }
+    });
   });
 
   server.on('connect', (req: IncomingMessage, sock: Socket) => {
     const { host, port } = hostPortFrom(req.url ?? '', 443);
-    if (!judge(host, port, 'CONNECT')) {
-      sock.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      sock.destroy();
-      return;
-    }
-    const tunnel = netConnect(port, host, () => {
-      sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      sock.pipe(tunnel);
-      tunnel.pipe(sock);
+    void judge(host, port, 'CONNECT').then((judgement) => {
+      if (!judgement.ok) {
+        sock.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        sock.destroy();
+        return;
+      }
+      const tunnel = netConnect(port, judgement.dialHost, () => {
+        sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        sock.pipe(tunnel);
+        tunnel.pipe(sock);
+      });
+      const die = (): void => {
+        sock.destroy();
+        tunnel.destroy();
+      };
+      sock.on('error', die);
+      tunnel.on('error', die);
     });
-    const die = (): void => {
-      sock.destroy();
-      tunnel.destroy();
-    };
-    sock.on('error', die);
-    tunnel.on('error', die);
   });
 
   return new Promise((resolve, reject) => {

@@ -5,6 +5,7 @@ import { RoomBudgetTracker, type BudgetGasGauge } from '../talk/budget-gauge.ts'
 import type { BuzzSurface } from '../talk/buzz.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import { listUsers } from '../core/auth.ts';
+import { svgIcon } from './buzz-icons.ts';
 
 /**
  * The Workspace (internal: buzz) — the human-facing chat console.
@@ -204,8 +205,6 @@ export async function createLocalReply(
   return id;
 }
 
-
-
 /** Local stand-in when the relay is not configured: recent audit + approvals. */
 async function localRoomActivity(db: AsyncDb, tenant: string, scope: string): Promise<BuzzThreadMessage[]> {
   const localMsgs = (await db
@@ -250,9 +249,152 @@ async function localRoomActivity(db: AsyncDb, tenant: string, scope: string): Pr
 }
 
 function autonomyBadge(autonomy: string): string {
-  if (autonomy === 'supervised') return '<span style="color:#B45309;">human-in-the-loop</span>';
-  if (autonomy === 'guarded') return '<span style="color:#B45309;">guarded</span>';
-  return '<span style="color:#047857;">autonomous</span>';
+  if (autonomy === 'supervised') return '<span style="color:var(--buzz-lock);">human-in-the-loop</span>';
+  if (autonomy === 'guarded') return '<span style="color:var(--buzz-lock);">guarded</span>';
+  return '<span style="color:var(--buzz-good);">autonomous</span>';
+}
+
+/**
+ * Inline-only markdown-lite pass: `code`, **bold**, *italic*, @mentions,
+ * [text](url) links and the embedded GitHub PR card. Input is raw message
+ * text; XSS safety comes from the escape-first invariant — the whole string
+ * is `esc()`ed before any tag is injected, so markup the agents themselves
+ * emitted stays inert text and only the tags added here are real HTML.
+ */
+function markdownInline(text: string): string {
+  let out = esc(text);
+  // Markdown-lite: agent briefings arrive as `**bold**` / `*italic*` /
+  // `` `code` `` and used to render as escaped source text — the single
+  // biggest visual-dirt tell next to the crafted marketing pages.
+  out = out.replace(/`([^`\n]+)`/g, '<code class="buzz-md-code">$1</code>');
+  // [text](url) — resolved before the PR-card rewrite below. The href
+  // allow-list (http/https/relative/anchor) keeps javascript: and friends out.
+  out = out.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s)"&]+(?:&[^\s)"]*)?|\/[^\s)"#]*|#[^\s)"]*)\)/g,
+    '<a href="$2" class="buzz-md-link" target="_blank" rel="noopener noreferrer">$1</a>',
+  );
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong class="buzz-md-strong">$1</strong>');
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em class="buzz-md-em">$2</em>');
+  // Mentions styled as Buzz pill with mini avatar or bee icon
+  out = out.replace(/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g, (match, target) => {
+    const src = getAgentAvatarSrc(target);
+    const icon = src
+      ? `<img src="${esc(src)}" alt="" style="width:13px;height:13px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:2px;" loading="lazy">`
+      : '<span style="font-size:10px;opacity:0.8;">🐝</span>';
+    return `<span style="background:var(--buzz-inset-2);border:1px solid var(--buzz-border-soft);color:var(--buzz-ink-1);font-weight:600;padding:1px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:3px;font-size:12px;vertical-align:baseline;">${icon}${target}</span>`;
+  });
+  // Embedded PR Card. The lookbehind stops the rewrite from climbing into
+  // the href="…" attribute of a markdown link resolved above.
+  out = out.replace(
+    /(?<!["=])(https:\/\/github\.com\/[^\s"]+|BUZ-\d+)/g,
+    (match) =>
+      `<div style="display:inline-flex;align-items:center;gap:10px;background:var(--buzz-inset);border:1px solid var(--buzz-border-soft);border-radius:8px;padding:6px 12px;margin:6px 0;max-width:100%;"><span style="width:24px;height:24px;border-radius:6px;background:var(--buzz-border-soft);display:grid;place-items:center;font-size:11px;color:var(--buzz-ink-3);flex-shrink:0;">⎇</span><div style="display:flex;flex-direction:column;min-width:0;"><span style="font-size:10px;color:var(--buzz-ink-3);font-weight:600;">GitHub · PR</span><a href="${match}" target="_blank" style="color:var(--buzz-info);font-weight:600;font-size:12.5px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${match}</a></div></div>`,
+  );
+  // Custom inline Buzz PR card
+  out = out.replace(
+    /\[Buzz · PR\]\s*([^<\n]+)/g,
+    '<div style="display:inline-flex;align-items:center;gap:10px;background:var(--buzz-inset);border:1px solid var(--buzz-border-soft);border-radius:8px;padding:6px 12px;margin:6px 0;"><span style="width:24px;height:24px;border-radius:6px;background:var(--buzz-border-soft);display:grid;place-items:center;font-size:11px;color:var(--buzz-ink-3);">⎇</span><div style="display:flex;flex-direction:column;"><span style="font-size:10px;color:var(--buzz-ink-3);font-weight:600;">Buzz · PR</span><span style="font-weight:600;font-size:12.5px;color:var(--buzz-ink-1);">$1</span></div></div>',
+  );
+  return out;
+}
+
+/**
+ * Markdown-lite block renderer for chat bubbles. Agents — and our own slash
+ * commands and canvases — emit `## headings`, `- ` bullets, `1.` lists,
+ * fenced code blocks and blockquotes, which the pre-wrap bubble used to show
+ * as raw source. Block structure is handled here; every text run then goes
+ * through `markdownInline` (which keeps the escape-first XSS invariant).
+ * Plain messages stay one `<p>` with pre-wrap, so human line breaks render
+ * exactly as before.
+ */
+export function renderMarkdownLite(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const blocks: string[] = [];
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length === 0) return;
+    blocks.push(`<p class="buzz-md-p">${markdownInline(para.join('\n'))}</p>`);
+    para = [];
+  };
+  const UL = /^\s*[-*+]\s+(.*)$/;
+  const OL = /^\s*\d+[.)]\s+(.*)$/;
+  const QUOTE = /^\s*>\s?(.*)$/;
+  const isFence = (l: string) => /^\s*(```|~~~)/.test(l);
+  const li = (x: string) => `<li class="buzz-md-li">${markdownInline(x)}</li>`;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (isFence(line)) {
+      flushPara();
+      const lang = /^\s*(?:```|~~~)\s*([A-Za-z0-9_+-]*)/.exec(line)?.[1] ?? '';
+      const body: string[] = [];
+      i += 1;
+      while (i < lines.length && !isFence(lines[i]!)) {
+        body.push(lines[i]!);
+        i += 1;
+      }
+      // An unterminated fence (the 4000-char clip can cut mid-block) is
+      // auto-closed so raw backticks never leak into later blocks.
+      blocks.push(
+        `<pre class="buzz-md-pre"${lang ? ` data-lang="${esc(lang)}"` : ''}><code>${esc(body.join('\n'))}</code></pre>`,
+      );
+      continue;
+    }
+    const h = /^\s*(#{1,6})\s+(.+)$/.exec(line);
+    if (h) {
+      flushPara();
+      blocks.push(`<div class="buzz-md-h buzz-md-h--${String(h[1]!.length)}">${markdownInline(h[2]!)}</div>`);
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushPara();
+      blocks.push('<hr class="buzz-md-hr">');
+      continue;
+    }
+    const q = QUOTE.exec(line);
+    if (q) {
+      flushPara();
+      const inner: string[] = [q[1]!];
+      let m: RegExpExecArray | null;
+      while (i + 1 < lines.length && (m = QUOTE.exec(lines[i + 1]!))) {
+        i += 1;
+        inner.push(m[1]!);
+      }
+      blocks.push(`<blockquote class="buzz-md-quote">${inner.map((x) => markdownInline(x)).join('<br>')}</blockquote>`);
+      continue;
+    }
+    const ul = UL.exec(line);
+    if (ul) {
+      flushPara();
+      const items: string[] = [ul[1]!];
+      let m: RegExpExecArray | null;
+      while (i + 1 < lines.length && (m = UL.exec(lines[i + 1]!))) {
+        i += 1;
+        items.push(m[1]!);
+      }
+      blocks.push(`<ul class="buzz-md-list">${items.map(li).join('')}</ul>`);
+      continue;
+    }
+    const ol = OL.exec(line);
+    if (ol) {
+      flushPara();
+      const items: string[] = [ol[1]!];
+      let m: RegExpExecArray | null;
+      while (i + 1 < lines.length && (m = OL.exec(lines[i + 1]!))) {
+        i += 1;
+        items.push(m[1]!);
+      }
+      blocks.push(`<ol class="buzz-md-list">${items.map(li).join('')}</ol>`);
+      continue;
+    }
+    if (line.trim() === '') {
+      flushPara();
+      continue;
+    }
+    para.push(line);
+  }
+  flushPara();
+  return blocks.join('');
 }
 
 export function getAgentAvatarSrc(name: string): string | null {
@@ -339,56 +481,56 @@ export function getScopeAvatarSrc(scope: string): string {
 /** The roster: Slack-style channel browser. The sidebar (in the shell)
  *  already lists every room, so this page is the directory, not a second
  *  sidebar. */
-export function renderBuzzRoster(data: BuzzRosterData, home: string, _csrf: string): string {
+export function renderBuzzRoster(data: BuzzRosterData, _home: string, _csrf: string): string {
   const order = new Map(CANONICAL_ROOMS.map((d, i) => [d.scope, i]));
   const rooms = [...data.rooms].sort((a, b) => (order.get(a.scope) ?? 99) - (order.get(b.scope) ?? 99));
 
   let relayLine: string;
   if (!data.relay) {
     relayLine =
-      '<p style="font-size:13px;color:#616061;background:#F8F8F8;border:1px solid #DDDDDD;border-radius:8px;padding:8px 12px;">Relay not configured — working locally. Messages stay on this workspace.</p>';
+      '<p style="font-size:13px;color:var(--buzz-ink-3);background:var(--buzz-inset);border:1px solid var(--buzz-border);border-radius:8px;padding:8px 12px;">Relay not configured — working locally. Messages stay on this workspace.</p>';
   } else if (data.relay.ok) {
-    relayLine = `<p style="font-size:13px;color:#2BAC76;">Relay connected: ${esc(data.relay.detail)}</p>`;
+    relayLine = `<p style="font-size:13px;color:var(--buzz-good);">Relay connected: ${esc(data.relay.detail)}</p>`;
   } else {
-    relayLine = `<p style="font-size:13px;color:#E01E5A;">Relay unreachable: ${esc(data.relay.detail)}</p>`;
+    relayLine = `<p style="font-size:13px;color:var(--buzz-risk);">Relay unreachable: ${esc(data.relay.detail)}</p>`;
   }
 
   const provisionedCount = rooms.filter((r) => r.provisioned).length;
   const unprovisioned = rooms.filter((r) => !r.provisioned);
   const provisionLine =
     unprovisioned.length > 0
-      ? `<p style="font-size:13px;color:#616061;">${provisionedCount}/${rooms.length} rooms live · <a href="${esc(home)}setup/rooms">set up the rest</a></p>`
-      : `<p style="font-size:13px;color:#2BAC76;">All ${rooms.length} rooms live.</p>`;
+      ? `<p style="font-size:13px;color:var(--buzz-ink-3);">${provisionedCount}/${rooms.length} rooms live · <a href="/setup/rooms">set up the rest</a></p>`
+      : `<p style="font-size:13px;color:var(--buzz-good);">All ${rooms.length} rooms live.</p>`;
 
   const row = (room: (typeof rooms)[number]) => {
     const live = room.provisioned
-      ? '<span style="color:#2BAC76;">● live</span>'
-      : '<span style="color:#ECB22E;" title="not provisioned">○ local</span> not provisioned';
+      ? '<span style="color:var(--buzz-good);">● live</span>'
+      : '<span style="color:var(--buzz-warn);" title="not provisioned">○ local</span> not provisioned';
     const pending =
       room.health.pendingApprovals > 0
-        ? ` <span style="background:#CD2553;color:#fff;font-size:11px;font-weight:700;min-width:20px;height:20px;display:inline-grid;place-items:center;border-radius:999px;padding:0 6px;">${room.health.pendingApprovals}</span>`
+        ? ` <span style="background:var(--buzz-risk);color:var(--buzz-ink-inverse);font-size:11px;font-weight:700;min-width:20px;height:20px;display:inline-grid;place-items:center;border-radius:999px;padding:0 6px;">${room.health.pendingApprovals}</span>`
         : '';
     const agentName = room.agentName;
     const avatar = getScopeAvatarSrc(room.scope);
-    return `<div style="display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid #E8E8E8;">
-  <img src="${esc(avatar)}" alt="${esc(agentName)}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid #E2E8F0;background:#F8FAFC;" loading="lazy">
+    return `<div style="display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--buzz-border);">
+  <img src="${esc(avatar)}" alt="${esc(agentName)}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--buzz-border-soft);background:var(--buzz-inset);" loading="lazy">
   <div style="flex:1;min-width:0;">
-    <div style="font-size:15px;display:flex;align-items:center;gap:6px;"><a href="${esc(home)}console/buzz/${esc(room.scope)}" style="font-weight:700;color:#1D1C1D;">#${esc(room.roomName)}</a>${pending} <span style="font-size:12px;">${room.health.badge}</span> <span style="font-weight:400;color:#616061;font-size:12px;">· ${esc(room.gauge.headerString)}</span></div>
-    <div style="font-size:13px;color:#616061;margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${esc(room.mission.slice(0, 110))}${room.mission.length > 110 ? '…' : ''}</div>
-    <div style="font-size:12px;color:#868686;margin-top:2px;">${esc(room.scope)} · <strong>@${esc(agentName)}</strong> · ${autonomyBadge(room.autonomy)}${room.active ? '' : ' · disabled'} · ${live}</div>
+    <div style="font-size:15px;display:flex;align-items:center;gap:6px;"><a href="/console/buzz/${esc(room.scope)}" style="font-weight:700;color:var(--buzz-ink-1);">#${esc(room.roomName)}</a>${pending} <span style="font-size:12px;">${room.health.badge}</span> <span style="font-weight:400;color:var(--buzz-ink-3);font-size:12px;">· ${esc(room.gauge.headerString)}</span></div>
+    <div style="font-size:13px;color:var(--buzz-ink-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${esc(room.mission.slice(0, 110))}${room.mission.length > 110 ? '…' : ''}</div>
+    <div style="font-size:12px;color:var(--buzz-ink-3);margin-top:2px;">${esc(room.scope)} · <strong>@${esc(agentName)}</strong> · ${autonomyBadge(room.autonomy)}${room.active ? '' : ' · disabled'} · ${live}</div>
   </div>
-  <a href="${esc(home)}console/buzz/${esc(room.scope)}" style="flex-shrink:0;font-size:13px;font-weight:600;border:1px solid #DDDDDD;border-radius:6px;padding:6px 12px;color:#1D1C1D;text-decoration:none;background:#fff;">View</a>
+  <a href="/console/buzz/${esc(room.scope)}" style="flex-shrink:0;font-size:13px;font-weight:600;border:1px solid var(--buzz-border);border-radius:6px;padding:6px 12px;color:var(--buzz-ink-1);text-decoration:none;background:var(--buzz-surface);">View</a>
 </div>`;
   };
 
   return `<section style="padding:26px 32px;max-width:920px;">
-  <h1 style="font-size:20px;margin:0 0 4px;color:#1D1C1D;">Browse channels</h1>
-  <p style="font-size:13px;color:#616061;margin:0 0 12px;">One room per scope. Agents work in their rooms and surface what needs you.</p>
+  <h1 style="font-size:20px;margin:0 0 4px;color:var(--buzz-ink-1);">Browse channels</h1>
+  <p style="font-size:13px;color:var(--buzz-ink-3);margin:0 0 12px;">One room per scope. Agents work in their rooms and surface what needs you.</p>
   ${relayLine}
   ${provisionLine}
-  <input type="search" id="buzz-filter" placeholder="Search channels" aria-label="Search channels" style="width:100%;max-width:420px;border:1px solid #DDDDDD;border-radius:6px;padding:8px 12px;font-size:13px;margin:8px 0 4px;">
+  <input type="search" id="buzz-filter" placeholder="Search channels" aria-label="Search channels" style="width:100%;max-width:420px;border:1px solid var(--buzz-border);border-radius:6px;padding:8px 12px;font-size:13px;margin:8px 0 4px;">
   <div id="buzz-list">${rooms.map(row).join('\n')}</div>
-  <p style="font-size:12px;color:#868686;margin-top:14px;">Room settings: <a href="${esc(home)}setup/rooms">provisioning &amp; tuning</a></p>
+  <p style="font-size:12px;color:var(--buzz-ink-3);margin-top:14px;">Room settings: <a href="/setup/rooms">provisioning &amp; tuning</a></p>
   <script>try{const f=document.getElementById('buzz-filter');const l=document.getElementById('buzz-list');if(f&&l){f.addEventListener('input',()=>{const q=f.value.toLowerCase();for(const d of l.children){d.style.display=d.textContent.toLowerCase().includes(q)?'':'none';}});}}catch{}</script>
 </section>`;
 }
@@ -494,56 +636,32 @@ export async function renderBuzzRoom(
   const getMascotAvatar = (name: string, size = 36) => {
     const avatarSrc = getAgentAvatarSrc(name);
     if (avatarSrc) {
-      return `<img src="${esc(avatarSrc)}" alt="${esc(name)}" class="buzz-agent-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.12);background:#F8FAFC;border:1px solid #E2E8F0;" loading="lazy">`;
+      return `<img src="${esc(avatarSrc)}" alt="${esc(name)}" class="buzz-agent-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.12);background:var(--buzz-inset);border:1px solid var(--buzz-border-soft);" loading="lazy">`;
     }
-    return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${avatarColor(name)};color:#1E293B;display:grid;place-items:center;font-size:${Math.max(10, Math.round(size * 0.35))}px;font-weight:700;flex-shrink:0;border:1px solid #E2E8F0;">${esc(initials(name))}</div>`;
-  };
-
-  const linkify = (text: string) => {
-    let out = esc(text);
-    // Mentions styled as Buzz pill with mini avatar or bee icon
-    out = out.replace(/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g, (match, target) => {
-      const src = getAgentAvatarSrc(target);
-      const icon = src
-        ? `<img src="${esc(src)}" alt="" style="width:13px;height:13px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:2px;" loading="lazy">`
-        : '<span style="font-size:10px;opacity:0.8;">🐝</span>';
-      return `<span style="background:#F1F3F5;border:1px solid #E2E8F0;color:#1E293B;font-weight:600;padding:1px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:3px;font-size:12px;vertical-align:baseline;">${icon}${target}</span>`;
-    });
-    // Embedded PR Card
-    out = out.replace(
-      /(https:\/\/github\.com\/[^\s]+|BUZ-\d+)/g,
-      (match) =>
-        `<div style="display:inline-flex;align-items:center;gap:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;margin:6px 0;max-width:100%;"><span style="width:24px;height:24px;border-radius:6px;background:#E2E8F0;display:grid;place-items:center;font-size:11px;color:#475569;flex-shrink:0;">⎇</span><div style="display:flex;flex-direction:column;min-width:0;"><span style="font-size:10px;color:#64748B;font-weight:600;">GitHub · PR</span><a href="${match}" target="_blank" style="color:#2563EB;font-weight:600;font-size:12.5px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${match}</a></div></div>`,
-    );
-    // Custom inline Buzz PR card
-    out = out.replace(
-      /\[Buzz · PR\]\s*([^<\n]+)/g,
-      '<div style="display:inline-flex;align-items:center;gap:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;margin:6px 0;"><span style="width:24px;height:24px;border-radius:6px;background:#E2E8F0;display:grid;place-items:center;font-size:11px;color:#475569;">⎇</span><div style="display:flex;flex-direction:column;"><span style="font-size:10px;color:#64748B;font-weight:600;">Buzz · PR</span><span style="font-weight:600;font-size:12.5px;color:#1E293B;">$1</span></div></div>',
-    );
-    return out;
+    return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${avatarColor(name)};color:var(--buzz-avatar-ink);display:grid;place-items:center;font-size:${Math.max(10, Math.round(size * 0.35))}px;font-weight:700;flex-shrink:0;border:1px solid var(--buzz-border-soft);">${esc(initials(name))}</div>`;
   };
 
   const pendingHtml = pendingForRoom
     .map(
       (
         r,
-      ) => `<li style="display:flex;gap:10px;padding:10px 12px;border:1px solid #E2E8F0;border-left:3px solid #ECB22E;background:#fff;border-radius:8px;margin:6px 0;list-style:none;">
-    <div style="width:34px;height:34px;border-radius:6px;background:#FFF7E6;display:grid;place-items:center;flex-shrink:0;font-size:15px;">⚠️</div>
+      ) => `<li style="display:flex;gap:10px;padding:10px 12px;border:1px solid var(--buzz-border-soft);border-left:3px solid var(--buzz-warn);background:var(--buzz-surface);border-radius:8px;margin:6px 0;list-style:none;">
+    <div style="width:34px;height:34px;border-radius:6px;background:var(--buzz-warn-soft);display:grid;place-items:center;flex-shrink:0;font-size:15px;">⚠️</div>
     <div style="flex:1;min-width:0;">
-      <div style="font-size:11.5px;color:#64748B;">Approval requested · ${esc(r.id.slice(0, 12))}</div>
-      <div style="font-weight:600;font-size:13.5px;color:#1E293B;white-space:pre-wrap;margin-top:2px;">${esc(r.goal)}</div>
+      <div style="font-size:11.5px;color:var(--buzz-ink-3);">Approval requested · ${esc(r.id.slice(0, 12))}</div>
+      <div style="font-weight:600;font-size:13.5px;color:var(--buzz-ink-1);white-space:pre-wrap;margin-top:2px;">${esc(r.goal)}</div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <form data-review-action="approve" action="/api/requests/${esc(r.id)}/approve" method="post" style="display:inline-flex;gap:6px;align-items:center;">
           <input type="hidden" name="csrf" value="${esc(csrf)}">
           <input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
-          <label style="display:inline-flex;gap:4px;align-items:center;font-size:11px;color:#64748B;"><input type="checkbox" name="confirmed" required> reviewed</label>
-          <button type="submit" disabled style="padding:5px 12px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;font-size:12px;">Approve</button>
+          <label style="display:inline-flex;gap:4px;align-items:center;font-size:11px;color:var(--buzz-ink-3);"><input type="checkbox" name="confirmed" required> reviewed</label>
+          <button type="submit" disabled style="padding:5px 12px;border:0;border-radius:6px;background:var(--buzz-accent);color:var(--buzz-ink-inverse);font-weight:600;cursor:pointer;font-size:12px;">Approve</button>
         </form>
         <form data-review-action="decline" action="/api/requests/${esc(r.id)}/decline" method="post" style="display:inline-flex;gap:6px;align-items:center;">
           <input type="hidden" name="csrf" value="${esc(csrf)}">
           <input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
-          <input type="text" name="reason" placeholder="Decline reason" required style="padding:5px 8px;border:1px solid #E2E8F0;border-radius:6px;font-size:12px;width:150px;">
-          <button type="submit" disabled style="padding:5px 12px;border:1px solid #E2E8F0;border-radius:6px;background:#fff;color:#1E293B;font-weight:600;cursor:pointer;font-size:12px;">Decline</button>
+          <input type="text" name="reason" placeholder="Decline reason" required style="padding:5px 8px;border:1px solid var(--buzz-border-soft);border-radius:6px;font-size:12px;width:150px;">
+          <button type="submit" disabled style="padding:5px 12px;border:1px solid var(--buzz-border-soft);border-radius:6px;background:var(--buzz-surface);color:var(--buzz-ink-1);font-weight:600;cursor:pointer;font-size:12px;">Decline</button>
         </form>
       </div>
       <p role="status" aria-live="polite" data-review-status style="font-size:11px;margin-top:6px;"></p>
@@ -573,9 +691,32 @@ export async function renderBuzzRoom(
     }
   }
 
+  const dayKey = (unixSeconds: number) => {
+    const d = new Date(unixSeconds * 1000);
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  };
+  const fmtDaySep = (unixSeconds: number) => {
+    const d = new Date(unixSeconds * 1000);
+    const today = new Date();
+    const yest = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    const same = (a: Date, b: Date) => dayKey(a.getTime() / 1000) === dayKey(b.getTime() / 1000);
+    if (same(d, today)) return 'Today';
+    if (same(d, yest)) return 'Yesterday';
+    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  };
+  let lastDayKey = '';
+
   const messages = tops
     .map((m) => {
       const who = displayName(m.author, config.agentName);
+      // Day separator pill: only when the calendar day changes (anchors the
+      // otherwise-endless stream, like the marketing pages anchor sections).
+      const dk = dayKey(m.createdAt);
+      const dateSep =
+        dk !== lastDayKey
+          ? `<li class="buzz-day-sep" role="separator"><span>${esc(fmtDaySep(m.createdAt))}</span></li>`
+          : '';
+      lastDayKey = dk;
       const isCard = m.isReviewCard;
       const time = fmtClock(m.createdAt);
       const avatarHtml = getMascotAvatar(who);
@@ -595,15 +736,15 @@ export async function renderBuzzRoom(
 
       const seedReaction =
         isSeed9 && stored.length === 0
-          ? `<span style="border:1px solid #E2E8F0;border-radius:12px;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center;gap:4px;background:#F8FAFC;color:#1E293B;">❤️ <span style="font-weight:600;">1</span> <span style="font-size:10px;color:#94A3B8;">⏱️</span></span>`
+          ? `<span style="border:1px solid var(--buzz-border-soft);border-radius:12px;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center;gap:4px;background:var(--buzz-inset);color:var(--buzz-ink-1);">❤️ <span style="font-weight:600;">1</span> <span style="font-size:10px;color:var(--buzz-ink-3);">⏱️</span></span>`
           : '';
 
       const reactionForms = stored
         .map((r) => {
           const mine = r.me
-            ? 'background:#E8F5FA;border-color:#BAE6FD;color:#0369A1;'
-            : 'background:#F8FAFC;border-color:#E2E8F0;color:#1E293B;';
-          return `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:12px;padding:2px 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;${mine}">${esc(r.emoji)} <span style="font-weight:600;">${r.count}</span></button></form>`;
+            ? 'background:var(--buzz-info-soft);border-color:var(--buzz-info);color:var(--buzz-info);'
+            : 'background:var(--buzz-inset);border-color:var(--buzz-border-soft);color:var(--buzz-ink-1);';
+          return `<form method="post" action="/console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:12px;padding:2px 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;${mine}">${esc(r.emoji)} <span style="font-weight:600;">${r.count}</span></button></form>`;
         })
         .join('');
 
@@ -613,49 +754,49 @@ export async function renderBuzzRoom(
 
       const doneMatch = /^Work done — v(\d+)/.exec(m.content);
       const doneArrow = doneMatch
-        ? `<div style="margin-top:8px;"><a href="/console/deliverables/by-request/${esc(m.requestId ?? '')}" style="display:inline-flex;gap:6px;align-items:center;font-size:12px;font-weight:600;color:#0F5C57;text-decoration:none;border:1px solid #A7F3D0;background:#ECFDF5;border-radius:8px;padding:6px 10px;">→ View diff (v${esc(doneMatch[1]!)})</a></div>`
+        ? `<div style="margin-top:8px;"><a href="/console/deliverables/by-request/${esc(m.requestId ?? '')}" style="display:inline-flex;gap:6px;align-items:center;font-size:12px;font-weight:600;color:var(--buzz-accent);text-decoration:none;border:1px solid var(--buzz-good);background:var(--buzz-good-soft);border-radius:8px;padding:6px 10px;">→ View diff (v${esc(doneMatch[1]!)})</a></div>`
         : ``;
 
       const bubble = isCard
-        ? `<div style="border-left:3px solid #ECB22E;background:#FFFBEB;border-radius:0 8px 8px 0;padding:10px 12px;"><div style="white-space:pre-wrap;font-size:13.5px;line-height:1.45;color:#1E293B;">${linkify(m.content.slice(0, 4000))}</div></div>`
-        : `<div style="white-space:pre-wrap;font-size:13.5px;line-height:1.45;color:#1E293B;overflow-wrap:anywhere;">${linkify(m.content.slice(0, 4000))}</div>${doneArrow}`;
+        ? `<div style="border-left:3px solid var(--buzz-warn);background:var(--buzz-warn-soft);border-radius:0 8px 8px 0;padding:10px 12px;"><div class="buzz-md" style="font-size:13.5px;line-height:1.45;color:var(--buzz-ink-1);">${renderMarkdownLite(m.content.slice(0, 4000))}</div></div>`
+        : `<div class="buzz-md" style="font-size:13.5px;line-height:1.45;color:var(--buzz-ink-1);overflow-wrap:anywhere;">${renderMarkdownLite(m.content.slice(0, 4000))}</div>${doneArrow}`;
 
       const replies = byRoot.get(m.id) ?? [];
       const replyThreadHtml =
         replies.length > 0
           ? `<div style="margin-top:6px;">
   <details style="margin:2px 0 0 0;" open>
-    <summary style="font-size:12px;font-weight:600;color:#0284C7;cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;">
+    <summary style="font-size:12px;font-weight:600;color:var(--buzz-info);cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;">
       <span>💬</span> <span>${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}</span>
-      <span style="font-weight:normal;color:#64748B;font-size:11px;">· Last reply ${esc(fmtClock(replies[replies.length - 1]!.createdAt))}</span>
+      <span style="font-weight:normal;color:var(--buzz-ink-3);font-size:11px;">· Last reply ${esc(fmtClock(replies[replies.length - 1]!.createdAt))}</span>
     </summary>
-    <div style="margin-top:6px;padding-left:10px;border-left:2px solid #E2E8F0;">
+    <div style="margin-top:6px;padding-left:10px;border-left:2px solid var(--buzz-border-soft);">
       ${replies
         .map((r) => {
           const rw = displayName(r.author, config.agentName);
           return `<div style="display:flex;gap:8px;padding:4px 0;">
         ${getMascotAvatar(rw, 26)}
-        <div style="flex:1;"><span style="font-weight:600;font-size:12.5px;">${esc(rw)}</span> <span style="font-size:11px;color:#64748B;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12.5px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 4000))}</div></div>
+        <div style="flex:1;"><span style="font-weight:600;font-size:12.5px;">${esc(rw)}</span> <span style="font-size:11px;color:var(--buzz-ink-3);">${esc(fmtClock(r.createdAt))}</span><div class="buzz-md" style="font-size:12.5px;margin-top:2px;">${renderMarkdownLite(r.content.slice(0, 4000))}</div></div>
       </div>`;
         })
         .join('')}
-      <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:6px;">
+      <form id="reply-${esc(m.id)}" method="post" action="/console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:6px;">
         <input type="hidden" name="csrf" value="${esc(csrf)}">
         <input type="hidden" name="parentId" value="${esc(m.id)}">
-        <input type="text" name="content" placeholder="Reply in thread…" style="flex:1;border:1px solid #CBD5E1;border-radius:6px;padding:5px 8px;font-size:12px;" maxlength="500">
-        <button type="submit" style="border:1px solid #CBD5E1;background:#fff;color:#1E293B;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer;">Reply</button>
+        <input type="text" name="content" placeholder="Reply in thread…" style="flex:1;border:1px solid var(--buzz-scroll);border-radius:6px;padding:5px 8px;font-size:12px;" maxlength="500">
+        <button type="submit" style="border:1px solid var(--buzz-scroll);background:var(--buzz-surface);color:var(--buzz-ink-1);border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer;">Reply</button>
       </form>
     </div>
   </details>
 </div>`
           : '';
 
-      return `<li id="msg-${esc(m.id)}" class="buzz-message-row" style="display:flex;gap:12px;list-style:none;padding:8px 8px;border-radius:8px;position:relative;transition:background 0.15s;">
+      return `${dateSep}<li id="msg-${esc(m.id)}" class="buzz-message-row" style="display:flex;gap:12px;list-style:none;padding:8px 8px;border-radius:8px;position:relative;transition:background 0.15s;">
   ${avatarHtml}
   <div style="flex:1;min-width:0;">
     <div style="display:flex;gap:8px;align-items:baseline;">
-      <span style="font-weight:700;font-size:13.5px;color:#1E293B;">${esc(who)}</span>
-      <span style="font-size:11.5px;color:#94A3B8;">${esc(time)}</span>
+      <span style="font-weight:700;font-size:13.5px;color:var(--buzz-ink-1);">${esc(who)}</span>
+      <span style="font-size:11.5px;color:var(--buzz-ink-3);">${esc(time)}</span>
     </div>
     <div style="margin-top:2px;">${bubble}</div>
     ${reactions}
@@ -664,7 +805,7 @@ export async function renderBuzzRoom(
 
   <!-- Floating Hover Reaction Bar -->
   <div class="buzz-hover-bar"${m.id === 'seed_eng_9' ? ' style="opacity:1;pointer-events:auto;"' : ''}>
-    ${['👍', '❤️', '😂', '🎉', '⏱️'].map((e) => `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(e)}"><button type="submit" class="buzz-hover-btn" title="React ${e}">${e}</button></form>`).join('')}
+    ${['👍', '❤️', '😂', '🎉', '⏱️'].map((e) => `<form method="post" action="/console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(e)}"><button type="submit" class="buzz-hover-btn" title="React ${e}">${e}</button></form>`).join('')}
     <button type="button" class="buzz-hover-btn" onclick="const r=document.getElementById('reply-${esc(m.id)}');if(r)r.scrollIntoView({behavior:'smooth'});" title="Reply">↩️</button>
     <button type="button" class="buzz-hover-btn" title="More">⋯</button>
   </div>
@@ -672,21 +813,54 @@ export async function renderBuzzRoom(
     })
     .join('\n');
 
+  // Suggestion chips for the empty-room welcome card. These are NOT new
+  // features: every chip just pre-fills the existing composer with a slash
+  // command or mention the command router already understands.
+  const welcomeChips: { icon: string; title: string; desc: string; fill: string }[] = [
+    {
+      icon: 'search',
+      title: 'Ask a question',
+      desc: 'Get instant help from your agent',
+      fill: `@${config.agentName} `,
+    },
+    { icon: 'chart', title: 'Room status', desc: 'Health, spend and activity', fill: '/status' },
+    { icon: 'clipboard', title: 'Run a workflow', desc: 'Open the compiler board', fill: '/compiler' },
+    { icon: 'at', title: 'Mention someone', desc: 'Pull a teammate or agent in', fill: '@' },
+  ];
+  const welcomeChipHtml = welcomeChips
+    .map(
+      (
+        c,
+      ) => `<button type="button" class="buzz-welcome-card" data-fill="${esc(c.fill)}" title="Insert into the message box">
+        <span class="buzz-welcome-card__icon">${svgIcon(c.icon, 18)}</span>
+        <span class="buzz-welcome-card__title">${esc(c.title)}</span>
+        <span class="buzz-welcome-card__desc">${esc(c.desc)}</span>
+      </button>`,
+    )
+    .join('\n');
+
   const threadList =
     pendingHtml + messages ||
     `
-    <li style="list-style:none;padding:48px 18px;text-align:center;">
-      <div style="font-size:32px;">👋</div>
-      <div style="font-size:16px;font-weight:700;color:#1E293B;margin-top:8px;">Welcome to #${esc(def.name)}</div>
-      <div style="font-size:13px;color:#64748B;margin-top:4px;">This is the very beginning of #${esc(def.name)}.</div>
+    <li class="buzz-welcome" style="list-style:none;">
+      <div class="buzz-welcome__mascot">${getMascotAvatar(config.agentName, 44)}</div>
+      <h2 class="buzz-welcome__title">Welcome to #${esc(def.name)}</h2>
+      <p class="buzz-welcome__sub">${esc(config.mission ? config.mission.slice(0, 140) : `Collaborate with your team and @${config.agentName} — all in one place.`)}</p>
+      <div class="buzz-welcome__grid">${welcomeChipHtml}</div>
     </li>`;
 
   const roomDisplayName = scope === 'infra' || rawScope === 'engineering' ? 'engineering' : def.name;
 
+  // Budget bar fill tone (real gauge, no invented numbers).
+  let budgetFillClass = '';
+  if (gauge.isBreached) budgetFillClass = ' buzz-budget__fill--breached';
+  else if (gauge.isWarning) budgetFillClass = ' buzz-budget__fill--warn';
+  const budgetFillPct = Math.max(0, Math.min(100, gauge.percentage));
+
   return `
 <style>
   .buzz-message-row:hover {
-    background: #F8FAFC;
+    background: var(--buzz-inset);
   }
   .buzz-message-row:hover .buzz-hover-bar {
     opacity: 1;
@@ -696,8 +870,8 @@ export async function renderBuzzRoom(
     position: absolute;
     top: 4px;
     right: 12px;
-    background: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background: var(--buzz-surface);
+    border: 1px solid var(--buzz-border-soft);
     border-radius: 8px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     display: flex;
@@ -718,11 +892,11 @@ export async function renderBuzzRoom(
     border-radius: 4px;
     display: grid;
     place-items: center;
-    color: #475569;
+    color: var(--buzz-ink-3);
     transition: background 0.12s;
   }
   .buzz-hover-btn:hover {
-    background: #F1F5F9;
+    background: var(--buzz-inset-2);
   }
 
   /* Floating Hearts Animation */
@@ -751,58 +925,219 @@ export async function renderBuzzRoom(
     80% { opacity: 0.8; }
     100% { transform: translateY(-38px) scale(1.2); opacity: 0; }
   }
+
+  /* ── Chat surface: header, thread, composer ──────────────────────
+     These reuse the --buzz-* tokens defined in the workspace shell's
+     :root (same document), so the sidebar and the chat share one
+     palette. No Console --v-* tokens and no Inter font-family here:
+     that would break the surface-split regression test. */
+  .buzz-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--buzz-inset-2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .buzz-header__id { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .buzz-header__stack { min-width: 0; }
+  .buzz-header__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .buzz-header__title {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 0;
+    color: var(--buzz-ink-1);
+    letter-spacing: -0.01em;
+  }
+  .buzz-header__sub { font-size: 11px; color: var(--buzz-ink-3); margin-top: 2px; }
+  .buzz-header__agent { font-weight: 600; color: var(--buzz-accent); }
+  .buzz-header__actions { display: flex; align-items: center; gap: 8px; color: var(--buzz-ink-3); flex-shrink: 0; }
+  .buzz-header__meta-item {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 12.5px; color: var(--buzz-ink-3); font-weight: 500;
+    font-variant-numeric: tabular-nums; padding-right: 4px;
+  }
+  .buzz-icon-btn {
+    display: grid; place-items: center;
+    width: 30px; height: 30px;
+    background: none; border: none; cursor: pointer;
+    color: var(--buzz-ink-3); border-radius: var(--buzz-r-md);
+    transition: background 0.12s var(--buzz-ease), color 0.12s var(--buzz-ease);
+  }
+  .buzz-icon-btn:hover { background: var(--buzz-surface-hover); color: var(--buzz-ink-1); }
+
+  .buzz-health { font-size: 12px; }
+  .buzz-budget { display: inline-flex; align-items: center; gap: 7px; }
+  .buzz-budget__track {
+    width: 64px; height: 4px; border-radius: 999px;
+    background: var(--buzz-track); overflow: hidden; display: inline-block;
+  }
+  .buzz-budget__fill { display: block; height: 100%; border-radius: 999px; background: var(--buzz-accent); transition: width 0.3s var(--buzz-ease); }
+  .buzz-budget__fill--warn { background: var(--buzz-warn); }
+  .buzz-budget__fill--breached { background: var(--buzz-risk); }
+  .buzz-budget__label { font-size: 11.5px; color: var(--buzz-ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* Markdown-lite inline styles */
+  .buzz-md-strong { font-weight: 700; color: var(--buzz-ink-1); }
+  .buzz-md-em { font-style: italic; }
+  .buzz-md-code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em; background: var(--buzz-inset-2); border: 1px solid var(--buzz-border-soft);
+    border-radius: 4px; padding: 0 4px; color: var(--buzz-code-ink);
+  }
+  .buzz-md-link { color: var(--buzz-info); text-decoration: none; }
+  .buzz-md-link:hover { text-decoration: underline; }
+
+  /* Markdown-lite block styles (renderMarkdownLite). The bubble keeps its
+     own font-size; blocks only add structure + rhythm. Plain messages stay
+     one pre-wrap <p>, so human line breaks render as before. */
+  .buzz-md > * + * { margin-top: 5px; }
+  .buzz-md-p { white-space: pre-wrap; margin: 0; overflow-wrap: anywhere; }
+  .buzz-md-h { font-weight: 700; color: var(--buzz-ink-1); line-height: 1.3; }
+  .buzz-md-h--1 { font-size: 1.18em; }
+  .buzz-md-h--2 { font-size: 1.1em; }
+  .buzz-md-h--3 { font-size: 1.04em; }
+  .buzz-md-h--4, .buzz-md-h--5, .buzz-md-h--6 { font-size: 1em; }
+  .buzz-md-list { margin: 0; padding-left: 22px; }
+  ul.buzz-md-list { list-style: disc; }
+  ol.buzz-md-list { list-style: decimal; }
+  .buzz-md-li { margin: 1px 0; }
+  .buzz-md-pre {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; color: var(--buzz-code-ink); background: var(--buzz-inset);
+    border: 1px solid var(--buzz-border-soft); border-radius: 8px; padding: 8px 10px;
+    margin: 0; overflow-x: auto; white-space: pre;
+  }
+  .buzz-md-pre code { font: inherit; background: none; border: 0; padding: 0; }
+  .buzz-md-quote {
+    margin: 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--buzz-border-soft);
+    color: var(--buzz-ink-3); white-space: pre-wrap;
+  }
+  .buzz-md-hr { border: 0; border-top: 1px solid var(--buzz-border-soft); margin: 2px 0; }
+
+  /* Day separator pill */
+  .buzz-day-sep {
+    list-style: none; display: flex; justify-content: center;
+    margin: 10px 0 4px;
+  }
+  .buzz-day-sep span {
+    background: var(--buzz-inset); border: 1px solid var(--buzz-border-soft); border-radius: 999px;
+    padding: 2px 12px; font-size: 11px; font-weight: 600; color: var(--buzz-ink-3);
+  }
+
+  /* Welcome (empty-room) card */
+  .buzz-welcome { padding: 40px 18px 24px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+  .buzz-welcome__mascot { margin-bottom: 10px; }
+  .buzz-welcome__title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--buzz-ink-1); margin: 0; }
+  .buzz-welcome__sub { font-size: 13.5px; color: var(--buzz-ink-3); margin: 6px 0 22px; max-width: 460px; }
+  .buzz-welcome__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; width: 100%; max-width: 620px; }
+  .buzz-welcome-card {
+    text-align: left; cursor: pointer; font: inherit;
+    background: var(--buzz-surface); border: 1px solid var(--buzz-border);
+    border-radius: var(--buzz-r-lg); padding: 14px;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: border-color 0.15s var(--buzz-ease), box-shadow 0.15s var(--buzz-ease), transform 0.15s var(--buzz-ease);
+  }
+  .buzz-welcome-card:hover { border-color: var(--buzz-accent); box-shadow: var(--buzz-shadow-pop); transform: translateY(-2px); }
+  .buzz-welcome-card__icon { color: var(--buzz-accent); margin-bottom: 6px; }
+  .buzz-welcome-card__title { font-size: 13.5px; font-weight: 600; color: var(--buzz-ink-1); }
+  .buzz-welcome-card__desc { font-size: 12px; color: var(--buzz-ink-3); }
+
+  /* Composer */
+  .buzz-composer { padding: 10px 20px 16px; background: var(--buzz-surface); flex-shrink: 0; }
+  .buzz-composer__form { display: flex; flex-direction: column; }
+  .buzz-composer__card {
+    border: 1px solid var(--buzz-border-soft); border-radius: var(--buzz-r-lg);
+    padding: 10px 14px; background: var(--buzz-surface);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    display: flex; flex-direction: column; gap: 8px;
+    transition: border-color 0.15s var(--buzz-ease), box-shadow 0.15s var(--buzz-ease);
+  }
+  .buzz-composer__card:focus-within { border-color: var(--buzz-accent); box-shadow: 0 0 0 3px var(--buzz-accent-ring); }
+  .buzz-composer__input {
+    border: none; outline: none; font-size: 13.5px; color: var(--buzz-ink-1);
+    width: 100%; font-family: inherit; padding: 2px 0; background: transparent;
+  }
+  .buzz-composer__bar { display: flex; align-items: center; justify-content: space-between; padding-top: 4px; }
+  .buzz-composer__tools { display: flex; align-items: center; gap: 2px; }
+  .buzz-tool-btn {
+    display: grid; place-items: center; width: 28px; height: 28px;
+    border: none; background: transparent; cursor: pointer;
+    color: var(--buzz-ink-3); border-radius: var(--buzz-r-sm);
+    transition: background 0.12s var(--buzz-ease), color 0.12s var(--buzz-ease);
+  }
+  .buzz-tool-btn:hover { background: var(--buzz-surface-hover); color: var(--buzz-ink-1); }
+  .buzz-composer__send {
+    width: 30px; height: 30px; border-radius: 50%; border: none;
+    background: var(--buzz-border); color: var(--buzz-ink-3); display: grid; place-items: center;
+    cursor: pointer; transition: background 0.15s var(--buzz-ease), color 0.15s var(--buzz-ease), transform 0.15s var(--buzz-ease);
+  }
+  .buzz-composer__send--ready { background: var(--buzz-ink-1); color: var(--buzz-ink-inverse); }
+  .buzz-composer__send:hover { transform: translateY(-1px); }
+  .buzz-emoji-pick { display: none; gap: 6px; flex-wrap: wrap; padding: 6px; background: var(--buzz-inset); border-radius: var(--buzz-r-md); border: 1px solid var(--buzz-border-soft); margin-top: 4px; }
+
+  #chat-messages-stream::-webkit-scrollbar { width: 6px; }
+  #chat-messages-stream::-webkit-scrollbar-thumb { background: var(--buzz-scroll); border-radius: 6px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-welcome-card:hover, .buzz-composer__send:hover, .buzz-icon-btn:hover { transform: none; }
+  }
 </style>
 
-<div style="display:flex;flex-direction:column;height:100%;min-height:0;background:#FFFFFF;overflow:hidden;position:relative;">
-  <!-- Room Header (Matching Image 1) -->
-  <header style="padding:14px 20px 12px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
-    <div style="display:flex;align-items:center;gap:10px;">
-      ${getMascotAvatar(config.agentName, 32)}
-      <div>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <h1 style="font-size:16px;font-weight:700;margin:0;color:#0F172A;letter-spacing:-0.01em;"># ${esc(roomDisplayName)}</h1>
-          <span title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ' — ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
-          <span style="font-size:12px;font-weight:400;color:#475569;" title="Live budget gas gauge (real spend from the coordinator)">· ${esc(gauge.headerString)}</span>
+<div style="display:flex;flex-direction:column;height:100%;min-height:0;background:var(--buzz-surface);overflow:hidden;position:relative;">
+  <!-- Room Header -->
+  <header class="buzz-header">
+    <div class="buzz-header__id">
+      ${getMascotAvatar(config.agentName, 34)}
+      <div class="buzz-header__stack">
+        <div class="buzz-header__row">
+          <h1 class="buzz-header__title"># ${esc(roomDisplayName)}</h1>
+          <span class="buzz-health" title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ' — ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
+          <span class="buzz-budget" title="Live budget: real spend from the coordinator (${gauge.percentage}% of ceiling)">
+            <span class="buzz-budget__track"><span class="buzz-budget__fill${budgetFillClass}" style="width:${budgetFillPct}%;"></span></span>
+            <span class="buzz-budget__label">$${esc(gauge.dollarsSpent.toFixed(0))} / $${esc(gauge.dollarsCeiling.toFixed(0))}</span>
+          </span>
         </div>
-        <div style="font-size:11px;color:#64748B;margin-top:1px;">
-          Room Agent: <span style="font-weight:600;color:#0F5C57;">@${esc(config.agentName)}</span> · ${autonomyBadge(config.autonomy)}
+        <div class="buzz-header__sub">
+          Room Agent: <span class="buzz-header__agent">@${esc(config.agentName)}</span> · ${autonomyBadge(config.autonomy)}
         </div>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:14px;color:#64748B;">
-      <span style="display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:#475569;font-weight:500;" title="Active Members in Room">
-        <span>👥</span> <span>${memberCount > 0 ? memberCount : 9}</span>
+    <div class="buzz-header__actions">
+      <span class="buzz-header__meta-item" title="Distinct authors who have posted in this room">
+        ${svgIcon('users', 14)} <span>${memberCount > 0 ? memberCount : '—'}</span>
       </span>
-      <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/compiler?drawer=1', 'Compiler Board')" style="background:none;border:none;cursor:pointer;font-size:14px;color:#64748B;" title="Huddle / Audio">🎧</button>
-      <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/requests?drawer=1', 'Review Queue')" style="background:none;border:none;cursor:pointer;font-size:14px;color:#64748B;" title="Toggle Panel">⊡</button>
+      <button type="button" class="buzz-icon-btn" onclick="window.openBuzzDrawer('/console/compiler?drawer=1', 'Compiler Board')" title="Huddle / Audio">${svgIcon('mic', 16)}</button>
+      <button type="button" class="buzz-icon-btn" onclick="window.openBuzzDrawer('/console/requests?drawer=1', 'Review Queue')" title="Toggle Panel">${svgIcon('panel', 16)}</button>
       <!-- Subtle drawer anchors for test compatibility -->
-      <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/compiler?drawer=1', 'Compiler Board')" style="display:none;">📊 Compiler</button>
-      <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/claims?drawer=1', 'Evidence Ledger')" style="display:none;">📜 Ledger</button>
-      <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/requests?drawer=1', 'Review Queue')" style="display:none;">📋 Reviews</button>
+      <button type="button" onclick="window.openBuzzDrawer('/console/compiler?drawer=1', 'Compiler Board')" style="display:none;">📊 Compiler</button>
+      <button type="button" onclick="window.openBuzzDrawer('/console/claims?drawer=1', 'Evidence Ledger')" style="display:none;">📜 Ledger</button>
+      <button type="button" onclick="window.openBuzzDrawer('/console/requests?drawer=1', 'Review Queue')" style="display:none;">📋 Reviews</button>
     </div>
   </header>
 
   <!-- Floating scroll-to-latest pill -->
   <div style="display:flex;justify-content:center;margin:6px 0 -8px;position:relative;z-index:5;">
-    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:20px;padding:3px 12px;font-size:11px;font-weight:600;color:#64748B;box-shadow:0 1px 3px rgba(0,0,0,0.04);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
+    <div style="background:var(--buzz-inset);border:1px solid var(--buzz-border-soft);border-radius:20px;padding:3px 12px;font-size:11px;font-weight:600;color:var(--buzz-ink-3);box-shadow:0 1px 3px rgba(0,0,0,0.04);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
       <span>↑</span> <span>Jump to latest</span>
     </div>
   </div>
 
-  ${notice ? `<div style="background:#ECFDF5;border-bottom:1px solid #A7F3D0;padding:6px 20px;font-size:12px;color:#065F46;flex-shrink:0;">${esc(notice)}</div>` : ''}
+  ${notice ? `<div style="background:var(--buzz-good-soft);border-bottom:1px solid var(--buzz-good);padding:6px 20px;font-size:12px;color:var(--buzz-good);flex-shrink:0;">${esc(notice)}</div>` : ''}
 
   <!-- Message Stream -->
   <div class="review-root" id="chat-messages-stream" style="flex:1;overflow-y:auto;padding:14px 20px;min-height:0;display:flex;flex-direction:column;gap:6px;">
     <ul style="padding:0;margin:0;list-style:none;display:flex;flex-direction:column;gap:4px;">${threadList}</ul>
   </div>
 
-  <!-- Buzz Message Composer Card (Matching Image 1 bottom) -->
-  <div style="padding:10px 20px 14px;background:#FFFFFF;flex-shrink:0;">
+  <!-- Buzz Message Composer -->
+  <div class="buzz-composer">
     <span style="display:none">Send a command</span>
-    <form method="post" action="${esc(home)}console/buzz/${esc(scope)}/command" style="display:flex;flex-direction:column;">
+    <form method="post" action="/console/buzz/${esc(scope)}/command" class="buzz-composer__form">
       <input type="hidden" name="csrf" value="${esc(csrf)}">
-      <div style="border:1px solid #E2E8F0;border-radius:12px;padding:10px 14px;background:#FFFFFF;box-shadow:0 1px 3px rgba(0,0,0,0.03);display:flex;flex-direction:column;gap:8px;">
-        <input type="text" name="command" id="buzz-composer" list="buzz-commands" placeholder="Message #${esc(roomDisplayName)}" style="border:none;outline:none;font-size:13.5px;color:#0F172A;width:100%;font-family:inherit;padding:2px 0;" autocomplete="off">
+      <div class="buzz-composer__card">
+        <input type="text" name="command" id="buzz-composer" list="buzz-commands" class="buzz-composer__input" placeholder="Message #${esc(roomDisplayName)}" autocomplete="off">
         <datalist id="buzz-commands">
           <option value="/compiler" label="Open Compiler board in drawer"></option>
           <option value="/ledger " label="Search Evidence Ledger"></option>
@@ -814,18 +1149,18 @@ export async function renderBuzzRoom(
         </datalist>
         <datalist id="buzz-users">${userOptions}</datalist>
 
-        <div style="display:flex;align-items:center;justify-content:space-between;padding-top:4px;">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <button type="button" id="buzz-at" style="border:none;background:transparent;cursor:pointer;font-size:14px;color:#64748B;" title="Mention someone">@</button>
-            <button type="button" style="border:none;background:transparent;cursor:pointer;font-size:14px;color:#64748B;" title="Attach file">📎</button>
-            <button type="button" id="buzz-emoji" style="border:none;background:transparent;cursor:pointer;font-size:14px;color:#64748B;" title="Emoji">😊</button>
-            <button type="button" style="border:none;background:transparent;cursor:pointer;font-size:13px;color:#64748B;font-weight:700;" title="Formatting">AA</button>
+        <div class="buzz-composer__bar">
+          <div class="buzz-composer__tools">
+            <button type="button" id="buzz-at" class="buzz-tool-btn" title="Mention someone">${svgIcon('at', 16)}</button>
+            <button type="button" class="buzz-tool-btn" title="Attach file">${svgIcon('paperclip', 16)}</button>
+            <button type="button" id="buzz-emoji" class="buzz-tool-btn" title="Emoji">${svgIcon('smile', 16)}</button>
+            <button type="button" class="buzz-tool-btn" title="Formatting">${svgIcon('bold', 16)}</button>
           </div>
-          <button type="submit" aria-label="Send" style="width:28px;height:28px;border-radius:50%;border:none;background:#94A3B8;color:#FFFFFF;display:grid;place-items:center;cursor:pointer;font-size:13px;font-weight:700;transition:background 0.15s;">↑</button>
+          <button type="submit" aria-label="Send" id="buzz-send" class="buzz-composer__send">${svgIcon('send', 15)}</button>
         </div>
       </div>
-      <div id="buzz-emoji-pick" style="display:none;gap:6px;flex-wrap:wrap;padding:6px;background:#F8FAFC;border-radius:8px;border:1px solid #E2E8F0;margin-top:4px;">
-        ${['😀', '😂', '❤️', '🚀', '✅', '👀', '🎉', '👍', '🔥', '💡'].map((e) => `<button type="button" data-emoji="${esc(e)}" style="border:1px solid #E2E8F0;background:#fff;border-radius:6px;padding:3px 6px;cursor:pointer;">${esc(e)}</button>`).join('')}
+      <div id="buzz-emoji-pick" class="buzz-emoji-pick">
+        ${['😀', '😂', '❤️', '🚀', '✅', '👀', '🎉', '👍', '🔥', '💡'].map((e) => `<button type="button" data-emoji="${esc(e)}" style="border:1px solid var(--buzz-border-soft);background:var(--buzz-surface);border-radius:6px;padding:3px 6px;cursor:pointer;">${esc(e)}</button>`).join('')}
       </div>
     </form>
   </div>
@@ -835,22 +1170,26 @@ export async function renderBuzzRoom(
     const at=document.getElementById('buzz-at');
     const em=document.getElementById('buzz-emoji');
     const pick=document.getElementById('buzz-emoji-pick');
-    if(at&&i){at.addEventListener('click',()=>{const s=i.selectionStart??i.value.length;const v=i.value;i.value=v.slice(0,s)+'@'+v.slice(s);i.focus();i.setSelectionRange(s+1,s+1);i.setAttribute('list','buzz-users');try{i.showPicker&&i.showPicker();}catch{}});}
-    if(em&&pick){em.addEventListener('click',()=>{pick.style.display=pick.style.display==='none'?'flex':'none';});pick.querySelectorAll('[data-emoji]').forEach(b=>b.addEventListener('click',()=>{const s=i.selectionStart??i.value.length;const v=i.value;i.value=v.slice(0,s)+b.dataset.emoji+v.slice(s);i.focus();pick.style.display='none';}));}
-    if(i){i.addEventListener('input',()=>{if(i.value.includes('@'))i.setAttribute('list','buzz-users');});i.addEventListener('keydown',e=>{if(e.key==='/'&&!i.value){i.setAttribute('list','buzz-commands');}});}
+    const send=document.getElementById('buzz-send');
+    const syncSend=()=>{if(send&&i)send.classList.toggle('buzz-composer__send--ready',i.value.trim().length>0);};
+    if(at&&i){at.addEventListener('click',()=>{const s=i.selectionStart??i.value.length;const v=i.value;i.value=v.slice(0,s)+'@'+v.slice(s);i.focus();i.setSelectionRange(s+1,s+1);i.setAttribute('list','buzz-users');syncSend();try{i.showPicker&&i.showPicker();}catch{}});}
+    if(em&&pick){em.addEventListener('click',()=>{const shown=getComputedStyle(pick).display!=='none';pick.style.display=shown?'none':'flex';});pick.querySelectorAll('[data-emoji]').forEach(b=>b.addEventListener('click',()=>{const s=i.selectionStart??i.value.length;const v=i.value;i.value=v.slice(0,s)+b.dataset.emoji+v.slice(s);i.focus();syncSend();pick.style.display='none';}));}
+    if(i){i.addEventListener('input',()=>{if(i.value.includes('@'))i.setAttribute('list','buzz-users');syncSend();});i.addEventListener('keydown',e=>{if(e.key==='/'&&!i.value){i.setAttribute('list','buzz-commands');}});}
+    // Welcome-card suggestion chips pre-fill the existing composer (no new commands).
+    document.querySelectorAll('.buzz-welcome-card[data-fill]').forEach(c=>c.addEventListener('click',()=>{if(!i)return;i.value=c.getAttribute('data-fill');i.focus();i.setSelectionRange(i.value.length,i.value.length);syncSend();}));
   }catch{}</script>
 
   <!-- Slide-out Drawer for Reviews, Compiler and Ledger -->
-  <div id="buzz-drawer" style="display:none;position:fixed;top:0;right:0;width:580px;max-width:92vw;height:100vh;background:#fff;border-left:1px solid #E5E7EB;box-shadow:-4px 0 24px rgba(0,0,0,0.12);z-index:9999;flex-direction:column;">
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid #E5E7EB;background:#F9FAFB;">
-      <h3 id="buzz-drawer-title" style="margin:0;font-size:14px;font-weight:600;color:#111827;">Drawer</h3>
+  <div id="buzz-drawer" style="display:none;position:fixed;top:0;right:0;width:580px;max-width:92vw;height:100vh;background:var(--buzz-surface);border-left:1px solid var(--buzz-hairline);box-shadow:-4px 0 24px rgba(0,0,0,0.12);z-index:9999;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid var(--buzz-hairline);background:var(--buzz-inset);">
+      <h3 id="buzz-drawer-title" style="margin:0;font-size:14px;font-weight:600;color:var(--buzz-ink-1);">Drawer</h3>
       <div style="display:flex;align-items:center;gap:8px;">
-        <a id="buzz-drawer-fullscreen" href="#" target="_blank" style="font-size:12px;color:#0F5C57;text-decoration:none;padding:4px 8px;border:1px solid #D1D5DB;border-radius:6px;background:#fff;">Full view ↗</a>
-        <button type="button" id="buzz-drawer-close" style="background:transparent;border:0;font-size:18px;line-height:1;cursor:pointer;color:#6B7280;">✕</button>
+        <a id="buzz-drawer-fullscreen" href="#" target="_blank" style="font-size:12px;color:var(--buzz-accent);text-decoration:none;padding:4px 8px;border:1px solid var(--buzz-border);border-radius:6px;background:var(--buzz-surface);">Full view ↗</a>
+        <button type="button" id="buzz-drawer-close" style="background:transparent;border:0;font-size:18px;line-height:1;cursor:pointer;color:var(--buzz-ink-3);">✕</button>
       </div>
     </div>
     <div id="buzz-drawer-content" style="flex:1;overflow:auto;padding:16px;">
-      <div style="color:#6B7280;font-size:13px;">Loading...</div>
+      <div style="color:var(--buzz-ink-3);font-size:13px;">Loading...</div>
     </div>
   </div>
   <script>
@@ -863,14 +1202,14 @@ export async function renderBuzzRoom(
     if (titleEl) titleEl.textContent = title || 'Drawer';
     if (fsEl) fsEl.href = url.replace('?drawer=1', '').replace('&drawer=1', '');
     drawer.style.display = 'flex';
-    content.innerHTML = '<p style="color:#6B7280;font-size:13px;padding:12px;">Loading...</p>';
+    content.innerHTML = '<p style="color:var(--buzz-ink-3);font-size:13px;padding:12px;">Loading...</p>';
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const html = await res.text();
       content.innerHTML = html;
     } catch (err) {
-      content.innerHTML = '<p style="color:#B91C1C;font-size:13px;padding:12px;">Failed to load: ' + err.message + '</p>';
+      content.innerHTML = '<p style="color:var(--buzz-risk);font-size:13px;padding:12px;">Failed to load: ' + err.message + '</p>';
     }
   };
   window.closeBuzzDrawer = function() {

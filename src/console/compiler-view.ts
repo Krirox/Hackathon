@@ -77,7 +77,7 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
       rightPanelHtml: `
   <div>
     <h2 style="font-size:14px;font-weight:700;margin:0 0 6px 0;color:var(--v-ink);font-style:normal;">Why not trusted yet</h2>
-    <p style="font-size:12px;color:var(--v-muted);margin:0 0 12px;line-height:1.5;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded.</p>
+    <p style="font-size:12px;color:var(--v-muted);margin:0 0 12px;line-height:1.5;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded. Compilation is an explicit, gated act: <a href="/console/learning/compile">compile a mined candidate</a> to create the first card. Mining alone will not fill this board.</p>
     <div style="display:grid;gap:8px;font-size:12px;">
       <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Quarantine</strong><div style="color:var(--v-muted);font-size:11px;">new cards land here first</div></div>
       <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Shadow → Pilot</strong><div style="color:var(--v-muted);font-size:11px;">measured against live traffic</div></div>
@@ -203,7 +203,7 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
             )
             .join('\n')
     }
-    <div style="font-size:11px;color:var(--v-faint);margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board.</div>
+    <div style="font-size:11px;color:var(--v-faint);margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board. That path is now reachable: <a href="/console/learning/compile">compile a mined candidate</a>, then queue a transfer test from the card's page. Promotion still requires cross-model evidence, so a smoke run against a test-baseline harness will not move a card.</div>
   </div>`;
 
   return { boardHtml, metricsHtml, rightPanelHtml };

@@ -1,5 +1,6 @@
 import { T, eq, TEN, NOW, fresh, sor, base, rejects } from './helpers.ts';
 import { handler, runJob } from '../src/aws/executor.ts';
+import { setKill, clearKill } from '../src/gov/trust.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +86,75 @@ T('F05: a real job claims exclusively, charges usage, persists the full artifact
   eq(value.fullTextRef.length > 0, true, 'the claim points at the artifact:');
   eq(value.textPreview.length <= 2000, true, 'the claim value is a bounded preview:');
   eq(value.truncated, false);
+});
+
+T('an engaged stop refuses a serverless job before it can spend', async () => {
+  // The Lambda executor never passes through a harness adapter, and the adapter
+  // is where the kill check normally happens (harness.ts). Without a check here,
+  // an operator's stop halted the worker and left Lambda spending money on the
+  // same scope — a safety control enforced on one of two execution paths.
+  const { db, ledger, coord } = await fresh();
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'kill probe',
+    kind: 'OBSERVATION',
+    statement: 'x',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 's',
+    scope: 'engineering',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const { request } = await coord.submit(
+    base({ id: 'kill1', goal: 'must not run under a stop', claimRefs: [clm.id] }),
+  );
+  // The stop covers this request's target scope ('engineering').
+  await setKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'operator:killprobe', NOW);
+
+  let calls = 0;
+  const spy = async (): Promise<{ text: string; usage: { input: number; output: number } }> => {
+    calls += 1;
+    return { text: 'deliverable', usage: { input: 1, output: 1 } };
+  };
+  const blocked = await runJob(
+    db,
+    { tenant: TEN, requestId: request.id, prompt: 'run it', lane: 'dev' },
+    { GEMINI_API_KEY: 'test-key' },
+    spy,
+  );
+  eq(calls, 0, 'no model call is made under a stop:');
+  eq(blocked.status, 'FAILED', 'the job reports a terminal refusal:');
+  eq((blocked.error ?? '').includes('kill switch'), true, `the refusal says why (${blocked.error}):`);
+  const after = (await coord.get(TEN, request.id))!;
+  eq(after.state, 'FAILED', 'the request ends rather than sitting ADMITTED forever:');
+  eq(after.spent.tokens, 0, 'nothing was charged:');
+  eq(after.refusalReason?.includes('kill switch'), true, 'the request carries the reason too:');
+
+  // A wildcard stop (every scope, every class) is the other way an operator
+  // engages this, and it must refuse too.
+  await clearKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'operator:killprobe', NOW);
+  await setKill(db, TEN, { scope: '*', actionClass: '*' }, 'operator:killprobe', NOW);
+  const wildcard = await runJob(
+    db,
+    { tenant: TEN, requestId: request.id, prompt: 'run it', lane: 'dev' },
+    { GEMINI_API_KEY: 'test-key' },
+    spy,
+  );
+  eq(wildcard.status, 'FAILED');
+  eq(calls, 0, 'still no spend:');
+
+  // Disengaging is the only thing that refused it: the same job now runs.
+  await clearKill(db, TEN, { scope: '*', actionClass: '*' }, 'operator:killprobe', NOW);
+  const ran = await runJob(
+    db,
+    { tenant: TEN, requestId: request.id, prompt: 'run it', lane: 'dev' },
+    { GEMINI_API_KEY: 'test-key' },
+    spy,
+  );
+  eq(ran.status, 'COMPLETED', `the stopped request runs once resumed (${ran.error ?? ''}):`);
+  eq(calls, 1, 'and only then does it spend:');
 });
 
 T('F05: a second concurrent delivery of the same job cannot double-spend (claim fencing)', async () => {

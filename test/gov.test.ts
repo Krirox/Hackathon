@@ -28,6 +28,7 @@ import {
   listStops,
   liveness,
   mintSupportRef,
+  describeExecutorHealth,
   readWorkerHeartbeat,
   recoverStop,
   recordSelfHalt,
@@ -1015,6 +1016,52 @@ T('FLOW-023: worker heartbeat separates unconfigured, live, and silent workers',
   eq(stale.ok, false);
   eq(stale.unconfigured ?? false, false, 'a silent worker is an outage, not an unconfigured optional:');
   eq(stale.detail?.includes('stale'), true);
+});
+
+T('executor health names the echo harness, so a live worker cannot pass as execution', async () => {
+  const echo = describeExecutorHealth(
+    { workerId: 'w-echo', at: NOW, adapter: 'local-echo', baseline: true },
+    NOW,
+  );
+  eq(echo.state, 'live');
+  eq(echo.baseline, true);
+  eq(echo.detail.includes('test-baseline'), true, 'the adapter is reported by role, not just by name:');
+  eq(echo.detail.includes('no deliverable'), true);
+
+  const real = describeExecutorHealth({ workerId: 'w-jcode', at: NOW, adapter: 'jcode' }, NOW);
+  eq(real.state, 'live');
+  eq(real.baseline, false);
+  eq(real.detail.includes('jcode'), true);
+
+  // An older heartbeat (written before adapter honesty existed) must still parse
+  // and must not be accused of being a baseline it never claimed to be.
+  const legacy = describeExecutorHealth({ workerId: 'w-old', at: NOW }, NOW);
+  eq(legacy.state, 'live');
+  eq(legacy.baseline, false);
+
+  const absent = describeExecutorHealth(null, NOW);
+  eq(absent.state, 'absent');
+  eq(absent.detail.includes('vital worker'), true, 'the absent case names the command that fixes it:');
+
+  const stale = describeExecutorHealth({ workerId: 'w-1', at: NOW }, '2026-09-09T12:05:00.000Z');
+  eq(stale.state, 'stale');
+});
+
+T('readiness refuses a baseline executor, because its runs leave nothing to review', async () => {
+  const { db } = await fresh();
+  await recordWorkerHeartbeat(db, TEN, { workerId: 'w-echo', now: NOW, adapter: 'local-echo', baseline: true });
+  const beat = await readWorkerHeartbeat(db, TEN);
+  eq(beat?.adapter, 'local-echo');
+  eq(beat?.baseline, true, 'the heartbeat round-trips adapter honesty:');
+  const readiness = await workerReadiness(db, TEN, { now: NOW });
+  eq(readiness.ok, false, 'a fresh heartbeat from the echo harness is not readiness:');
+  eq(readiness.unconfigured ?? false, false, 'it is deployed — just not executing:');
+  eq(readiness.detail?.includes('test-baseline'), true);
+
+  await recordWorkerHeartbeat(db, TEN, { workerId: 'w-jcode', now: NOW, adapter: 'jcode', baseline: false });
+  const healthy = await workerReadiness(db, TEN, { now: NOW });
+  eq(healthy.ok, true);
+  eq(healthy.detail?.includes('jcode'), true);
 });
 
 T('FLOW-023: integration readiness separates unconfigured-optional from broken', async () => {

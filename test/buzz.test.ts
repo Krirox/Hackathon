@@ -1,4 +1,5 @@
 import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
+import { installAuthSchema } from '../src/core/auth.ts';
 import { DEFAULT_LIMITS } from '../src/coord/coordinator.ts';
 import {
   CANONICAL_ROOMS,
@@ -24,6 +25,7 @@ import { AmbientMorningBriefingSynthesizer, generateVoiceAudioWav } from '../src
 import { RoomBudgetTracker, renderProgressBar, formatTokenRate } from '../src/talk/budget-gauge.ts';
 import { TimeTravelForkEngine } from '../src/talk/fork.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost, INDUSTRY_PRESETS } from '../src/console/rooms-setup.ts';
+import { renderMarkdownLite, renderBuzzRoom, createLocalReply } from '../src/console/buzz.ts';
 import { createBuzzSurface, type BuzzNostrEvent } from '../src/talk/buzz.ts';
 import { generateNostrKeypair, pubkeyFromSecret, verifyNostrEvent } from '../src/talk/nostr.ts';
 import { signAsRoomAgent } from '../src/talk/rooms.ts';
@@ -383,9 +385,9 @@ T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', a
 
     // The onBehalfOf principal reflects who SPOKE the mention (agent here),
     // and a human mention must not be attributed to an agent identity.
-    const downstream = await db.prepare('SELECT on_behalf_of FROM requests WHERE id = ?').get(handoff.downstreamRequestId) as
-      | { on_behalf_of: string }
-      | undefined;
+    const downstream = (await db
+      .prepare('SELECT on_behalf_of FROM requests WHERE id = ?')
+      .get(handoff.downstreamRequestId)) as { on_behalf_of: string } | undefined;
     eq(downstream?.on_behalf_of, 'agent:market-agent', 'agent mention attributes to the agent:');
 
     const humanHandoff = await swarm.executeHandoff({
@@ -395,9 +397,9 @@ T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', a
       originKind: 'human',
       dispatchText: `@finance-agent second opinion on [${marketClaim.id}]`,
     });
-    const humanDownstream = await db.prepare('SELECT on_behalf_of FROM requests WHERE id = ?').get(humanHandoff.downstreamRequestId) as
-      | { on_behalf_of: string }
-      | undefined;
+    const humanDownstream = (await db
+      .prepare('SELECT on_behalf_of FROM requests WHERE id = ?')
+      .get(humanHandoff.downstreamRequestId)) as { on_behalf_of: string } | undefined;
     eq(humanDownstream?.on_behalf_of, 'human:ada', 'human mention attributes to the human:');
 
     // Self-delegation (mentioning your own room's agent) is refused loudly,
@@ -756,4 +758,114 @@ T('Phase 6: Room Selection Onboarding Setup Wizard renders presets and saves con
   eq(auditEntry?.actor, 'operator:admin');
   eq(auditEntry?.action, 'POLICY_MUTATE');
   eq(auditEntry?.detail.includes('Monitor counterparty credit exposure'), true);
+});
+
+// ------------------------------------------------------------------ Markdown-lite rendering
+T('Markdown-lite: plain messages keep newlines, headings and lists become blocks', () => {
+  // Plain multi-line message: one pre-wrap paragraph, newlines preserved.
+  const plain = renderMarkdownLite('line one\nline two');
+  eq(plain.includes('<p class="buzz-md-p">line one\nline two</p>'), true, 'plain stays pre-wrap paragraph:');
+
+  // Canvas-style `## 1. Heading` renders as a heading, not literal "##".
+  const head = renderMarkdownLite('## 1. Exposure Observations');
+  eq(head.includes('buzz-md-h--2'), true, 'h2 class:');
+  eq(head.includes('1. Exposure Observations'), true, 'heading text:');
+  eq(head.includes('##'), false, 'no literal hashes:');
+
+  // Slash-command-style bullets group into ONE real list; the literal `- `
+  // dashes disappear and inline bold survives inside the items.
+  const list = renderMarkdownLite('- **Autonomy**: `GUARDED`\n- **Spend**: $4.20 / $500\n- **Pending Reviews**: 2');
+  eq((list.match(/<ul class="buzz-md-list">/g) ?? []).length, 1, 'one ul:');
+  eq((list.match(/<li class="buzz-md-li">/g) ?? []).length, 3, 'three items:');
+  eq(list.includes('<strong class="buzz-md-strong">Autonomy</strong>'), true, 'bold inside li:');
+  eq(list.includes('<li class="buzz-md-li">- '), false, 'no literal bullets:');
+
+  // Numbered lists group into <ol>.
+  const ol = renderMarkdownLite('1. first\n2. second');
+  eq(ol.includes('<ol class="buzz-md-list">'), true, 'ol:');
+  eq((ol.match(/<li/g) ?? []).length, 2, 'two numbered items:');
+});
+
+T('Markdown-lite: fenced code blocks render escaped and never leak inline tags', () => {
+  const code = renderMarkdownLite('before\n```ts\nconst x = 1; // **not bold**\n```\nafter');
+  eq(code.includes('<pre class="buzz-md-pre" data-lang="ts">'), true, 'fence with lang:');
+  eq(code.includes('**not bold**'), true, 'fence content stays literal:');
+  eq(code.includes('<strong'), false, 'no inline rules inside fences:');
+  eq(code.includes('const x = 1;'), true, 'code text:');
+  eq(code.indexOf('before') < code.indexOf('<pre'), true, 'paragraph before fence:');
+  eq(code.indexOf('</pre>') < code.indexOf('after'), true, 'paragraph after fence:');
+
+  // Escaped HTML inside the fence (escape-first invariant).
+  const evil = renderMarkdownLite('```\n<script>alert(1)</script>\n```');
+  eq(evil.includes('<script>'), false, 'no raw script in code block:');
+  eq(evil.includes('&lt;script&gt;'), true, 'script is escaped text:');
+
+  // Unterminated fence (e.g. a 4000-char clip mid-block) auto-closes.
+  const clipped = renderMarkdownLite('```sql\nSELECT 1 FROM claims');
+  eq(clipped.includes('<pre class="buzz-md-pre" data-lang="sql">'), true, 'open fence:');
+  eq(clipped.includes('SELECT 1 FROM claims'), true, 'content kept:');
+});
+
+T('Markdown-lite: quotes, rules, links and the XSS guardrails', () => {
+  const q = renderMarkdownLite('> cited from the ledger\n> second line');
+  eq(q.includes('<blockquote class="buzz-md-quote">'), true, 'blockquote:');
+  eq(q.includes('cited from the ledger<br>second line'), true, 'quote lines:');
+
+  const hr = renderMarkdownLite('one\n---\ntwo');
+  eq(hr.includes('<hr class="buzz-md-hr">'), true, 'rule:');
+
+  const link = renderMarkdownLite('see [the report](https://example.com/r) now');
+  eq(
+    link.includes(
+      '<a href="https://example.com/r" class="buzz-md-link" target="_blank" rel="noopener noreferrer">the report</a>',
+    ),
+    true,
+    'markdown link:',
+  );
+
+  // javascript: URLs are refused by the href allow-list — left as inert text.
+  const evilLink = renderMarkdownLite('[click](javascript:alert(1))');
+  eq(evilLink.includes('<a href="javascript:'), false, 'no javascript: href:');
+
+  // A markdown link pointing at GitHub resolves to an anchor; the PR-card
+  // rewrite must not inject markup into its href attribute.
+  const gh = renderMarkdownLite('[Repo](https://github.com/acme/app)');
+  eq(gh.includes('<a href="https://github.com/acme/app" class="buzz-md-link"'), true, 'gh link:');
+  eq(gh.includes('href="https://github.com/acme/app"'), true, 'href stays clean:');
+  eq(gh.includes('<a href="<div'), false, 'no card inside href:');
+
+  // Raw injection attempt renders as escaped text only.
+  const xss = renderMarkdownLite('<img src=x onerror=alert(1)> hi');
+  eq(xss.includes('<img src=x'), false, 'no raw img tag:');
+  eq(xss.includes('&lt;img'), true, 'escaped text:');
+
+  // Existing inline behavior preserved: **bold** inside a bubble paragraph.
+  eq(renderMarkdownLite('all **good**').includes('<strong class="buzz-md-strong">good</strong>'), true, 'bold:');
+});
+
+T('Markdown-lite: room page renders agent markdown through the block renderer', async () => {
+  const { db } = await fresh();
+  // The room page lists users for the mention datalist; renderBuzzRoom needs
+  // the auth schema the server installs at boot.
+  await installAuthSchema(db);
+  await createLocalReply(
+    db,
+    TEN,
+    'general',
+    null,
+    'local_general_agent',
+    '## Status\n- **Spend**: ok\n```js\nx = 1\n```',
+  );
+  const page = await renderBuzzRoom(db, TEN, 'general', '/', 'csrf_test');
+  eq(typeof page === 'string', true, 'room page renders:');
+  if (typeof page !== 'string') return;
+  eq(page.includes('buzz-md-h--2'), true, 'heading block in page:');
+  eq(page.includes('buzz-md-list'), true, 'list block in page:');
+  eq(page.includes('<pre class="buzz-md-pre" data-lang="js">'), true, 'code block in page:');
+  eq(page.includes('<div class="buzz-md"'), true, 'bubble uses buzz-md:');
+  // The markdown-lite styles live in Buzz's own token space (surface-split
+  // contract): no Console --v-* tokens inside the .buzz-md rules.
+  const mdStyles = /\/\* Markdown-lite block styles[\s\S]*?\.buzz-md-hr[^}]*}/.exec(page);
+  eq(Boolean(mdStyles), true, 'block styles present:');
+  eq((mdStyles?.[0] ?? '').includes('--v-'), false, 'no --v-* console tokens in md styles:');
 });

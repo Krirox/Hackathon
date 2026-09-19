@@ -19,6 +19,15 @@
  */
 
 import type { AsyncDb } from '../core/db.ts';
+import { timingSafeEqual } from 'node:crypto';
+
+/** Constant-time shared-secret comparison. Null/empty never matches. */
+function webhookTokenOk(presented: string | null | undefined, secret: string): boolean {
+  if (!presented || !secret) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(secret);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export class SchedulerError extends Error {
   constructor(
@@ -284,7 +293,9 @@ export class Scheduler {
 
   /** Inbound webhook: authenticate, rate-limit, record. Delivery effects belong to the handler layer. */
   webhook(source: string, token: string | null, payload: unknown): { accepted: boolean; reason: string } {
-    if (this.webhookSecret !== null && token !== this.webhookSecret) {
+    // A null secret means this intake is intentionally unauthenticated
+    // (in-process use); a configured secret is compared constant-time.
+    if (this.webhookSecret !== null && !webhookTokenOk(token, this.webhookSecret)) {
       return { accepted: false, reason: 'bad webhook secret' };
     }
     const t = this.now();

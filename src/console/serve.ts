@@ -76,6 +76,9 @@ import {
   startSessionForUser,
   verifyLoginCredentials,
   verifyMfaCode,
+  checkMfaLockout,
+  recordMfaFailure,
+  clearMfaFailures,
   type MfaFactor,
 } from '../core/auth.ts';
 import { LedgerError, type Ledger } from '../ledger/ledger.ts';
@@ -123,15 +126,11 @@ import {
   renderAccountCluster,
   renderConsoleNav,
   renderHtml,
-  renderListPage,
-  renderListSection,
-  renderTable,
   requestDetailUrl,
   resolveConsoleHome,
   withReturnTo,
 } from './render.ts';
 import { renderDigest, digestWindowSince, type DigestDays } from './digest.ts';
-import { statusChip } from './components.ts';
 import {
   DEFAULT_THEME,
   THEME_TOGGLE_MARKER,
@@ -142,8 +141,9 @@ import {
 } from './theme.ts';
 import { renderReview } from './review.ts';
 import { renderLearningPage, renderLearningCardPage } from './learning.ts';
-import { renderAuditPage } from './audit.ts';
-import { renderDataPage, renderErasureReceiptPage } from './data.ts';
+// `renderAuditPage` / `renderDataPage` moved with their routes (routes/compliance.ts):
+// the pages are rendered there, so this module no longer imports them.
+import { renderErasureReceiptPage } from './data.ts';
 import {
   buildActivationState,
   loadActivationConfig,
@@ -192,24 +192,19 @@ import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
 import { isBrowserForm, loginPath, safeReturnPath, sessionExpiredPayload } from './session-flow.ts';
 // Route table: declared capability per route, enforced in one place below.
-import {
-  capabilityAllows,
-  matchRoute,
-  validateRoutes,
-  type AuthContext,
-  type RouteDef,
-} from './routes/registry.ts';
+import { capabilityAllows, matchRoute, validateRoutes, type AuthContext, type RouteDef } from './routes/registry.ts';
 import { observabilityRoutes, type ObservabilityEnv } from './routes/observability.ts';
 import { complianceRoutes, type ComplianceEnv } from './routes/compliance.ts';
+import { requestsRoutes, type RequestsEnv } from './routes/requests.ts';
+import { listsRoutes, type ListsEnv } from './routes/lists.ts';
+import { agentTasksRoutes, type AgentTasksEnv } from './routes/agent-tasks.ts';
+import { learningRoutes, type LearningEnv } from './routes/learning.ts';
+import { reviewRoutes, type ReviewEnv } from './routes/review.ts';
 import { createRequestStats, memo as memoize, withRequestCache } from '../core/request-cache.ts';
 // `shellMetrics as shellMetricsFor`: the page branches below keep local
 // `shellMetrics` / `teamMetrics` bindings, and shadowing the import there would
 // make it easy to call the unmemoized path by accident.
-import {
-  roomHealth,
-  roomRecency,
-  shellMetrics as shellMetricsFor,
-} from './shell-reads.ts';
+import { roomHealth, roomRecency, shellMetrics as shellMetricsFor } from './shell-reads.ts';
 import {
   accountNav,
   addPreCsrfToken,
@@ -225,10 +220,12 @@ import {
   checkReadiness,
   correlateDiagnostic,
   describeDrillMode,
+  describeExecutorHealth,
   describeStops,
   haltEffects,
   listHaltEvidence,
   liveness,
+  readWorkerHeartbeat,
   recoverStop,
   retryGuidance,
   workerReadiness,
@@ -247,10 +244,12 @@ import {
   addComment,
   createIssue,
   deleteIssue,
+  getGitHubPushError,
   getGitHubSyncConfig,
   getIssue,
   listComments,
   listIssues,
+  markGitHubSyncError,
   moveIssue,
   parseGitHubRepoPath,
   authorizeGitHubRepo,
@@ -262,6 +261,7 @@ import {
   saveGitHubSyncConfig,
   syncGitHubProject,
   syncIssues,
+  unlinkGitHubSyncConfig,
   updateIssue,
   type IssuePriority,
   type IssueSnapshot,
@@ -270,11 +270,11 @@ import {
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import {
   CANONICAL_ROOMS,
-  ROOM_CATEGORIES,
-  ROOM_CATEGORY_LABELS,
   loadRoomConfig,
   normalizeScope,
   saveRoomConfig,
+  ROOM_BUDGET_MAX_DOLLARS,
+  ROOM_BUDGET_MAX_TOKENS,
 } from '../talk/rooms.ts';
 import { renderCompilerView, renderCompilerParts } from './compiler-view.ts';
 import { renderOperationsDashboard } from './operations-dashboard.ts';
@@ -286,11 +286,15 @@ import { RoomBudgetTracker } from '../talk/budget-gauge.ts';
 import { LiveCanvasSynchronizer } from '../talk/canvas.ts';
 import { type DashboardDepartment } from './dashboard-views.ts';
 import { MeetingService } from '../meetings/service.ts';
+import type { MeetingPipelineOptions } from '../meetings/pipeline.ts';
+import { WhisperSttProvider } from '../meetings/stt.ts';
 import { MeetingSignalingHub, createWebSocketUpgradeHandler } from '../meetings/signaling.ts';
 import {
   renderMeetingRoomView,
   renderMeetingDetailView,
   renderMeetingLibraryView,
+  meetingRoomAsset,
+  meetingIceServers,
 } from './meetings.ts';
 import { listTranscriptSegments } from '../meetings/db.ts';
 
@@ -524,13 +528,28 @@ const esc = (s: string): string =>
  */
 function workspaceInnerHtml(html: string): string {
   const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html;
-  return body
-    .replace(/<a\b[^>]*class="skip-link"[^>]*>[\s\S]*?<\/a>/gi, '')
-    .replace(/<\/?main\b[^>]*>/gi, '')
-    // detailDocument's "Back to console" anchor is kept: it is the only link to
-    // the console root that the shell-agnostic tests pin, and a shelled page is
-    // still reachable with the rail hidden.
-    .trim();
+  return (
+    body
+      // A standalone `page()` utility document wraps its content in a centered
+      // `.utility-wrap` column and a right-aligned `.utility-bar` carrying a
+      // private theme toggle. When such a body is extracted to be re-shelled
+      // (Team, and any console page rendered through `page()`), that chrome must
+      // not survive: the Console shell already owns the search field, theme
+      // toggle and full-width surface. Left in, it leaks a second "Dark" pill
+      // into the page and clamps the content to an 880px column — the shell's
+      // `html,body{max-width:none}` cannot reach a div. Unwrap the column and
+      // drop the bar, keeping only the page's <main> (stripped below).
+      .replace(
+        /<div class="utility-wrap">\s*(?:<div class="utility-bar">[\s\S]*?<\/div>)?\s*(<main\b[\s\S]*?<\/main>)\s*<\/div>/i,
+        '$1',
+      )
+      .replace(/<a\b[^>]*class="skip-link"[^>]*>[\s\S]*?<\/a>/gi, '')
+      .replace(/<\/?main\b[^>]*>/gi, '')
+      // detailDocument's "Back to console" anchor is kept: it is the only link to
+      // the console root that the shell-agnostic tests pin, and a shelled page is
+      // still reachable with the rail hidden.
+      .trim()
+  );
 }
 
 async function wrapInWorkspaceShell(
@@ -555,7 +574,9 @@ async function wrapInWorkspaceShell(
   const innerHtml = isChat
     ? // Buzz keeps upstream's exact body slice: the shell owns a #main landmark
       // and the chat document already supplies one, so nothing is stripped.
-      (html.includes('<body>') ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) : html)
+      html.includes('<body>')
+      ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
+      : html
     : workspaceInnerHtml(html);
   if (isDrawer) {
     return innerHtml;
@@ -632,7 +653,14 @@ async function wrapInWorkspaceShell(
     metrics: shellMetrics,
     roomRecency: shellRecency,
   });
-  const head = html.replace(/[\s\S]*?<head[^>]*>/i, '').replace(/<\/head>[\s\S]*/i, '');
+  // Extract the page's own <head> contents only when it IS a full document.
+  // Some callers (the meetings library) hand this function a bare body
+  // fragment; the old `replace`-to-slice approach left the whole fragment in
+  // `head` when no `<head>` tags were present, so the browser hoisted that
+  // stray content out of `<head>` and rendered the page a second time above
+  // the shell (unscrollable, theme-less). An empty capture means "no head to
+  // carry" and the fragment now appears exactly once, inside the shell.
+  const head = /<head[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? '';
   const openBody = /<body[^>]*>/i.exec(html)?.[0] ?? '<body>';
   return themeDocument(
     `<!doctype html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}</head>${openBody}${shell}</body></html>`,
@@ -732,9 +760,15 @@ function preCsrfOk(req: IncomingMessage, presented: string | null): boolean {
  * the route may proceed; otherwise answers 403 REAUTH_REQUIRED and returns
  * false. Never weakens the role/activation/CSRF checks — it runs after them.
  */
-async function recentAuthGate(db: AsyncDb, res: ServerResponse, userId: string, at: string): Promise<boolean> {
+async function recentAuthGate(
+  db: AsyncDb,
+  res: ServerResponse,
+  userId: string,
+  at: string,
+  presentingSessionCreatedAt?: string,
+): Promise<boolean> {
   try {
-    await assertRecentAuthForSensitiveOp(db, userId, at);
+    await assertRecentAuthForSensitiveOp(db, userId, at, undefined, presentingSessionCreatedAt);
     return true;
   } catch (e) {
     const msg =
@@ -830,15 +864,26 @@ ${
   );
 }
 
-export function hasMailerConfigured(): boolean {
-  return Boolean(process.env.SMTP_URL || process.env.VITAL_MAILER_ENABLED === '1');
-}
+/*
+ * There is no mailer, and there is deliberately no "is a mailer configured"
+ * probe any more.
+ *
+ * `hasMailerConfigured()` returned true when `SMTP_URL` or
+ * `VITAL_MAILER_ENABLED=1` was set, and the auth pages used it to relabel
+ * themselves as transactional: "a password reset link has been sent to your
+ * inbox", "Send verification link". Nothing in `src/` sends mail — there is no
+ * SMTP client, no SES call, no `sendMail` — so setting the variable did not
+ * enable a mailer, it switched a working honest flow ("ask your operator") into a
+ * false promise on the one journey an enterprise probes first: account recovery.
+ *
+ * The honest copy below is what the product actually does, and it is the only
+ * copy now. When a sender ships, it should return its own copy at that point —
+ * gated on a sender that exists rather than on a variable a deployment sets.
+ */
 
 function forgotPasswordPage(csrf: string, opts: { error?: string; notice?: string; next?: string } = {}): string {
   const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
-  const mailerNote = hasMailerConfigured()
-    ? `<p class="sub">Enter your account email. If an account exists, a single-use password reset link will be sent to your inbox.</p>`
-    : `<div class="card" style="background:var(--v-bg-2);margin:12px 0 16px 0;padding:14px 16px;">
+  const mailerNote = `<div class="card" style="background:var(--v-bg-2);margin:12px 0 16px 0;padding:14px 16px;">
 <p class="sub" style="margin:0 0 6px 0;font-weight:600;color:var(--v-ink);">Operator-assisted password recovery</p>
 <p class="sub" style="margin:0;">Transactional outbound email is not configured for this self-hosted installation. Submitting this form records an audited reset token in the ledger.</p>
 <p class="sub" style="margin:6px 0 0 0;color:var(--v-muted);"><strong>Next steps:</strong> Ask your system operator to deliver your link using <code>vital reset-link</code>, or contact your team owner. <strong>Expected turnaround:</strong> typically under 1 hour during business hours.</p>
@@ -855,7 +900,7 @@ ${opts.error ? `<div class="error-summary" role="alert"><p class="err">${esc(opt
   ${nextField}
   <label class="sub" for="email">work email</label>
   <input id="email" name="email" type="email" autocomplete="username" required>
-  <button type="submit">${hasMailerConfigured() ? 'Send reset email' : 'Request operator reset link'}</button>
+  <button type="submit">Request operator reset link</button>
 </form>
 <p class="sub"><a href="/login">Back to sign in</a></p>`,
   );
@@ -971,9 +1016,6 @@ function accountPage(
   const emailBlock = ((): string => {
     if (extra.emailVerified === undefined) return '';
     if (extra.emailVerified) return '<p class="sub">Email verified — this address may be used for recovery.</p>';
-    if (hasMailerConfigured()) {
-      return `<p class="sub">Email not yet verified — recovery links are not trusted until verification completes. <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Send verification link</button></form></p>`;
-    }
     return `<p class="sub">Email not yet verified — automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code>vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day). <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary" style="min-height:auto;">Request operator verification</button></form></p>`;
   })();
   const mfaBlock = extra.mfaHint ? `<p class="sub">${esc(extra.mfaHint)}</p>` : '';
@@ -1293,6 +1335,41 @@ function teamForm(csrf: string, viewer: User, u: User): string {
     <input type="hidden" name="userId" value="${esc(u.id)}">
     <select name="team" onchange="this.form.submit()" aria-label="Team for ${esc(u.email)}">${options}</select>
   </form>`;
+}
+
+/**
+ * The acceptance link, rendered to the admin who just issued it.
+ *
+ * Only `sha256(token)` is stored (core/auth.ts), and this build has no mailer
+ * (there is no sender in `src/` — see the note above `forgotPasswordPage`), so this
+ * response is the *only* place the plaintext token ever exists. Gating it behind
+ * `VITAL_EXPOSE_INVITE_LINK` therefore protected nothing and broke the feature:
+ * the operator was told to "deliver the acceptance link out of band" while the
+ * link was deliberately withheld, so an invited person could never accept.
+ *
+ * It is shown once, in the issuing admin's own authenticated response, with the
+ * delivery expectation stated. If a mailer ever ships, this becomes the
+ * fallback rather than the only path.
+ */
+/**
+ * Meeting pipeline providers, chosen from the environment — or not chosen at all.
+ *
+ * Empty means "nothing configured", which the pipeline treats as a refusal. The
+ * console used to construct `new MeetingService(db)` with no options, so every
+ * deployment ran the mock speech-to-text provider and stored its canned script as
+ * the transcript of real meetings.
+ */
+function meetingPipelineOptions(env: NodeJS.ProcessEnv = process.env): MeetingPipelineOptions {
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  // Whisper is the only speech-to-text implementation here that reaches a real
+  // service; it serves live chunk transcription (meetings/stt.ts).
+  return apiKey ? { sttProvider: new WhisperSttProvider(apiKey) } : {};
+}
+
+function inviteLinkNotice(links: { email: string; link: string }[]): string {
+  if (links.length === 0) return '';
+  const shown = links.map((l) => (links.length === 1 ? l.link : `${l.email}: ${l.link}`)).join(' · ');
+  return ` Acceptance link${links.length === 1 ? '' : 's'} (shown once — deliver securely): ${shown}`;
 }
 
 function teamPage(
@@ -1622,7 +1699,7 @@ function compilerGapsSection(
     )
     .join('');
   return `<h2>Compiler trust gaps</h2>
-<p class="sub">Skill cards with open transfer or evaluation gaps stay scoped where they were validated until the listed evidence passes. Linking evidence here never promotes a card — promotion runs only through the governed transfer-test path.</p>
+<p class="sub">Skill cards with open transfer or evaluation gaps stay scoped where they were validated until the listed evidence passes. Linking evidence here never promotes a card — promotion runs only through the governed transfer-test path, which is not exposed in this console yet.</p>
 ${items ? `<ul class="sub">${items}</ul>` : '<p class="sub">No open trust gaps: every card currently holds the evidence its state requires.</p>'}`;
 }
 
@@ -2096,6 +2173,81 @@ export function startConsoleServer(
 </section>`;
   };
 
+  /**
+   * Executor honesty banner for the dashboard.
+   *
+   * Renders nothing when a real executor checked in recently — silence means the
+   * ordinary case. It speaks up only when approved work would not run at all, or
+   * would "run" through the echo harness, whose runs report COMPLETED without
+   * doing work. That last case used to be invisible: the readiness strip said a
+   * worker was alive, and the operator had no way to tell an executor from a
+   * test double.
+   */
+  const renderExecutorBanner = async (at: string): Promise<string> => {
+    const health = describeExecutorHealth(await readWorkerHeartbeat(db, tenant), at);
+    if (health.state === 'live' && !health.baseline) return '';
+    const risk = health.state === 'absent' || health.baseline;
+    let title = 'Executor silent';
+    if (health.baseline) title = 'No real executor attached';
+    else if (health.state === 'absent') title = 'No executor deployed';
+    let hint = 'It may not have returned yet; legs already EXECUTING are flagged on their workflow page.';
+    if (health.state === 'absent') {
+      hint = 'Start one with <code>vital worker</code> or <code>vital serve --with-worker</code>.';
+    } else if (health.baseline) {
+      hint =
+        "Approved work will be 'completed' by the test-baseline harness and leave no deliverable to review. Attach a real executor (for example <code>JCODE_API_SOCKET</code>) before trusting these runs.";
+    }
+    return `<section class="v-card" style="border-color:var(--v-${risk ? 'risk' : 'warn'})">
+<div class="v-split" style="align-items:flex-start">
+  <div><p class="v-eyebrow">Execution</p><h2 class="v-card-title" style="margin-top:4px;">${esc(title)}</h2>
+  <p class="v-meta" style="margin-top:6px;">${esc(health.detail)}</p>
+  <p class="v-meta" style="margin-top:6px;">${hint}</p></div>
+  <a class="v-btn v-btn-secondary v-btn-sm" href="/console/workflows">Workflows</a>
+</div>
+</section>`;
+  };
+
+  /**
+   * Run an outbound GitHub push after the local write has been answered, and
+   * record the result instead of discarding it.
+   *
+   * The push cannot block the response — the human's write already succeeded and
+   * GitHub's latency is not theirs to wait on — but it must not vanish either.
+   * Every call site used to be `.catch(() => {})`, so a revoked token or a
+   * renamed repository left the local board happily diverging from GitHub with
+   * no signal anywhere a person would look. A failure now flips the sync status
+   * to `error` (visible in the Issues toolbar and dialog) and lands in the audit
+   * log with what failed and why.
+   */
+  const pushAfterLocalWrite = (
+    kind: string,
+    target: string,
+    actor: string,
+    run: () => Promise<{ ok: boolean; error?: string }>,
+  ): void => {
+    const at2 = new Date().toISOString();
+    void run()
+      .then(async (result) => {
+        if (result.ok) return;
+        await markGitHubSyncError(db, tenant, {
+          kind,
+          target,
+          error: result.error ?? 'push failed with no reason given',
+          at: at2,
+        });
+        await auditConsole(db, tenant, actor, 'github.push_failed', target, at2, `${kind}: ${result.error ?? 'no reason'}`.slice(0, 200));
+      })
+      .catch(async (e: unknown) => {
+        await markGitHubSyncError(db, tenant, {
+          kind,
+          target,
+          error: (e as Error).message,
+          at: at2,
+        });
+        await auditConsole(db, tenant, actor, 'github.push_failed', target, at2, `${kind}: ${(e as Error).message}`.slice(0, 200));
+      });
+  };
+
   // Per-instance rate-limit buckets (see the rate-limit note above): a server
   // owns its own counters, so cohabiting instances never share one.
   const buckets = new Map<string, { n: number; reset: number }>();
@@ -2135,11 +2287,7 @@ export function startConsoleServer(
       settled = true;
       const type = contentType || String(res.getHeader('content-type') ?? '');
       if (type.includes('text/html') && typeof chunk === 'string') {
-        return end(
-          themeDocument(chunk) as never,
-          encoding as never,
-          callback as never,
-        );
+        return end(themeDocument(chunk) as never, encoding as never, callback as never);
       }
       return end(chunk as never, encoding as never, callback as never);
     }) as typeof res.end;
@@ -2176,9 +2324,41 @@ export function startConsoleServer(
     await ensureBootstrapOwner(db, tenant, now());
     let boundAddress = `${bindHost}:pending`;
 
-    const meetingService = new MeetingService(db);
+    // Providers are configured from the environment, or the pipeline refuses
+    // (meetings/pipeline.ts). Nothing here defaults to a mock: a fabricated
+    // meeting transcript would be stored as a fact in the ledger this product
+    // exists to keep honest.
+    const meetingService = new MeetingService(db, meetingPipelineOptions());
     const signalingHub = new MeetingSignalingHub(db);
-    const wsUpgrade = createWebSocketUpgradeHandler(signalingHub);
+    // Identity for a signaling socket is resolved server-side from the
+    // session cookie — never from query params, which let anyone claim the
+    // host role. The upgrade is refused (401) without a live session on this
+    // tenant whose meeting exists.
+    const wsUpgrade = createWebSocketUpgradeHandler(signalingHub, {
+      resolveIdentity: async (req) => {
+        const sessionToken = cookieValue(req, 'vital_session');
+        if (!sessionToken) return null;
+        let auth: { session: { csrfToken: string }; user: { id: string; name: string; tenant: string } };
+        try {
+          auth = await sessionUser(db, sessionToken, now());
+        } catch {
+          return null;
+        }
+        if (auth.user.tenant !== tenant) return null;
+        const u = new URL(req.url ?? '/', 'http://console');
+        const meetingId = u.searchParams.get('meetingId') ?? '';
+        if (!meetingId) return null;
+        const meeting = await meetingService.getMeeting(tenant, meetingId).catch(() => null);
+        if (!meeting) return null;
+        const name = u.searchParams.get('name');
+        return {
+          userId: auth.user.id,
+          displayName: (name && name.slice(0, 64)) || auth.user.name,
+          tenant,
+          role: meeting.hostUserId === auth.user.id ? ('host' as const) : ('participant' as const),
+        };
+      },
+    });
 
     // ---------------------------------------------------------- route table ----
     // Routes moved off the legacy if-chain. Their capability is declared in
@@ -2189,9 +2369,9 @@ export function startConsoleServer(
     // only for what it uses; the server satisfies all of them, and because a
     // handler's parameter is contravariant a narrow handler slots into this
     // wider list without a cast.
-    type ConsoleRouteEnv = ObservabilityEnv & ComplianceEnv;
+    type ConsoleRouteEnv = ObservabilityEnv & ComplianceEnv & RequestsEnv & ListsEnv & LearningEnv & ReviewEnv & AgentTasksEnv;
     /** Shelled console page: the chrome stays here, the page body comes from the domain. */
-    const shellPage: ComplianceEnv['shellPage'] = async (auth, page) => {
+    const shellPage: ListsEnv['shellPage'] = async (auth, page) => {
       const opts = {
         tenant,
         actor: by(auth.user),
@@ -2209,8 +2389,17 @@ export function startConsoleServer(
         home,
         auth,
         page.navKey,
+        undefined,
+        // The drawer rendering the list pages use when a detail link opens in
+        // place. Declared on the route, applied by the one shell builder.
+        page.drawer,
       );
     };
+    // Boot-time capability of the operator channel: a signing key, a shared
+    // secret, or none. The same precedence the legacy approval branch used.
+    let operatorMode: 'signature' | 'secret' | 'session' = 'session';
+    if (keyAuth) operatorMode = 'signature';
+    else if (operatorSecret) operatorMode = 'secret';
     const routeEnv: ConsoleRouteEnv = {
       db,
       tenant,
@@ -2219,8 +2408,13 @@ export function startConsoleServer(
       exportLedger: (t, at) => exportLedger(db, t, at),
       eraseTenant: (t, actor, at) => eraseTenant(db, t, actor, at),
       actorOf: (auth) => by(auth.user),
-      redirect: (res, location, opts) =>
-        redirect(res, location, opts?.clearSession ? CLEAR_SESSION_COOKIE : undefined),
+      actorLabel: (auth) => actorLabel(auth.user),
+      approverMin,
+      operatorMode,
+      coord,
+      ledger,
+      audit: (actor, action, target, at) => auditConsole(db, tenant, actor, action, target, at),
+      redirect: (res, location, opts) => redirect(res, location, opts?.clearSession ? CLEAR_SESSION_COOKIE : undefined),
       vitalVersion: '0.0.1',
       // Read at request time: the address is only known after listen().
       get boundAddress(): string {
@@ -2238,11 +2432,21 @@ export function startConsoleServer(
       rateOk,
       approvalLatency: (t) => coord.approvalLatencyStats(t),
       costPerSignal: (t) => new CognitiveRouter(db).costPerSignal(t),
+      comp,
     };
-    const routes: RouteDef<ConsoleRouteEnv>[] = [...observabilityRoutes(), ...complianceRoutes()];
+    const routes: RouteDef<ConsoleRouteEnv>[] = [
+      ...observabilityRoutes(),
+      ...complianceRoutes(),
+      ...requestsRoutes(),
+      ...listsRoutes(),
+      ...learningRoutes(),
+      ...reviewRoutes(),
+      ...agentTasksRoutes(),
+    ];
     // Fail at boot, not at request time: a route that cannot register is a 404
     // in production and a mystery in review.
-    validateRoutes(routes);      const server: Server = createServer((req, res) => {
+    validateRoutes(routes);
+    const server: Server = createServer((req, res) => {
       const started = Date.now();
       let logPath = 'unmatched';
       themeAwareHtml(res);
@@ -2276,1062 +2480,1105 @@ export function startConsoleServer(
       // Counters live here, outside the request context, because the log line is
       // written on `finish` — after the context that would have held them.
       const stats = createRequestStats();
-      void withRequestCache(async () => {
-        const url = new URL(req.url ?? '/', 'http://console');
-        const path = url.pathname;
-        const method = req.method ?? 'GET';
-        // Route templates avoid logging tenant data, identifiers, or query strings.
-        if (/^\/api\/requests\/[^/]+\/(approve|decline)$/.test(path))
-          logPath = `/api/requests/:id/${path.endsWith('/approve') ? 'approve' : 'decline'}`;
-        else if (/^\/api\/requests\/[^/]+\/refresh-evidence$/.test(path))
-          logPath = '/api/requests/:id/refresh-evidence';
-        else if (/^\/api\/meetings\/[^/]+\/(join|leave|end|recording|transcript|process|rag|ask|delete)$/.test(path))
-          logPath = `/api/meetings/:id/${path.split('/').pop()}`;
-        else if (/^\/api\/meetings\/[^/]+$/.test(path))
-          logPath = '/api/meetings/:id';
-        else if (/^\/console\/meetings\/[^/]+\/room$/.test(path))
-          logPath = '/console/meetings/:id/room';
-        else if (/^\/console\/meetings\/[^/]+$/.test(path) && path !== '/console/meetings/room' && path !== '/console/meetings/detail')
-          logPath = '/console/meetings/:id';
-        // Chat room names are tenant data too, and this is the busiest page in
-        // the product — logged as `unmatched` it made the render-cost metric
-        // useless for exactly the surface it was most needed on.
-        else if (/^\/console\/buzz\/[^/]+$/.test(path)) logPath = '/console/buzz/:room';
-        else if (
-          [
-            home,
-            '/console',
-            '/console/rooms',
-            '/console/requests',
-            '/console/human-work',
-            '/console/claims',
-            '/console/meetings',
-            '/console/meetings/room',
-            '/console/meetings/detail',
-            '/api/meetings',
-            '/api/meetings/create',
-            '/api/meetings/list',
-            '/login',
-            '/signup',
-            '/logout',
-            '/change-password',
-            '/account',
-            '/account/password',
-            '/account/email/request',
-            '/verify-email',
-            '/login/mfa',
-            '/console/dashboard',
-            '/console/compiler',
-            '/console/audit',
-            '/console/data',
-            '/console/data/export',
-            '/console/data/erase',
-            '/console/issues',
-            '/console/issues/sync',
-            '/console/issues/detail',
-            '/console/issues/create',
-            '/console/issues/move',
-            '/console/issues/update',
-            '/console/issues/delete',
-            '/console/issues/comment',
-            '/receipts/erasure',
-            '/account/mfa/setup',
-            '/account/mfa/enable',
-            '/account/mfa/recovery',
-            '/account/mfa/remove',
-            '/forgot-password',
-            '/reset-password',
-            '/team',
-            '/team/invite',
-            '/team/disable',
-            '/team/reactivate',
-            '/team/role',
-            '/team/team',
-            '/team/transfer-ownership',
-            '/team/invitation/resend',
-            '/team/invitation/revoke',
-            '/team/stops/recover',
-            '/accept-invite',
-            '/setup',
-            '/setup/ingest',
-            '/setup/test-source',
-            '/setup/sample',
-            '/setup/start-release',
-            '/api/ingest/health',
-            '/healthz',
-            '/api/health',
-            '/api/metrics',
-            '/api/approval-latency',
-            '/api/cost-per-signal',
-          ].includes(path)
-        )
-          logPath = path;
-        // NOTE: /healthz lives in routes/observability.ts (capability: public).
-        // It is dispatched further down, after the session closures exist — and
-        // deliberately before any tenant/cookie DB read, because the target
-        // group probes it every 30s per task and it must stay constant-cost.
-        const ip = resolveRequestContext(req, trustProxy).clientIp;
-        const at = now();
+      void withRequestCache(
+        async () => {
+          const url = new URL(req.url ?? '/', 'http://console');
+          const path = url.pathname;
+          const method = req.method ?? 'GET';
+          // Route templates avoid logging tenant data, identifiers, or query strings.
+          if (/^\/api\/requests\/[^/]+\/(approve|decline)$/.test(path))
+            logPath = `/api/requests/:id/${path.endsWith('/approve') ? 'approve' : 'decline'}`;
+          else if (/^\/api\/requests\/[^/]+\/refresh-evidence$/.test(path))
+            logPath = '/api/requests/:id/refresh-evidence';
+          else if (/^\/api\/meetings\/[^/]+\/(join|leave|end|recording|transcript|process|rag|ask|delete)$/.test(path))
+            logPath = `/api/meetings/:id/${path.split('/').pop()}`;
+          else if (/^\/api\/meetings\/[^/]+$/.test(path)) logPath = '/api/meetings/:id';
+          else if (/^\/console\/meetings\/[^/]+\/room$/.test(path)) logPath = '/console/meetings/:id/room';
+          else if (
+            /^\/console\/meetings\/[^/]+$/.test(path) &&
+            path !== '/console/meetings/room' &&
+            path !== '/console/meetings/detail'
+          )
+            logPath = '/console/meetings/:id';
+          // Chat room names are tenant data too, and this is the busiest page in
+          // the product — logged as `unmatched` it made the render-cost metric
+          // useless for exactly the surface it was most needed on.
+          else if (/^\/console\/buzz\/[^/]+$/.test(path)) logPath = '/console/buzz/:room';
+          else if (
+            [
+              home,
+              '/console',
+              '/console/rooms',
+              '/console/requests',
+              '/console/human-work',
+              '/console/claims',
+              '/console/meetings',
+              '/console/meetings/room',
+              '/console/meetings/detail',
+              '/api/meetings',
+              '/api/meetings/create',
+              '/api/meetings/list',
+              '/login',
+              '/signup',
+              '/logout',
+              '/change-password',
+              '/account',
+              '/account/password',
+              '/account/email/request',
+              '/verify-email',
+              '/login/mfa',
+              '/console/dashboard',
+              '/console/compiler',
+              '/console/audit',
+              '/console/data',
+              '/console/data/export',
+              '/console/data/erase',
+              '/console/issues',
+              '/console/issues/sync',
+              '/console/issues/detail',
+              '/console/issues/create',
+              '/console/issues/move',
+              '/console/issues/update',
+              '/console/issues/delete',
+              '/console/issues/comment',
+              '/receipts/erasure',
+              '/account/mfa/setup',
+              '/account/mfa/enable',
+              '/account/mfa/recovery',
+              '/account/mfa/remove',
+              '/forgot-password',
+              '/reset-password',
+              '/team',
+              '/team/invite',
+              '/team/disable',
+              '/team/reactivate',
+              '/team/role',
+              '/team/team',
+              '/team/transfer-ownership',
+              '/team/invitation/resend',
+              '/team/invitation/revoke',
+              '/team/stops/recover',
+              '/accept-invite',
+              '/setup',
+              '/setup/ingest',
+              '/setup/test-source',
+              '/setup/sample',
+              '/setup/start-release',
+              '/api/ingest/health',
+              '/healthz',
+              '/api/health',
+              '/api/metrics',
+              '/api/approval-latency',
+              '/api/cost-per-signal',
+            ].includes(path)
+          )
+            logPath = path;
+          // NOTE: /healthz lives in routes/observability.ts (capability: public).
+          // It is dispatched further down, after the session closures exist — and
+          // deliberately before any tenant/cookie DB read, because the target
+          // group probes it every 30s per task and it must stay constant-cost.
+          const ip = resolveRequestContext(req, trustProxy).clientIp;
+          const at = now();
 
-        const sessionToken = cookieValue(req, 'vital_session');
-        const hadSessionCookie = Boolean(sessionToken);
-        const sessionOf = async (): Promise<{ session: Session; user: User } | null> => {
-          if (!sessionToken) return null;
-          try {
-            return await sessionUser(db, sessionToken, at);
-          } catch {
-            return null;
-          }
-        };
-        const returnPath = (): string => path + (url.search || '');
-        const redirectLogin = (expired = hadSessionCookie): void => {
-          if (expired) {
-            const resume = reauthResume(returnPath());
-            if (hadSessionCookie) redirect(res, resume.loginUrl, CLEAR_SESSION_COOKIE);
-            else redirect(res, resume.loginUrl);
-          } else {
-            redirect(res, loginPath({ next: returnPath() }));
-          }
-        };
-        const sessionExpiredApi = (): void => {
-          json(res, 401, sessionExpiredPayload(returnPath()));
-        };
-
-        // ------------------------------------------------- route table dispatch
-        // The single enforcement point for declared capabilities. A hit is fully
-        // handled here and returns; everything not yet migrated falls through to
-        // the chain below, so migration can proceed route by route.
-        const routeHit = matchRoute(routes, method, path);
-        if (routeHit) {
-          const declared = routeHit.route;
-          // A declared pattern is already identifier-free, so a migrated route
-          // can never log as `unmatched` (or leak an id) by being forgotten in
-          // the allow-list above — which is how `/console/rooms` spent its time
-          // logging as `unmatched` while being the most expensive page.
-          logPath = declared.pattern;
-          const capability = declared.capability;
-          const isPage = declared.surface === 'html';
-          // Only pay for a session lookup when the route demands one.
-          const auth = capability === 'public' ? null : await sessionOf();
-          if (capability !== 'public' && !auth) {
-            // A browser following a nav link must land on the login form with a
-            // way back; an API caller must get a status it can act on.
-            return isPage ? redirectLogin() : sessionExpiredApi();
-          }
-          // Identical for both surfaces by choice: legacy HTML pages answered a
-          // foreign tenant with JSON as well, and the tenant mismatch means the
-          // caller's session does not belong to this deployment at all.
-          if (auth && auth.user.tenant !== tenant)
-            return json(res, 403, { ok: false, error: 'wrong tenant' });
-          // Session freshness precedes the role decision, matching the legacy
-          // order: an un-activated account is sent to change its password rather
-          // than told about a page it cannot see yet.
-          if (isPage && auth && activationDenied(res, auth, false)) return;
-          if (!capabilityAllows(capability, auth)) {
-            const denied = declared.denied;
-            if (isPage && auth && denied && denied.as !== 'text') {
-              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(
-                await shellPage(auth, {
-                  title: denied.title,
-                  body: `<p class="sub">${esc(denied.message)}</p>`,
-                  navKey: denied.navKey ?? '',
-                }),
-              );
-              return;
-            }
-            if (isPage && denied?.as === 'text') {
-              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
-              res.end(denied.message);
-              return;
-            }
-            return json(res, 403, { ok: false, error: 'forbidden' });
-          }
-          // Declared body handling: parse + CSRF once, here, so "this route
-          // checks its token" is a property of the table rather than of the
-          // handler. The parsed body is handed over, so a handler cannot forget
-          // to read it or accidentally read it twice.
-          let call: Call | null = null;
-          if (declared.body === 'csrf') {
-            if (!auth) return sessionExpiredApi();
+          const sessionToken = cookieValue(req, 'vital_session');
+          const hadSessionCookie = Boolean(sessionToken);
+          const sessionOf = async (): Promise<{ session: Session; user: User } | null> => {
+            if (!sessionToken) return null;
             try {
-              call = await parseCall(req);
-            } catch (e) {
-              return bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
+              return await sessionUser(db, sessionToken, at);
+            } catch {
+              return null;
             }
-            if (!csrfOk(auth.session, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          }
-          await declared.handler({
-            req,
-            res,
-            url,
-            path,
-            method,
-            params: routeHit.params,
-            ip,
-            at,
-            auth: auth as AuthContext | null,
-            call,
-            env: routeEnv,
-            memo: { memo: memoize },
-          });
-          return;
-        }
+          };
+          const returnPath = (): string => path + (url.search || '');
+          const redirectLogin = (expired = hadSessionCookie): void => {
+            if (expired) {
+              const resume = reauthResume(returnPath());
+              if (hadSessionCookie) redirect(res, resume.loginUrl, CLEAR_SESSION_COOKIE);
+              else redirect(res, resume.loginUrl);
+            } else {
+              redirect(res, loginPath({ next: returnPath() }));
+            }
+          };
+          const sessionExpiredApi = (): void => {
+            json(res, 401, sessionExpiredPayload(returnPath()));
+          };
 
-        const accessState = await tenantAccessState(db, tenant);
-        const exposeResetToken = process.env.VITAL_EXPOSE_RESET_TOKEN === '1';
-
-        // ---------------------------------------------------------- auth pages
-        if (path === '/login' && method === 'GET') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          const existingAuth = await sessionOf();
-          if (existingAuth) {
-            const defRoom = await defaultRoomForUser(db, tenant, existingAuth.user);
-            return redirect(res, `/console/buzz/${encodeURIComponent(defRoom)}`);
-          }
-          const csrf = randomBytes(32).toString('hex');
-          const next = safeReturnPath(url.searchParams.get('next'));
-          const expired = url.searchParams.get('reason') === 'expired';
-          const notice =
-            url.searchParams.get('reset') === 'ok'
-              ? 'Password saved. Every other session was signed out — sign in to continue.'
-              : undefined;
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          const tenantCtx = await loginTenantContext(db, tenant);
-          res.end(
-            loginPage(csrf, {
-              notice,
-              next,
-              recovery: accessState === 'recovery',
-              expired,
-              ...tenantCtx,
-            }),
-          );
-          return;
-        }
-        if (path === '/login' && method === 'POST') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          const next = safeReturnPath(call.fields.next);
-          const email = call.fields.email ?? '';
-          // Login-CSRF: the form must echo the pre-session cookie value.
-          if (!preCsrfOk(req, call.csrf)) {
-            const fresh = randomBytes(32).toString('hex');
-            const shape = formErrorShape('csrf-expired');
-            const msg = 'This sign-in form expired. Your email is preserved — submit again.';
-            if (isBrowserForm(req)) {
-              res.writeHead(200, {
-                'content-type': 'text/html; charset=utf-8',
-                'set-cookie': preCsrfCookie(fresh, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-              });
-              const tenantCtx = await loginTenantContext(db, tenant);
-              const retained = retainDraftFields(call.fields);
-              res.end(
-                loginPage(fresh, {
-                  error: msg,
-                  next,
-                  email: retained.email ?? '',
-                  recovery: accessState === 'recovery',
-                  ...tenantCtx,
-                }),
-              );
-              return;
+          // ------------------------------------------------- route table dispatch
+          // The single enforcement point for declared capabilities. A hit is fully
+          // handled here and returns; everything not yet migrated falls through to
+          // the chain below, so migration can proceed route by route.
+          const routeHit = matchRoute(routes, method, path);
+          if (routeHit) {
+            const declared = routeHit.route;
+            // A declared pattern is already identifier-free, so a migrated route
+            // can never log as `unmatched` (or leak an id) by being forgotten in
+            // the allow-list above — which is how `/console/rooms` spent its time
+            // logging as `unmatched` while being the most expensive page.
+            logPath = declared.pattern;
+            const capability = declared.capability;
+            const isPage = declared.surface === 'html';
+            // Only pay for a session lookup when the route demands one.
+            const auth = capability === 'public' ? null : await sessionOf();
+            if (capability !== 'public' && !auth) {
+              // A browser following a nav link must land on the login form with a
+              // way back; an API caller must get a status it can act on.
+              return isPage ? redirectLogin() : sessionExpiredApi();
             }
-            return json(res, 403, { ok: false, error: msg, code: shape.code });
-          }
-          if (!rateOk(`login:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
-            const bucket = buckets.get(`login:${ip ?? '-'}:${tenant}`);
-            const retryAt = bucket ? new Date(bucket.reset).toISOString() : undefined;
-            const shape = formErrorShape('rate-limited', {
-              retryAfterMs: bucket ? Math.max(0, bucket.reset - Date.parse(at)) : undefined,
-            });
-            const guidance = retryGuidance('rate-limit');
-            const msg = retryAt ? `${shape.message} — try again after ${retryAt}` : shape.message;
-            if (isBrowserForm(req)) {
-              res.writeHead(shape.status, { 'content-type': 'text/html; charset=utf-8' });
-              const tenantCtx = await loginTenantContext(db, tenant);
-              const retained = retainDraftFields(call.fields);
-              res.end(
-                loginPage(call.csrf ?? '', {
-                  error: msg,
-                  next,
-                  email: retained.email ?? '',
-                  recovery: accessState === 'recovery',
-                  ...tenantCtx,
-                }),
-              );
-              return;
+            // Identical for both surfaces by choice: legacy HTML pages answered a
+            // foreign tenant with JSON as well, and the tenant mismatch means the
+            // caller's session does not belong to this deployment at all.
+            if (auth && auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            // Session freshness precedes the role decision, matching the legacy
+            // order: an un-activated account is sent to change its password rather
+            // than told about a page it cannot see yet. Declared per route, so the
+            // routes that always checked it keep checking it and the ones that
+            // never did are not quietly changed.
+            if (declared.activation === 'required' && auth && activationDenied(res, auth, !isPage)) return;
+            if (!capabilityAllows(capability, auth)) {
+              const denied = declared.denied;
+              if (isPage && auth && denied && denied.as !== 'text') {
+                res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(
+                  await shellPage(auth, {
+                    title: denied.title,
+                    body: `<p class="sub">${esc(denied.message)}</p>`,
+                    navKey: denied.navKey ?? '',
+                  }),
+                );
+                return;
+              }
+              if (isPage && denied?.as === 'text') {
+                res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+                res.end(denied.message);
+                return;
+              }
+              return json(res, 403, { ok: false, error: 'forbidden' });
             }
-            return json(res, shape.status, {
-              ok: false,
-              error: msg,
-              code: shape.code,
-              retryAfterMs: shape.retryAfterMs,
-              retryable: guidance.retryable,
-              retryAt,
-            });
-          }
-          try {
-            const user = await verifyLoginCredentials(
-              db,
-              { tenant, email, password: call.fields.password ?? '', ip },
+            // Declared body handling: parse + CSRF once, here, so "this route
+            // checks its token" is a property of the table rather than of the
+            // handler. The parsed body is handed over, so a handler cannot forget
+            // to read it or accidentally read it twice.
+            let call: Call | null = null;
+            if (declared.body === 'csrf') {
+              if (!auth) return sessionExpiredApi();
+              try {
+                call = await parseCall(req);
+              } catch (e) {
+                return bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
+              }
+              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            await declared.handler({
+              req,
+              res,
+              url,
+              path,
+              method,
+              params: routeHit.params,
+              ip,
               at,
-            );
-            if (await isMfaEnabled(db, user.id)) {
-              // Second factor enrolled: a correct password must NOT mint a
-              // usable session. Issue a short-lived challenge instead.
-              for (const [k, v] of mfaChallenges) if (v.expiresAtMs <= Date.parse(at)) mfaChallenges.delete(k);
-              const challenge = randomBytes(32).toString('hex');
-              mfaChallenges.set(challenge, {
-                userId: user.id,
-                tenant,
-                expiresAtMs: Date.parse(at) + MFA_CHALLENGE_TTL_MS,
-              });
-              await auditConsole(db, tenant, user.id, 'auth.mfa_challenge', 'login', at);
-              const mfaCookie = `${MFA_COOKIE}=${challenge}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(MFA_CHALLENGE_TTL_MS / 1000)}${secure ? '; Secure' : ''}`;
-              const loc = next ? `/login/mfa?next=${encodeURIComponent(next)}` : '/login/mfa';
-              return redirect(res, loc, mfaCookie);
+              auth: auth as AuthContext | null,
+              call,
+              env: routeEnv,
+              memo: { memo: memoize },
+            });
+            return;
+          }
+
+          const accessState = await tenantAccessState(db, tenant);
+          const exposeResetToken = process.env.VITAL_EXPOSE_RESET_TOKEN === '1';
+
+          // ---------------------------------------------------------- auth pages
+          if (path === '/login' && method === 'GET') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            const existingAuth = await sessionOf();
+            if (existingAuth) {
+              const defRoom = await defaultRoomForUser(db, tenant, existingAuth.user);
+              return redirect(res, `/console/buzz/${encodeURIComponent(defRoom)}`);
             }
-            const { session, token } = await startSessionForUser(db, tenant, user.id, at);
-            const cookie = sessionCookie(token, at, secure, session);
-            if (user.mustChangePassword) return redirect(res, '/change-password', cookie);
-            const defRoom = await defaultRoomForUser(db, tenant, user);
-            return redirect(res, next ?? `/console/buzz/${encodeURIComponent(defRoom)}`, cookie);
-          } catch (e) {
-            // One message for every credential failure — no user enumeration —
-            // EXCEPT lockout, which the user must see to know it is not their
-            // password that is wrong.
-            const locked = e instanceof AuthError && e.code === 'LOCKED';
-            res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' });
+            const csrf = randomBytes(32).toString('hex');
+            const next = safeReturnPath(url.searchParams.get('next'));
+            const expired = url.searchParams.get('reason') === 'expired';
+            const notice =
+              url.searchParams.get('reset') === 'ok'
+                ? 'Password saved. Every other session was signed out — sign in to continue.'
+                : undefined;
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
             const tenantCtx = await loginTenantContext(db, tenant);
             res.end(
-              loginPage(call.csrf ?? '', {
-                error: locked ? (e as AuthError).message.replace(/^\[auth:[^\]]+\]\s*/, '') : 'invalid credentials',
+              loginPage(csrf, {
+                notice,
                 next,
-                email,
                 recovery: accessState === 'recovery',
+                expired,
                 ...tenantCtx,
               }),
             );
             return;
           }
-        }
-        // FINAL-005: second-factor step. The session is created only after the
-        // code verifies; the challenge cookie is not a session.
-        if (path === '/login/mfa' && method === 'GET') {
-          const challenge = cookieValue(req, MFA_COOKIE);
-          const entry = challenge ? mfaChallenges.get(challenge) : undefined;
-          if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
-            return redirect(
-              res,
-              loginPath({ reason: 'expired' }),
-              `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
-            );
-          }
-          const csrf = randomBytes(32).toString('hex');
-          const next = safeReturnPath(url.searchParams.get('next'));
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          res.end(mfaChallengePage(csrf, { next, recovery: url.searchParams.get('mode') === 'recovery' }));
-          return;
-        }
-        if (path === '/login/mfa' && method === 'POST') {
-          const challenge = cookieValue(req, MFA_COOKIE);
-          const entry = challenge ? mfaChallenges.get(challenge) : undefined;
-          if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
-            return redirect(
-              res,
-              loginPath({ reason: 'expired' }),
-              `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
-            );
-          }
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!preCsrfOk(req, call.csrf))
-            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          if (!rateOk(`mfa:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
-            const shape = formErrorShape('rate-limited');
-            return json(res, shape.status, { ok: false, error: shape.message, code: shape.code });
-          }
-          const code = (call.fields.code ?? '').trim();
-          const next = safeReturnPath(call.fields.next);
-          const mode = call.fields.mode === 'recovery';
-          const accepted = mode
-            ? await consumeMfaRecoveryCode(db, tenant, entry.userId, code, at)
-            : await verifyMfaCode(db, tenant, entry.userId, code, at);
-          if (!accepted) {
-            const csrf = randomBytes(32).toString('hex');
-            res.writeHead(401, {
-              'content-type': 'text/html; charset=utf-8',
-              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-            });
-            res.end(
-              mfaChallengePage(csrf, {
-                error: mode
-                  ? 'That recovery code is not valid or was already used.'
-                  : 'That code was not accepted. Check your device clock and try again.',
-                next,
-                recovery: mode,
-              }),
-            );
-            return;
-          }
-          mfaChallenges.delete(challenge!);
-          const { user, session, token } = await startSessionForUser(db, tenant, entry.userId, at);
-          const sessionCk = sessionCookie(token, at, secure, session);
-          const clearMfa = `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
-          const defRoom = await defaultRoomForUser(db, tenant, user);
-          const target = user.mustChangePassword
-            ? '/change-password'
-            : (next ?? `/console/buzz/${encodeURIComponent(defRoom)}`);
-          res.writeHead(303, { location: target, 'set-cookie': [sessionCk, clearMfa] });
-          res.end();
-          return;
-        }
-        if (path === '/forgot-password' && method === 'GET') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          if (await sessionOf()) return redirect(res, home);
-          const csrf = randomBytes(32).toString('hex');
-          const next = safeReturnPath(url.searchParams.get('next'));
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          res.end(forgotPasswordPage(csrf, { next }));
-          return;
-        }
-        if (path === '/forgot-password' && method === 'POST') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!preCsrfOk(req, call.csrf))
-            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          if (!rateOk(`reset:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
-            const shape = formErrorShape('rate-limited');
-            const guidance = retryGuidance('rate-limit');
-            return json(res, shape.status, {
-              ok: false,
-              error: shape.message,
-              code: shape.code,
-              retryAfterMs: shape.retryAfterMs,
-              retryable: guidance.retryable,
-            });
-          }
-          const next = safeReturnPath(call.fields.next);
-          const email = call.fields.email ?? '';
-          const token = await tryPasswordReset(db, tenant, email, at);
-          let notice = hasMailerConfigured()
-            ? 'If an account exists for that email, a password reset link has been sent to your inbox.'
-            : 'If an account exists for that email, the reset request has been recorded. Automatic email delivery is not configured on this host — ask your operator to deliver your single-use link via vital reset-link (turnaround: under 1 hour).';
-          if (token) {
-            // FLOW-007: recovery rides on a verified address. The reset token
-            // is still issued (no oracle for strangers), but the owner is
-            // told verification is missing so an unverified address is never
-            // silently trusted as the recovery channel.
-            const channel = await recoveryChannelStatus(db, tenant, email);
-            if (channel.exists && !channel.verified)
-              notice +=
-                ' Note: this email address is not yet verified — verify it from Account and security before relying on it for recovery.';
-            if (exposeResetToken) {
-              const link = `/reset-password?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
-              notice = `Reset link (development only): ${link}${channel.exists && !channel.verified ? ' (email unverified — verify before relying on it)' : ''}`;
+          if (path === '/login' && method === 'POST') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
             }
-          }
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(forgotPasswordPage(call.csrf ?? '', { notice, next }));
-          return;
-        }
-        if (path === '/reset-password' && method === 'GET') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          const token = url.searchParams.get('token') ?? '';
-          if (!token) return redirect(res, '/forgot-password');
-          const csrf = randomBytes(32).toString('hex');
-          const next = safeReturnPath(url.searchParams.get('next'));
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          res.end(resetPasswordPage(csrf, token, { next }));
-          return;
-        }
-        if (path === '/accept-invite' && method === 'GET') {
-          const token = url.searchParams.get('token') ?? '';
-          if (!token) return redirect(res, '/login');
-          const inv = await peekInvitationByToken(db, token, at);
-          if (!inv || inv.status === 'revoked' || inv.status === 'accepted')
-            return json(res, 404, { ok: false, error: 'invitation not found or no longer valid' });
-          const csrf = randomBytes(32).toString('hex');
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          res.end(acceptInvitePage(csrf, token, inv));
-          return;
-        }
-        if (path === '/accept-invite' && method === 'POST') {
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!preCsrfOk(req, call.csrf))
-            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          const token = call.fields.token ?? '';
-          const inv = token ? await peekInvitationByToken(db, token, at) : undefined;
-          try {
-            const accepted = await acceptInvitation(db, token, call.fields.password ?? '', at);
-            const signed = await login(
-              db,
-              { tenant: accepted.user.tenant, email: accepted.user.email, password: call.fields.password ?? '' },
-              at,
-            );
-            return redirect(res, home, sessionCookie(signed.token, at, secure, signed.session));
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              inv
-                ? acceptInvitePage(call.csrf ?? '', token, inv, { error: msg })
-                : page(
-                    'Vital Console — accept invitation',
-                    `<p class="err">${esc(msg)}</p><p class="sub"><a href="/login">Sign in</a></p>`,
-                  ),
-            );
-            return;
-          }
-        }
-        if (path === '/reset-password' && method === 'POST') {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!preCsrfOk(req, call.csrf))
-            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          const next = safeReturnPath(call.fields.next);
-          const token = call.fields.token ?? '';
-          try {
-            await confirmPasswordReset(db, token, call.fields.password ?? '', at);
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              resetPasswordPage(call.csrf ?? '', token, {
-                error: e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
-                next,
-              }),
-            );
-            return;
-          }
-          const loginTarget = `/login?reset=ok${next ? `&next=${encodeURIComponent(next)}` : ''}`;
-          return redirect(res, loginTarget, CLEAR_SESSION_COOKIE);
-        }
-        if (path === '/receipts/erasure' && method === 'GET') {
-          const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase();
-          if (slug) {
-            return redirect(res, `/receipts/erasure/${encodeURIComponent(slug)}`);
-          }
-          const verification = { found: false, slug: '' };
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(renderErasureReceiptPage(verification as any, home));
-          return;
-        }
-        if (path.startsWith('/receipts/erasure/') && method === 'GET') {
-          const slug = decodeURIComponent(path.slice('/receipts/erasure/'.length)).trim().toLowerCase();
-          const verification = await verifyErasureReceipt(db, slug);
-          res.writeHead(verification.found ? 200 : 404, {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-          });
-          res.end(renderErasureReceiptPage(verification, home));
-          return;
-        }
-        if (path === '/signup' && method === 'GET') {
-          // Signup exists only to claim an UNPROVISIONED console. Once the
-          // tenant has an owner, membership is invite-only — by design, this
-          // is multi-tenant isolation at the front door.
-          if (publicBind && !hasBootstrapCreds()) {
-            res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup required</title></head><body><main>
-<p>This console is reachable remotely but has no owner yet. Web signup is disabled on non-loopback binds.</p>
-<p>Configure <code>VITAL_BOOTSTRAP_EMAIL</code> and <code>VITAL_BOOTSTRAP_PASSWORD</code> before exposing the service, or bind to loopback for local claiming.</p>
-</main></body></html>`,
-            );
-            return;
-          }
-          if (accessState === 'ready') return redirect(res, '/login');
-          if (accessState === 'recovery') {
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(recoveryPage(tenant));
-            return;
-          }
-          if (await sessionOf()) return redirect(res, home);
-          const csrf = randomBytes(32).toString('hex');
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
-          });
-          res.end(signupPage(csrf, tenant, undefined, {}, signupRequiresSetupSecret(ip, setupSecret)));
-          return;
-        }
-        if (path === '/signup' && method === 'POST') {
-          if (publicBind && !hasBootstrapCreds())
-            return json(res, 403, {
-              ok: false,
-              error: 'remote signup is disabled — configure VITAL_BOOTSTRAP_EMAIL and VITAL_BOOTSTRAP_PASSWORD',
-            });
-          if (accessState === 'ready')
-            return json(res, 403, { ok: false, error: 'signup is closed — membership is invite-only' });
-          if (accessState === 'recovery')
-            return json(res, 403, {
-              ok: false,
-              error: 'owner recovery is required — contact your operator (see /signup for instructions)',
-            });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!preCsrfOk(req, call.csrf))
-            return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
-          if (!setupAuthorized(req, call.fields.setupSecret))
-            return json(res, 403, {
-              ok: false,
-              error: setupSecret
-                ? 'setup authorization required — provide the configured setup secret'
-                : 'remote organization claiming requires setup authorization — configure VITAL_SETUP_SECRET',
-            });
-          if (!rateOk(`signup:${ip ?? '-'}:${tenant}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at))) {
-            const shape = formErrorShape('rate-limited');
-            const guidance = retryGuidance('rate-limit');
-            return json(res, shape.status, {
-              ok: false,
-              error: shape.message,
-              code: shape.code,
-              retryAfterMs: shape.retryAfterMs,
-              retryable: guidance.retryable,
-            });
-          }
-          const values = retainDraftFields({
-            orgname: call.fields.orgname ?? '',
-            email: call.fields.email ?? '',
-            ownerName: call.fields.ownerName ?? '',
-          });
-          try {
-            // The claimed tenant is the one this console is BOUND to — a
-            // signup cannot conjure an arbitrary tenant and land on someone
-            // else's report. The handle is not attacker-controlled input.
-            const payload = {
-              slug: tenant,
-              name: call.fields.orgname?.trim() || tenant,
-              email: call.fields.email ?? '',
-              password: call.fields.password ?? '',
-              ownerName: call.fields.ownerName ?? '',
-            };
-            const known = await getTenant(db, tenant);
-            const { tenant: created } = known
-              ? await claimTenantOwner(
-                  db,
-                  {
-                    slug: tenant,
-                    email: payload.email,
-                    password: payload.password,
-                    ownerName: payload.ownerName,
-                  },
-                  at,
-                )
-              : await signupTenant(db, payload, at);
-            await recordSignupAt(db, created.slug, at);
-            await auditConsole(
-              db,
-              created.slug,
-              'web-signup',
-              known ? 'auth.tenant_claimed_web' : 'auth.tenant_provisioned_web',
-              `tenant:${created.slug}`,
-              at,
-            );
-            // Sign the new owner straight in: one flow, no dead end. The
-            // signup password was chosen interactively — no forced change.
-            const { session, token } = await login(
-              db,
-              { tenant: created.slug, email: call.fields.email ?? '', password: call.fields.password ?? '', ip },
-              at,
-            );
-            return redirect(res, home, sessionCookie(token, at, secure, session));
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              signupPage(
-                call.csrf ?? '',
-                tenant,
-                signupErrorMessage(e),
-                values,
-                signupRequiresSetupSecret(ip, setupSecret),
-              ),
-            );
-            return;
-          }
-        }
-        if (path === '/change-password' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (!auth.user.mustChangePassword) return redirect(res, '/account');
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(changePasswordPage(auth.session.csrfToken));
-          return;
-        }
-        if (path === '/change-password' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (!auth.user.mustChangePassword) return redirect(res, '/account');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) {
-            if (isBrowserForm(req)) {
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(changePasswordPage(auth.session.csrfToken, 'This form expired — submit again.'));
-              return;
+            const next = safeReturnPath(call.fields.next);
+            const email = call.fields.email ?? '';
+            // Login-CSRF: the form must echo the pre-session cookie value.
+            if (!preCsrfOk(req, call.csrf)) {
+              const fresh = randomBytes(32).toString('hex');
+              const shape = formErrorShape('csrf-expired');
+              const msg = 'This sign-in form expired. Your email is preserved — submit again.';
+              if (isBrowserForm(req)) {
+                res.writeHead(200, {
+                  'content-type': 'text/html; charset=utf-8',
+                  'set-cookie': preCsrfCookie(fresh, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+                });
+                const tenantCtx = await loginTenantContext(db, tenant);
+                const retained = retainDraftFields(call.fields);
+                res.end(
+                  loginPage(fresh, {
+                    error: msg,
+                    next,
+                    email: retained.email ?? '',
+                    recovery: accessState === 'recovery',
+                    ...tenantCtx,
+                  }),
+                );
+                return;
+              }
+              return json(res, 403, { ok: false, error: msg, code: shape.code });
             }
-            return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          }
-          try {
-            await changePassword(db, auth.user.tenant, auth.user.id, call.fields.password ?? '', at);
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              changePasswordPage(
-                auth.session.csrfToken,
-                e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
-              ),
-            );
-            return;
-          }
-          // changePassword revoked every session, including this one — re-login.
-          const loc = loginPath({ reset: true });
-          return redirect(res, loc, CLEAR_SESSION_COOKIE);
-        }
-        if (path === '/account' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
-          const factors = await listMfaFactors(db, auth.user.id);
-          const recoveryCount = await countLiveRecoveryCodes(db, auth.user.id);
-          const raw = accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, {
-            emailVerified: verified,
-            mfa: { enabled: factors.length > 0, factors, recoveryCount },
-          });
-          const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(shelled);
-          return;
-        }
-        // FLOW-007: email-verification lifecycle over HTTP. The request route
-        // is session-gated (no oracle for strangers); the confirm route bears
-        // the single-use token and is valid for 24h.
-        if (path === '/account/email/request' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const token = await requestEmailVerification(db, auth.user.tenant, auth.user.id, at);
-          if (process.env.VITAL_EXPOSE_VERIFY_LINK === '1') {
-            return json(res, 200, {
-              ok: true,
-              verifyLink: `/verify-email?token=${encodeURIComponent(token)}`,
-              notice: 'Verification link issued (development only). Confirm within 24 hours.',
-            });
-          }
-          const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
-          const raw = accountPage(
-            auth.session.csrfToken,
-            auth.user,
-            undefined,
-            hasMailerConfigured()
-              ? 'Verification link sent to your inbox. Confirm within 24 hours.'
-              : 'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
-            home,
-            {
-              emailVerified: verified,
-            },
-          );
-          const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(shelled);
-          return;
-        }
-        if (path === '/verify-email' && method === 'GET') {
-          const token = url.searchParams.get('token') ?? '';
-          if (!token) return redirect(res, '/login');
-          try {
-            const user = await confirmEmailVerification(db, token, at);
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              page(
-                'Vital Console — email verified',
-                `<h1>Email verified</h1><p class="sub">${esc(user.email)} is now a trusted recovery channel.</p><p class="sub"><a href="/login">Sign in</a></p>`,
-              ),
-            );
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              page(
-                'Vital Console — verification failed',
-                `<p class="err">${esc(e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message)}</p><p class="sub">Ask for a fresh link from Account and security.</p>`,
-              ),
-            );
-          }
-          return;
-        }
-        if (path === '/account/password' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) {
-            if (isBrowserForm(req)) {
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+            if (!rateOk(`login:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
+              const bucket = buckets.get(`login:${ip ?? '-'}:${tenant}`);
+              const retryAt = bucket ? new Date(bucket.reset).toISOString() : undefined;
+              const shape = formErrorShape('rate-limited', {
+                retryAfterMs: bucket ? Math.max(0, bucket.reset - Date.parse(at)) : undefined,
+              });
+              const guidance = retryGuidance('rate-limit');
+              const msg = retryAt ? `${shape.message} — try again after ${retryAt}` : shape.message;
+              if (isBrowserForm(req)) {
+                res.writeHead(shape.status, { 'content-type': 'text/html; charset=utf-8' });
+                const tenantCtx = await loginTenantContext(db, tenant);
+                const retained = retainDraftFields(call.fields);
+                res.end(
+                  loginPage(call.csrf ?? '', {
+                    error: msg,
+                    next,
+                    email: retained.email ?? '',
+                    recovery: accessState === 'recovery',
+                    ...tenantCtx,
+                  }),
+                );
+                return;
+              }
+              return json(res, shape.status, {
+                ok: false,
+                error: msg,
+                code: shape.code,
+                retryAfterMs: shape.retryAfterMs,
+                retryable: guidance.retryable,
+                retryAt,
+              });
+            }
+            try {
+              const user = await verifyLoginCredentials(
+                db,
+                { tenant, email, password: call.fields.password ?? '', ip },
+                at,
+              );
+              if (await isMfaEnabled(db, user.id)) {
+                // Second factor enrolled: a correct password must NOT mint a
+                // usable session. Issue a short-lived challenge instead.
+                for (const [k, v] of mfaChallenges) if (v.expiresAtMs <= Date.parse(at)) mfaChallenges.delete(k);
+                const challenge = randomBytes(32).toString('hex');
+                mfaChallenges.set(challenge, {
+                  userId: user.id,
+                  tenant,
+                  expiresAtMs: Date.parse(at) + MFA_CHALLENGE_TTL_MS,
+                });
+                await auditConsole(db, tenant, user.id, 'auth.mfa_challenge', 'login', at);
+                const mfaCookie = `${MFA_COOKIE}=${challenge}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(MFA_CHALLENGE_TTL_MS / 1000)}${secure ? '; Secure' : ''}`;
+                const loc = next ? `/login/mfa?next=${encodeURIComponent(next)}` : '/login/mfa';
+                return redirect(res, loc, mfaCookie);
+              }
+              const { session, token } = await startSessionForUser(db, tenant, user.id, at);
+              const cookie = sessionCookie(token, at, secure, session);
+              if (user.mustChangePassword) return redirect(res, '/change-password', cookie);
+              const defRoom = await defaultRoomForUser(db, tenant, user);
+              return redirect(res, next ?? `/console/buzz/${encodeURIComponent(defRoom)}`, cookie);
+            } catch (e) {
+              // One message for every credential failure — no user enumeration —
+              // EXCEPT lockout, which the user must see to know it is not their
+              // password that is wrong.
+              const locked = e instanceof AuthError && e.code === 'LOCKED';
+              res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' });
+              const tenantCtx = await loginTenantContext(db, tenant);
               res.end(
-                accountPage(auth.session.csrfToken, auth.user, 'This form expired — submit again.', undefined, home),
+                loginPage(call.csrf ?? '', {
+                  error: locked ? (e as AuthError).message.replace(/^\[auth:[^\]]+\]\s*/, '') : 'invalid credentials',
+                  next,
+                  email,
+                  recovery: accessState === 'recovery',
+                  ...tenantCtx,
+                }),
               );
               return;
             }
-            return json(res, 403, { ok: false, error: 'bad CSRF token' });
           }
-          try {
-            await changePassword(db, auth.user.tenant, auth.user.id, call.fields.password ?? '', at);
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              accountPage(
-                auth.session.csrfToken,
-                auth.user,
-                e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
-                undefined,
-                home,
-              ),
-            );
+          // FINAL-005: second-factor step. The session is created only after the
+          // code verifies; the challenge cookie is not a session.
+          if (path === '/login/mfa' && method === 'GET') {
+            const challenge = cookieValue(req, MFA_COOKIE);
+            const entry = challenge ? mfaChallenges.get(challenge) : undefined;
+            if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
+              return redirect(
+                res,
+                loginPath({ reason: 'expired' }),
+                `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+              );
+            }
+            const csrf = randomBytes(32).toString('hex');
+            const next = safeReturnPath(url.searchParams.get('next'));
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(mfaChallengePage(csrf, { next, recovery: url.searchParams.get('mode') === 'recovery' }));
             return;
           }
-          const loc = loginPath({ reset: true });
-          return redirect(res, loc, CLEAR_SESSION_COOKIE);
-        }
-        // FINAL-005: authenticator enrollment + recovery-code management.
-        if (path === '/account/mfa/setup' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const secret = newTotpSecret();
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(mfaSetupPage(auth.session.csrfToken, secret, auth.user.email));
-          return;
-        }
-        if (path === '/account/mfa/enable' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
+          if (path === '/login/mfa' && method === 'POST') {
+            const challenge = cookieValue(req, MFA_COOKIE);
+            const entry = challenge ? mfaChallenges.get(challenge) : undefined;
+            if (!entry || entry.tenant !== tenant || entry.expiresAtMs <= Date.parse(at)) {
+              return redirect(
+                res,
+                loginPath({ reason: 'expired' }),
+                `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+              );
+            }
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+            if (!rateOk(`mfa:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
+              const shape = formErrorShape('rate-limited');
+              return json(res, shape.status, { ok: false, error: shape.message, code: shape.code });
+            }
+            const code = (call.fields.code ?? '').trim();
+            const next = safeReturnPath(call.fields.next);
+            const mode = call.fields.mode === 'recovery';
+            try {
+              await checkMfaLockout(db, tenant, entry.userId, at);
+            } catch {
+              const csrfLocked = randomBytes(32).toString('hex');
+              res.writeHead(401, {
+                'content-type': 'text/html; charset=utf-8',
+                'set-cookie': preCsrfCookie(csrfLocked, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+              });
+              res.end(
+                mfaChallengePage(csrfLocked, {
+                  error: 'Too many failed attempts — try again later.',
+                  next,
+                  recovery: mode,
+                }),
+              );
+              return;
+            }
+            const accepted = mode
+              ? await consumeMfaRecoveryCode(db, tenant, entry.userId, code, at)
+              : await verifyMfaCode(db, tenant, entry.userId, code, at);
+            if (!accepted) {
+              await recordMfaFailure(db, tenant, entry.userId, at);
+              const csrf = randomBytes(32).toString('hex');
+              res.writeHead(401, {
+                'content-type': 'text/html; charset=utf-8',
+                'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+              });
+              res.end(
+                mfaChallengePage(csrf, {
+                  error: mode
+                    ? 'That recovery code is not valid or was already used.'
+                    : 'That code was not accepted. Check your device clock and try again.',
+                  next,
+                  recovery: mode,
+                }),
+              );
+              return;
+            }
+            mfaChallenges.delete(challenge!);
+            await clearMfaFailures(db, tenant, entry.userId);
+            const { user, session, token } = await startSessionForUser(db, tenant, entry.userId, at);
+            const sessionCk = sessionCookie(token, at, secure, session);
+            const clearMfa = `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+            const defRoom = await defaultRoomForUser(db, tenant, user);
+            const target = user.mustChangePassword
+              ? '/change-password'
+              : (next ?? `/console/buzz/${encodeURIComponent(defRoom)}`);
+            res.writeHead(303, { location: target, 'set-cookie': [sessionCk, clearMfa] });
+            res.end();
+            return;
           }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const secret = call.fields.secret ?? '';
-          try {
-            await confirmMfaEnrollment(db, tenant, auth.user.id, secret, call.fields.code ?? '', at);
+          if (path === '/forgot-password' && method === 'GET') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            if (await sessionOf()) return redirect(res, home);
+            const csrf = randomBytes(32).toString('hex');
+            const next = safeReturnPath(url.searchParams.get('next'));
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(forgotPasswordPage(csrf, { next }));
+            return;
+          }
+          if (path === '/forgot-password' && method === 'POST') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+            if (!rateOk(`reset:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
+              const shape = formErrorShape('rate-limited');
+              const guidance = retryGuidance('rate-limit');
+              return json(res, shape.status, {
+                ok: false,
+                error: shape.message,
+                code: shape.code,
+                retryAfterMs: shape.retryAfterMs,
+                retryable: guidance.retryable,
+              });
+            }
+            const next = safeReturnPath(call.fields.next);
+            const email = call.fields.email ?? '';
+            const token = await tryPasswordReset(db, tenant, email, at);
+            // One honest answer, because there is one real behaviour: the token is
+            // recorded and an operator delivers it. Claiming an inbox delivery here
+            // was the false promise this branch used to make.
+            let notice =
+              'If an account exists for that email, the reset request has been recorded. Automatic email delivery is not configured on this host — ask your operator to deliver your single-use link via vital reset-link (turnaround: under 1 hour).';
+            if (token) {
+              // FLOW-007: recovery rides on a verified address. The reset token
+              // is still issued (no oracle for strangers), but the owner is
+              // told verification is missing so an unverified address is never
+              // silently trusted as the recovery channel.
+              const channel = await recoveryChannelStatus(db, tenant, email);
+              if (channel.exists && !channel.verified)
+                notice +=
+                  ' Note: this email address is not yet verified — verify it from Account and security before relying on it for recovery.';
+              if (exposeResetToken) {
+                const link = `/reset-password?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
+                notice = `Reset link (development only): ${link}${channel.exists && !channel.verified ? ' (email unverified — verify before relying on it)' : ''}`;
+              }
+            }
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(forgotPasswordPage(call.csrf ?? '', { notice, next }));
+            return;
+          }
+          if (path === '/reset-password' && method === 'GET') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            const token = url.searchParams.get('token') ?? '';
+            if (!token) return redirect(res, '/forgot-password');
+            const csrf = randomBytes(32).toString('hex');
+            const next = safeReturnPath(url.searchParams.get('next'));
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(resetPasswordPage(csrf, token, { next }));
+            return;
+          }
+          if (path === '/accept-invite' && method === 'GET') {
+            const token = url.searchParams.get('token') ?? '';
+            if (!token) return redirect(res, '/login');
+            const inv = await peekInvitationByToken(db, token, at);
+            if (!inv || inv.status === 'revoked' || inv.status === 'accepted')
+              return json(res, 404, { ok: false, error: 'invitation not found or no longer valid' });
+            const csrf = randomBytes(32).toString('hex');
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(acceptInvitePage(csrf, token, inv));
+            return;
+          }
+          if (path === '/accept-invite' && method === 'POST') {
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+            const token = call.fields.token ?? '';
+            const inv = token ? await peekInvitationByToken(db, token, at) : undefined;
+            try {
+              const accepted = await acceptInvitation(db, token, call.fields.password ?? '', at);
+              const signed = await login(
+                db,
+                { tenant: accepted.user.tenant, email: accepted.user.email, password: call.fields.password ?? '' },
+                at,
+              );
+              return redirect(res, home, sessionCookie(signed.token, at, secure, signed.session));
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                inv
+                  ? acceptInvitePage(call.csrf ?? '', token, inv, { error: msg })
+                  : page(
+                      'Vital Console — accept invitation',
+                      `<p class="err">${esc(msg)}</p><p class="sub"><a href="/login">Sign in</a></p>`,
+                    ),
+              );
+              return;
+            }
+          }
+          if (path === '/reset-password' && method === 'POST') {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+            const next = safeReturnPath(call.fields.next);
+            const token = call.fields.token ?? '';
+            try {
+              await confirmPasswordReset(db, token, call.fields.password ?? '', at);
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                resetPasswordPage(call.csrf ?? '', token, {
+                  error: e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+                  next,
+                }),
+              );
+              return;
+            }
+            const loginTarget = `/login?reset=ok${next ? `&next=${encodeURIComponent(next)}` : ''}`;
+            return redirect(res, loginTarget, CLEAR_SESSION_COOKIE);
+          }
+          if (path === '/receipts/erasure' && method === 'GET') {
+            const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase();
+            if (slug) {
+              return redirect(res, `/receipts/erasure/${encodeURIComponent(slug)}`);
+            }
+            const verification = { found: false, slug: '' };
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(renderErasureReceiptPage(verification as any, home));
+            return;
+          }
+          if (path.startsWith('/receipts/erasure/') && method === 'GET') {
+            const slug = decodeURIComponent(path.slice('/receipts/erasure/'.length)).trim().toLowerCase();
+            const verification = await verifyErasureReceipt(db, slug);
+            res.writeHead(verification.found ? 200 : 404, {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-store',
+            });
+            res.end(renderErasureReceiptPage(verification, home));
+            return;
+          }
+          if (path === '/signup' && method === 'GET') {
+            // Signup exists only to claim an UNPROVISIONED console. Once the
+            // tenant has an owner, membership is invite-only — by design, this
+            // is multi-tenant isolation at the front door.
+            if (publicBind && !hasBootstrapCreds()) {
+              res.writeHead(503, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup required</title></head><body><main>
+<p>This console is reachable remotely but has no owner yet. Web signup is disabled on non-loopback binds.</p>
+<p>Configure <code>VITAL_BOOTSTRAP_EMAIL</code> and <code>VITAL_BOOTSTRAP_PASSWORD</code> before exposing the service, or bind to loopback for local claiming.</p>
+</main></body></html>`,
+              );
+              return;
+            }
+            if (accessState === 'ready') return redirect(res, '/login');
+            if (accessState === 'recovery') {
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(recoveryPage(tenant));
+              return;
+            }
+            if (await sessionOf()) return redirect(res, home);
+            const csrf = randomBytes(32).toString('hex');
+            res.writeHead(200, {
+              'content-type': 'text/html; charset=utf-8',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(signupPage(csrf, tenant, undefined, {}, signupRequiresSetupSecret(ip, setupSecret)));
+            return;
+          }
+          if (path === '/signup' && method === 'POST') {
+            if (publicBind && !hasBootstrapCreds())
+              return json(res, 403, {
+                ok: false,
+                error: 'remote signup is disabled — configure VITAL_BOOTSTRAP_EMAIL and VITAL_BOOTSTRAP_PASSWORD',
+              });
+            if (accessState === 'ready')
+              return json(res, 403, { ok: false, error: 'signup is closed — membership is invite-only' });
+            if (accessState === 'recovery')
+              return json(res, 403, {
+                ok: false,
+                error: 'owner recovery is required — contact your operator (see /signup for instructions)',
+              });
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+            if (!setupAuthorized(req, call.fields.setupSecret))
+              return json(res, 403, {
+                ok: false,
+                error: setupSecret
+                  ? 'setup authorization required — provide the configured setup secret'
+                  : 'remote organization claiming requires setup authorization — configure VITAL_SETUP_SECRET',
+              });
+            if (!rateOk(`signup:${ip ?? '-'}:${tenant}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at))) {
+              const shape = formErrorShape('rate-limited');
+              const guidance = retryGuidance('rate-limit');
+              return json(res, shape.status, {
+                ok: false,
+                error: shape.message,
+                code: shape.code,
+                retryAfterMs: shape.retryAfterMs,
+                retryable: guidance.retryable,
+              });
+            }
+            const values = retainDraftFields({
+              orgname: call.fields.orgname ?? '',
+              email: call.fields.email ?? '',
+              ownerName: call.fields.ownerName ?? '',
+            });
+            try {
+              // The claimed tenant is the one this console is BOUND to — a
+              // signup cannot conjure an arbitrary tenant and land on someone
+              // else's report. The handle is not attacker-controlled input.
+              const payload = {
+                slug: tenant,
+                name: call.fields.orgname?.trim() || tenant,
+                email: call.fields.email ?? '',
+                password: call.fields.password ?? '',
+                ownerName: call.fields.ownerName ?? '',
+              };
+              const known = await getTenant(db, tenant);
+              const { tenant: created } = known
+                ? await claimTenantOwner(
+                    db,
+                    {
+                      slug: tenant,
+                      email: payload.email,
+                      password: payload.password,
+                      ownerName: payload.ownerName,
+                    },
+                    at,
+                  )
+                : await signupTenant(db, payload, at);
+              await recordSignupAt(db, created.slug, at);
+              await auditConsole(
+                db,
+                created.slug,
+                'web-signup',
+                known ? 'auth.tenant_claimed_web' : 'auth.tenant_provisioned_web',
+                `tenant:${created.slug}`,
+                at,
+              );
+              // Sign the new owner straight in: one flow, no dead end. The
+              // signup password was chosen interactively — no forced change.
+              const { session, token } = await login(
+                db,
+                { tenant: created.slug, email: call.fields.email ?? '', password: call.fields.password ?? '', ip },
+                at,
+              );
+              return redirect(res, home, sessionCookie(token, at, secure, session));
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                signupPage(
+                  call.csrf ?? '',
+                  tenant,
+                  signupErrorMessage(e),
+                  values,
+                  signupRequiresSetupSecret(ip, setupSecret),
+                ),
+              );
+              return;
+            }
+          }
+          if (path === '/change-password' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (!auth.user.mustChangePassword) return redirect(res, '/account');
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(changePasswordPage(auth.session.csrfToken));
+            return;
+          }
+          if (path === '/change-password' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (!auth.user.mustChangePassword) return redirect(res, '/account');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) {
+              if (isBrowserForm(req)) {
+                res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(changePasswordPage(auth.session.csrfToken, 'This form expired — submit again.'));
+                return;
+              }
+              return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            try {
+              await changePassword(db, auth.user.tenant, auth.user.id, call.fields.password ?? '', at);
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                changePasswordPage(
+                  auth.session.csrfToken,
+                  e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+                ),
+              );
+              return;
+            }
+            // changePassword revoked every session, including this one — re-login.
+            const loc = loginPath({ reset: true });
+            return redirect(res, loc, CLEAR_SESSION_COOKIE);
+          }
+          if (path === '/account' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
+            const factors = await listMfaFactors(db, auth.user.id);
+            const recoveryCount = await countLiveRecoveryCodes(db, auth.user.id);
+            const raw = accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, {
+              emailVerified: verified,
+              mfa: { enabled: factors.length > 0, factors, recoveryCount },
+            });
+            const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(shelled);
+            return;
+          }
+          // FLOW-007: email-verification lifecycle over HTTP. The request route
+          // is session-gated (no oracle for strangers); the confirm route bears
+          // the single-use token and is valid for 24h.
+          if (path === '/account/email/request' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const token = await requestEmailVerification(db, auth.user.tenant, auth.user.id, at);
+            if (process.env.VITAL_EXPOSE_VERIFY_LINK === '1') {
+              return json(res, 200, {
+                ok: true,
+                verifyLink: `/verify-email?token=${encodeURIComponent(token)}`,
+                notice: 'Verification link issued (development only). Confirm within 24 hours.',
+              });
+            }
+            const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
+            const raw = accountPage(
+              auth.session.csrfToken,
+              auth.user,
+              undefined,
+              'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
+              home,
+              {
+                emailVerified: verified,
+              },
+            );
+            const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(shelled);
+            return;
+          }
+          if (path === '/verify-email' && method === 'GET') {
+            const token = url.searchParams.get('token') ?? '';
+            if (!token) return redirect(res, '/login');
+            try {
+              const user = await confirmEmailVerification(db, token, at);
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                page(
+                  'Vital Console — email verified',
+                  `<h1>Email verified</h1><p class="sub">${esc(user.email)} is now a trusted recovery channel.</p><p class="sub"><a href="/login">Sign in</a></p>`,
+                ),
+              );
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                page(
+                  'Vital Console — verification failed',
+                  `<p class="err">${esc(e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message)}</p><p class="sub">Ask for a fresh link from Account and security.</p>`,
+                ),
+              );
+            }
+            return;
+          }
+          if (path === '/account/password' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) {
+              if (isBrowserForm(req)) {
+                res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(
+                  accountPage(auth.session.csrfToken, auth.user, 'This form expired — submit again.', undefined, home),
+                );
+                return;
+              }
+              return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            try {
+              await changePassword(db, auth.user.tenant, auth.user.id, call.fields.password ?? '', at);
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                accountPage(
+                  auth.session.csrfToken,
+                  auth.user,
+                  e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+                  undefined,
+                  home,
+                ),
+              );
+              return;
+            }
+            const loc = loginPath({ reset: true });
+            return redirect(res, loc, CLEAR_SESSION_COOKIE);
+          }
+          // FINAL-005: authenticator enrollment + recovery-code management.
+          if (path === '/account/mfa/setup' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            const secret = newTotpSecret();
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(mfaSetupPage(auth.session.csrfToken, secret, auth.user.email));
+            return;
+          }
+          if (path === '/account/mfa/enable' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            // Enrolling an authenticator neutralizes passwords as a sole factor:
+            // demand a fresh authentication, not just a live session.
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const secret = call.fields.secret ?? '';
+            try {
+              await confirmMfaEnrollment(db, tenant, auth.user.id, secret, call.fields.code ?? '', at);
+              const codes = await generateMfaRecoveryCodes(db, tenant, auth.user.id, at);
+              await auditConsole(db, tenant, by(auth.user), 'account.mfa_enabled', `user:${auth.user.id}`, at);
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(mfaRecoveryCodesPage(codes, home));
+            } catch (e) {
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                mfaSetupPage(auth.session.csrfToken, secret, auth.user.email, {
+                  error: e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
+                }),
+              );
+            }
+            return;
+          }
+          if (path === '/account/mfa/recovery' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            if (!(await isMfaEnabled(db, auth.user.id))) return redirect(res, '/account');
             const codes = await generateMfaRecoveryCodes(db, tenant, auth.user.id, at);
-            await auditConsole(db, tenant, by(auth.user), 'account.mfa_enabled', `user:${auth.user.id}`, at);
+            await auditConsole(
+              db,
+              tenant,
+              by(auth.user),
+              'account.mfa_recovery_regenerated',
+              `user:${auth.user.id}`,
+              at,
+            );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
             res.end(mfaRecoveryCodesPage(codes, home));
-          } catch (e) {
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              mfaSetupPage(auth.session.csrfToken, secret, auth.user.email, {
-                error: e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message,
-              }),
-            );
+            return;
           }
-          return;
-        }
-        if (path === '/account/mfa/recovery' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!(await isMfaEnabled(db, auth.user.id))) return redirect(res, '/account');
-          const codes = await generateMfaRecoveryCodes(db, tenant, auth.user.id, at);
-          await auditConsole(db, tenant, by(auth.user), 'account.mfa_recovery_regenerated', `user:${auth.user.id}`, at);
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(mfaRecoveryCodesPage(codes, home));
-          return;
-        }
-        if (path === '/account/mfa/remove' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          try {
-            await removeMfaFactor(db, tenant, auth.user.id, call.fields.factorId ?? '', at);
-            await auditConsole(db, tenant, by(auth.user), 'account.mfa_removed', `user:${auth.user.id}`, at);
-          } catch {
-            /* unknown factor — nothing to remove; return to the account page */
-          }
-          return redirect(res, '/account');
-        }
-        if (path === '/logout') {
-          if (method === 'POST') {
+          if (path === '/account/mfa/remove' && method === 'POST') {
             const auth = await sessionOf();
-            if (auth) {
-              let call: Call;
-              try {
-                call = await parseCall(req);
-              } catch {
-                return json(res, 400, { ok: false, error: 'malformed body' });
-              }
-              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-              const token = cookieValue(req, 'vital_session');
-              if (token) await logout(db, token, at);
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
             }
-            return redirect(res, '/login', CLEAR_SESSION_COOKIE);
-          }
-          if (method === 'GET') {
-            const token = cookieValue(req, 'vital_session');
-            if (token) {
-              try {
-                await logout(db, token, at);
-              } catch {
-                /* non-fatal */
-              }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            try {
+              await removeMfaFactor(db, tenant, auth.user.id, call.fields.factorId ?? '', at);
+              await auditConsole(db, tenant, by(auth.user), 'account.mfa_removed', `user:${auth.user.id}`, at);
+            } catch {
+              /* unknown factor — nothing to remove; return to the account page */
             }
-            return redirect(res, '/login', CLEAR_SESSION_COOKIE);
+            return redirect(res, '/account');
           }
-        }
+          if (path === '/logout') {
+            if (method === 'POST') {
+              const auth = await sessionOf();
+              if (auth) {
+                let call: Call;
+                try {
+                  call = await parseCall(req);
+                } catch {
+                  return json(res, 400, { ok: false, error: 'malformed body' });
+                }
+                if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+                const token = cookieValue(req, 'vital_session');
+                if (token) await logout(db, token, at);
+              }
+              return redirect(res, '/login', CLEAR_SESSION_COOKIE);
+            }
+            if (method === 'GET') {
+              // Logout is a state change: GET renders a confirmation form
+              // instead of mutating, so a prefetched link or top-level
+              // navigation cannot log the user out (logout-CSRF).
+              const auth = await sessionOf();
+              if (!auth) return redirect(res, '/login');
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                page(
+                  'Vital Console — sign out',
+                  `<h1>Sign out?</h1><p class="sub">This ends the current session on this device.</p>
+<form method="post" action="/logout">
+  <input type="hidden" name="csrf" value="${esc(auth.session.csrfToken)}">
+  <button type="submit">Sign out</button>
+</form>
+<p class="sub"><a href="/">Back to console</a></p>`,
+                ),
+              );
+              return;
+            }
+          }
 
-        // /api/health — routes/observability.ts (public, rate-limited).
-        const deliverableByRequest = path.match(/^\/console\/deliverables\/by-request\/([^/]+)$/);
-        if (method === 'GET' && deliverableByRequest) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          let requestId: string;
-          try {
-            requestId = decodeURIComponent(deliverableByRequest[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed request id' });
+          // /api/health — routes/observability.ts (public, rate-limited).
+          const deliverableByRequest = path.match(/^\/console\/deliverables\/by-request\/([^/]+)$/);
+          if (method === 'GET' && deliverableByRequest) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            let requestId: string;
+            try {
+              requestId = decodeURIComponent(deliverableByRequest[1]!);
+            } catch {
+              return json(res, 400, { ok: false, error: 'malformed request id' });
+            }
+            const { loadDeliverableByRequest } = await import('../wedge/deliverable-artifact.ts');
+            const record = await loadDeliverableByRequest(db, tenant, requestId);
+            if (!record) return json(res, 404, { ok: false, error: 'no deliverable for request' });
+            return redirect(res, `/console/deliverables/${encodeURIComponent(record.id)}`);
           }
-          const { loadDeliverableByRequest } = await import('../wedge/deliverable-artifact.ts');
-          const record = await loadDeliverableByRequest(db, tenant, requestId);
-          if (!record) return json(res, 404, { ok: false, error: 'no deliverable for request' });
-          return redirect(res, `/console/deliverables/${encodeURIComponent(record.id)}`);
-        }
-        const deliverablePage = path.match(/^\/console\/deliverables\/([^/]+)$/);
-        if (method === 'GET' && deliverablePage) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          let id: string;
-          try {
-            id = decodeURIComponent(deliverablePage[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed deliverable id' });
+          const deliverablePage = path.match(/^\/console\/deliverables\/([^/]+)$/);
+          if (method === 'GET' && deliverablePage) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            let id: string;
+            try {
+              id = decodeURIComponent(deliverablePage[1]!);
+            } catch {
+              return json(res, 400, { ok: false, error: 'malformed deliverable id' });
+            }
+            const versionParam = url.searchParams.get('version');
+            const versionNum = versionParam === null ? null : Number(versionParam);
+            if (versionParam !== null && (!Number.isInteger(versionNum) || versionNum! < 1)) {
+              return json(res, 400, { ok: false, error: 'version must be a positive integer' });
+            }
+            const fallbackMode = operatorSecret ? 'secret' : 'session';
+            const detailOpts = {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: atLeast(auth.user.role, approverMin),
+              requiredRole: approverMin,
+              operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
+              home,
+            };
+            const html = await deliverableDetailPage(db, ledger, id, versionNum, detailOpts, artifactDir);
+            if (!html) return json(res, 404, { ok: false, error: 'deliverable not found' });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(detailDocument('Deliverable', html, detailOpts));
+            return;
           }
-          const versionParam = url.searchParams.get('version');
-          const versionNum = versionParam === null ? null : Number(versionParam);
-          if (versionParam !== null && (!Number.isInteger(versionNum) || versionNum! < 1)) {
-            return json(res, 400, { ok: false, error: 'version must be a positive integer' });
-          }
-          const fallbackMode = operatorSecret ? 'secret' : 'session';
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: atLeast(auth.user.role, approverMin),
-            requiredRole: approverMin,
-            operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
-            home,
-          };
-          const html = await deliverableDetailPage(db, ledger, id, versionNum, detailOpts, artifactDir);
-          if (!html) return json(res, 404, { ok: false, error: 'deliverable not found' });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(detailDocument('Deliverable', html, detailOpts));
-          return;
-        }
-        if (path === '/console/digest') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          if (method !== 'GET') {
-            res.setHeader('allow', 'GET');
-            return json(res, 405, { ok: false, error: 'digest is read-only' });
-          }
-          const days = url.searchParams.get('days') ?? '7';
-          if (!['1', '7', '30', 'all'].includes(days))
-            return respondGetError(req, res, 400, 'days must be 1, 7, 30 or all');
-          const window = days as DigestDays;
-          const since = digestWindowSince(at, window);
-          // Wording kept verbatim: the labels are pinned by the digest tests.
-          const windows: { value: DigestDays; label: string }[] = [
-            { value: '1', label: 'Last 1 day(s)' },
-            { value: '7', label: 'Last 7 day(s)' },
-            { value: '30', label: 'Last 30 day(s)' },
-            { value: 'all', label: 'All history' },
-          ];
-          const navigation = `<div class="v-page-head">
+          if (path === '/console/digest') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            if (method !== 'GET') {
+              res.setHeader('allow', 'GET');
+              return json(res, 405, { ok: false, error: 'digest is read-only' });
+            }
+            const days = url.searchParams.get('days') ?? '7';
+            if (!['1', '7', '30', 'all'].includes(days))
+              return respondGetError(req, res, 400, 'days must be 1, 7, 30 or all');
+            const window = days as DigestDays;
+            const since = digestWindowSince(at, window);
+            // Wording kept verbatim: the labels are pinned by the digest tests.
+            const windows: { value: DigestDays; label: string }[] = [
+              { value: '1', label: 'Last 1 day(s)' },
+              { value: '7', label: 'Last 7 day(s)' },
+              { value: '30', label: 'Last 30 day(s)' },
+              { value: 'all', label: 'All history' },
+            ];
+            const navigation = `<div class="v-page-head">
   <div>
     <p class="v-eyebrow">System</p>
     <h1 class="v-page-title">Digest</h1>
@@ -3339,54 +3586,78 @@ export function startConsoleServer(
   </div>
   <nav class="v-segmented" aria-label="Digest time window">${windows.map((w) => `<a href="/console/digest?days=${w.value}"${w.value === window ? ' aria-current="page"' : ''}>${esc(w.label)}</a>`).join('')}</nav>
 </div>`;
-          const body = navigation + (await renderDigest(coord, db, tenant, at, { since }));
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          // Digest is a nav item, so it wears the same console chrome as every
-          // other list page. It used to call detailDocument directly and render
-          // as an orphan: no rail, no top bar, no way back.
-          res.end(
-            await wrapInWorkspaceShell(
-              detailDocument('Digest', body, { ...detailOpts, hideHeader: true }),
-              db,
+            const body = navigation + (await renderDigest(coord, db, tenant, at, { since }));
+            const detailOpts = {
               tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: false,
+              requiredRole: approverMin,
+              operatorMode: 'session' as const,
               home,
-              auth,
-              'digest',
-            ),
-          );
-          return;
-        }
-        // FINAL-004: human surface for learning review (labeling + card gaps).
-        // Replaces the in-product links that previously pointed at the JSON
-        // learning APIs, which render as an unstyled blob in a browser.
-        if (method === 'GET' && path === '/console/learning') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (!atLeast(auth.user.role, 'admin')) {
-            const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            };
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            // Digest is a nav item, so it wears the same console chrome as every
+            // other list page. It used to call detailDocument directly and render
+            // as an orphan: no rail, no top bar, no way back.
+            res.end(
+              await wrapInWorkspaceShell(
+                detailDocument('Digest', body, { ...detailOpts, hideHeader: true }),
+                db,
+                tenant,
+                home,
+                auth,
+                'digest',
+              ),
+            );
+            return;
+          }
+          // FINAL-004: human surface for learning review (labeling + card gaps).
+          // Replaces the in-product links that previously pointed at the JSON
+          // learning APIs, which render as an unstyled blob in a browser.
+          if (method === 'GET' && path === '/console/learning') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const detailOpts = {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: false,
+              requiredRole: approverMin,
+              operatorMode: 'session' as const,
+              home,
+            };
+            if (!atLeast(auth.user.role, 'admin')) {
+              const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
+              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                await wrapInWorkspaceShell(
+                  detailDocument('Learning review', body, { ...detailOpts, hideHeader: true }),
+                  db,
+                  tenant,
+                  home,
+                  auth,
+                  'learning',
+                ),
+              );
+              return;
+            }
+            const labeled = url.searchParams.get('labeled');
+            const errorParam = url.searchParams.get('error');
+            let notice: string | undefined;
+            if (labeled === 'ok') notice = 'Decision labeled.';
+            else if (errorParam) notice = `Could not label: ${errorParam}`;
+            const body = await renderLearningPage(db, new CognitiveRouter(db), comp, tenant, {
+              tenant,
+              actor: by(auth.user),
+              csrf: auth.session.csrfToken,
+              notice,
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(
               await wrapInWorkspaceShell(
                 detailDocument('Learning review', body, { ...detailOpts, hideHeader: true }),
@@ -3399,908 +3670,1107 @@ export function startConsoleServer(
             );
             return;
           }
-          const labeled = url.searchParams.get('labeled');
-          const errorParam = url.searchParams.get('error');
-          let notice: string | undefined;
-          if (labeled === 'ok') notice = 'Decision labeled.';
-          else if (errorParam) notice = `Could not label: ${errorParam}`;
-          const body = await renderLearningPage(db, new CognitiveRouter(db), comp, tenant, {
-            tenant,
-            actor: by(auth.user),
-            csrf: auth.session.csrfToken,
-            notice,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(
-              detailDocument('Learning review', body, { ...detailOpts, hideHeader: true }),
-              db,
+          if (method === 'GET' && path === '/console/compiler') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const isDrawer = url.searchParams.get('drawer') === '1';
+            const content = await renderCompilerView(db, comp, tenant);
+            if (isDrawer) {
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(content);
+              return;
+            }
+            const detailOpts = {
               tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: false,
+              requiredRole: approverMin,
+              operatorMode: 'session' as const,
               home,
-              auth,
-              'learning',
-            ),
-          );
-          return;
-        }
-        if (method === 'GET' && path === '/console/compiler') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const isDrawer = url.searchParams.get('drawer') === '1';
-          const content = await renderCompilerView(db, comp, tenant);
-          if (isDrawer) {
+            };
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(content);
-            return;
-          }
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(
-              detailDocument('Compiler — Why Not Trusted Yet', content, { ...detailOpts, hideHeader: true }),
-              db,
-              tenant,
-              home,
-              auth,
-              'compiler',
-            ),
-          );
-          return;
-        }
-        // ------------------------------------------------------------ Workspace (internal: buzz)
-        // The human-facing room console: roster + per-room thread view.
-        // Chat is open to every tenant role (the room-agent model: humans talk
-        // to their own agent); governance surfaces elsewhere stay admin-gated.
-        if (method === 'GET' && path === '/console/buzz') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          // Chat is open to every tenant role; governance surfaces elsewhere
-          // (team, learning, policy) keep their admin gates.
-          const surface = await maybeBuzzSurface(db, tenant);
-          try {
-            const roster = await buildBuzzRoster(db, tenant, surface);
-            const body = renderBuzzRoster(roster, home, auth.session.csrfToken);
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(await wrapInWorkspaceShell(buzzDocument('Workspace', body), db, tenant, home, auth, 'buzz'));
-          } finally {
-            // The surface holds no pooled connections of its own; the health
-            // probe is one fetch. Nothing to close — this block documents that.
-          }
-          return;
-        }
-        const buzzRoom = path.match(/^\/console\/buzz\/([^/]+)$/);
-        if (method === 'GET' && buzzRoom) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-
-          const scope = decodeURIComponent(buzzRoom[1]!);
-          const surface = await maybeBuzzSurface(db, tenant);
-          const notice = url.searchParams.get('notice') ?? undefined;
-          const body = await renderBuzzRoom(
-            db,
-            tenant,
-            scope,
-            home,
-            auth.session.csrfToken,
-            surface,
-            notice ?? undefined,
-            auth.user.id,
-            coord,
-          );
-          if (!body) {
-            res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
-              detailDocument(
-                'Room',
-                '<p class="sub">No such room. <a href="/console/buzz">Back to the workspace</a>.</p>',
-                detailOpts,
+              await wrapInWorkspaceShell(
+                detailDocument('Compiler — Why Not Trusted Yet', content, { ...detailOpts, hideHeader: true }),
+                db,
+                tenant,
+                home,
+                auth,
+                'compiler',
               ),
             );
             return;
           }
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(buzzDocument(`#${scope}`, body), db, tenant, home, auth, 'buzz', scope));
-          return;
-        }
-        const buzzRoomCommand = path.match(/^\/console\/buzz\/([^/]+)\/command$/);
-        if (method === 'POST' && buzzRoomCommand) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const call = await parseCall(req);
-          if (!csrfOk(auth.session, call.csrf)) {
-            return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          // ------------------------------------------------------------ Workspace (internal: buzz)
+          // The human-facing room console: roster + per-room thread view.
+          // Chat is open to every tenant role (the room-agent model: humans talk
+          // to their own agent); governance surfaces elsewhere stay admin-gated.
+          if (method === 'GET' && path === '/console/buzz') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            // Chat is open to every tenant role; governance surfaces elsewhere
+            // (team, learning, policy) keep their admin gates.
+            const surface = await maybeBuzzSurface(db, tenant);
+            try {
+              const roster = await buildBuzzRoster(db, tenant, surface);
+              const body = renderBuzzRoster(roster, home, auth.session.csrfToken);
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(await wrapInWorkspaceShell(buzzDocument('Workspace', body), db, tenant, home, auth, 'buzz'));
+            } finally {
+              // The surface holds no pooled connections of its own; the health
+              // probe is one fetch. Nothing to close — this block documents that.
+            }
+            return;
           }
-          const scope = decodeURIComponent(buzzRoomCommand[1]!);
-          const command = String(call.fields.command ?? '').trim();
-          const back = `/console/buzz/${encodeURIComponent(scope)}`;
-          if (!command) return redirect(res, back);
-          // Chat flows through this endpoint, so it is open to every tenant
-          // role — but slash commands that act on the org (halt, recover,
-          // policy changes) are governance, and stay admin+.
-          const GOVERNANCE_COMMANDS = new Set(['halt', 'recover', 'policy']);
-          const firstWord = command.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '';
-          if (GOVERNANCE_COMMANDS.has(firstWord) && !atLeast(auth.user.role, 'admin')) {
-            return json(res, 403, { ok: false, error: `${firstWord} requires the admin or owner role` });
+          const buzzRoom = path.match(/^\/console\/buzz\/([^/]+)$/);
+          if (method === 'GET' && buzzRoom) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const detailOpts = {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: false,
+              requiredRole: approverMin,
+              operatorMode: 'session' as const,
+              home,
+            };
+
+            const scope = decodeURIComponent(buzzRoom[1]!);
+            const surface = await maybeBuzzSurface(db, tenant);
+            const notice = url.searchParams.get('notice') ?? undefined;
+            const body = await renderBuzzRoom(
+              db,
+              tenant,
+              scope,
+              home,
+              auth.session.csrfToken,
+              surface,
+              notice ?? undefined,
+              auth.user.id,
+              coord,
+            );
+            if (!body) {
+              res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                detailDocument(
+                  'Room',
+                  '<p class="sub">No such room. <a href="/console/buzz">Back to the workspace</a>.</p>',
+                  detailOpts,
+                ),
+              );
+              return;
+            }
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(await wrapInWorkspaceShell(buzzDocument(`#${scope}`, body), db, tenant, home, auth, 'buzz', scope));
+            return;
           }
-          const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
-          const result = await executeRoomCommand(command, {
-            db,
-            tenant,
-            actor: by(auth.user),
-            currentScope: scope,
-            coord,
-            ledger,
-            evaluator,
-          });
-          if (!result.handled) {
-            // Treat unhandled input as a conversation message with @mention dispatch
+          const buzzRoomCommand = path.match(/^\/console\/buzz\/([^/]+)\/command$/);
+          if (method === 'POST' && buzzRoomCommand) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const call = await parseCall(req);
+            if (!csrfOk(auth.session, call.csrf)) {
+              return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            const scope = decodeURIComponent(buzzRoomCommand[1]!);
+            const command = String(call.fields.command ?? '').trim();
+            const back = `/console/buzz/${encodeURIComponent(scope)}`;
+            if (!command) return redirect(res, back);
+            // Chat flows through this endpoint, so it is open to every tenant
+            // role — but slash commands that act on the org (halt, recover,
+            // policy changes) are governance, and stay admin+.
+            const GOVERNANCE_COMMANDS = new Set(['halt', 'recover', 'policy']);
+            const firstWord = command.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '';
+            if (GOVERNANCE_COMMANDS.has(firstWord) && !atLeast(auth.user.role, 'admin')) {
+              return json(res, 403, { ok: false, error: `${firstWord} requires the admin or owner role` });
+            }
+            const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
+            const result = await executeRoomCommand(command, {
+              db,
+              tenant,
+              actor: by(auth.user),
+              currentScope: scope,
+              coord,
+              ledger,
+              evaluator,
+            });
+            if (!result.handled) {
+              // Treat unhandled input as a conversation message with @mention dispatch
+              const { createLocalReply } = await import('./buzz.ts');
+              const byName = auth.user.email.split('@')[0] ?? auth.user.email;
+              const newId = await createLocalReply(db, tenant, scope, null, byName, command, at);
+              await triggerMentionHandoffs(command, {
+                db,
+                ledger,
+                coord,
+                tenant,
+                originScope: scope,
+                authorName: byName,
+                threadRoot: null,
+                at,
+              });
+
+              let targetId = newId;
+              const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import('../talk/rag-analyst.ts');
+              if (isBusinessIntelligenceInquiry(command, scope)) {
+                const res = await handleGeneralAgentQuery(db, tenant, command, at);
+                const agentId = await createLocalReply(db, tenant, scope, newId, 'general-agent', res.text, at);
+                targetId = agentId;
+              }
+
+              await auditConsole(db, tenant, by(auth.user), 'buzz.chat', `room:${scope}`, at, command.slice(0, 200));
+              return redirect(res, `${back}#msg-${encodeURIComponent(targetId)}`);
+            }
+            await auditConsole(db, tenant, by(auth.user), 'buzz.command', `room:${scope}`, at, command.slice(0, 200));
+            const notice = `Command ${result.command} executed.`;
+            return redirect(res, `${back}?notice=${encodeURIComponent(notice.slice(0, 200))}`);
+          }
+          const buzzReact = path.match(/^\/console\/buzz\/([^/]+)\/react$/);
+          if (method === 'POST' && buzzReact) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const call = await parseCall(req);
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const scope = decodeURIComponent(buzzReact[1]!);
+            const messageId = String(call.fields.messageId ?? '')
+              .trim()
+              .slice(0, 64);
+            const emoji = String(call.fields.emoji ?? '')
+              .trim()
+              .slice(0, 8);
+            if (!messageId || !emoji) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
+            const { toggleReaction } = await import('./buzz.ts');
+            await toggleReaction(db, tenant, messageId, emoji, auth.user.id, at);
+            await auditConsole(db, tenant, by(auth.user), 'buzz.react', `msg:${messageId}`, at, emoji);
+            return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(messageId)}`);
+          }
+          const buzzReply = path.match(/^\/console\/buzz\/([^/]+)\/reply$/);
+          if (method === 'POST' && buzzReply) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const call = await parseCall(req);
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const scope = decodeURIComponent(buzzReply[1]!);
+            const parentId =
+              String(call.fields.parentId ?? '')
+                .trim()
+                .slice(0, 64) || null;
+            const content = String(call.fields.content ?? '')
+              .trim()
+              .slice(0, 500);
+            if (!content) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
             const { createLocalReply } = await import('./buzz.ts');
             const byName = auth.user.email.split('@')[0] ?? auth.user.email;
-            const newId = await createLocalReply(db, tenant, scope, null, byName, command, at);
-            await triggerMentionHandoffs(command, {
+            const newId = await createLocalReply(db, tenant, scope, parentId, byName, content, at);
+            await triggerMentionHandoffs(content, {
               db,
               ledger,
               coord,
               tenant,
               originScope: scope,
               authorName: byName,
-              threadRoot: null,
+              threadRoot: parentId,
               at,
             });
 
-            let targetId = newId;
-            const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import(
-              '../talk/rag-analyst.ts'
-            );
-            if (isBusinessIntelligenceInquiry(command, scope)) {
-              const res = await handleGeneralAgentQuery(db, tenant, command, at);
-              const agentId = await createLocalReply(db, tenant, scope, newId, 'general-agent', res.text, at);
-              targetId = agentId;
+            let targetReplyId = newId;
+            const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import('../talk/rag-analyst.ts');
+            if (isBusinessIntelligenceInquiry(content, scope)) {
+              const res = await handleGeneralAgentQuery(db, tenant, content, at);
+              const agentId = await createLocalReply(
+                db,
+                tenant,
+                scope,
+                parentId ?? newId,
+                'general-agent',
+                res.text,
+                at,
+              );
+              targetReplyId = agentId;
             }
 
-            await auditConsole(db, tenant, by(auth.user), 'buzz.chat', `room:${scope}`, at, command.slice(0, 200));
-            return redirect(res, `${back}#msg-${encodeURIComponent(targetId)}`);
+            await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
+            return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
           }
-          await auditConsole(db, tenant, by(auth.user), 'buzz.command', `room:${scope}`, at, command.slice(0, 200));
-          const notice = `Command ${result.command} executed.`;
-          return redirect(res, `${back}?notice=${encodeURIComponent(notice.slice(0, 200))}`);
-        }
-        const buzzReact = path.match(/^\/console\/buzz\/([^/]+)\/react$/);
-        if (method === 'POST' && buzzReact) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const call = await parseCall(req);
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const scope = decodeURIComponent(buzzReact[1]!);
-          const messageId = String(call.fields.messageId ?? '')
-            .trim()
-            .slice(0, 64);
-          const emoji = String(call.fields.emoji ?? '')
-            .trim()
-            .slice(0, 8);
-          if (!messageId || !emoji) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
-          const { toggleReaction } = await import('./buzz.ts');
-          await toggleReaction(db, tenant, messageId, emoji, auth.user.id, at);
-          await auditConsole(db, tenant, by(auth.user), 'buzz.react', `msg:${messageId}`, at, emoji);
-          return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(messageId)}`);
-        }
-        const buzzReply = path.match(/^\/console\/buzz\/([^/]+)\/reply$/);
-        if (method === 'POST' && buzzReply) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const call = await parseCall(req);
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const scope = decodeURIComponent(buzzReply[1]!);
-          const parentId =
-            String(call.fields.parentId ?? '')
-              .trim()
-              .slice(0, 64) || null;
-          const content = String(call.fields.content ?? '')
-            .trim()
-            .slice(0, 500);
-          if (!content) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
-          const { createLocalReply } = await import('./buzz.ts');
-          const byName = auth.user.email.split('@')[0] ?? auth.user.email;
-          const newId = await createLocalReply(db, tenant, scope, parentId, byName, content, at);
-          await triggerMentionHandoffs(content, {
-            db,
-            ledger,
-            coord,
-            tenant,
-            originScope: scope,
-            authorName: byName,
-            threadRoot: parentId,
-            at,
-          });
-
-          let targetReplyId = newId;
-          const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import(
-            '../talk/rag-analyst.ts'
-          );
-          if (isBusinessIntelligenceInquiry(content, scope)) {
-            const res = await handleGeneralAgentQuery(db, tenant, content, at);
-            const agentId = await createLocalReply(
-              db,
-              tenant,
-              scope,
-              parentId ?? newId,
-              'general-agent',
-              res.text,
-              at,
-            );
-            targetReplyId = agentId;
-          }
-
-          await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
-          return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
-        }
-        // ------------------------------------------------------------ Code review (per-mission human gate)
-        // GET  /console/review/:missionId — diff review page
-        // POST /console/review/:missionId — review actions (accept/reject/edit/comment/verify/snapshot)
-        const reviewMatch = path.match(/^\/console\/review\/([^/]+)$/);
-        if (reviewMatch && (method === 'GET' || method === 'POST')) {
-          const auth = await sessionOf();
-          if (!auth) return method === 'GET' ? redirectLogin() : json(res, 401, { ok: false, error: 'session required' });
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const missionId = decodeURIComponent(reviewMatch[1]!);
-          if (method === 'GET') {
-            const html = await renderReviewPage(db, tenant, missionId, {
-              q: url.searchParams.get('q') ?? undefined,
-              file: url.searchParams.get('file') ?? undefined,
-              mode: url.searchParams.get('mode') ?? undefined,
-              notice: url.searchParams.get('notice') ?? undefined,
-            }, auth.session.csrfToken, by(auth.user));
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(html);
-            return;
-          }
-          // POST: parse, CSRF-gate, dispatch, redirect back to the page.
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          try {
-            const { handleReviewAction } = await import('./code-review.ts');
-            const result = await handleReviewAction(db, tenant, missionId, call.fields, by(auth.user));
-            await auditConsole(db, tenant, by(auth.user), 'review.action', `mission:${missionId}`, at, String(call.fields.action ?? ''));
-            return redirect(res, result.redirect);
-          } catch (e) {
-            await auditConsole(db, tenant, by(auth.user), 'review.action_failed', `mission:${missionId}`, at, String((e as Error).message).slice(0, 200));
-            return redirect(res, `/console/review/${encodeURIComponent(missionId)}?notice=${encodeURIComponent((e as Error).message.slice(0, 200))}`);
-          }
-        }
-
-        // ------------------------------------------------------------ Issues (engineers team only)
-        // The engineering Issues board: kanban over the `issues` table with
-        // live delta sync. Every route below gates on `isEngineer(auth.user)`
-        // — the SESSION user's department, never the request body — so the
-        // board is invisible and unwritable for every other team (owners
-        // included) and for anonymous callers. All mutations audit.
-        const engineerOnly = (auth: { user: User }): boolean => {
-          return isEngineer(auth.user) && !auth.user.disabled;
-        };
-        const engineerList = async (): Promise<{ email: string; name: string }[]> =>
-          (await listUsers(db, tenant))
-            .filter((u) => isEngineer(u) && !u.disabled)
-            .map((u) => ({ email: u.email, name: u.name }));
-        const issueSnapshot = async (since: string | null): Promise<IssueSnapshot> =>
-          since ? syncIssues(db, tenant, since) : listIssues(db, tenant);
-
-        const issuesPage = path === '/console/issues' && method === 'GET';
-        const issuesSync = path === '/console/issues/sync' && method === 'GET';
-        if (issuesPage || issuesSync) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          // Engineers-team gate: owners and every other department are refused.
-          if (!engineerOnly(auth)) {
-            if (issuesSync)
-              return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              page(
-                'Vital Console — Issues',
-                `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
-              ),
-            );
-            return;
-          }
-          const since = issuesSync ? url.searchParams.get('since') : null;
-          const snapshot = await issueSnapshot(since);
-          if (issuesSync) {
-            return json(res, 200, { ok: true, snapshot });
-          }
-          const engineers = await engineerList();
-          const body = renderIssuesBoard(snapshot, {
-            csrf: auth.session.csrfToken,
-            home,
-            engineers,
-            currentEmail: auth.user.email,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(buzzDocument('Issues', body), db, tenant, home, auth, 'buzz', 'dashboard'),
-          );
-          return;
-        }
-        const issuesDetail = path === '/console/issues/detail' && method === 'GET';
-        const issuesMutations: [boolean, string][] = [
-          [path === '/console/issues/create' && method === 'POST', 'create'],
-          [path === '/console/issues/move' && method === 'POST', 'move'],
-          [path === '/console/issues/update' && method === 'POST', 'update'],
-          [path === '/console/issues/delete' && method === 'POST', 'delete'],
-          [path === '/console/issues/comment' && method === 'POST', 'comment'],
-        ];
-        const issuesMutation = issuesMutations.find(([match]) => match);
-        if (issuesDetail || issuesMutation) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          if (!engineerOnly(auth))
-            return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-          let call: Call | null = null;
-          if (issuesMutation) {
+          // ------------------------------------------------------------ Code review (per-mission human gate)
+          // GET  /console/review/:missionId — diff review page
+          // POST /console/review/:missionId — review actions (accept/reject/edit/comment/verify/snapshot)
+          const reviewMatch = path.match(/^\/console\/review\/([^/]+)$/);
+          if (reviewMatch && (method === 'GET' || method === 'POST')) {
+            const auth = await sessionOf();
+            if (!auth)
+              return method === 'GET' ? redirectLogin() : json(res, 401, { ok: false, error: 'session required' });
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            const missionId = decodeURIComponent(reviewMatch[1]!);
+            if (method === 'GET') {
+              const html = await renderReviewPage(
+                db,
+                tenant,
+                missionId,
+                {
+                  q: url.searchParams.get('q') ?? undefined,
+                  file: url.searchParams.get('file') ?? undefined,
+                  mode: url.searchParams.get('mode') ?? undefined,
+                  notice: url.searchParams.get('notice') ?? undefined,
+                },
+                auth.session.csrfToken,
+                by(auth.user),
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(html);
+              return;
+            }
+            // POST: parse, CSRF-gate, dispatch, redirect back to the page.
+            let call: Call;
             try {
               call = await parseCall(req);
             } catch (e) {
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          }
-          const action = issuesMutation?.[1];
-          try {
-            if (issuesDetail) {
-              const id = (url.searchParams.get('id') ?? '').slice(0, 64);
-              const issue = id ? await getIssue(db, tenant, id) : null;
-              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-              const comments = await listComments(db, tenant, issue.id);
-              return json(res, 200, { ok: true, issue, comments });
-            }
-            const fields = call!.fields;
-            if (action === 'create') {
-              const rawLabels = (call!.json?.labels ?? fields.labels) as unknown;
-              let labelList: string[] | undefined;
-              if (Array.isArray(rawLabels)) {
-                labelList = rawLabels.map((l) => String(l));
-              } else if (typeof rawLabels === 'string' && rawLabels.trim()) {
-                labelList = rawLabels.split(/[,;]+/).map((l) => l.trim()).filter(Boolean);
-              }
-              const issue = await createIssue(
-                db,
-                tenant,
-                {
-                  title: String(fields.title ?? ''),
-                  description: String(fields.description ?? ''),
-                  state: ISSUE_STATES.includes(String(fields.state ?? '') as IssueState)
-                    ? (String(fields.state) as IssueState)
-                    : undefined,
-                  priority: ISSUE_PRIORITIES.includes(String(fields.priority ?? '') as IssuePriority)
-                    ? (String(fields.priority) as IssuePriority)
-                    : undefined,
-                  labels: labelList,
-                  assigneeEmail: String(fields.assigneeEmail ?? '') || null,
-                },
-                { userId: auth.user.id, email: auth.user.email },
-                at,
-              );
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'issues.create',
-                `issue:${issue.id}`,
-                at,
-                issue.title.slice(0, 120),
-              );
-              pushCreateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
-              return json(res, 200, { ok: true, issue });
-            }
-            if (action === 'move') {
-              const id = String(fields.issueId ?? '').slice(0, 64);
-              const state = String(fields.state ?? '');
-              if (!ISSUE_STATES.includes(state as IssueState))
-                return json(res, 400, { ok: false, error: 'unknown state' });
-              const issue = await moveIssue(
-                db,
-                tenant,
-                id,
-                {
-                  state: state as IssueState,
-                  beforeId: String(fields.beforeId ?? '') || null,
-                  afterId: String(fields.afterId ?? '') || null,
-                },
-                at,
-              );
-              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'issues.move',
-                `issue:${issue.id}`,
-                at,
-                `state=${issue.state}`,
-              );
-              pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
-              return json(res, 200, { ok: true, issue });
-            }
-            if (action === 'update') {
-              const id = String(fields.issueId ?? '').slice(0, 64);
-              const progressRaw =
-                fields.progress === undefined || fields.progress === '' ? undefined : Number(fields.progress);
-              const stateRaw =
-                fields.state !== undefined && ISSUE_STATES.includes(String(fields.state) as IssueState)
-                  ? (String(fields.state) as IssueState)
-                  : undefined;
-              const issue = await updateIssue(
-                db,
-                tenant,
-                id,
-                {
-                  title: fields.title === undefined ? undefined : String(fields.title),
-                  description: fields.description === undefined ? undefined : String(fields.description),
-                  state: stateRaw,
-                  priority:
-                    fields.priority === undefined ||
-                    !ISSUE_PRIORITIES.includes(String(fields.priority) as IssuePriority)
-                      ? undefined
-                      : (String(fields.priority) as IssuePriority),
-                  progress: progressRaw !== undefined && Number.isFinite(progressRaw) ? progressRaw : undefined,
-                  expectedUpdatedAt: String(fields.expectedUpdatedAt ?? '') || null,
-                },
-                at,
-              );
-              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'issues.update',
-                `issue:${issue.id}`,
-                at,
-                issue.title.slice(0, 120),
-              );
-              pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
-              return json(res, 200, { ok: true, issue });
-            }
-            if (action === 'delete') {
-              const id = String(fields.issueId ?? '').slice(0, 64);
-              const gone = await deleteIssue(db, tenant, id);
-              if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
-              await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
-              pushDeleteToGitHub(db, tenant, id, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
-              return json(res, 200, { ok: true });
-            }
-            if (action === 'comment') {
-              const id = String(fields.issueId ?? '').slice(0, 64);
-              const comment = await addComment(db, tenant, id, auth.user.email, String(fields.content ?? ''), at);
-              if (!comment) return json(res, 404, { ok: false, error: 'no such issue' });
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'issues.comment',
-                `issue:${id}`,
-                at,
-                comment.content.slice(0, 120),
-              );
-              pushCommentToGitHub(db, tenant, id, comment.content, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
-              return json(res, 200, { ok: true, comment });
-            }
-          } catch (e) {
-            const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
-            const stale = (e as Error).message.includes('STALE_WRITE');
-            return json(res, stale ? 409 : 400, { ok: false, error: msg });
-          }
-        }
-        // ------------------------------------------------------------ GitHub Project Sync (bidirectional)
-        {
-          const issuesGhConfig = path === '/console/issues/github/config' && method === 'GET';
-          const issuesGhAuth = path === '/console/issues/github/authorize' && method === 'POST';
-          const issuesGhSync = path === '/console/issues/github/sync' && method === 'POST';
-          const issuesGhWebhook = path === '/console/issues/github/webhook' && method === 'POST';
-          if (issuesGhConfig || issuesGhAuth || issuesGhSync || issuesGhWebhook) {
-            const auth = await sessionOf();
-            // webhook is allowed anonymous if repo linked (GitHub itself calls it); otherwise require engineer session
-            if (!issuesGhWebhook) {
-              if (!auth) return redirectLogin();
-              if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-              if (activationDenied(res, auth, false)) return;
-              if (!engineerOnly(auth)) return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-            }
-            if (issuesGhConfig) {
-              const a = await sessionOf();
-              if (!a) return redirectLogin();
-              if (!engineerOnly(a)) return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-              const config = await getGitHubSyncConfig(db, tenant);
-              return json(res, 200, {
-                ok: true,
-                config: config
-                  ? { repo: config.repo, status: config.status, lastSyncedAt: config.lastSyncedAt, syncedCount: config.syncedCount, hasToken: !!config.token }
-                  : null,
-              });
-            }
-            if (issuesGhWebhook) {
-              const cfg = await getGitHubSyncConfig(db, tenant);
-              if (!cfg || !cfg.repo) return json(res, 400, { ok: false, error: 'no repo linked for tenant' });
-              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: opts.fetchFn ?? fetch });
-              return json(res, 200, { ok: syncRes.ok, syncedCount: syncRes.syncedCount, error: syncRes.error });
-            }
-            let call: Call | null = null;
-            try { call = await parseCall(req); } catch (e) { return json(res, 400, { ok: false, error: (e as Error).message }); }
-            if (!auth || !csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            const serverFetchFn = opts.fetchFn ?? fetch;
-            const at2 = now();
-            if (issuesGhAuth) {
-              const repoRaw = String(call.fields.repo ?? '').trim();
-              const tokenRaw = typeof call.fields.token === 'string' ? call.fields.token.trim() : null;
-              const parsed = parseGitHubRepoPath(repoRaw);
-              if (!parsed) return json(res, 400, { ok: false, error: 'Invalid repository. Please enter owner/repo or a GitHub URL.' });
-              const authRes = await authorizeGitHubRepo(repoRaw, tokenRaw, serverFetchFn);
-              if (!authRes.ok) return json(res, 400, { ok: false, error: authRes.error || 'GitHub authorization failed' });
-              await saveGitHubSyncConfig(db, tenant, authRes.repoFullName, tokenRaw, auth.user.email, at2);
-              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: serverFetchFn, userEmail: auth.user.email });
-              await auditConsole(db, tenant, by(auth.user), 'issues.github_authorize', `repo:${authRes.repoFullName}`, at2, `synced:${syncRes.syncedCount}`);
-              return json(res, 200, { ok: true, repo: authRes.repoFullName, syncedCount: syncRes.syncedCount, error: syncRes.error });
-            }
-            if (issuesGhSync) {
-              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: serverFetchFn, userEmail: auth!.user.email });
-              if (!syncRes.ok) return json(res, 400, { ok: false, error: syncRes.error || 'Sync failed' });
-              await auditConsole(db, tenant, by(auth!.user), 'issues.github_sync', `synced:${syncRes.syncedCount}`, at2);
-              return json(res, 200, { ok: true, syncedCount: syncRes.syncedCount });
-            }
-          }
-        }
-
-        // ------------------------------------------------------------- Meetings ----
-        if (path === '/console/meetings' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-
-          const meetings = await meetingService.listMeetings(tenant);
-          const body = renderMeetingLibraryView({ meetings, home, csrf: auth.session.csrfToken });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          // The library is a management surface (browse, review, join), so it
-          // renders in the Console shell — never in the chat shell. Only the
-          // live room itself is a real-time space.
-          res.end(
-            await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'),
-          );
-          return;
-        }
-
-        const roomMatch = path.match(/^\/console\/meetings\/([^/]+)\/room$/);
-        if ((path === '/console/meetings/room' || roomMatch) && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-
-          const meetingId = roomMatch ? decodeURIComponent(roomMatch[1]!) : url.searchParams.get('id');
-          if (!meetingId) {
-            res.writeHead(302, { location: `${home}console/meetings` });
-            res.end();
-            return;
-          }
-          const meeting = await meetingService.getMeeting(tenant, meetingId);
-          if (!meeting) {
-            res.writeHead(302, { location: `${home}console/meetings` });
-            res.end();
-            return;
-          }
-
-          const html = renderMeetingRoomView({
-            meeting,
-            currentUserId: auth.user.id,
-            currentUserName: auth.user.name,
-            userRole: auth.user.role,
-            home,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
-          return;
-        }
-
-        const detailMatch = path.match(/^\/console\/meetings\/([^/]+)$/);
-        if (
-          (path === '/console/meetings/detail' || (detailMatch && detailMatch[1] !== 'room' && detailMatch[1] !== 'detail')) &&
-          method === 'GET'
-        ) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-
-          const meetingId =
-            detailMatch && detailMatch[1] !== 'detail'
-              ? decodeURIComponent(detailMatch[1]!)
-              : url.searchParams.get('id');
-          if (!meetingId) {
-            res.writeHead(302, { location: `${home}console/meetings` });
-            res.end();
-            return;
-          }
-          const details = await meetingService.getMeetingDetails(tenant, meetingId);
-          if (!details) {
-            res.writeHead(302, { location: `${home}console/meetings` });
-            res.end();
-            return;
-          }
-
-          const body = renderMeetingDetailView({
-            meeting: details.meeting,
-            notes: details.notes,
-            transcript: details.transcript,
-            recording: details.recording,
-            participants: details.participants,
-            home,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          // Review surface (transcript, notes, intelligence): Console shell.
-          res.end(
-            await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'),
-          );
-          return;
-        }
-
-        if ((path === '/api/meetings/create' || path === '/api/meetings') && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-
-          const raw = await readBody(req);
-          let title = 'Untitled Meeting';
-          let scope = 'general';
-          let recordingEnabled = true;
-
-          const ctype = req.headers['content-type'] ?? '';
-          if (ctype.includes('application/json')) {
             try {
-              const body = JSON.parse(raw);
-              title = body.title || title;
-              scope = body.scope || scope;
-              if (typeof body.recordingEnabled === 'boolean') recordingEnabled = body.recordingEnabled;
-            } catch {}
-          } else {
-            const params = new URLSearchParams(raw);
-            title = params.get('title') || title;
-            scope = params.get('scope') || scope;
-            recordingEnabled = params.get('recordingEnabled') === '1' || params.get('recordingEnabled') === 'true';
+              const { handleReviewAction } = await import('./code-review.ts');
+              const result = await handleReviewAction(db, tenant, missionId, call.fields, by(auth.user));
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'review.action',
+                `mission:${missionId}`,
+                at,
+                String(call.fields.action ?? ''),
+              );
+              return redirect(res, result.redirect);
+            } catch (e) {
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'review.action_failed',
+                `mission:${missionId}`,
+                at,
+                String((e as Error).message).slice(0, 200),
+              );
+              return redirect(
+                res,
+                `/console/review/${encodeURIComponent(missionId)}?notice=${encodeURIComponent((e as Error).message.slice(0, 200))}`,
+              );
+            }
           }
 
-          const meeting = await meetingService.createMeeting(tenant, {
-            title,
-            scope,
-            hostUserId: auth.user.id,
-            hostName: auth.user.name,
-            recordingEnabled,
-          });
+          // ------------------------------------------------------------ Issues (engineers team only)
+          // The engineering Issues board: kanban over the `issues` table with
+          // live delta sync. Every route below gates on `isEngineer(auth.user)`
+          // — the SESSION user's department, never the request body — so the
+          // board is invisible and unwritable for every other team (owners
+          // included) and for anonymous callers. All mutations audit.
+          const engineerOnly = (auth: { user: User }): boolean => {
+            return isEngineer(auth.user) && !auth.user.disabled;
+          };
+          const engineerList = async (): Promise<{ email: string; name: string }[]> =>
+            (await listUsers(db, tenant))
+              .filter((u) => isEngineer(u) && !u.disabled)
+              .map((u) => ({ email: u.email, name: u.name }));
+          const issueSnapshot = async (since: string | null): Promise<IssueSnapshot> =>
+            since ? syncIssues(db, tenant, since) : listIssues(db, tenant);
 
-          await auditConsole(
-            db,
-            tenant,
-            by(auth.user),
-            'meeting.create',
-            `meeting:${meeting.id}`,
-            at,
-            meeting.title,
-          );
-
-          if (ctype.includes('application/x-www-form-urlencoded')) {
-            res.writeHead(303, { location: `${home}console/meetings/room?id=${encodeURIComponent(meeting.id)}` });
-            res.end();
+          const issuesPage = path === '/console/issues' && method === 'GET';
+          const issuesSync = path === '/console/issues/sync' && method === 'GET';
+          if (issuesPage || issuesSync) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            // Engineers-team gate: owners and every other department are refused.
+            if (!engineerOnly(auth)) {
+              if (issuesSync)
+                return json(res, 403, {
+                  ok: false,
+                  error: 'the Issues board is available to the engineering team only',
+                });
+              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                page(
+                  'Vital Console — Issues',
+                  `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
+                ),
+              );
+              return;
+            }
+            const since = issuesSync ? url.searchParams.get('since') : null;
+            const snapshot = await issueSnapshot(since);
+            if (issuesSync) {
+              return json(res, 200, { ok: true, snapshot });
+            }
+            const engineers = await engineerList();
+            const body = renderIssuesBoard(snapshot, {
+              csrf: auth.session.csrfToken,
+              home,
+              engineers,
+              currentEmail: auth.user.email,
+              syncConfig: await getGitHubSyncConfig(db, tenant),
+              pushError: await getGitHubPushError(db, tenant),
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(
+              await wrapInWorkspaceShell(buzzDocument('Issues', body), db, tenant, home, auth, 'buzz', 'dashboard'),
+            );
             return;
           }
-          return json(res, 200, { ok: true, meeting });
-        }
+          const issuesDetail = path === '/console/issues/detail' && method === 'GET';
+          const issuesMutations: [boolean, string][] = [
+            [path === '/console/issues/create' && method === 'POST', 'create'],
+            [path === '/console/issues/move' && method === 'POST', 'move'],
+            [path === '/console/issues/update' && method === 'POST', 'update'],
+            [path === '/console/issues/delete' && method === 'POST', 'delete'],
+            [path === '/console/issues/comment' && method === 'POST', 'comment'],
+          ];
+          const issuesMutation = issuesMutations.find(([match]) => match);
+          if (issuesDetail || issuesMutation) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            if (!engineerOnly(auth))
+              return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
+            let call: Call | null = null;
+            if (issuesMutation) {
+              try {
+                call = await parseCall(req);
+              } catch (e) {
+                return json(res, 400, { ok: false, error: (e as Error).message });
+              }
+              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            const action = issuesMutation?.[1];
+            try {
+              if (issuesDetail) {
+                const id = (url.searchParams.get('id') ?? '').slice(0, 64);
+                const issue = id ? await getIssue(db, tenant, id) : null;
+                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+                const comments = await listComments(db, tenant, issue.id);
+                return json(res, 200, { ok: true, issue, comments });
+              }
+              const fields = call!.fields;
+              if (action === 'create') {
+                const rawLabels = (call!.json?.labels ?? fields.labels) as unknown;
+                let labelList: string[] | undefined;
+                if (Array.isArray(rawLabels)) {
+                  labelList = rawLabels.map((l) => String(l));
+                } else if (typeof rawLabels === 'string' && rawLabels.trim()) {
+                  labelList = rawLabels
+                    .split(/[,;]+/)
+                    .map((l) => l.trim())
+                    .filter(Boolean);
+                }
+                const issue = await createIssue(
+                  db,
+                  tenant,
+                  {
+                    title: String(fields.title ?? ''),
+                    description: String(fields.description ?? ''),
+                    state: ISSUE_STATES.includes(String(fields.state ?? '') as IssueState)
+                      ? (String(fields.state) as IssueState)
+                      : undefined,
+                    priority: ISSUE_PRIORITIES.includes(String(fields.priority ?? '') as IssuePriority)
+                      ? (String(fields.priority) as IssuePriority)
+                      : undefined,
+                    labels: labelList,
+                    assigneeEmail: String(fields.assigneeEmail ?? '') || null,
+                  },
+                  { userId: auth.user.id, email: auth.user.email },
+                  at,
+                );
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'issues.create',
+                  `issue:${issue.id}`,
+                  at,
+                  issue.title.slice(0, 120),
+                );
+                pushAfterLocalWrite('issue.create', `issue:${issue.id}`, by(auth.user), () =>
+                  pushCreateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
+                );
+                return json(res, 200, { ok: true, issue });
+              }
+              if (action === 'move') {
+                const id = String(fields.issueId ?? '').slice(0, 64);
+                const state = String(fields.state ?? '');
+                if (!ISSUE_STATES.includes(state as IssueState))
+                  return json(res, 400, { ok: false, error: 'unknown state' });
+                const issue = await moveIssue(
+                  db,
+                  tenant,
+                  id,
+                  {
+                    state: state as IssueState,
+                    beforeId: String(fields.beforeId ?? '') || null,
+                    afterId: String(fields.afterId ?? '') || null,
+                  },
+                  at,
+                );
+                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'issues.move',
+                  `issue:${issue.id}`,
+                  at,
+                  `state=${issue.state}`,
+                );
+                pushAfterLocalWrite('issue.move', `issue:${issue.id}`, by(auth.user), () =>
+                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
+                );
+                return json(res, 200, { ok: true, issue });
+              }
+              if (action === 'update') {
+                const id = String(fields.issueId ?? '').slice(0, 64);
+                const progressRaw =
+                  fields.progress === undefined || fields.progress === '' ? undefined : Number(fields.progress);
+                const stateRaw =
+                  fields.state !== undefined && ISSUE_STATES.includes(String(fields.state) as IssueState)
+                    ? (String(fields.state) as IssueState)
+                    : undefined;
+                const issue = await updateIssue(
+                  db,
+                  tenant,
+                  id,
+                  {
+                    title: fields.title === undefined ? undefined : String(fields.title),
+                    description: fields.description === undefined ? undefined : String(fields.description),
+                    state: stateRaw,
+                    priority:
+                      fields.priority === undefined ||
+                      !ISSUE_PRIORITIES.includes(String(fields.priority) as IssuePriority)
+                        ? undefined
+                        : (String(fields.priority) as IssuePriority),
+                    progress: progressRaw !== undefined && Number.isFinite(progressRaw) ? progressRaw : undefined,
+                    expectedUpdatedAt: String(fields.expectedUpdatedAt ?? '') || null,
+                  },
+                  at,
+                );
+                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'issues.update',
+                  `issue:${issue.id}`,
+                  at,
+                  issue.title.slice(0, 120),
+                );
+                pushAfterLocalWrite('issue.update', `issue:${issue.id}`, by(auth.user), () =>
+                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
+                );
+                return json(res, 200, { ok: true, issue });
+              }
+              if (action === 'delete') {
+                const id = String(fields.issueId ?? '').slice(0, 64);
+                const gone = await deleteIssue(db, tenant, id);
+                if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
+                await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
+                pushAfterLocalWrite('issue.delete', `issue:${id}`, by(auth.user), () =>
+                  pushDeleteToGitHub(db, tenant, id, { fetchFn: opts.fetchFn ?? fetch }),
+                );
+                return json(res, 200, { ok: true });
+              }
+              if (action === 'comment') {
+                const id = String(fields.issueId ?? '').slice(0, 64);
+                const comment = await addComment(db, tenant, id, auth.user.email, String(fields.content ?? ''), at);
+                if (!comment) return json(res, 404, { ok: false, error: 'no such issue' });
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'issues.comment',
+                  `issue:${id}`,
+                  at,
+                  comment.content.slice(0, 120),
+                );
+                pushAfterLocalWrite('issue.comment', `issue:${id}`, by(auth.user), () =>
+                  pushCommentToGitHub(db, tenant, id, comment.content, { fetchFn: opts.fetchFn ?? fetch }),
+                );
+                return json(res, 200, { ok: true, comment });
+              }
+            } catch (e) {
+              const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
+              const stale = (e as Error).message.includes('STALE_WRITE');
+              return json(res, stale ? 409 : 400, { ok: false, error: msg });
+            }
+          }
+          // ------------------------------------------------------------ GitHub Project Sync (bidirectional)
+          {
+            const issuesGhConfig = path === '/console/issues/github/config' && method === 'GET';
+            const issuesGhAuth = path === '/console/issues/github/authorize' && method === 'POST';
+            const issuesGhSync = path === '/console/issues/github/sync' && method === 'POST';
+            const issuesGhUnlink = path === '/console/issues/github/unlink' && method === 'POST';
+            const issuesGhWebhook = path === '/console/issues/github/webhook' && method === 'POST';
+            if (issuesGhConfig || issuesGhAuth || issuesGhSync || issuesGhUnlink || issuesGhWebhook) {
+              const auth = await sessionOf();
+              // webhook is allowed anonymous if repo linked (GitHub itself calls it); otherwise require engineer session
+              if (!issuesGhWebhook) {
+                if (!auth) return redirectLogin();
+                if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+                if (activationDenied(res, auth, false)) return;
+                if (!engineerOnly(auth))
+                  return json(res, 403, {
+                    ok: false,
+                    error: 'the Issues board is available to the engineering team only',
+                  });
+              }
+              if (issuesGhConfig) {
+                const a = await sessionOf();
+                if (!a) return redirectLogin();
+                if (!engineerOnly(a))
+                  return json(res, 403, {
+                    ok: false,
+                    error: 'the Issues board is available to the engineering team only',
+                  });
+                const config = await getGitHubSyncConfig(db, tenant);
+                const pushError = await getGitHubPushError(db, tenant);
+                return json(res, 200, {
+                  ok: true,
+                  config: config
+                    ? {
+                        repo: config.repo,
+                        status: config.status,
+                        lastSyncedAt: config.lastSyncedAt,
+                        syncedCount: config.syncedCount,
+                        hasToken: !!config.token,
+                        lastPushError: pushError,
+                      }
+                    : null,
+                });
+              }
+              if (issuesGhWebhook) {
+                const cfg = await getGitHubSyncConfig(db, tenant);
+                if (!cfg || !cfg.repo) return json(res, 400, { ok: false, error: 'no repo linked for tenant' });
+                const syncRes = await syncGitHubProject(db, tenant, { fetchFn: opts.fetchFn ?? fetch });
+                return json(res, 200, { ok: syncRes.ok, syncedCount: syncRes.syncedCount, error: syncRes.error });
+              }
+              let call: Call | null = null;
+              try {
+                call = await parseCall(req);
+              } catch (e) {
+                return json(res, 400, { ok: false, error: (e as Error).message });
+              }
+              if (!auth || !csrfOk(auth.session, call.csrf))
+                return json(res, 403, { ok: false, error: 'bad CSRF token' });
+              const serverFetchFn = opts.fetchFn ?? fetch;
+              const at2 = now();
+              if (issuesGhUnlink) {
+                // Read the repo first: the audit line is only useful if it names
+                // what was disconnected, and the unlink forgets exactly that.
+                const before = await getGitHubSyncConfig(db, tenant);
+                await unlinkGitHubSyncConfig(db, tenant, auth.user.email, at2);
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'github.unlink',
+                  'github:sync',
+                  at2,
+                  before?.repo ? `unlinked ${before.repo}` : undefined,
+                );
+                return json(res, 200, { ok: true, config: null });
+              }
+              if (issuesGhAuth) {
+                const repoRaw = String(call.fields.repo ?? '').trim();
+                const tokenRaw = typeof call.fields.token === 'string' ? call.fields.token.trim() : null;
+                const parsed = parseGitHubRepoPath(repoRaw);
+                if (!parsed)
+                  return json(res, 400, {
+                    ok: false,
+                    error: 'Invalid repository. Please enter owner/repo or a GitHub URL.',
+                  });
+                const authRes = await authorizeGitHubRepo(repoRaw, tokenRaw, serverFetchFn);
+                if (!authRes.ok)
+                  return json(res, 400, { ok: false, error: authRes.error || 'GitHub authorization failed' });
+                await saveGitHubSyncConfig(db, tenant, authRes.repoFullName, tokenRaw, auth.user.email, at2);
+                const syncRes = await syncGitHubProject(db, tenant, {
+                  fetchFn: serverFetchFn,
+                  userEmail: auth.user.email,
+                });
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'issues.github_authorize',
+                  `repo:${authRes.repoFullName}`,
+                  at2,
+                  `synced:${syncRes.syncedCount}`,
+                );
+                return json(res, 200, {
+                  ok: true,
+                  repo: authRes.repoFullName,
+                  syncedCount: syncRes.syncedCount,
+                  error: syncRes.error,
+                });
+              }
+              if (issuesGhSync) {
+                const syncRes = await syncGitHubProject(db, tenant, {
+                  fetchFn: serverFetchFn,
+                  userEmail: auth!.user.email,
+                });
+                if (!syncRes.ok) return json(res, 400, { ok: false, error: syncRes.error || 'Sync failed' });
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth!.user),
+                  'issues.github_sync',
+                  `synced:${syncRes.syncedCount}`,
+                  at2,
+                );
+                return json(res, 200, { ok: true, syncedCount: syncRes.syncedCount });
+              }
+            }
+          }
 
-        if ((path === '/api/meetings/list' || path === '/api/meetings') && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          // ------------------------------------------------------------- Meetings ----
+          if (path === '/console/meetings' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
 
-          const scope = url.searchParams.get('scope') || undefined;
-          const status = (url.searchParams.get('status') as any) || undefined;
-          const search = url.searchParams.get('search') || undefined;
-          const meetings = await meetingService.listMeetings(tenant, { scope, status, search });
-          return json(res, 200, { ok: true, meetings });
-        }
+            const meetings = await meetingService.listMeetings(tenant);
+            const body = renderMeetingLibraryView({ meetings, home, csrf: auth.session.csrfToken });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            // The library is a management surface (browse, review, join), so it
+            // renders in the Console shell — never in the chat shell. Only the
+            // live room itself is a real-time space.
+            res.end(await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'));
+            return;
+          }
 
-        // Meeting-specific routes /api/meetings/:id/...
-        const meetingRouteMatch = path.match(/^\/api\/meetings\/([^/]+)(?:\/([a-zA-Z0-9_-]+))?$/);
-        if (meetingRouteMatch) {
-          const auth = await sessionOf();
-          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          const roomMatch = path.match(/^\/console\/meetings\/([^/]+)\/room$/);
+          if ((path === '/console/meetings/room' || roomMatch) && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
 
-          const meetingId = meetingRouteMatch[1]!;
-          const subAction = meetingRouteMatch[2] || '';
+            const meetingId = roomMatch ? decodeURIComponent(roomMatch[1]!) : url.searchParams.get('id');
+            if (!meetingId) {
+              res.writeHead(302, { location: `${home}console/meetings` });
+              res.end();
+              return;
+            }
+            const meeting = await meetingService.getMeeting(tenant, meetingId);
+            if (!meeting) {
+              res.writeHead(302, { location: `${home}console/meetings` });
+              res.end();
+              return;
+            }
 
-          if (!subAction && method === 'GET') {
+            const html = renderMeetingRoomView({
+              meeting,
+              currentUserId: auth.user.id,
+              currentUserName: auth.user.name,
+              userRole: auth.user.role,
+              home,
+              csrf: auth.session.csrfToken,
+              iceServers: meetingIceServers(),
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(html);
+            return;
+          }
+
+          // Live-room static assets. Content-hashed URLs (the room HTML links
+          // ?v=<sha>), so the body is immutable; unhashed requests only get
+          // revalidated, never served stale.
+          if (
+            method === 'GET' &&
+            (path === '/console/assets/meeting-room.css' || path === '/console/assets/meeting-room.js')
+          ) {
+            const kind = path.endsWith('.css') ? 'css' : 'js';
+            const asset = meetingRoomAsset(kind);
+            if ((req.headers['if-none-match'] ?? '') === asset.etag) {
+              res.writeHead(304, { etag: asset.etag });
+              res.end();
+              return;
+            }
+            const hashed = (url.searchParams.get('v') ?? '') === asset.etag.slice(3, 13);
+            res.writeHead(200, {
+              'content-type': asset.type,
+              'cache-control': hashed ? 'public, max-age=31536000, immutable' : 'public, max-age=0, must-revalidate',
+              etag: asset.etag,
+            });
+            res.end(asset.body);
+            return;
+          }
+
+          const detailMatch = path.match(/^\/console\/meetings\/([^/]+)$/);
+          if (
+            (path === '/console/meetings/detail' ||
+              (detailMatch && detailMatch[1] !== 'room' && detailMatch[1] !== 'detail')) &&
+            method === 'GET'
+          ) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+
+            const meetingId =
+              detailMatch && detailMatch[1] !== 'detail'
+                ? decodeURIComponent(detailMatch[1]!)
+                : url.searchParams.get('id');
+            if (!meetingId) {
+              res.writeHead(302, { location: `${home}console/meetings` });
+              res.end();
+              return;
+            }
             const details = await meetingService.getMeetingDetails(tenant, meetingId);
-            if (!details) return json(res, 404, { ok: false, error: 'meeting not found' });
-            return json(res, 200, { ok: true, ...details });
-          }
+            if (!details) {
+              res.writeHead(302, { location: `${home}console/meetings` });
+              res.end();
+              return;
+            }
 
-          if (subAction === 'join' && method === 'POST') {
-            const participant = await meetingService.joinMeeting(tenant, meetingId, {
-              id: auth.user.id,
-              name: auth.user.name,
+            const body = renderMeetingDetailView({
+              meeting: details.meeting,
+              notes: details.notes,
+              transcript: details.transcript,
+              recording: details.recording,
+              participants: details.participants,
+              home,
+              csrf: auth.session.csrfToken,
             });
-            return json(res, 200, { ok: true, participant });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            // Review surface (transcript, notes, intelligence): Console shell.
+            res.end(await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'));
+            return;
           }
 
-          if (subAction === 'leave' && method === 'POST') {
-            await meetingService.leaveMeeting(tenant, meetingId, auth.user.id);
-            return json(res, 200, { ok: true });
-          }
+          if ((path === '/api/meetings/create' || path === '/api/meetings') && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
 
-          if (subAction === 'end' && method === 'POST') {
-            const meeting = await meetingService.endMeeting(tenant, meetingId, auth.user.id);
-            signalingHub.broadcastToRoom(meetingId, {
-              type: 'meeting-ended',
-              meetingId,
-              senderId: auth.user.id,
-              senderName: auth.user.name,
-              timestamp: Date.now(),
+            const raw = await readBody(req);
+            let title = 'Untitled Meeting';
+            let scope = 'general';
+            let recordingEnabled = true;
+
+            const ctype = req.headers['content-type'] ?? '';
+            const headerCsrf = req.headers['x-vital-csrf'];
+            if (ctype.includes('application/json')) {
+              if (!csrfOk(auth.session, typeof headerCsrf === 'string' ? headerCsrf : null)) {
+                return json(res, 403, { ok: false, error: 'bad CSRF token' });
+              }
+              try {
+                const body = JSON.parse(raw);
+                title = body.title || title;
+                scope = body.scope || scope;
+                if (typeof body.recordingEnabled === 'boolean') recordingEnabled = body.recordingEnabled;
+              } catch {}
+            } else {
+              const params = new URLSearchParams(raw);
+              const formCsrf = params.get('csrf');
+              if (!csrfOk(auth.session, typeof headerCsrf === 'string' && headerCsrf ? headerCsrf : formCsrf)) {
+                return json(res, 403, { ok: false, error: 'bad CSRF token' });
+              }
+              title = params.get('title') || title;
+              scope = params.get('scope') || scope;
+              recordingEnabled = params.get('recordingEnabled') === '1' || params.get('recordingEnabled') === 'true';
+            }
+            title = String(title).trim().slice(0, 200) || 'Untitled Meeting';
+            scope = /^[a-z0-9-]{2,32}$/.test(String(scope).trim()) ? String(scope).trim() : 'general';
+
+            const meeting = await meetingService.createMeeting(tenant, {
+              title,
+              scope,
+              hostUserId: auth.user.id,
+              hostName: auth.user.name,
+              recordingEnabled,
             });
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'meeting.end',
-              `meeting:${meetingId}`,
-              at,
-              `duration=${meeting.durationSeconds}s`,
-            );
+
+            await auditConsole(db, tenant, by(auth.user), 'meeting.create', `meeting:${meeting.id}`, at, meeting.title);
+
+            if (ctype.includes('application/x-www-form-urlencoded')) {
+              res.writeHead(303, { location: `${home}console/meetings/room?id=${encodeURIComponent(meeting.id)}` });
+              res.end();
+              return;
+            }
             return json(res, 200, { ok: true, meeting });
           }
 
-          if (subAction === 'recording') {
+          if ((path === '/api/meetings/list' || path === '/api/meetings') && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+            const scope = url.searchParams.get('scope') || undefined;
+            const status = (url.searchParams.get('status') as any) || undefined;
+            const search = url.searchParams.get('search') || undefined;
+            const meetings = await meetingService.listMeetings(tenant, { scope, status, search });
+            return json(res, 200, { ok: true, meetings });
+          }
+
+          // Meeting-specific routes /api/meetings/:id/...
+          const meetingRouteMatch = path.match(/^\/api\/meetings\/([^/]+)(?:\/([a-zA-Z0-9_-]+))?$/);
+          if (meetingRouteMatch) {
+            const auth = await sessionOf();
+            if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            // Every meeting mutation is session-authenticated AND carries the
+            // session's CSRF token (header on JSON/blob calls): the session
+            // cookie alone never authorizes a state change.
             if (method === 'POST') {
-              const rawBytes = await readRawBody(req);
-              const durationSec = Number(url.searchParams.get('durationSeconds') ?? 0);
-              const format = (url.searchParams.get('format') ?? 'webm') as 'webm' | 'wav' | 'mp4';
-              const recording = await meetingService.saveRecording(tenant, meetingId, rawBytes, format, durationSec);
-              return json(res, 200, { ok: true, recording });
-            }
-            if (method === 'GET') {
-              const recording = await (await import('../meetings/db.ts')).getRecordingByMeetingId(db, tenant, meetingId);
-              if (!recording) return json(res, 404, { ok: false, error: 'no recording for this meeting' });
-
-              let audioBuffer = await meetingService.getRecordingBytes(recording.storageRef);
-              if (!audioBuffer) {
-                const { generateSilentWav } = await import('../meetings/service.ts');
-                audioBuffer = generateSilentWav(Math.min(Math.max(recording.durationSeconds || 5, 2), 15));
+              const presented = req.headers['x-vital-csrf'];
+              if (!csrfOk(auth.session, typeof presented === 'string' ? presented : null)) {
+                return json(res, 403, { ok: false, error: 'bad CSRF token' });
               }
+            }
 
-              res.writeHead(200, {
-                'content-type': `audio/${recording.format}`,
-                'content-length': audioBuffer.length,
-                'cache-control': 'public, max-age=86400',
+            const meetingId = meetingRouteMatch[1]!;
+            const subAction = meetingRouteMatch[2] || '';
+
+            if (!subAction && method === 'GET') {
+              const details = await meetingService.getMeetingDetails(tenant, meetingId);
+              if (!details) return json(res, 404, { ok: false, error: 'meeting not found' });
+              return json(res, 200, { ok: true, ...details });
+            }
+
+            if (subAction === 'join' && method === 'POST') {
+              const participant = await meetingService.joinMeeting(tenant, meetingId, {
+                id: auth.user.id,
+                name: auth.user.name,
               });
-              res.end(audioBuffer);
+              return json(res, 200, { ok: true, participant });
+            }
+
+            if (subAction === 'leave' && method === 'POST') {
+              await meetingService.leaveMeeting(tenant, meetingId, auth.user.id);
+              return json(res, 200, { ok: true });
+            }
+
+            if (subAction === 'end' && method === 'POST') {
+              const meeting = await meetingService.endMeeting(tenant, meetingId, auth.user.id);
+              signalingHub.broadcastToRoom(meetingId, {
+                type: 'meeting-ended',
+                meetingId,
+                senderId: auth.user.id,
+                senderName: auth.user.name,
+                timestamp: Date.now(),
+              });
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'meeting.end',
+                `meeting:${meetingId}`,
+                at,
+                `duration=${meeting.durationSeconds}s`,
+              );
+              return json(res, 200, { ok: true, meeting });
+            }
+
+            if (subAction === 'recording') {
+              if (method === 'POST') {
+                let rawBytes: Buffer;
+                try {
+                  rawBytes = await readRawBody(req);
+                } catch (e) {
+                  if ((e as Error).message.includes('BODY_TOO_LARGE')) {
+                    return json(res, 413, { ok: false, error: 'recording exceeds the 50MB cap' });
+                  }
+                  throw e;
+                }
+                const durationSec = Number(url.searchParams.get('durationSeconds') ?? 0);
+                const formatParam = url.searchParams.get('format') ?? 'webm';
+                if (formatParam !== 'webm' && formatParam !== 'wav' && formatParam !== 'mp4') {
+                  return json(res, 400, { ok: false, error: 'format must be webm, wav, or mp4' });
+                }
+                const recording = await meetingService.saveRecording(
+                  tenant,
+                  meetingId,
+                  rawBytes,
+                  formatParam,
+                  Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0,
+                );
+                return json(res, 200, { ok: true, recording });
+              }
+              if (method === 'GET') {
+                const recording = await (
+                  await import('../meetings/db.ts')
+                ).getRecordingByMeetingId(db, tenant, meetingId);
+                if (!recording) return json(res, 404, { ok: false, error: 'no recording for this meeting' });
+
+                let audioBuffer = await meetingService.getRecordingBytes(recording.storageRef);
+                if (!audioBuffer) {
+                  const { generateSilentWav } = await import('../meetings/service.ts');
+                  audioBuffer = generateSilentWav(Math.min(Math.max(recording.durationSeconds || 5, 2), 15));
+                }
+
+                res.writeHead(200, {
+                  'content-type': `audio/${recording.format}`,
+                  'content-length': audioBuffer.length,
+                  'cache-control': 'public, max-age=86400',
+                });
+                res.end(audioBuffer);
+                return;
+              }
+            }
+
+            if (subAction === 'transcript') {
+              if (method === 'POST') {
+                const raw = await readBody(req);
+                let body: Record<string, unknown>;
+                try {
+                  body = JSON.parse(raw) as Record<string, unknown>;
+                } catch {
+                  return json(res, 400, { ok: false, error: 'malformed JSON body' });
+                }
+                const startTime = Number(body.startTime ?? 0);
+                const endTime = Number(body.endTime ?? 0);
+                const confidence = Number(body.confidence ?? 0.95);
+                const text = String(body.text ?? '');
+                if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || !Number.isFinite(confidence)) {
+                  return json(res, 400, {
+                    ok: false,
+                    error: 'startTime, endTime and confidence must be finite numbers',
+                  });
+                }
+                if (text.length > 10000) {
+                  return json(res, 400, { ok: false, error: 'segment text exceeds the 10000 character limit' });
+                }
+                const mgr = meetingService.getLiveTranscriptManager(tenant, meetingId);
+                const speakerName =
+                  typeof body.speakerName === 'string' && body.speakerName.trim()
+                    ? body.speakerName.trim().slice(0, 120)
+                    : auth.user.name;
+                const segment = await mgr.appendSegment({
+                  speakerId: typeof body.speakerId === 'string' && body.speakerId ? body.speakerId : auth.user.id,
+                  speakerName,
+                  startTime,
+                  endTime,
+                  text,
+                  confidence: Math.min(Math.max(confidence, 0), 1),
+                });
+                return json(res, 200, { ok: true, segment });
+              }
+              if (method === 'GET') {
+                const segments = await listTranscriptSegments(db, tenant, meetingId);
+                return json(res, 200, { ok: true, transcript: segments });
+              }
+            }
+
+            if (subAction === 'process' && method === 'POST') {
+              const status = await meetingService.triggerProcessing(tenant, meetingId);
+              return json(res, 200, { ok: true, status });
+            }
+
+            if ((subAction === 'rag' || subAction === 'ask') && method === 'POST') {
+              const raw = await readBody(req);
+              let question = '';
+              try {
+                question = JSON.parse(raw).question ?? '';
+              } catch {
+                question = new URLSearchParams(raw).get('question') ?? '';
+              }
+              if (!question.trim()) {
+                return json(res, 400, { ok: false, error: 'question required' });
+              }
+              if (question.trim().length > 4000) {
+                return json(res, 400, { ok: false, error: 'question exceeds the 4000 character limit' });
+              }
+              const result = await meetingService.askQuestion(tenant, meetingId, auth.user.id, question.trim());
+              return json(res, 200, {
+                ok: true,
+                answer: result.answer,
+                sources: result.sources,
+                found: result.found,
+              });
+            }
+
+            if (subAction === 'delete' && method === 'POST') {
+              const deleted = await meetingService.deleteMeeting(tenant, meetingId);
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'meeting.delete',
+                `meeting:${meetingId}`,
+                at,
+                `deleted=${deleted}`,
+              );
+              return json(res, 200, { ok: true, deleted });
+            }
+          }
+          const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
+          if (method === 'GET' && learningCard) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            const detailOpts = {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: false,
+              requiredRole: approverMin,
+              operatorMode: 'session' as const,
+              home,
+            };
+            if (!atLeast(auth.user.role, 'admin')) {
+              const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
+              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                await wrapInWorkspaceShell(
+                  detailDocument('Skill card', body, { ...detailOpts, hideHeader: true }),
+                  db,
+                  tenant,
+                  home,
+                  auth,
+                  'learning',
+                ),
+              );
               return;
             }
-          }
-
-          if (subAction === 'transcript') {
-            if (method === 'POST') {
-              const raw = await readBody(req);
-              const body = JSON.parse(raw);
-              const mgr = meetingService.getLiveTranscriptManager(tenant, meetingId);
-              const segment = await mgr.appendSegment({
-                speakerId: body.speakerId || auth.user.id,
-                speakerName: body.speakerName || auth.user.name,
-                startTime: Number(body.startTime || 0),
-                endTime: Number(body.endTime || 0),
-                text: String(body.text || ''),
-                confidence: Number(body.confidence || 0.95),
-              });
-              return json(res, 200, { ok: true, segment });
-            }
-            if (method === 'GET') {
-              const segments = await listTranscriptSegments(db, tenant, meetingId);
-              return json(res, 200, { ok: true, transcript: segments });
-            }
-          }
-
-          if (subAction === 'process' && method === 'POST') {
-            const status = await meetingService.triggerProcessing(tenant, meetingId);
-            return json(res, 200, { ok: true, status });
-          }
-
-          if ((subAction === 'rag' || subAction === 'ask') && method === 'POST') {
-            const raw = await readBody(req);
-            let question = '';
+            let cardId: string;
             try {
-              question = JSON.parse(raw).question ?? '';
+              cardId = decodeURIComponent(learningCard[1]!);
             } catch {
-              question = new URLSearchParams(raw).get('question') ?? '';
+              return json(res, 400, { ok: false, error: 'malformed card id' });
             }
-            if (!question.trim()) {
-              return json(res, 400, { ok: false, error: 'question required' });
-            }
-            const result = await meetingService.askQuestion(tenant, meetingId, auth.user.id, question.trim());
-            return json(res, 200, {
-              ok: true,
-              answer: result.answer,
-              sources: result.sources,
-              found: result.found,
+            // The csrf token is what makes the transfer-test form on this page
+            // render at all — a GET carries it for a POST that the route table then
+            // verifies. `queued` / `compiled` are the one-line receipts the actions
+            // redirect back with; `error` is the refusal, which is the useful half.
+            const queueNotice = url.searchParams.get('queued')
+              ? `Transfer test queued (job ${url.searchParams.get('queued')}). A worker runs it and banks the result.`
+              : url.searchParams.get('compiled')
+                ? 'Card compiled into CANDIDATE — promotion still requires transfer evidence.'
+                : undefined;
+            const body = await renderLearningCardPage(db, comp, tenant, cardId, {
+              csrf: auth.session.csrfToken,
+              notice: queueNotice,
+              error: url.searchParams.get('error') ?? undefined,
             });
-          }
-
-          if (subAction === 'delete' && method === 'POST') {
-            const deleted = await meetingService.deleteMeeting(tenant, meetingId);
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'meeting.delete',
-              `meeting:${meetingId}`,
-              at,
-              `deleted=${deleted}`,
-            );
-            return json(res, 200, { ok: true, deleted });
-          }
-        }
-        const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
-        if (method === 'GET' && learningCard) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (!atLeast(auth.user.role, 'admin')) {
-            const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            if (!body) return json(res, 404, { ok: false, error: 'skill card not found' });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(
               await wrapInWorkspaceShell(
                 detailDocument('Skill card', body, { ...detailOpts, hideHeader: true }),
@@ -4313,379 +4783,85 @@ export function startConsoleServer(
             );
             return;
           }
-          let cardId: string;
-          try {
-            cardId = decodeURIComponent(learningCard[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed card id' });
-          }
-          const body = await renderLearningCardPage(db, comp, tenant, cardId);
-          if (!body) return json(res, 404, { ok: false, error: 'skill card not found' });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(
-              detailDocument('Skill card', body, { ...detailOpts, hideHeader: true }),
-              db,
-              tenant,
-              home,
-              auth,
-              'learning',
-            ),
-          );
-          return;
-        }
-        if (path === '/console/learning/label' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          const decisionId = Number(call.fields.decisionId);
-          const correctTier = call.fields.correctTier ?? '';
-          if (!Number.isInteger(decisionId) || decisionId <= 0) {
-            return redirect(
-              res,
-              '/console/learning?error=' + encodeURIComponent('decisionId must be a positive integer'),
-            );
-          }
-          if (!['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'].includes(correctTier)) {
-            return redirect(res, '/console/learning?error=' + encodeURIComponent('invalid routing tier'));
-          }
-          const reviewer = by(auth.user);
-          try {
-            await new CognitiveRouter(db).label(tenant, decisionId, correctTier as never, reviewer);
-            await auditConsole(
-              db,
-              tenant,
-              reviewer,
-              'console.label_decision',
-              String(decisionId),
-              at,
-              `correct_tier=${correctTier}`,
-            );
-            return redirect(res, '/console/learning?labeled=ok');
-          } catch (e) {
-            return redirect(res, '/console/learning?error=' + encodeURIComponent((e as Error).message));
-          }
-        }
-        // The compliance surfaces — audit log, data & retention, ledger export
-        // and the erasure POST — live in routes/compliance.ts with a declared
-        // capability, surface and body policy. Nothing in that domain is left
-        // in this chain.
-        if (method === 'GET' && path === '/console/workflows') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const items = await listWorkflows(db, ledger, coord, comp, tenant);
-          const q = (url.searchParams.get('q') ?? '').trim();
-          let shown = items;
-          let filterNote = '';
-          if (q !== '') {
-            let found: { rows: { id: string }[]; total: number };
+          if (path === '/console/learning/label' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
             try {
-              found = await searchWorkflows(db, tenant, { q });
+              call = await parseCall(req);
             } catch (e) {
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
-            const ids = new Set(found.rows.map((row) => row.id));
-            shown = items.filter((item) => ids.has(item.id));
-            if (shown.length === 0) {
-              const model = noResultsModel('/console/workflows', { q });
-              filterNote = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search</a></p>`;
-            } else {
-              filterNote = `<p class="sub">${shown.length} matching workflow(s) for search "${esc(q)}" (${found.total} total). <a href="/console/workflows">Clear search</a></p>`;
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            const decisionId = Number(call.fields.decisionId);
+            const correctTier = call.fields.correctTier ?? '';
+            if (!Number.isInteger(decisionId) || decisionId <= 0) {
+              return redirect(
+                res,
+                '/console/learning?error=' + encodeURIComponent('decisionId must be a positive integer'),
+              );
+            }
+            if (!['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'].includes(correctTier)) {
+              return redirect(res, '/console/learning?error=' + encodeURIComponent('invalid routing tier'));
+            }
+            const reviewer = by(auth.user);
+            try {
+              await new CognitiveRouter(db).label(tenant, decisionId, correctTier as never, reviewer);
+              await auditConsole(
+                db,
+                tenant,
+                reviewer,
+                'console.label_decision',
+                String(decisionId),
+                at,
+                `correct_tier=${correctTier}`,
+              );
+              return redirect(res, '/console/learning?labeled=ok');
+            } catch (e) {
+              return redirect(res, '/console/learning?error=' + encodeURIComponent((e as Error).message));
             }
           }
-          const listHtml = renderWorkflowListPage(shown, {
-            home,
-            csrf: auth.session.csrfToken,
-            actor: by(auth.user),
-          });
-          const html = filterNote
-            ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
-            : listHtml;
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(
-              html,
-              db,
-              tenant,
-              home,
-              auth,
-              'workflows',
-              undefined,
-              url.searchParams.get('drawer') === '1',
-            ),
-          );
-          return;
-        }
-        const workflowDetail = path.match(/^\/console\/workflows\/([^/]+)$/);
-        if (method === 'GET' && workflowDetail) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          let workflowId: string;
-          try {
-            workflowId = decodeURIComponent(workflowDetail[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed workflow id' });
-          }
-          const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
-          if (!view) return json(res, 404, { ok: false, error: 'workflow not found' });
-          const html = renderWorkflowDetailPage(view, {
-            home,
-            csrf: auth.session.csrfToken,
-            actor: by(auth.user),
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows'));
-          return;
-        }
-        const workflowAction = path.match(/^\/console\/workflows\/([^/]+)\/(preregister|outcome|retry|cancel)$/);
-        if (method === 'POST' && workflowAction) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          let workflowId: string;
-          try {
-            workflowId = decodeURIComponent(workflowAction[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed workflow id' });
-          }
-          const action = workflowAction[2]!;
-          const who = by(auth.user);
-          const workflowUrl = `/console/workflows/${encodeURIComponent(workflowId)}`;
-          try {
-            if (action === 'preregister') {
-              await preregisterWorkflowMetrics(db, tenant, workflowId, {
-                metrics: [
-                  {
-                    name: (call.fields.metric ?? 'ship_to_launch_hours').trim(),
-                    threshold: Number(call.fields.threshold ?? '24'),
-                    direction: 'lower',
-                  },
-                ],
-                baseline: (call.fields.baseline ?? '').trim(),
-                comparisonBasis: (call.fields.comparisonBasis ?? '').trim(),
-                measurementWindow: {
-                  start: (call.fields.windowStart ?? at).trim(),
-                  end: (call.fields.windowEnd ?? at).trim(),
-                },
-                agreedBy: who,
-                now: at,
-              });
-              await auditConsole(db, tenant, who, 'workflow.preregister', workflowId, at);
-            } else if (action === 'outcome') {
-              const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
-              await captureWorkflowOutcome(db, ledger, tenant, workflowId, {
-                decisionId: (call.fields.decisionId ?? '').trim(),
-                metric: (call.fields.metric ?? '').trim(),
-                actual: Number(call.fields.actual),
-                basis: (call.fields.basis ?? '').trim(),
-                predicted: call.fields.predicted ? Number(call.fields.predicted) : undefined,
-                resolvedBy: who,
-                owner: who,
-                scope: view?.legs[0]?.key ?? 'product',
-                now: at,
-              });
-              await auditConsole(db, tenant, who, 'workflow.outcome', workflowId, at);
-            } else if (action === 'retry') {
-              await retryWorkflow(db, coord, tenant, workflowId, { retryBlocked: true });
-              await auditConsole(db, tenant, who, 'workflow.retry', workflowId, at);
-            } else if (action === 'cancel') {
-              const reason = (call.fields.reason ?? '').trim();
-              if (!reason) throw new Error('cancellation reason is required');
-              await cancelWorkflow(db, tenant, workflowId, reason, at);
-              await auditConsole(db, tenant, who, 'workflow.cancel', workflowId, at);
+          // The compliance surfaces — audit log, data & retention, ledger export
+          // and the erasure POST — live in routes/compliance.ts with a declared
+          // capability, surface and body policy. Nothing in that domain is left
+          // in this chain.
+          if (method === 'GET' && path === '/console/workflows') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            const items = await listWorkflows(db, ledger, coord, comp, tenant);
+            const q = (url.searchParams.get('q') ?? '').trim();
+            let shown = items;
+            let filterNote = '';
+            if (q !== '') {
+              let found: { rows: { id: string }[]; total: number };
+              try {
+                found = await searchWorkflows(db, tenant, { q });
+              } catch (e) {
+                return json(res, 400, { ok: false, error: (e as Error).message });
+              }
+              const ids = new Set(found.rows.map((row) => row.id));
+              shown = items.filter((item) => ids.has(item.id));
+              if (shown.length === 0) {
+                const model = noResultsModel('/console/workflows', { q });
+                filterNote = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search</a></p>`;
+              } else {
+                filterNote = `<p class="sub">${shown.length} matching workflow(s) for search "${esc(q)}" (${found.total} total). <a href="/console/workflows">Clear search</a></p>`;
+              }
             }
-            return redirect(res, workflowUrl);
-          } catch (e) {
-            const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
-            if (!view) return json(res, 404, { ok: false, error: 'workflow not found' });
-            const html = renderWorkflowDetailPage(view, {
+            const listHtml = renderWorkflowListPage(shown, {
               home,
               csrf: auth.session.csrfToken,
-              actor: who,
-            }).replace('</body>', `<p class="err">${(e as Error).message}</p></body>`);
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        // FLOW-020 view-all routes: permissioned, paginated, tenant-scoped
-        // indexes reusing searchRequests/searchClaims/partitionRequestsByDecision.
-        // Detail links carry returnTo (the full list URL incl. filters) so the
-        // detail Back target preserves filter/sort/page state.
-        if (method === 'GET' && (path === '/console/requests' || path === '/console/claims')) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const state = decodeListState(url.search);
-          const here = returnPath();
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          try {
-            if (path === '/console/requests') {
-              const pageResult = await searchRequests(db, tenant, {
-                q: state.q,
-                states: state.states,
-                scope: state.scopes?.[0],
-                messageClass: state.messageClass,
-                workflowId: state.workflowId,
-                since: state.since,
-                until: state.until,
-                limit: state.limit,
-                offset: state.offset,
-              });
-              const groups = partitionRequestsByDecision(pageResult.rows);
-              const row = (r: { id: string; goal: string; state: string }): string[] => [
-                `<a class="v-strong" href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a>`,
-                `<span class="v-mono v-meta">${esc(r.id)}</span>`,
-                statusChip(r.state),
-              ];
-              const REQUEST_COLUMNS = ['Request', 'ID', 'State'];
-              const group = (heading: string, rows2: { id: string; goal: string; state: string }[]): string =>
-                rows2.length === 0
-                  ? ''
-                  : renderListSection(
-                      `${heading} (${rows2.length})`,
-                      renderTable(REQUEST_COLUMNS, rows2.map(row)),
-                    );
-              let body = '';
-              if (pageResult.total === 0) {
-                const model = noResultsModel('/console/requests', state);
-                body = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p>`;
-              } else {
-                body += group('Pending decision', groups.pending);
-                body += group('Approved or executing', groups.active);
-                body += group('Other states', groups.other);
-                if (pageResult.truncated)
-                  body += `<p class="sub">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching requests</p>`;
-              }
-              const prev =
-                pageResult.offset > 0
-                  ? listStateUrl('/console/requests', {
-                      ...state,
-                      offset: Math.max(0, pageResult.offset - pageResult.limit),
-                    })
-                  : null;
-              const next = pageResult.hasMore
-                ? listStateUrl('/console/requests', { ...state, offset: pageResult.offset + pageResult.rows.length })
-                : null;
-              const html = detailDocument(
-                'Requests',
-                renderListPage({
-                  title: 'Requests',
-                  heading: 'Requests',
-                  searchAction: '/console/requests',
-                  query: state.q ?? '',
-                  total: pageResult.total,
-                  truncated: pageResult.truncated,
-                  shown: pageResult.rows.length,
-                  prevUrl: prev,
-                  nextUrl: next,
-                  clearUrl: clearFilterUrl('/console/requests'),
-                  body,
-                }),
-                { ...detailOpts, hideHeader: true },
-              );
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(
-                await wrapInWorkspaceShell(
-                  html,
-                  db,
-                  tenant,
-                  home,
-                  auth,
-                  'requests',
-                  undefined,
-                  url.searchParams.get('drawer') === '1',
-                ),
-              );
-              return;
-            }
-            const pageResult = await searchClaims(db, tenant, {
-              q: state.q,
-              kinds: state.kinds,
-              statuses: state.statuses,
-              scope: state.scopes?.[0],
-              since: state.since,
-              until: state.until,
-              limit: state.limit,
-              offset: state.offset,
+              actor: by(auth.user),
             });
-            let body: string;
-            if (pageResult.total === 0) {
-              const model = noResultsModel('/console/claims', state);
-              body = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p>`;
-            } else {
-              body =
-                renderTable(
-                  ['Subject', 'ID', 'Kind', 'Status'],
-                  pageResult.rows.map((c) => [
-                    `<a class="v-strong" href="${esc(withReturnTo(claimDetailUrl(c.id), here))}">${esc(c.subject)}</a>`,
-                    `<span class="v-mono v-meta">${esc(c.id)}</span>`,
-                    `<span class="v-badge">${esc(c.kind)}</span>`,
-                    statusChip(c.status),
-                  ]),
-                ) +
-                (pageResult.truncated
-                  ? `<p class="v-meta">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching claims</p>`
-                  : '');
-            }
-            const prev =
-              pageResult.offset > 0
-                ? listStateUrl('/console/claims', {
-                    ...state,
-                    offset: Math.max(0, pageResult.offset - pageResult.limit),
-                  })
-                : null;
-            const next = pageResult.hasMore
-              ? listStateUrl('/console/claims', { ...state, offset: pageResult.offset + pageResult.rows.length })
-              : null;
-            const html = detailDocument(
-              'Claims',
-              renderListPage({
-                title: 'Claims',
-                heading: 'Claims',
-                searchAction: '/console/claims',
-                query: state.q ?? '',
-                total: pageResult.total,
-                truncated: pageResult.truncated,
-                shown: pageResult.rows.length,
-                prevUrl: prev,
-                nextUrl: next,
-                clearUrl: clearFilterUrl('/console/claims'),
-                body,
-              }),
-              { ...detailOpts, hideHeader: true },
-            );
+            const html = filterNote
+              ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
+              : listHtml;
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(
               await wrapInWorkspaceShell(
@@ -4694,418 +4870,342 @@ export function startConsoleServer(
                 tenant,
                 home,
                 auth,
-                'claims',
+                'workflows',
                 undefined,
                 url.searchParams.get('drawer') === '1',
               ),
             );
             return;
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
           }
-        }
-        if (method === 'GET' && (path === '/console/rooms' || path === '/console/human-work')) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const state = decodeListState(url.search);
-          const here = returnPath();
-          const limit =
-            state.limit !== undefined && Number.isSafeInteger(state.limit) && state.limit > 0
-              ? Math.min(state.limit, 100)
-              : 20;
-          const offset =
-            state.offset !== undefined && Number.isSafeInteger(state.offset) && state.offset >= 0 ? state.offset : 0;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (path === '/console/rooms') {
-            const q = (state.q ?? '').trim().toLowerCase();
-            // The rooms page lists ROOMS, not whichever scopes happen to appear
-            // in requests. Deriving it from `requests` hid any room with no
-            // traffic and stripped every room of its category — the grouping the
-            // chat roster no longer displays. `evaluateAll` returns every
-            // canonical and custom room with its own category, so this page can
-            // carry that grouping instead of a flat list of derived strings.
-            const evaluations = await roomHealth(db, tenant);
-            let roomRows = evaluations.map((e) => ({
-              scope: e.scope,
-              roomName: e.roomName,
-              category: e.category,
-              status: e.status,
-              pending: e.pendingApprovals,
-              budget: e.budgetPercentage,
-              stops: e.activeStops,
-            }));
-            if (q) {
-              roomRows = roomRows.filter((r) => `${r.roomName} ${r.scope}`.toLowerCase().includes(q));
+          const workflowDetail = path.match(/^\/console\/workflows\/([^/]+)$/);
+          if (method === 'GET' && workflowDetail) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            let workflowId: string;
+            try {
+              workflowId = decodeURIComponent(workflowDetail[1]!);
+            } catch {
+              return json(res, 400, { ok: false, error: 'malformed workflow id' });
             }
-            // Stable order regardless of evaluation order: category, then name.
-            const categoryRank = new Map(ROOM_CATEGORIES.map((c, i) => [c, i] as const));
-            roomRows.sort(
-              (a, b) =>
-                (categoryRank.get(a.category) ?? ROOM_CATEGORIES.length) -
-                  (categoryRank.get(b.category) ?? ROOM_CATEGORIES.length) ||
-                a.roomName.localeCompare(b.roomName),
-            );
-            const total = roomRows.length;
-            const pageRooms = roomRows.slice(offset, offset + limit);
-            const roomUrl = (scope: string) =>
-              scope === 'infra' ? '/console/buzz/engineering' : `/console/buzz/${encodeURIComponent(scope)}`;
-            const roomRow = (r: (typeof roomRows)[number]) => [
-              `<a class="v-strong" href="${esc(roomUrl(r.scope))}">#${esc(r.roomName)}</a>`,
-              `<span class="v-mono v-meta">${esc(r.scope)}</span>`,
-              `<a href="${esc(`/console/requests?scope=${encodeURIComponent(r.scope)}&return=${encodeURIComponent(here)}`)}" class="v-meta">${statusChip(r.status)}</a>`,
-              r.pending > 0
-                ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.pending} waiting</span>`
-                : '<span class="v-meta">—</span>',
-              r.stops > 0
-                ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.stops} stop${r.stops === 1 ? '' : 's'}</span>`
-                : '<span class="v-meta">—</span>',
-              `<span class="v-num v-meta">${Math.round(r.budget)}%</span>`,
-            ];
-            // Group the current page by category, in the canonical order.
-            const roomGroups = ROOM_CATEGORIES.map((category) => {
-              const inGroup = pageRooms.filter((r) => r.category === category);
-              if (inGroup.length === 0) return '';
-              return `<section class="v-list-group">
-<h2>${esc(ROOM_CATEGORY_LABELS[category])}<span class="v-meta" style="font-weight:500;">${inGroup.length} room${inGroup.length === 1 ? '' : 's'}</span></h2>
-${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], inGroup.map(roomRow))}
-</section>`;
-            })
-              .filter(Boolean)
-              .join('');
-            const body =
-              total === 0
-                ? `<p class="sub">No results: no rooms match this search. <a href="${esc(clearFilterUrl('/console/rooms'))}">Clear search and filters</a></p>`
-                : roomGroups +
-                  (offset + pageRooms.length < total
-                    ? `<p class="v-meta">explicit truncation: showing ${pageRooms.length} of ${total} rooms</p>`
-                    : '');
-            const prev =
-              offset > 0 ? listStateUrl('/console/rooms', { ...state, offset: Math.max(0, offset - limit) }) : null;
-            const next =
-              offset + pageRooms.length < total
-                ? listStateUrl('/console/rooms', { ...state, offset: offset + pageRooms.length })
-                : null;
-            const html = detailDocument(
-              'Rooms',
-              renderListPage({
-                title: 'Rooms',
-                heading: 'Rooms',
-                searchAction: '/console/rooms',
-                query: state.q ?? '',
-                total,
-                truncated: offset + pageRooms.length < total,
-                shown: pageRooms.length,
-                prevUrl: prev,
-                nextUrl: next,
-                clearUrl: clearFilterUrl('/console/rooms'),
-                body,
-              }),
-              { ...detailOpts, hideHeader: true },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'rooms'));
-            return;
-          }
-          const q = (state.q ?? '').trim().toLowerCase();
-          const all = await coord.list(tenant);
-          const terminal = new Set(['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED']);
-          let work = all.filter(
-            (r) => r.messageClass === 'REQUEST' && r.bid.humanMinutes > 0 && !terminal.has(r.state),
-          );
-          if (q) work = work.filter((r) => `${r.goal} ${r.id}`.toLowerCase().includes(q));
-          work.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-          const total = work.length;
-          const pageWork = work.slice(offset, offset + limit);
-          // The approval queue belongs on this page, not only on the legacy
-          // dashboard chrome. "Human work" is where a person is asked to decide,
-          // and a page that says "Pending human review" without offering Approve
-          // or Decline is a dead end. renderReview already owns the request
-          // approval contract (csrf, requestUpdatedAt optimistic locking, the
-          // explicit `confirmed` checkbox, decline reason, operator fields), so
-          // this reuses it rather than inventing a second approval path.
-          const approvalQueue =
-            path === '/console/human-work'
-              ? await renderReview(coord, ledger, {
-                  tenant,
-                  actor: by(auth.user),
-                  actorLabel: actorLabel(auth.user),
-                  csrf: auth.session.csrfToken,
-                  canApprove: atLeast(auth.user.role, approverMin),
-                  requiredRole: approverMin,
-                  operatorMode: keyAuth ? 'signature' : operatorSecret ? 'secret' : 'session',
-                  home,
-                })
-              : '';
-          const body =
-            total === 0
-              ? `<p class="sub">No results: no human work matches this search. <a href="${esc(clearFilterUrl('/console/human-work'))}">Clear search and filters</a></p>`
-              : renderTable(
-                  ['Work', 'ID', 'State'],
-                  pageWork.map((r) => [
-                    `<a class="v-strong" href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a>`,
-                    `<span class="v-mono v-meta">${esc(r.id)}</span>`,
-                    statusChip(r.state),
-                  ]),
-                ) +
-                (offset + pageWork.length < total
-                  ? `<p class="v-meta">explicit truncation: showing ${pageWork.length} of ${total} items</p>`
-                  : '');
-          const prev =
-            offset > 0 ? listStateUrl('/console/human-work', { ...state, offset: Math.max(0, offset - limit) }) : null;
-          const next =
-            offset + pageWork.length < total
-              ? listStateUrl('/console/human-work', { ...state, offset: offset + pageWork.length })
-              : null;
-          // The page is the approval queue plus the inventory behind it, so its
-          // title names the job (decide) rather than the row type (human work).
-          const html = detailDocument(
-            'Approvals',
-            renderListPage({
-              title: 'Approvals',
-              heading: 'Approvals',
-              searchAction: '/console/human-work',
-              query: state.q ?? '',
-              total,
-              truncated: offset + pageWork.length < total,
-              shown: pageWork.length,
-              prevUrl: prev,
-              nextUrl: next,
-              clearUrl: clearFilterUrl('/console/human-work'),
-              // Queue first — the decision is the point of the page; the table
-              // below is the full inventory of work that touched human minutes.
-              body: `${approvalQueue}${approvalQueue ? '<p class="v-eyebrow" style="margin:22px 0 8px;">All human work</p>' : ''}${body}`,
-            }),
-            { ...detailOpts, hideHeader: true },
-          );
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, path === '/console/human-work' ? 'approvals' : 'rooms'));
-          return;
-        }
-        const detail = path.match(/^\/console\/(claims|requests|decisions)\/([^/]+)$/);
-        if (method === 'GET' && detail) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          let id: string;
-          try {
-            id = decodeURIComponent(detail[2]!);
-          } catch {
-            return respondGetError(req, res, 400, 'malformed detail id');
-          }
-          const pageIndex = Number(url.searchParams.get('page') ?? '0');
-          if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
-            return respondGetError(req, res, 400, 'page must be a nonnegative integer');
-          const detailNav = parseDetailNav(url.search);
-          const fallbackMode = operatorSecret ? 'secret' : 'session';
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: atLeast(auth.user.role, approverMin),
-            requiredRole: approverMin,
-            operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
-            home: detailBackTarget(detailNav.returnTo, queueReturnUrl(home, {})),
-            notice: url.searchParams.get('notice') ?? undefined,
-            draft: url.searchParams.get('draft') === '1',
-          };
-          const navCtx = {
-            returnTo: detailNav.returnTo ?? undefined,
-            requestId: detailNav.requestId ?? undefined,
-          };
-          let html: string | null;
-          if (detail[1] === 'claims') {
-            html = await claimDetail(db, ledger, coord, id, pageIndex, detailOpts, navCtx);
-          } else if (detail[1] === 'decisions') {
-            html = await decisionDetail(ledger, id, detailOpts);
-          } else {
-            html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts, artifactDir, navCtx);
-          }
-          if (!html) return respondGetError(req, res, 404, 'evidence not found');
-          let detailNavKey: import('./render.ts').NavKey | undefined;
-          if (detail[1] === 'claims') detailNavKey = 'claims';
-          else if (detail[1] === 'requests') detailNavKey = 'requests';
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, detailNavKey));
-          return;
-        }
-        const deliverableDraftPost = path.match(/^\/console\/requests\/([^/]+)\/deliverable$/);
-        if (method === 'POST' && deliverableDraftPost) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          let id: string;
-          try {
-            id = decodeURIComponent(deliverableDraftPost[1]!);
-          } catch {
-            return json(res, 400, { ok: false, error: 'malformed request id' });
-          }
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const request = await coord.get(tenant, id);
-          if (!request) return json(res, 404, { ok: false, error: 'request not found' });
-          const content = String(call.fields.content ?? '').trim();
-          if (!content) return json(res, 400, { ok: false, error: 'deliverable content is required' });
-          const deliverableSchema = String(
-            call.fields.deliverableSchema ?? request.deliverableSchema ?? 'feature-plan.v1',
-          ).trim();
-          const priorVersionId = String(call.fields.priorVersionId ?? '').trim() || null;
-          const revisionNotes = String(call.fields.revisionNotes ?? '').trim() || null;
-          const externalPublish = call.fields.externalPublish === 'on' || call.fields.externalPublish === 'true';
-
-          const claimIdSet = new Set<string>();
-          for (const m of content.matchAll(/\[claim:([^\]]+)\]/gi)) {
-            claimIdSet.add(m[1]!);
-          }
-          if (claimIdSet.size === 0) {
-            for (const cid of [...request.claimRefs, ...request.chainClaimIds]) {
-              claimIdSet.add(cid);
-            }
-          }
-
-          const version = await persistDeliverableVersion(db, ledger, {
-            tenant,
-            requestId: id,
-            workflowId: null,
-            deliverableSchema,
-            content,
-            claimIds: [...claimIdSet],
-            createdBy: by(auth.user),
-            now: at,
-            artifactDir: artifactDir ?? process.env.ARTIFACT_DIR,
-            externalPublish,
-            revisionNotes,
-            priorVersionId,
-          });
-
-          await auditConsole(
-            db,
-            tenant,
-            by(auth.user),
-            'console.draft-deliverable',
-            `deliverable:${version.id}`,
-            at,
-            `version=${version.version}`,
-          );
-
-          return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
-        }
-        if (
-          method === 'GET' &&
-          (path === home || path === '/console' || path === '/console/' || path === '/console/dashboard')
-        ) {
-          if (accessState === 'unclaimed') return redirect(res, '/signup');
-          if (accessState === 'recovery') {
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(recoveryPage(tenant));
-            return;
-          }
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-
-          const users = await listUsers(db, tenant);
-          const activationState = await buildActivationState(db, ledger, coord, tenant, at, users, {
-            approverRole: approverMin,
-          });
-
-          if (
-            (path === home || path === '/console' || path === '/console/') &&
-            path !== '/console/dashboard' &&
-            url.searchParams.get('view') !== 'dashboard' &&
-            !activationState.showPanel &&
-            !activationState.sampleActive
-          ) {
-            const defRoom = await defaultRoomForUser(db, tenant, auth.user);
-            const loc = `/console/buzz/${encodeURIComponent(defRoom)}`;
-            const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
-            res.writeHead(302, {
-              location: loc,
-              'content-type': 'text/html; charset=utf-8',
-              'set-cookie': refreshed,
+            const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
+            if (!view) return json(res, 404, { ok: false, error: 'workflow not found' });
+            const html = renderWorkflowDetailPage(view, {
+              home,
+              csrf: auth.session.csrfToken,
+              actor: by(auth.user),
             });
-            res.end(
-              `<!DOCTYPE html><html><head><meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head><body><p>Redirecting to <a href="${esc(loc)}">workspace chat</a>...</p></body></html>`,
-            );
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows'));
             return;
           }
-          const reviewPage = Number(url.searchParams.get('reviewPage') ?? '0');
-          if (!Number.isSafeInteger(reviewPage) || reviewPage < 0)
-            return json(res, 400, { ok: false, error: 'reviewPage must be a nonnegative integer' });
-          const listState = decodeListState(url.search);
-          let searchHtml: string;
-          try {
-            searchHtml = await dashboardSearchSection(db, tenant, listState, home, returnPath());
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
+          const workflowAction = path.match(/^\/console\/workflows\/([^/]+)\/(preregister|outcome|retry|cancel)$/);
+          if (method === 'POST' && workflowAction) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            let workflowId: string;
+            try {
+              workflowId = decodeURIComponent(workflowAction[1]!);
+            } catch {
+              return json(res, 400, { ok: false, error: 'malformed workflow id' });
+            }
+            const action = workflowAction[2]!;
+            const who = by(auth.user);
+            const workflowUrl = `/console/workflows/${encodeURIComponent(workflowId)}`;
+            try {
+              if (action === 'preregister') {
+                await preregisterWorkflowMetrics(db, tenant, workflowId, {
+                  metrics: [
+                    {
+                      name: (call.fields.metric ?? 'ship_to_launch_hours').trim(),
+                      threshold: Number(call.fields.threshold ?? '24'),
+                      direction: 'lower',
+                    },
+                  ],
+                  baseline: (call.fields.baseline ?? '').trim(),
+                  comparisonBasis: (call.fields.comparisonBasis ?? '').trim(),
+                  measurementWindow: {
+                    start: (call.fields.windowStart ?? at).trim(),
+                    end: (call.fields.windowEnd ?? at).trim(),
+                  },
+                  agreedBy: who,
+                  now: at,
+                });
+                await auditConsole(db, tenant, who, 'workflow.preregister', workflowId, at);
+              } else if (action === 'outcome') {
+                const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
+                await captureWorkflowOutcome(db, ledger, tenant, workflowId, {
+                  decisionId: (call.fields.decisionId ?? '').trim(),
+                  metric: (call.fields.metric ?? '').trim(),
+                  actual: Number(call.fields.actual),
+                  basis: (call.fields.basis ?? '').trim(),
+                  predicted: call.fields.predicted ? Number(call.fields.predicted) : undefined,
+                  resolvedBy: who,
+                  owner: who,
+                  scope: view?.legs[0]?.key ?? 'product',
+                  now: at,
+                });
+                await auditConsole(db, tenant, who, 'workflow.outcome', workflowId, at);
+              } else if (action === 'retry') {
+                await retryWorkflow(db, coord, tenant, workflowId, { retryBlocked: true });
+                await auditConsole(db, tenant, who, 'workflow.retry', workflowId, at);
+              } else if (action === 'cancel') {
+                const reason = (call.fields.reason ?? '').trim();
+                if (!reason) throw new Error('cancellation reason is required');
+                await cancelWorkflow(db, tenant, workflowId, reason, at);
+                await auditConsole(db, tenant, who, 'workflow.cancel', workflowId, at);
+              }
+              return redirect(res, workflowUrl);
+            } catch (e) {
+              const view = await buildWorkspaceView(db, ledger, coord, comp, tenant, workflowId);
+              if (!view) return json(res, 404, { ok: false, error: 'workflow not found' });
+              const html = renderWorkflowDetailPage(view, {
+                home,
+                csrf: auth.session.csrfToken,
+                actor: who,
+              }).replace('</body>', `<p class="err">${(e as Error).message}</p></body>`);
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
           }
-          const report = await reportHtml(tenant, at);
-          const fallbackMode = operatorSecret ? 'secret' : 'session';
-          const readiness = await renderSystemReadiness(at);
-          const activation = renderActivationPanel(activationState, auth.session.csrfToken, home);
-          const journey = renderJourneyMilestone(await buildTenantJourney(db, tenant, at), home);
-          const review = await renderReview(coord, ledger, {
-            tenant,
-            actor: by(auth.user),
-            actorLabel: actorLabel(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: atLeast(auth.user.role, approverMin),
-            requiredRole: approverMin,
-            operatorMode: keyAuth ? 'signature' : fallbackMode,
-            page: reviewPage,
-            home,
-          });
-          const rawScope = (url.searchParams.get('scope') ?? 'all').toLowerCase();
-          const activeDepartment: DashboardDepartment = [
-            'all',
-            'legal',
-            'marketing',
-            'finance',
-            'engineering',
-          ].includes(rawScope)
-            ? (rawScope as DashboardDepartment)
-            : 'all';
-          const rawTab = (url.searchParams.get('tab') ?? 'home').toLowerCase();
-          const validTabs = ['home', 'approvals', 'ledger', 'workflows', 'governance', 'activity', 'compiler', 'coordination', 'router', 'world', 'economics', 'evals', 'feed'] as const;
-          const activeTab = validTabs.includes(rawTab as any) ? (rawTab as typeof validTabs[number]) : 'home';
-          const deptEvaluations = await roomHealth(db, tenant);
+          const detail = path.match(/^\/console\/(claims|requests|decisions)\/([^/]+)$/);
+          if (method === 'GET' && detail) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            let id: string;
+            try {
+              id = decodeURIComponent(detail[2]!);
+            } catch {
+              return respondGetError(req, res, 400, 'malformed detail id');
+            }
+            const pageIndex = Number(url.searchParams.get('page') ?? '0');
+            if (!Number.isSafeInteger(pageIndex) || pageIndex < 0)
+              return respondGetError(req, res, 400, 'page must be a nonnegative integer');
+            const detailNav = parseDetailNav(url.search);
+            const fallbackMode = operatorSecret ? 'secret' : 'session';
+            const detailOpts = {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: atLeast(auth.user.role, approverMin),
+              requiredRole: approverMin,
+              operatorMode: keyAuth ? ('signature' as const) : (fallbackMode as 'secret' | 'session'),
+              home: detailBackTarget(detailNav.returnTo, queueReturnUrl(home, {})),
+              notice: url.searchParams.get('notice') ?? undefined,
+              draft: url.searchParams.get('draft') === '1',
+            };
+            const navCtx = {
+              returnTo: detailNav.returnTo ?? undefined,
+              requestId: detailNav.requestId ?? undefined,
+            };
+            let html: string | null;
+            if (detail[1] === 'claims') {
+              html = await claimDetail(db, ledger, coord, id, pageIndex, detailOpts, navCtx);
+            } else if (detail[1] === 'decisions') {
+              html = await decisionDetail(ledger, id, detailOpts);
+            } else {
+              html = await requestDetail(db, coord, ledger, id, pageIndex, detailOpts, artifactDir, navCtx);
+            }
+            if (!html) return respondGetError(req, res, 404, 'evidence not found');
+            let detailNavKey: import('./render.ts').NavKey | undefined;
+            if (detail[1] === 'claims') detailNavKey = 'claims';
+            else if (detail[1] === 'requests') detailNavKey = 'requests';
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, detailNavKey));
+            return;
+          }
+          const deliverableDraftPost = path.match(/^\/console\/requests\/([^/]+)\/deliverable$/);
+          if (method === 'POST' && deliverableDraftPost) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            let id: string;
+            try {
+              id = decodeURIComponent(deliverableDraftPost[1]!);
+            } catch {
+              return json(res, 400, { ok: false, error: 'malformed request id' });
+            }
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const request = await coord.get(tenant, id);
+            if (!request) return json(res, 404, { ok: false, error: 'request not found' });
+            const content = String(call.fields.content ?? '').trim();
+            if (!content) return json(res, 400, { ok: false, error: 'deliverable content is required' });
+            const deliverableSchema = String(
+              call.fields.deliverableSchema ?? request.deliverableSchema ?? 'feature-plan.v1',
+            ).trim();
+            const priorVersionId = String(call.fields.priorVersionId ?? '').trim() || null;
+            const revisionNotes = String(call.fields.revisionNotes ?? '').trim() || null;
+            const externalPublish = call.fields.externalPublish === 'on' || call.fields.externalPublish === 'true';
 
-          const compilerParts = await renderCompilerParts(db, comp, tenant);
-          const shellMetrics = await shellMetricsFor(db, tenant, {
-            dailyBudgetDollars: coord.limits.maxDailyDollars,
-          });
-          const recencyByScope = await roomRecency(
-            db,
-            tenant,
-            CANONICAL_ROOMS.map((r) => r.scope),
-          );
+            const claimIdSet = new Set<string>();
+            for (const m of content.matchAll(/\[claim:([^\]]+)\]/gi)) {
+              claimIdSet.add(m[1]!);
+            }
+            if (claimIdSet.size === 0) {
+              for (const cid of [...request.claimRefs, ...request.chainClaimIds]) {
+                claimIdSet.add(cid);
+              }
+            }
 
-          const bodyStart = report.indexOf('<body>');
-          const bodyEnd = report.lastIndexOf('</body>');
-          const reportBody = bodyStart !== -1 && bodyEnd !== -1
-            ? report.slice(bodyStart + 6, bodyEnd)
-            : report;
+            const version = await persistDeliverableVersion(db, ledger, {
+              tenant,
+              requestId: id,
+              workflowId: null,
+              deliverableSchema,
+              content,
+              claimIds: [...claimIdSet],
+              createdBy: by(auth.user),
+              now: at,
+              artifactDir: artifactDir ?? process.env.ARTIFACT_DIR,
+              externalPublish,
+              revisionNotes,
+              priorVersionId,
+            });
 
-          const realitySection = `
+            await auditConsole(
+              db,
+              tenant,
+              by(auth.user),
+              'console.draft-deliverable',
+              `deliverable:${version.id}`,
+              at,
+              `version=${version.version}`,
+            );
+
+            return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
+          }
+          if (
+            method === 'GET' &&
+            (path === home || path === '/console' || path === '/console/' || path === '/console/dashboard')
+          ) {
+            if (accessState === 'unclaimed') return redirect(res, '/signup');
+            if (accessState === 'recovery') {
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(recoveryPage(tenant));
+              return;
+            }
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+            const users = await listUsers(db, tenant);
+            const activationState = await buildActivationState(db, ledger, coord, tenant, at, users, {
+              approverRole: approverMin,
+            });
+
+            if (
+              (path === home || path === '/console' || path === '/console/') &&
+              path !== '/console/dashboard' &&
+              url.searchParams.get('view') !== 'dashboard' &&
+              !activationState.showPanel &&
+              !activationState.sampleActive
+            ) {
+              const defRoom = await defaultRoomForUser(db, tenant, auth.user);
+              const loc = `/console/buzz/${encodeURIComponent(defRoom)}`;
+              const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
+              res.writeHead(302, {
+                location: loc,
+                'content-type': 'text/html; charset=utf-8',
+                'set-cookie': refreshed,
+              });
+              res.end(
+                `<!DOCTYPE html><html><head><meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head><body><p>Redirecting to <a href="${esc(loc)}">workspace chat</a>...</p></body></html>`,
+              );
+              return;
+            }
+            const reviewPage = Number(url.searchParams.get('reviewPage') ?? '0');
+            if (!Number.isSafeInteger(reviewPage) || reviewPage < 0)
+              return json(res, 400, { ok: false, error: 'reviewPage must be a nonnegative integer' });
+            const listState = decodeListState(url.search);
+            let searchHtml: string;
+            try {
+              searchHtml = await dashboardSearchSection(db, tenant, listState, home, returnPath());
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            const report = await reportHtml(tenant, at);
+            const fallbackMode = operatorSecret ? 'secret' : 'session';
+            const readiness = await renderSystemReadiness(at);
+            const executor = await renderExecutorBanner(at);
+            const activation = renderActivationPanel(activationState, auth.session.csrfToken, home);
+            const journey = renderJourneyMilestone(await buildTenantJourney(db, tenant, at), home);
+            const review = await renderReview(coord, ledger, {
+              tenant,
+              actor: by(auth.user),
+              actorLabel: actorLabel(auth.user),
+              csrf: auth.session.csrfToken,
+              canApprove: atLeast(auth.user.role, approverMin),
+              requiredRole: approverMin,
+              operatorMode: keyAuth ? 'signature' : fallbackMode,
+              page: reviewPage,
+              home,
+            });
+            const rawScope = (url.searchParams.get('scope') ?? 'all').toLowerCase();
+            const activeDepartment: DashboardDepartment = [
+              'all',
+              'legal',
+              'marketing',
+              'finance',
+              'engineering',
+            ].includes(rawScope)
+              ? (rawScope as DashboardDepartment)
+              : 'all';
+            const rawTab = (url.searchParams.get('tab') ?? 'home').toLowerCase();
+            const validTabs = [
+              'home',
+              'approvals',
+              'ledger',
+              'workflows',
+              'governance',
+              'activity',
+              'compiler',
+              'coordination',
+              'router',
+              'world',
+              'economics',
+              'evals',
+              'feed',
+            ] as const;
+            const activeTab = validTabs.includes(rawTab as any) ? (rawTab as (typeof validTabs)[number]) : 'home';
+            const deptEvaluations = await roomHealth(db, tenant);
+
+            const compilerParts = await renderCompilerParts(db, comp, tenant);
+            const shellMetrics = await shellMetricsFor(db, tenant, {
+              dailyBudgetDollars: coord.limits.maxDailyDollars,
+            });
+            const recencyByScope = await roomRecency(
+              db,
+              tenant,
+              CANONICAL_ROOMS.map((r) => r.scope),
+            );
+
+            const bodyStart = report.indexOf('<body>');
+            const bodyEnd = report.lastIndexOf('</body>');
+            const reportBody = bodyStart !== -1 && bodyEnd !== -1 ? report.slice(bodyStart + 6, bodyEnd) : report;
+
+            const realitySection = `
             <div id="reality-overview" style="margin-top:10px;">
               ${journey}
               ${readiness}
@@ -5117,546 +5217,657 @@ ${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], in
               </div>
             </div>`;
 
-          const isAdmin = atLeast(auth.user.role, 'admin');
-          const consoleNav = renderConsoleNav(
-            buildConsoleNav(home, {
-              requests: true,
-              claims: true,
-              rooms: true,
-              humanWork: true,
-              settings: isAdmin,
-              learning: isAdmin,
-              audit: isAdmin,
-              data: isAdmin,
-              buzz: isAdmin,
-            }),
-          );
-          const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-
-          let dashboardIssues: import('./issues.ts').IssueRow[] = [];
-          if (isEngineer(auth.user)) {
-            try {
-              const snap = await listIssues(db, tenant);
-              dashboardIssues = snap.issues;
-            } catch {
-              dashboardIssues = [];
-            }
-          }
-
-          const fullDashboard = renderOperationsDashboard({
-            tenant,
-            home,
-            userEmail: auth.user.email,
-            userRole: auth.user.role,
-            userTeam: auth.user.team,
-            issues: dashboardIssues,
-            csrfToken: auth.session.csrfToken,
-            activeDepartment,
-            activeTab,
-            evaluations: deptEvaluations,
-            metrics: shellMetrics,
-            recencyByScope,
-            compilerBoardHtml: compilerParts.boardHtml,
-            compilerRightPanelHtml: compilerParts.rightPanelHtml,
-            compilerMetricsHtml: compilerParts.metricsHtml,
-            realityHtml: realitySection,
-            journeyHtml: journey,
-            readinessHtml: readiness,
-            searchHtml: searchHtml,
-            activationHtml: activation,
-            reviewHtml: review,
-            reportBodyHtml: reportBody,
-            consoleNav,
-            accountCluster,
-          });
-
-
-          // FLOW-010: the browser cookie tracks the slid DB row
-
-          const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': refreshed });
-          res.end(fullDashboard);
-          return;
-        }
-
-        // ---------------------------------------------------------- setup (FLOW-012)
-        if (path === '/setup' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const users = await listUsers(db, tenant);
-          const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-            approverRole: approverMin,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(renderSetupPage(state, users, auth.session.csrfToken, home));
-          return;
-        }
-        if (path === '/setup' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const users = await listUsers(db, tenant);
-          try {
-            const config = parseActivationConfigInput(call.fields, users, at, tenant);
-            await saveActivationConfig(db, tenant, config);
-            await auditConsole(db, tenant, by(auth.user), 'setup.save', `tenant:${tenant}`, at);
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, 'Setup saved.'));
-          } catch (e) {
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
-          }
-          return;
-        }
-        if (path === '/api/ingest/health' && method === 'GET') {
-          const auth = await sessionOf();
-          if (!auth) return json(res, 401, sessionExpiredPayload('/api/ingest/health'));
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const config = await loadActivationConfig(db, tenant);
-          if (!config) return json(res, 200, { ok: true, configured: false, health: null });
-          const health = await getIntegrationHealth(db, tenant, collectorName(config.sourcePath), {
-            configured: true,
-            scope: config.scope,
-            now: at,
-          });
-          return json(res, 200, { ok: true, configured: true, health });
-        }
-        if (path === '/setup/test-source' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const config = await loadActivationConfig(db, tenant);
-          if (!config) return redirect(res, '/setup');
-          const users = await listUsers(db, tenant);
-          const test = await testConfiguredSource(config);
-          const preview =
-            test.preview && test.preview.samples.length > 0
-              ? ` Preview: ${test.preview.samples.map((s) => s.name).join(', ')}.`
-              : '';
-          const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-            approverRole: approverMin,
-          });
-          const message = test.ok
-            ? `Connection test passed (${test.code}).${preview}`
-            : `Connection test failed (${test.code}): ${test.detail}`;
-          res.writeHead(test.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(renderSetupPage(state, users, auth.session.csrfToken, home, message));
-          return;
-        }
-        if (path === '/setup/ingest' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const config = await loadActivationConfig(db, tenant);
-          if (!config) return redirect(res, '/setup');
-          const users = await listUsers(db, tenant);
-          try {
-            const result = await runConfiguredIngestion(db, ledger, tenant, config);
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'setup.ingest',
-              `tenant:${tenant}`,
-              at,
-              `processed=${result.processed} failed=${result.failed}`,
+            const isAdmin = atLeast(auth.user.role, 'admin');
+            const consoleNav = renderConsoleNav(
+              buildConsoleNav(home, {
+                requests: true,
+                claims: true,
+                rooms: true,
+                humanWork: true,
+                settings: isAdmin,
+                learning: isAdmin,
+                audit: isAdmin,
+                data: isAdmin,
+                buzz: isAdmin,
+              }),
             );
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            const detail =
-              result.errors.length > 0
-                ? `Ingestion finished with ${result.failed} failure(s).`
-                : `Synced ${result.processed} receipt(s).`;
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, detail));
-          } catch (e) {
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
-          }
-          return;
-        }
-        if (path === '/setup/sample' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const users = await listUsers(db, tenant);
-          try {
-            const seeded = await seedSampleWalkthrough(db, ledger, coord, tenant, auth.user, at);
-            await auditConsole(db, tenant, by(auth.user), 'setup.sample', `request:${seeded.requestId}`, at);
-            return redirect(res, `${home}#pending-review`);
-          } catch (e) {
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
-          }
-          return;
-        }
-        if (path === '/setup/start-release' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const config = await loadActivationConfig(db, tenant);
-          if (!config) return redirect(res, '/setup');
-          const users = await listUsers(db, tenant);
-          const accountable = users.find((u) => u.id === config.accountableOwnerId);
-          if (!accountable) return redirect(res, '/setup');
-          try {
-            const runId = await startFirstReleaseWorkflow(db, coord, tenant, config, accountable, at);
-            await auditConsole(db, tenant, by(auth.user), 'setup.start_release', `workflow:${runId}`, at);
-            return redirect(res, `/console/workflows/${encodeURIComponent(runId)}`);
-          } catch (e) {
-            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
-              approverRole: approverMin,
-            });
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
-          }
-          return;
-        }
+            const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
 
-        if (
-          (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-          method === 'GET'
-        ) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const notice = url.searchParams.get('saved') === 'ok' ? 'Room configuration saved and deployed.' : undefined;
-          const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, notice, home);
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(html);
-          return;
-        }
-        if (
-          (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-          method === 'POST'
-        ) {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          try {
-            const wantsCreate = ['newRoomId', 'newRoomName', 'newRoomScope', 'newRoomAgent', 'newRoomMission'].some(
-              (k) => (call.fields[k] ?? '').trim() !== '',
-            );
-            if (wantsCreate) {
-              const { createCustomRoom } = await import('../talk/rooms.ts');
-              const created = await createCustomRoom(
-                db,
-                tenant,
-                {
-                  id: String(call.fields.newRoomId ?? ''),
-                  name: String(call.fields.newRoomName ?? ''),
-                  scope: String(call.fields.newRoomScope ?? ''),
-                  agentName: String(call.fields.newRoomAgent ?? ''),
-                  mission: String(call.fields.newRoomMission ?? ''),
-                  category: String(call.fields.newRoomCategory ?? ''),
-                },
-                by(auth.user),
-              );
-              await auditConsole(db, tenant, by(auth.user), 'setup.rooms_create', `room:${created.scope}`, at);
-              return redirect(res, '/setup/rooms?saved=ok');
-            }
-            await handleRoomsSetupPost(db, tenant, call.fields, by(auth.user));
-            await auditConsole(db, tenant, by(auth.user), 'setup.rooms', `tenant:${tenant}`, at);
-            return redirect(res, '/setup/rooms?saved=ok');
-          } catch (e) {
-            const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, (e as Error).message, home);
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-            return;
-          }
-        }
-
-        // ------------------------------------------------------------ team
-        const teamData = async () => ({
-          users: await listUsers(db, tenant),
-          invitations: await listInvitations(db, tenant, at),
-        });
-
-        if (method === 'GET' && path === '/team') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (auth.user.mustChangePassword) return redirect(res, '/change-password');
-          const data = await teamData();
-          const confirmations = new Map<string, DisableConfirmation>();
-          for (const u of data.users) {
-            if (!canDisable(auth.user, u)) continue;
-            try {
-              confirmations.set(u.id, await disableConfirmation(db, tenant, u.id));
-            } catch {
-              continue;
-            }
-          }
-          const stops = await describeStops(db, tenant);
-          const haltEvidence = await listHaltEvidence(db, tenant);
-          // Query outbox for automation-self-halt rows and pair with audit entries.
-          const outboxRows = (await db
-            .prepare(
-              `SELECT id, status, attempts, next_at FROM outbox WHERE tenant = ? AND kind = 'automation-self-halt' ORDER BY id DESC LIMIT 5`,
-            )
-            .all(tenant)) as { id: string; status: string; attempts: number; next_at: string }[];
-          const outboxStatus = new Map<string, { status: string; attempts: number; nextAt: string }>();
-          for (const r of outboxRows) {
-            outboxStatus.set(r.id, { status: r.status, attempts: r.attempts, nextAt: r.next_at });
-          }
-          const selfHalts = haltEvidence.real
-            .filter((h) => h.action === 'AUTOMATION_SELF_HALT' || h.action === 'TRUST_FROZEN')
-            .slice(-5)
-            .reverse()
-            .map((h) => {
-              const ob = outboxStatus.get(h.detail ?? '');
-              return {
-                action: h.action,
-                actor: h.actor,
-                target: h.target,
-                detail: h.detail,
-                at: h.at,
-                outboxStatus: ob
-                  ? { status: ob.status, attempts: ob.attempts, nextAt: ob.nextAt }
-                  : { status: 'unknown', attempts: 0, nextAt: '' },
-              };
-            });
-          let operatorMode: 'signature' | 'secret' | 'session' = 'session';
-          if (keyAuth) operatorMode = 'signature';
-          else if (operatorSecret) operatorMode = 'secret';
-          // FLOW-025: read-only trust gaps for every card (presentation
-          // path only — never the evaluating describeCard).
-          const compilerGaps: {
-            cardId: string;
-            intent: string;
-            state: string;
-            gaps: string[];
-            evalRef: string | null;
-          }[] = [];
-          try {
-            const cards = await comp.list(tenant, {});
-            for (const card of cards.slice(0, 100)) {
+            let dashboardIssues: import('./issues.ts').IssueRow[] = [];
+            if (isEngineer(auth.user)) {
               try {
-                const described = await describeCardReadOnly(db, comp, tenant, card.id);
-                compilerGaps.push({
-                  cardId: card.id,
-                  intent: card.intent,
-                  state: card.state,
-                  gaps: described.trustGaps,
-                  evalRef: card.evalRef,
-                });
+                const snap = await listIssues(db, tenant);
+                dashboardIssues = snap.issues;
               } catch {
-                continue;
+                dashboardIssues = [];
               }
             }
-          } catch {
-            // No cards or compiler unavailable — the section renders empty.
-          }
-          const q = url.searchParams.get('q') ?? undefined;
-          const role = url.searchParams.get('role') ?? undefined;
-          const status = url.searchParams.get('status') ?? undefined;
-          const teamParam = url.searchParams.get('team') ?? undefined;
-          const rawPage = Number(url.searchParams.get('page') ?? '1');
-          const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
-          const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
-            home,
-            now: at,
-            confirmations,
-            stops,
-            selfHalts,
-            policy: { approverRole: approverMin, operatorMode },
-            compilerGaps,
-            filter: { q, role, status, team: teamParam, page: pageNum },
-          });
-          // Chat-centric: Team lives inside Workspace shell
-          const isAdmin = atLeast(auth.user.role, 'admin');
-          const teamNav = renderConsoleNav(
-            buildConsoleNav(home, {
-              requests: true,
-              claims: true,
-              rooms: true,
-              humanWork: true,
-              settings: isAdmin,
-              learning: isAdmin,
-              audit: isAdmin,
-              data: isAdmin,
-              buzz: isAdmin,
-            }),
-            'team',
-          );
-          const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-          const teamRooms = (await roomHealth(db, tenant)).map((h) => ({
-            scope: h.scope,
-            roomName: h.roomName,
-            badge: h.badge,
-            pending: h.pendingApprovals,
-            category: h.category,
-          }));
-          // Same inner-body extraction as every other shelled page: the shell
-          // owns the skip link and the #main landmark, so a page must not ship
-          // a second copy of either.
-          const teamInner = workspaceInnerHtml(html);
-          const teamMetrics = await shellMetricsFor(db, tenant);
-          const teamRecency = await roomRecency(
-            db,
-            tenant,
-            teamRooms.map((r) => r.scope),
-          );
-          const teamShelled = renderConsoleShell({
-            rooms: teamRooms,
-            home,
-            consoleNav: teamNav,
-            accountCluster: teamCluster,
-            innerHtml: teamInner,
-            userEmail: auth.user.email,
-            userRole: auth.user.role,
-            userTeam: auth.user.team,
-            tenant,
-            metrics: teamMetrics,
-            roomRecency: teamRecency,
-          });
-          const teamWithShell =
-            html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(teamWithShell);
-          return;
-        }
-        if (path === '/team/invite' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          const data = await teamData();
-          const rawEmail = (call.fields.email ?? '').trim();
-          const emailList = rawEmail
-            .split(/[\r\n,;]+/)
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
 
-          if (emailList.length <= 1) {
+            const fullDashboard = renderOperationsDashboard({
+              tenant,
+              home,
+              userEmail: auth.user.email,
+              userRole: auth.user.role,
+              userTeam: auth.user.team,
+              issues: dashboardIssues,
+              csrfToken: auth.session.csrfToken,
+              activeDepartment,
+              activeTab,
+              evaluations: deptEvaluations,
+              metrics: shellMetrics,
+              recencyByScope,
+              compilerBoardHtml: compilerParts.boardHtml,
+              compilerRightPanelHtml: compilerParts.rightPanelHtml,
+              compilerMetricsHtml: compilerParts.metricsHtml,
+              realityHtml: realitySection,
+              journeyHtml: journey,
+              executorHtml: executor,
+              readinessHtml: readiness,
+              searchHtml: searchHtml,
+              activationHtml: activation,
+              reviewHtml: review,
+              reportBodyHtml: reportBody,
+              consoleNav,
+              accountCluster,
+            });
+
+            // FLOW-010: the browser cookie tracks the slid DB row
+
+            const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': refreshed });
+            res.end(fullDashboard);
+            return;
+          }
+
+          // ---------------------------------------------------------- setup (FLOW-012)
+          if (path === '/setup' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            const users = await listUsers(db, tenant);
+            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+              approverRole: approverMin,
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(renderSetupPage(state, users, auth.session.csrfToken, home));
+            return;
+          }
+          if (path === '/setup' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
             try {
-              const { invitation, token } = await createInvitation(
-                db,
-                tenant,
-                {
-                  email: emailList[0] ?? '',
-                  name: call.fields.name ?? '',
-                  role: parseRole(call.fields.role ?? 'member'),
-                  team: parseTeam(call.fields.team ?? 'unassigned'),
-                },
-                { userId: auth.user.id, role: auth.user.role },
-                at,
-              );
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const users = await listUsers(db, tenant);
+            try {
+              const config = parseActivationConfigInput(call.fields, users, at, tenant);
+              await saveActivationConfig(db, tenant, config);
+              await auditConsole(db, tenant, by(auth.user), 'setup.save', `tenant:${tenant}`, at);
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, 'Setup saved.'));
+            } catch (e) {
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+            }
+            return;
+          }
+          if (path === '/api/ingest/health' && method === 'GET') {
+            const auth = await sessionOf();
+            if (!auth) return json(res, 401, sessionExpiredPayload('/api/ingest/health'));
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            const config = await loadActivationConfig(db, tenant);
+            if (!config) return json(res, 200, { ok: true, configured: false, health: null });
+            const health = await getIntegrationHealth(db, tenant, collectorName(config.sourcePath), {
+              configured: true,
+              scope: config.scope,
+              now: at,
+            });
+            return json(res, 200, { ok: true, configured: true, health });
+          }
+          if (path === '/setup/test-source' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const config = await loadActivationConfig(db, tenant);
+            if (!config) return redirect(res, '/setup');
+            const users = await listUsers(db, tenant);
+            const test = await testConfiguredSource(config);
+            const preview =
+              test.preview && test.preview.samples.length > 0
+                ? ` Preview: ${test.preview.samples.map((s) => s.name).join(', ')}.`
+                : '';
+            const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+              approverRole: approverMin,
+            });
+            const message = test.ok
+              ? `Connection test passed (${test.code}).${preview}`
+              : `Connection test failed (${test.code}): ${test.detail}`;
+            res.writeHead(test.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, message));
+            return;
+          }
+          if (path === '/setup/ingest' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const config = await loadActivationConfig(db, tenant);
+            if (!config) return redirect(res, '/setup');
+            const users = await listUsers(db, tenant);
+            try {
+              const result = await runConfiguredIngestion(db, ledger, tenant, config);
               await auditConsole(
                 db,
                 tenant,
                 by(auth.user),
-                'team.invite',
-                `invitation:${invitation.id}`,
+                'setup.ingest',
+                `tenant:${tenant}`,
                 at,
-                `role=${invitation.role}`,
+                `processed=${result.processed} failed=${result.failed}`,
               );
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              const detail =
+                result.errors.length > 0
+                  ? `Ingestion finished with ${result.failed} failure(s).`
+                  : `Synced ${result.processed} receipt(s).`;
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, detail));
+            } catch (e) {
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+            }
+            return;
+          }
+          if (path === '/setup/sample' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const users = await listUsers(db, tenant);
+            try {
+              const seeded = await seedSampleWalkthrough(db, ledger, coord, tenant, auth.user, at);
+              await auditConsole(db, tenant, by(auth.user), 'setup.sample', `request:${seeded.requestId}`, at);
+              return redirect(res, `${home}#pending-review`);
+            } catch (e) {
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+            }
+            return;
+          }
+          if (path === '/setup/start-release' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const config = await loadActivationConfig(db, tenant);
+            if (!config) return redirect(res, '/setup');
+            const users = await listUsers(db, tenant);
+            const accountable = users.find((u) => u.id === config.accountableOwnerId);
+            if (!accountable) return redirect(res, '/setup');
+            try {
+              const runId = await startFirstReleaseWorkflow(db, coord, tenant, config, accountable, at);
+              await auditConsole(db, tenant, by(auth.user), 'setup.start_release', `workflow:${runId}`, at);
+              return redirect(res, `/console/workflows/${encodeURIComponent(runId)}`);
+            } catch (e) {
+              const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
+                approverRole: approverMin,
+              });
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+            }
+            return;
+          }
+
+          if (
+            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
+            method === 'GET'
+          ) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            const notice =
+              url.searchParams.get('saved') === 'ok' ? 'Room configuration saved and deployed.' : undefined;
+            const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, notice, home);
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(html);
+            return;
+          }
+          if (
+            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
+            method === 'POST'
+          ) {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            // Room policy is spend policy: ceilings gate the hard budget block
+            // and autonomy selects the review posture, so only admins mutate it.
+            if (!atLeast(auth.user.role, 'admin')) {
+              return json(res, 403, { ok: false, error: 'room configuration requires the admin role' });
+            }
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            try {
+              const wantsCreate = ['newRoomId', 'newRoomName', 'newRoomScope', 'newRoomAgent', 'newRoomMission'].some(
+                (k) => (call.fields[k] ?? '').trim() !== '',
+              );
+              if (wantsCreate) {
+                const { createCustomRoom } = await import('../talk/rooms.ts');
+                const created = await createCustomRoom(
+                  db,
+                  tenant,
+                  {
+                    id: String(call.fields.newRoomId ?? ''),
+                    name: String(call.fields.newRoomName ?? ''),
+                    scope: String(call.fields.newRoomScope ?? ''),
+                    agentName: String(call.fields.newRoomAgent ?? ''),
+                    mission: String(call.fields.newRoomMission ?? ''),
+                    category: String(call.fields.newRoomCategory ?? ''),
+                  },
+                  by(auth.user),
+                );
+                await auditConsole(db, tenant, by(auth.user), 'setup.rooms_create', `room:${created.scope}`, at);
+                return redirect(res, '/setup/rooms?saved=ok');
+              }
+              await handleRoomsSetupPost(db, tenant, call.fields, by(auth.user));
+              await auditConsole(db, tenant, by(auth.user), 'setup.rooms', `tenant:${tenant}`, at);
+              return redirect(res, '/setup/rooms?saved=ok');
+            } catch (e) {
+              const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, (e as Error).message, home);
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+              return;
+            }
+          }
+
+          // ------------------------------------------------------------ team
+          const teamData = async () => ({
+            users: await listUsers(db, tenant),
+            invitations: await listInvitations(db, tenant, at),
+          });
+
+          if (method === 'GET' && path === '/team') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
+            const data = await teamData();
+            const confirmations = new Map<string, DisableConfirmation>();
+            for (const u of data.users) {
+              if (!canDisable(auth.user, u)) continue;
+              try {
+                confirmations.set(u.id, await disableConfirmation(db, tenant, u.id));
+              } catch {
+                continue;
+              }
+            }
+            const stops = await describeStops(db, tenant);
+            const haltEvidence = await listHaltEvidence(db, tenant);
+            // Query outbox for automation-self-halt rows and pair with audit entries.
+            const outboxRows = (await db
+              .prepare(
+                `SELECT id, status, attempts, next_at FROM outbox WHERE tenant = ? AND kind = 'automation-self-halt' ORDER BY id DESC LIMIT 5`,
+              )
+              .all(tenant)) as { id: string; status: string; attempts: number; next_at: string }[];
+            const outboxStatus = new Map<string, { status: string; attempts: number; nextAt: string }>();
+            for (const r of outboxRows) {
+              outboxStatus.set(r.id, { status: r.status, attempts: r.attempts, nextAt: r.next_at });
+            }
+            const selfHalts = haltEvidence.real
+              .filter((h) => h.action === 'AUTOMATION_SELF_HALT' || h.action === 'TRUST_FROZEN')
+              .slice(-5)
+              .reverse()
+              .map((h) => {
+                const ob = outboxStatus.get(h.detail ?? '');
+                return {
+                  action: h.action,
+                  actor: h.actor,
+                  target: h.target,
+                  detail: h.detail,
+                  at: h.at,
+                  outboxStatus: ob
+                    ? { status: ob.status, attempts: ob.attempts, nextAt: ob.nextAt }
+                    : { status: 'unknown', attempts: 0, nextAt: '' },
+                };
+              });
+            let operatorMode: 'signature' | 'secret' | 'session' = 'session';
+            if (keyAuth) operatorMode = 'signature';
+            else if (operatorSecret) operatorMode = 'secret';
+            // FLOW-025: read-only trust gaps for every card (presentation
+            // path only — never the evaluating describeCard).
+            const compilerGaps: {
+              cardId: string;
+              intent: string;
+              state: string;
+              gaps: string[];
+              evalRef: string | null;
+            }[] = [];
+            try {
+              const cards = await comp.list(tenant, {});
+              for (const card of cards.slice(0, 100)) {
+                try {
+                  const described = await describeCardReadOnly(db, comp, tenant, card.id);
+                  compilerGaps.push({
+                    cardId: card.id,
+                    intent: card.intent,
+                    state: card.state,
+                    gaps: described.trustGaps,
+                    evalRef: card.evalRef,
+                  });
+                } catch {
+                  continue;
+                }
+              }
+            } catch {
+              // No cards or compiler unavailable — the section renders empty.
+            }
+            const q = url.searchParams.get('q') ?? undefined;
+            const role = url.searchParams.get('role') ?? undefined;
+            const status = url.searchParams.get('status') ?? undefined;
+            const teamParam = url.searchParams.get('team') ?? undefined;
+            const rawPage = Number(url.searchParams.get('page') ?? '1');
+            const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+              home,
+              now: at,
+              confirmations,
+              stops,
+              selfHalts,
+              policy: { approverRole: approverMin, operatorMode },
+              compilerGaps,
+              filter: { q, role, status, team: teamParam, page: pageNum },
+            });
+            // Chat-centric: Team lives inside Workspace shell
+            const isAdmin = atLeast(auth.user.role, 'admin');
+            const teamNav = renderConsoleNav(
+              buildConsoleNav(home, {
+                requests: true,
+                claims: true,
+                rooms: true,
+                humanWork: true,
+                settings: isAdmin,
+                learning: isAdmin,
+                audit: isAdmin,
+                data: isAdmin,
+                buzz: isAdmin,
+              }),
+              'team',
+            );
+            const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+            const teamRooms = (await roomHealth(db, tenant)).map((h) => ({
+              scope: h.scope,
+              roomName: h.roomName,
+              badge: h.badge,
+              pending: h.pendingApprovals,
+              category: h.category,
+            }));
+            // Same inner-body extraction as every other shelled page: the shell
+            // owns the skip link and the #main landmark, so a page must not ship
+            // a second copy of either.
+            const teamInner = workspaceInnerHtml(html);
+            const teamMetrics = await shellMetricsFor(db, tenant);
+            const teamRecency = await roomRecency(
+              db,
+              tenant,
+              teamRooms.map((r) => r.scope),
+            );
+            const teamShelled = renderConsoleShell({
+              rooms: teamRooms,
+              home,
+              consoleNav: teamNav,
+              accountCluster: teamCluster,
+              innerHtml: teamInner,
+              userEmail: auth.user.email,
+              userRole: auth.user.role,
+              userTeam: auth.user.team,
+              tenant,
+              metrics: teamMetrics,
+              roomRecency: teamRecency,
+            });
+            const teamWithShell =
+              html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(teamWithShell);
+            return;
+          }
+          if (path === '/team/invite' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            const data = await teamData();
+            const rawEmail = (call.fields.email ?? '').trim();
+            const emailList = rawEmail
+              .split(/[\r\n,;]+/)
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+
+            if (emailList.length <= 1) {
+              try {
+                const { invitation, token } = await createInvitation(
+                  db,
+                  tenant,
+                  {
+                    email: emailList[0] ?? '',
+                    name: call.fields.name ?? '',
+                    role: parseRole(call.fields.role ?? 'member'),
+                    team: parseTeam(call.fields.team ?? 'unassigned'),
+                  },
+                  { userId: auth.user.id, role: auth.user.role },
+                  at,
+                );
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'team.invite',
+                  `invitation:${invitation.id}`,
+                  at,
+                  `role=${invitation.role}`,
+                );
+                const link = `/accept-invite?token=${encodeURIComponent(token)}`;
+                const exposeInvite = inviteLinkNotice([{ email: invitation.email, link }]);
+                const html = teamPage(
+                  auth.session.csrfToken,
+                  auth.user,
+                  data.users,
+                  await listInvitations(db, tenant, at),
+                  `${invitation.email} invited as ${invitation.role}.${exposeInvite}`,
+                  { home },
+                );
+                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(html);
+              } catch (e) {
+                const msg =
+                  e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+                const attempted = (emailList[0] ?? '').toLowerCase();
+                let hint = '';
+                if (e instanceof AuthError) {
+                  if (e.code === 'DISABLED_USER_EXISTS') {
+                    hint = ` ${invitationNextSteps('disabled_account', attempted).action}`;
+                  } else if (e.code === 'INVITATION_PENDING') {
+                    hint = ` ${invitationNextSteps('pending_invitation', attempted).action}`;
+                  } else if (e.code === 'DUPLICATE_USER') {
+                    hint = ` ${invitationNextSteps('active_account', attempted).action}`;
+                  }
+                }
+                const html = teamPage(
+                  auth.session.csrfToken,
+                  auth.user,
+                  data.users,
+                  data.invitations,
+                  `create account failed: ${msg}${hint}`,
+                  { home },
+                );
+                res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(html);
+              }
+              return;
+            }
+
+            // Bulk onboarding for multiple addresses
+            const invited: { email: string; token: string }[] = [];
+            const failed: { email: string; error: string }[] = [];
+            const targetRole = parseRole(call.fields.role ?? 'member');
+            const targetTeam = parseTeam(call.fields.team ?? 'unassigned');
+            for (const email of emailList) {
+              try {
+                const { invitation, token } = await createInvitation(
+                  db,
+                  tenant,
+                  {
+                    email,
+                    name: call.fields.name
+                      ? `${call.fields.name} (${email.split('@')[0]})`
+                      : (email.split('@')[0] ?? 'Member'),
+                    role: targetRole,
+                    team: targetTeam,
+                  },
+                  { userId: auth.user.id, role: auth.user.role },
+                  at,
+                );
+                await auditConsole(
+                  db,
+                  tenant,
+                  by(auth.user),
+                  'team.invite',
+                  `invitation:${invitation.id}`,
+                  at,
+                  `role=${invitation.role}`,
+                );
+                invited.push({ email, token });
+              } catch (e) {
+                const msg =
+                  e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+                failed.push({ email, error: msg });
+              }
+            }
+
+            const exposeInvite = inviteLinkNotice(
+              invited.map((i) => ({
+                email: i.email,
+                link: `/accept-invite?token=${encodeURIComponent(i.token)}`,
+              })),
+            );
+            const failMsg =
+              failed.length > 0
+                ? ` (${failed.length} failed: ${failed.map((f) => `${f.email}: ${f.error}`).join(', ')})`
+                : '';
+            const statusMsg = `${invited.length} members invited as ${targetRole}.${failMsg}${exposeInvite}`;
+            const currentInvites = await listInvitations(db, tenant, at);
+            const html = teamPage(auth.session.csrfToken, auth.user, data.users, currentInvites, statusMsg, { home });
+            res.writeHead(invited.length > 0 ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(html);
+            return;
+          }
+          if (path === '/team/invitation/resend' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            const data = await teamData();
+            try {
+              const { invitation, token } = await resendInvitation(
+                db,
+                tenant,
+                call.fields.invitationId ?? '',
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(db, tenant, by(auth.user), 'team.invite_resend', `invitation:${invitation.id}`, at);
               const link = `/accept-invite?token=${encodeURIComponent(token)}`;
-              const exposeInvite =
-                process.env.VITAL_EXPOSE_INVITE_LINK === '1'
-                  ? ` Acceptance link (deliver out of band): ${link}`
-                  : ' Deliver the acceptance link out of band — run with VITAL_EXPOSE_INVITE_LINK=1 in development to print it here.';
+              const exposeInvite = inviteLinkNotice([{ email: invitation.email, link }]);
               const html = teamPage(
                 auth.session.csrfToken,
                 auth.user,
                 data.users,
                 await listInvitations(db, tenant, at),
-                `${invitation.email} invited as ${invitation.role}.${exposeInvite}`,
+                `Invitation resent to ${invitation.email}.${exposeInvite}`,
                 { home },
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
               res.end(html);
             } catch (e) {
               const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-              const attempted = (emailList[0] ?? '').toLowerCase();
-              let hint = '';
-              if (e instanceof AuthError) {
-                if (e.code === 'DISABLED_USER_EXISTS') {
-                  hint = ` ${invitationNextSteps('disabled_account', attempted).action}`;
-                } else if (e.code === 'INVITATION_PENDING') {
-                  hint = ` ${invitationNextSteps('pending_invitation', attempted).action}`;
-                } else if (e.code === 'DUPLICATE_USER') {
-                  hint = ` ${invitationNextSteps('active_account', attempted).action}`;
-                }
-              }
               const html = teamPage(
                 auth.session.csrfToken,
                 auth.user,
                 data.users,
                 data.invitations,
-                `create account failed: ${msg}${hint}`,
+                `resend failed: ${msg}`,
                 { home },
               );
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
@@ -5664,1650 +5875,1668 @@ ${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], in
             }
             return;
           }
-
-          // Bulk onboarding for multiple addresses
-          const invited: { email: string; token: string }[] = [];
-          const failed: { email: string; error: string }[] = [];
-          const targetRole = parseRole(call.fields.role ?? 'member');
-          const targetTeam = parseTeam(call.fields.team ?? 'unassigned');
-          for (const email of emailList) {
+          if (path === '/team/invitation/revoke' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
             try {
-              const { invitation, token } = await createInvitation(
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            const data = await teamData();
+            try {
+              const invitation = await revokeInvitation(
                 db,
                 tenant,
-                {
-                  email,
-                  name: call.fields.name
-                    ? `${call.fields.name} (${email.split('@')[0]})`
-                    : (email.split('@')[0] ?? 'Member'),
-                  role: targetRole,
-                  team: targetTeam,
-                },
+                call.fields.invitationId ?? '',
                 { userId: auth.user.id, role: auth.user.role },
                 at,
               );
+              await auditConsole(db, tenant, by(auth.user), 'team.invite_revoke', `invitation:${invitation.id}`, at);
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                await listInvitations(db, tenant, at),
+                `Invitation to ${invitation.email} revoked`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `revoke failed: ${msg}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
+          }
+          if (path === '/team/reactivate' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const data = await teamData();
+            try {
+              const user = await reactivateUser(
+                db,
+                tenant,
+                call.fields.userId ?? '',
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(db, tenant, by(auth.user), 'team.reactivate', `user:${user.id}`, at);
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                await listUsers(db, tenant),
+                data.invitations,
+                `${user.email} reactivated — they must sign in again; old sessions stay revoked`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `reactivate failed: ${msg}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
+          }
+          if (path === '/team/team' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const data = await teamData();
+            try {
+              const user = await setUserTeam(
+                db,
+                tenant,
+                call.fields.userId ?? '',
+                parseTeam(call.fields.team ?? 'unassigned'),
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(db, tenant, by(auth.user), 'team.team', `user:${user.id}`, at, `team=${user.team}`);
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                await listUsers(db, tenant),
+                data.invitations,
+                `${user.email} is now on the ${user.team} team`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+                home,
+              });
+              res.writeHead(e instanceof AuthError && e.code === 'FORBIDDEN' ? 403 : 400, {
+                'content-type': 'text/html; charset=utf-8',
+              });
+              res.end(html.replace('</body>', `<body><p class="err">${esc(msg)}</p>`));
+            }
+            return;
+          }
+          if (path === '/team/role' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const data = await teamData();
+            try {
+              const user = await changeUserRole(
+                db,
+                tenant,
+                call.fields.userId ?? '',
+                parseRole(call.fields.role ?? 'member'),
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(db, tenant, by(auth.user), 'team.role', `user:${user.id}`, at, `role=${user.role}`);
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                await listUsers(db, tenant),
+                data.invitations,
+                `${user.email} is now ${user.role}`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `role change failed: ${msg}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
+          }
+          if (path === '/team/transfer-ownership' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (auth.user.role !== 'owner')
+              return json(res, 403, { ok: false, error: 'only the owner may transfer ownership' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const data = await teamData();
+            try {
+              const { to } = await transferOwnership(
+                db,
+                tenant,
+                call.fields.userId ?? '',
+                { userId: auth.user.id, role: auth.user.role },
+                at,
+              );
+              await auditConsole(db, tenant, by(auth.user), 'team.transfer_ownership', `user:${to.id}`, at);
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                await listUsers(db, tenant),
+                data.invitations,
+                `Ownership transferred to ${to.email}. You are now an admin.`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `transfer failed: ${msg}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
+          }
+          if (path === '/team/disable' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            if (!(await recentAuthGate(db, res, auth.user.id, at, auth.session.createdAt))) return;
+            const data = await teamData();
+            try {
+              const target = await getUser(db, tenant, call.fields.userId ?? '');
+              if (!target) return json(res, 404, { ok: false, error: 'no such user' });
+              if (target.role === 'owner' && auth.user.role !== 'owner')
+                return json(res, 403, { ok: false, error: 'only the owner may disable the owner' });
+              if (target.id === auth.user.id)
+                return json(res, 400, { ok: false, error: 'you cannot disable yourself' });
+              const confirm = (call.fields.confirmEmail ?? '').trim().toLowerCase();
+              if (confirm !== target.email)
+                throw new AuthError(
+                  'CONFIRM_MISMATCH',
+                  'confirmation email does not match — type the member email exactly',
+                );
+              const handoffToUserId = call.fields.handoffToUserId?.trim() || undefined;
+              const { reassigned } = await disableUser(db, tenant, target.id, at, {
+                handoffToUserId,
+                actorId: auth.user.id,
+              });
+              await auditConsole(db, tenant, by(auth.user), 'team.disable', `user:${target.id}`, at);
+              let handoffMsg = '';
+              if (reassigned.claims + reassigned.requests > 0) {
+                handoffMsg = ` ${reassigned.claims} claim(s) and ${reassigned.requests} request(s) were reassigned.`;
+              }
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                await listUsers(db, tenant),
+                data.invitations,
+                `${target.email} disabled — every live session was revoked immediately.${handoffMsg} Reactivate restores sign-in access but does not restore old sessions.`,
+                { home },
+              );
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            } catch (e) {
+              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `disable failed: ${msg}`,
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+            }
+            return;
+          }
+          if (path === '/team/stops/recover' && method === 'POST') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, false)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, 'admin'))
+              return json(res, 403, { ok: false, error: 'requires admin or owner' });
+            const scope = (call.fields.scope ?? '').trim();
+            const actionClass = (call.fields.actionClass ?? '').trim();
+            const reason = (call.fields.reason ?? '').trim();
+            if (!scope || !actionClass)
+              return json(res, 400, { ok: false, error: 'scope and action class are required' });
+            if (!reason) {
+              const data = await teamData();
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                'recover failed: a recorded reason is required',
+                { home },
+              );
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+              return;
+            }
+            try {
+              const recovered = await recoverStop(db, tenant, { scope, actionClass }, by(auth.user), {
+                reason,
+                now: at,
+              });
               await auditConsole(
                 db,
                 tenant,
                 by(auth.user),
-                'team.invite',
-                `invitation:${invitation.id}`,
+                'team.stops_recover',
+                `${recovered.scope}/${recovered.actionClass}`,
                 at,
-                `role=${invitation.role}`,
+                reason,
               );
-              invited.push({ email, token });
+              return redirect(res, '/team');
             } catch (e) {
-              const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-              failed.push({ email, error: msg });
-            }
-          }
-
-          const exposeInvite =
-            process.env.VITAL_EXPOSE_INVITE_LINK === '1' && invited.length > 0
-              ? ` Acceptance links: ${invited.map((i) => `${i.email}: /accept-invite?token=${encodeURIComponent(i.token)}`).join(' · ')}`
-              : ' Deliver acceptance links out of band.';
-          const failMsg =
-            failed.length > 0
-              ? ` (${failed.length} failed: ${failed.map((f) => `${f.email}: ${f.error}`).join(', ')})`
-              : '';
-          const statusMsg = `${invited.length} members invited as ${targetRole}.${failMsg}${exposeInvite}`;
-          const currentInvites = await listInvitations(db, tenant, at);
-          const html = teamPage(auth.session.csrfToken, auth.user, data.users, currentInvites, statusMsg, { home });
-          res.writeHead(invited.length > 0 ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(html);
-          return;
-        }
-        if (path === '/team/invitation/resend' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          const data = await teamData();
-          try {
-            const { invitation, token } = await resendInvitation(
-              db,
-              tenant,
-              call.fields.invitationId ?? '',
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.invite_resend', `invitation:${invitation.id}`, at);
-            const link = `/accept-invite?token=${encodeURIComponent(token)}`;
-            const exposeInvite =
-              process.env.VITAL_EXPOSE_INVITE_LINK === '1'
-                ? ` New link: ${link}`
-                : ' Deliver the new acceptance link out of band.';
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              await listInvitations(db, tenant, at),
-              `Invitation resent to ${invitation.email}.${exposeInvite}`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `resend failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        if (path === '/team/invitation/revoke' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          const data = await teamData();
-          try {
-            const invitation = await revokeInvitation(
-              db,
-              tenant,
-              call.fields.invitationId ?? '',
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.invite_revoke', `invitation:${invitation.id}`, at);
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              await listInvitations(db, tenant, at),
-              `Invitation to ${invitation.email} revoked`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `revoke failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        if (path === '/team/reactivate' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
-          const data = await teamData();
-          try {
-            const user = await reactivateUser(
-              db,
-              tenant,
-              call.fields.userId ?? '',
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.reactivate', `user:${user.id}`, at);
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              await listUsers(db, tenant),
-              data.invitations,
-              `${user.email} reactivated — they must sign in again; old sessions stay revoked`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `reactivate failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        if (path === '/team/team' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
-          const data = await teamData();
-          try {
-            const user = await setUserTeam(
-              db,
-              tenant,
-              call.fields.userId ?? '',
-              parseTeam(call.fields.team ?? 'unassigned'),
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.team', `user:${user.id}`, at, `team=${user.team}`);
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              await listUsers(db, tenant),
-              data.invitations,
-              `${user.email} is now on the ${user.team} team`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, { home });
-            res.writeHead(e instanceof AuthError && e.code === 'FORBIDDEN' ? 403 : 400, {
-              'content-type': 'text/html; charset=utf-8',
-            });
-            res.end(html.replace('</body>', `<body><p class="err">${esc(msg)}</p>`));
-          }
-          return;
-        }
-        if (path === '/team/role' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
-          const data = await teamData();
-          try {
-            const user = await changeUserRole(
-              db,
-              tenant,
-              call.fields.userId ?? '',
-              parseRole(call.fields.role ?? 'member'),
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.role', `user:${user.id}`, at, `role=${user.role}`);
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              await listUsers(db, tenant),
-              data.invitations,
-              `${user.email} is now ${user.role}`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `role change failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        if (path === '/team/transfer-ownership' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (auth.user.role !== 'owner')
-            return json(res, 403, { ok: false, error: 'only the owner may transfer ownership' });
-          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
-          const data = await teamData();
-          try {
-            const { to } = await transferOwnership(
-              db,
-              tenant,
-              call.fields.userId ?? '',
-              { userId: auth.user.id, role: auth.user.role },
-              at,
-            );
-            await auditConsole(db, tenant, by(auth.user), 'team.transfer_ownership', `user:${to.id}`, at);
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              await listUsers(db, tenant),
-              data.invitations,
-              `Ownership transferred to ${to.email}. You are now an admin.`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `transfer failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          }
-          return;
-        }
-        if (path === '/team/disable' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
-          const data = await teamData();
-          try {
-            const target = await getUser(db, tenant, call.fields.userId ?? '');
-            if (!target) return json(res, 404, { ok: false, error: 'no such user' });
-            if (target.role === 'owner' && auth.user.role !== 'owner')
-              return json(res, 403, { ok: false, error: 'only the owner may disable the owner' });
-            if (target.id === auth.user.id) return json(res, 400, { ok: false, error: 'you cannot disable yourself' });
-            const confirm = (call.fields.confirmEmail ?? '').trim().toLowerCase();
-            if (confirm !== target.email)
-              throw new AuthError(
-                'CONFIRM_MISMATCH',
-                'confirmation email does not match — type the member email exactly',
+              const data = await teamData();
+              const html = teamPage(
+                auth.session.csrfToken,
+                auth.user,
+                data.users,
+                data.invitations,
+                `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
+                { home },
               );
-            const handoffToUserId = call.fields.handoffToUserId?.trim() || undefined;
-            const { reassigned } = await disableUser(db, tenant, target.id, at, {
-              handoffToUserId,
-              actorId: auth.user.id,
-            });
-            await auditConsole(db, tenant, by(auth.user), 'team.disable', `user:${target.id}`, at);
-            let handoffMsg = '';
-            if (reassigned.claims + reassigned.requests > 0) {
-              handoffMsg = ` ${reassigned.claims} claim(s) and ${reassigned.requests} request(s) were reassigned.`;
+              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(html);
+              return;
             }
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              await listUsers(db, tenant),
-              data.invitations,
-              `${target.email} disabled — every live session was revoked immediately.${handoffMsg} Reactivate restores sign-in access but does not restore old sessions.`,
-              { home },
-            );
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-          } catch (e) {
-            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `disable failed: ${msg}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
           }
-          return;
-        }
-        if (path === '/team/stops/recover' && method === 'POST') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
-          const scope = (call.fields.scope ?? '').trim();
-          const actionClass = (call.fields.actionClass ?? '').trim();
-          const reason = (call.fields.reason ?? '').trim();
-          if (!scope || !actionClass)
-            return json(res, 400, { ok: false, error: 'scope and action class are required' });
-          if (!reason) {
-            const data = await teamData();
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              'recover failed: a recorded reason is required',
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-            return;
-          }
-          try {
-            const recovered = await recoverStop(db, tenant, { scope, actionClass }, by(auth.user), { reason, now: at });
-            await auditConsole(
-              db,
-              tenant,
-              by(auth.user),
-              'team.stops_recover',
-              `${recovered.scope}/${recovered.actionClass}`,
-              at,
-              reason,
-            );
-            return redirect(res, '/team');
-          } catch (e) {
-            const data = await teamData();
-            const html = teamPage(
-              auth.session.csrfToken,
-              auth.user,
-              data.users,
-              data.invitations,
-              `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
-              { home },
-            );
-            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
-            return;
-          }
-        }
 
-        const act = path.match(/^\/api\/requests\/([^/]+)\/(approve|decline)$/);
-        if (method === 'POST' && act) {
-          const auth = await sessionOf();
-          if (!auth) {
-            // FLOW-010: an expired approval POST keeps the reviewer's
-            // non-secret rationale for explicit resubmission — the approval
-            // itself is never replayed (reauthResume contract).
-            let draft: Record<string, string>;
-            try {
-              draft = expiredDraftCarry((await parseCall(req)).fields);
-            } catch {
-              draft = {};
-            }
-            return json(res, 401, sessionExpiredWithDraft(returnPath(), draft));
-          }
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          // Role policy: the R/A/I matrix governs agent autonomy; this gate
-          // governs which HUMAN role may approve. Default `member` (room-agent
-          // model); tenants may raise it.
-          if (!atLeast(auth.user.role, approverMin))
-            return json(res, 403, {
-              ok: false,
-              error: `approving requires ${approverMin} (you are ${auth.user.role})`,
-            });
-          if (!keyAuth && !authorized(req))
-            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          let id: string;
-          try {
-            // decodeURIComponent throws URIError on malformed % sequences —
-            // outside a try this escapes the async handler and kills the
-            // process (unauthenticated single-request DoS, notable because
-            // the ALB exposes this port publicly).
-            id = decodeURIComponent(act[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed request id' });
-            return;
-          }
-          const who = by(auth.user);
-          const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
-          const identity = keyAuth ? await verifyingKey(req, id, action, who) : {};
-          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
-          const current = await coord.get(tenant, id);
-          if (!current) {
-            json(res, 404, { ok: false, error: `unknown request ${id}` });
-            return;
-          }
-          // The approver is the authenticated identity — the body cannot
-          // name a human, so "approval theater" needs a compromised session.
-          try {
-            const result = await db.transaction(async () => {
-              // PostgreSQL needs a row lock; SQLite's enclosing BEGIN IMMEDIATE
-              // already serializes competing reviewers and execution claims.
-              await db
-                .prepare(
-                  `SELECT id FROM requests WHERE tenant = ? AND id = ?${db.engine === 'postgres' ? ' FOR UPDATE' : ''}`,
-                )
-                .get(tenant, id);
-              const request = await coord.get(tenant, id);
-              if (!request) throw new Error('Request no longer exists; refresh the review queue.');
-              const decisionId = `dec_console_${createHash('sha256')
-                .update(JSON.stringify([tenant, id]))
-                .digest('hex')}`;
-              // Strict FLOW-001 contract: an approval either lands a decision
-              // grounded in the request's cited evidence or nothing happens —
-              // a refused recordDecision throws inside this transaction and
-              // rolls the accept back with it. Duplicate submissions replay
-              // the original receipt without rewriting approver or evidence.
-              const existing =
-                action === 'approve'
-                  ? ((await ledger.getDecision(tenant, decisionId)) ?? (await ledger.getDecisionByRequest(tenant, id)))
-                  : null;
-              if (existing && request.state !== 'ADMITTED') {
-                return {
-                  state: request.state,
-                  by: existing.approvedBy,
-                  decisionId: existing.id,
-                  decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
-                  latencySeconds: null,
-                  repeated: true,
-                };
-              }
-              if (request.state !== 'ADMITTED')
-                throw new Error(`Request is ${request.state}, not awaiting review. Refresh to see its current status.`);
-              // FLOW-002: a decline on a stale page would refuse different
-              // content than reviewed — the explanation is preserved (409
-              // preservedDraft) and the reviewer resubmits after re-review.
-              if (action === 'decline') assertFreshReview(request, call.fields.requestUpdatedAt);
-              const executionSpec =
-                action === 'approve' && !existing
-                  ? await validateApprovalBoundary(ledger, request, at, {
-                      expectedRequestUpdatedAt: call.fields.requestUpdatedAt,
-                      planFingerprint: call.fields.planFingerprint,
-                      assetVersion: call.fields.assetVersion,
-                      command: call.fields.command,
-                    })
-                  : null;
-              const decision =
-                action === 'approve' && !existing && executionSpec
-                  ? await ledger.recordDecision({
-                      id: decisionId,
-                      tenant,
-                      goal: request.goal,
-                      // FLOW-002: frozen, versioned execution specification — not a
-                      // replacement instruction or unseen final deliverable.
-                      action: serializeExecutionSpec(executionSpec),
-                      actionClass: 'RECOMMEND',
-                      claimIds: request.claimRefs,
-                      decidedBy: who,
-                      approvedBy: who,
-                      scope: request.targetScope,
-                      autonomy: 'approval',
-                      requestId: id,
-                      now: at,
-                    })
-                  : null;
-              const next =
-                action === 'approve'
-                  ? await coord.accept(tenant, id)
-                  : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
-              await recordReviewOutcome(db, tenant, {
-                requestId: id,
-                scope: request.targetScope,
-                actionClass: 'RECOMMEND',
-                approved: action === 'approve',
-                reviewer: who,
-                reason: action === 'decline' ? call.fields.reason : undefined,
-                now: at,
-              });
-              await auditConsole(db, tenant, who, `console.${action}`, `request:${id}`, at);
-              let latencySeconds: number | null;
+          const act = path.match(/^\/api\/requests\/([^/]+)\/(approve|decline)$/);
+          if (method === 'POST' && act) {
+            const auth = await sessionOf();
+            if (!auth) {
+              // FLOW-010: an expired approval POST keeps the reviewer's
+              // non-secret rationale for explicit resubmission — the approval
+              // itself is never replayed (reauthResume contract).
+              let draft: Record<string, string>;
               try {
-                // Savepoint isolates optional telemetry failure on PostgreSQL.
-                latencySeconds = await db.transaction(
-                  async () => (await coord.recordApprovalLatency(tenant, id, action, who, at)).seconds,
-                );
+                draft = expiredDraftCarry((await parseCall(req)).fields);
               } catch {
-                latencySeconds = null;
+                draft = {};
               }
-              const receipt = decision ?? existing;
-              return {
-                state: next.state,
-                by: who,
-                latencySeconds,
-                repeated: false,
-                ...(receipt
-                  ? {
-                      decisionId: receipt.id,
-                      decisionUrl: `/console/decisions/${encodeURIComponent(receipt.id)}`,
-                      ...(executionSpec
-                        ? { specFingerprint: executionSpec.fingerprint, requestUpdatedAt: request.updatedAt }
-                        : {}),
-                    }
-                  : {}),
-              };
-            });
-            if (action === 'approve' && result.state === 'ACCEPTED' && !result.repeated) {
-              await recordFirstReviewAt(db, tenant, at);
+              return json(res, 401, sessionExpiredWithDraft(returnPath(), draft));
             }
-            if (prefersHtml(req)) {
-              return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
-            }
-            json(res, 200, { ok: action === 'approve', id, ...result, ...identity });
-          } catch (e) {
-            const code = e instanceof ExecutionSpecError ? e.code : undefined;
-            json(res, 409, {
-              ok: false,
-              error: (e as Error).message,
-              ...(code ? { code, ...(e instanceof ExecutionSpecError ? e.detail : {}) } : {}),
-              // The reviewer's explanation survives a stale rejection: the
-              // client restores it so re-review resubmits the same rationale.
-              ...(action === 'decline' && typeof call.fields.reason === 'string' && call.fields.reason.trim() !== ''
-                ? { preservedDraft: { reason: call.fields.reason } }
-                : {}),
-            });
-          }
-          return;
-        }
-
-        const deliverableArtifact = path.match(/^\/api\/deliverables\/([^/]+)\/artifact$/);
-        if (method === 'GET' && deliverableArtifact) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          let versionId: string;
-          try {
-            versionId = decodeURIComponent(deliverableArtifact[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed deliverable version id' });
-            return;
-          }
-          const version = await loadDeliverableVersion(db, tenant, versionId);
-          if (!version) {
-            json(res, 404, { ok: false, error: 'deliverable version not found' });
-            return;
-          }
-          const body = readDeliverableArtifact(version, artifactDir);
-          res.writeHead(200, {
-            'content-type': 'text/plain; charset=utf-8',
-            'content-disposition': `attachment; filename="${version.deliverableId}-v${version.version}.txt"`,
-            'cache-control': 'no-store',
-          });
-          res.end(body);
-          return;
-        }
-
-        const deliverableApprove = path.match(/^\/api\/deliverables\/([^/]+)\/approve$/);
-        if (method === 'POST' && deliverableApprove) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (!atLeast(auth.user.role, approverMin)) {
-            json(res, 403, { ok: false, error: `approving requires ${approverMin}` });
-            return;
-          }
-          if (activationDenied(res, auth, true)) return;
-          if (!keyAuth && !authorized(req))
-            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          let versionId: string;
-          try {
-            versionId = decodeURIComponent(deliverableApprove[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed deliverable version id' });
-            return;
-          }
-          const fingerprint = String(call.fields.fingerprint ?? '').trim();
-          if (!fingerprint) {
-            json(res, 400, { ok: false, error: 'fingerprint required — refresh the deliverable preview' });
-            return;
-          }
-          const who = by(auth.user);
-          const identity = keyAuth ? await verifyingKey(req, versionId, 'approve-deliverable', who) : {};
-          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
-          const version = await loadDeliverableVersion(db, tenant, versionId);
-          if (!version) {
-            json(res, 404, { ok: false, error: 'deliverable version not found' });
-            return;
-          }
-          if (version.externalPublish) {
-            const confirmText = String(call.fields.confirmText ?? '').trim();
-            if (confirmText !== 'PUBLISH') {
-              json(res, 400, { ok: false, error: 'type PUBLISH to confirm external publication' });
-              return;
-            }
-          }
-          const request = await coord.get(tenant, version.requestId);
-          try {
-            const result = await db.transaction(async () => {
-              const approved = await approveDeliverableVersion(db, ledger, {
-                tenant,
-                versionId,
-                fingerprint,
-                approvedBy: who,
-                now: at,
-                scope: request?.targetScope ?? 'product',
-                onBehalfOf: request?.onBehalfOf ?? who,
-                goal: request?.goal,
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            // Role policy: the R/A/I matrix governs agent autonomy; this gate
+            // governs which HUMAN role may approve. Default `member` (room-agent
+            // model); tenants may raise it.
+            if (!atLeast(auth.user.role, approverMin))
+              return json(res, 403, {
+                ok: false,
+                error: `approving requires ${approverMin} (you are ${auth.user.role})`,
               });
-              await auditConsole(db, tenant, who, 'console.approve-deliverable', `deliverable:${versionId}`, at);
-              return approved;
-            });
-            if (prefersHtml(req)) {
-              return redirect(res, `/console/requests/${encodeURIComponent(version.requestId)}`);
-            }
-            json(res, 200, {
-              ok: true,
-              decisionId: result.decisionId,
-              decisionUrl: `/console/decisions/${encodeURIComponent(result.decisionId)}`,
-              status: result.version.status,
-              ...identity,
-            });
-          } catch (e) {
-            json(res, 409, { ok: false, error: (e as Error).message.replace(/^\[wedge:[^\]]+\]\s*/, '') });
-          }
-          return;
-        }
-
-        const deliverableChanges = path.match(/^\/api\/deliverables\/([^/]+)\/request-changes$/);
-        if (method === 'POST' && deliverableChanges) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (!atLeast(auth.user.role, approverMin)) {
-            json(res, 403, { ok: false, error: `review requires ${approverMin}` });
-            return;
-          }
-          if (activationDenied(res, auth, true)) return;
-          if (!keyAuth && !authorized(req))
-            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const notes = String(call.fields.notes ?? '').trim();
-          if (!notes) {
-            json(res, 400, { ok: false, error: 'revision notes are required' });
-            return;
-          }
-          let versionId: string;
-          try {
-            versionId = decodeURIComponent(deliverableChanges[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed deliverable version id' });
-            return;
-          }
-          const who = by(auth.user);
-          const identity = keyAuth ? await verifyingKey(req, versionId, 'request-changes', who) : {};
-          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
-          try {
-            const revised = await requestDeliverableRevision(db, tenant, versionId, notes, who, at);
-            await auditConsole(db, tenant, who, 'console.request-changes', `deliverable:${versionId}`, at);
-            if (prefersHtml(req)) {
-              return redirect(res, `/console/requests/${encodeURIComponent(revised.requestId)}`);
-            }
-            json(res, 200, { ok: true, status: revised.status, revisionNotes: revised.revisionNotes, ...identity });
-          } catch (e) {
-            json(res, 409, { ok: false, error: (e as Error).message.replace(/^\[wedge:[^\]]+\]\s*/, '') });
-          }
-          return;
-        }
-
-        // /api/approval-latency — routes/observability.ts (capability: session).
-
-        // Live event stream (SSE): replays + tails audit_log for Mission Control.
-        if (method === 'GET' && path === '/api/events') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          const { handleEventStream } = await import('./events.ts');
-          handleEventStream(req, res, db, tenant);
-          return;
-        }
-        if (method === 'GET' && path === '/api/metrics') {          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          // FLOW-023: readiness is the authenticated worker/integration
-          // status. `database` is required; `worker` is required once a
-          // worker has ever checked in (a silent worker is an outage) but
-          // reports unconfigured-optional before the first heartbeat so
-          // fresh installs stay green; `integrations` folds every known
-          // collector in — unconfigured-optional when no source was ever
-          // set up, failing when a configured source is broken.
-          const readiness = await checkReadiness(
-            [
-              {
-                name: 'database',
-                check: async () => {
-                  await db.prepare('SELECT 1 AS ok').get();
-                  return { ok: true as const, detail: `${db.engine} reachable` };
-                },
-              },
-              {
-                name: 'worker',
-                // Optional until the first heartbeat: a fresh install with no
-                // worker deployed stays green; a stale heartbeat still fails.
-                optional: true,
-                check: async () => workerReadiness(db, tenant, { now: at }),
-              },
-              {
-                name: 'integrations',
-                optional: true,
-                check: async () => {
-                  const config = await loadActivationConfig(db, tenant);
-                  const collectors = new Set(await listKnownCollectors(db, tenant));
-                  if (config) collectors.add(collectorName(config.sourcePath));
-                  if (collectors.size === 0) return { ok: false, unconfigured: true, detail: 'no source configured' };
-                  const parts: string[] = [];
-                  let failing: string | null = null;
-                  for (const collector of collectors) {
-                    const health = await getIntegrationHealth(db, tenant, collector, {
-                      configured: true,
-                      now: at,
-                    });
-                    const projected = integrationReadinessState(health);
-                    parts.push(projected.detail);
-                    if (!projected.ok && projected.unconfigured !== true && !failing) failing = collector;
-                  }
-                  if (failing) return { ok: false, detail: parts.join(' | ') };
-                  return { ok: true as const, detail: parts.join(' | ') };
-                },
-              },
-            ],
-            { now: at },
-          );
-          json(res, 200, { ...metrics, uptimeMs: Date.now() - metrics.startedAt, readiness });
-          return;
-        }
-
-        // /api/cost-per-signal — routes/observability.ts (capability: session).
-
-        // Override capture (TODO 2.3): a human edits a claim → correctClaim
-        // supersedes the old row and audits the diff; then the eval spine
-        // converts the audit row into a regression case, so every override
-        // teaches the machine exactly what it got wrong. The corrector is the
-        // SESSION identity — the body's `by` is ignored here, as in approvals.
-        const fix = path.match(/^\/api\/claims\/([^/]+)\/correct$/);
-        if (method === 'POST' && fix) {
-          const auth = await sessionOf();
-          if (!auth) {
-            // FLOW-010: expiry during a correction preserves the non-secret
-            // draft (statement/reason, never passwords/secrets) so the human
-            // can re-submit after signing in — approvals are never replayed.
-            let draft: Record<string, string>;
+            if (!keyAuth && !authorized(req))
+              return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+            let call: Call;
             try {
-              draft = expiredDraftCarry((await parseCall(req)).fields);
-            } catch {
-              draft = {};
-            }
-            return json(res, 401, sessionExpiredWithDraft(returnPath(), draft));
-          }
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          if (!keyAuth && !authorized(req))
-            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const statement = (call.fields.statement ?? '').trim();
-          if (!statement) {
-            json(res, 400, {
-              ok: false,
-              error: 'a correction needs the corrected statement — pass { statement }',
-            });
-            return;
-          }
-          let id: string;
-          try {
-            id = decodeURIComponent(fix[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed claim id' });
-            return;
-          }
-          const who = by(auth.user);
-          const identity = keyAuth ? await verifyingKey(req, id, 'correct', who) : {};
-          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
-          try {
-            const old = await ledger.get(tenant, id);
-            if (!old) {
-              json(res, 404, { ok: false, error: `unknown claim ${id}` });
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
               return;
             }
-            const rawSeq = call.json && 'expectedSeq' in call.json ? call.json.expectedSeq : call.fields.expectedSeq;
-            const expectedSeq = rawSeq === undefined || rawSeq === null || rawSeq === '' ? undefined : Number(rawSeq);
-            if (expectedSeq !== undefined && !Number.isInteger(expectedSeq)) {
-              json(res, 400, { ok: false, error: 'expectedSeq must be an integer claim version' });
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            let id: string;
+            try {
+              // decodeURIComponent throws URIError on malformed % sequences —
+              // outside a try this escapes the async handler and kills the
+              // process (unauthenticated single-request DoS, notable because
+              // the ALB exposes this port publicly).
+              id = decodeURIComponent(act[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed request id' });
               return;
             }
-            const rawVal = call.json && 'value' in call.json ? call.json.value : call.fields.value;
-            let patch: { value?: number | null; unit?: string | null; confidence?: number } | undefined;
-            if (rawVal !== undefined) {
-              if (rawVal !== null && typeof rawVal !== 'string' && typeof rawVal !== 'number')
-                return json(res, 400, { ok: false, error: 'value must be a finite number or null' });
-              const numVal = rawVal === '' || rawVal === null ? null : Number(rawVal);
-              if (numVal !== null && !Number.isFinite(numVal)) {
-                json(res, 400, { ok: false, error: 'value must be a finite number or null' });
-                return;
-              }
-              const rawUnit = call.json && 'unit' in call.json ? call.json.unit : call.fields.unit;
-              const rawConf = call.json && 'confidence' in call.json ? call.json.confidence : call.fields.confidence;
-              let unitPatch: string | null | undefined;
-              if (rawUnit === null) {
-                unitPatch = null;
-              } else if (rawUnit !== undefined) {
-                unitPatch = String(rawUnit);
-              }
-              patch = {
-                value: numVal,
-                unit: unitPatch,
-                confidence: rawConf !== undefined ? Number(rawConf) : undefined,
-              };
+            const who = by(auth.user);
+            const action: 'approve' | 'decline' = act[2] === 'approve' ? 'approve' : 'decline';
+            const identity = keyAuth ? await verifyingKey(req, id, action, who) : {};
+            if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+            const current = await coord.get(tenant, id);
+            if (!current) {
+              json(res, 404, { ok: false, error: `unknown request ${id}` });
+              return;
             }
-            const { claim: neu, supersededId } = await ledger.correctClaim(tenant, id, statement, who, at, {
-              patch,
-              expectedSeq,
-            });
-            await auditConsole(db, tenant, who, 'console.correct', `claim:${id}`, at, `superseded_by=${neu.id}`);
-            const affectedRequests = (await coord.listPendingAffectedByClaim(tenant, supersededId)).map((r) => ({
-              id: r.id,
-              goal: r.goal,
-              state: r.state,
-              url: `/console/requests/${encodeURIComponent(r.id)}`,
-            }));
-            // Feed the eval spine. The CLAIM_CORRECTED audit row (target
-            // `oldId->newId`) is the spine's intake; a spine failure must not
-            // un-correct the claim, so this degrades to evalCaseId: null.
-            let evalCaseId: string | null = null;
+            // The approver is the authenticated identity — the body cannot
+            // name a human, so "approval theater" needs a compromised session.
             try {
-              const seqRow = (await db
-                .prepare(
-                  "SELECT seq FROM audit_log WHERE tenant = ? AND action = 'CLAIM_CORRECTED' AND target = ? ORDER BY seq DESC LIMIT 1",
-                )
-                .get(tenant, `${old.id}->${neu.id}`)) as { seq: number } | undefined;
-              if (seqRow) {
-                const kase = await proposeEvalFromCorrection(
-                  db,
-                  (cid) =>
-                    ledger.get(tenant, cid).then((c) => (c ? { subject: c.subject, statement: c.statement } : null)),
-                  tenant,
-                  Number(seqRow.seq),
-                  'overrides',
-                );
-                evalCaseId = kase.id;
+              const result = await db.transaction(async () => {
+                // PostgreSQL needs a row lock; SQLite's enclosing BEGIN IMMEDIATE
+                // already serializes competing reviewers and execution claims.
+                await db
+                  .prepare(
+                    `SELECT id FROM requests WHERE tenant = ? AND id = ?${db.engine === 'postgres' ? ' FOR UPDATE' : ''}`,
+                  )
+                  .get(tenant, id);
+                const request = await coord.get(tenant, id);
+                if (!request) throw new Error('Request no longer exists; refresh the review queue.');
+                const decisionId = `dec_console_${createHash('sha256')
+                  .update(JSON.stringify([tenant, id]))
+                  .digest('hex')}`;
+                // Strict FLOW-001 contract: an approval either lands a decision
+                // grounded in the request's cited evidence or nothing happens —
+                // a refused recordDecision throws inside this transaction and
+                // rolls the accept back with it. Duplicate submissions replay
+                // the original receipt without rewriting approver or evidence.
+                const existing =
+                  action === 'approve'
+                    ? ((await ledger.getDecision(tenant, decisionId)) ??
+                      (await ledger.getDecisionByRequest(tenant, id)))
+                    : null;
+                if (existing && request.state !== 'ADMITTED') {
+                  return {
+                    state: request.state,
+                    by: existing.approvedBy,
+                    decisionId: existing.id,
+                    decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
+                    latencySeconds: null,
+                    repeated: true,
+                  };
+                }
+                if (request.state !== 'ADMITTED')
+                  throw new Error(
+                    `Request is ${request.state}, not awaiting review. Refresh to see its current status.`,
+                  );
+                // FLOW-002: a decline on a stale page would refuse different
+                // content than reviewed — the explanation is preserved (409
+                // preservedDraft) and the reviewer resubmits after re-review.
+                if (action === 'decline') assertFreshReview(request, call.fields.requestUpdatedAt);
+                const executionSpec =
+                  action === 'approve' && !existing
+                    ? await validateApprovalBoundary(ledger, request, at, {
+                        expectedRequestUpdatedAt: call.fields.requestUpdatedAt,
+                        planFingerprint: call.fields.planFingerprint,
+                        assetVersion: call.fields.assetVersion,
+                        command: call.fields.command,
+                      })
+                    : null;
+                const decision =
+                  action === 'approve' && !existing && executionSpec
+                    ? await ledger.recordDecision({
+                        id: decisionId,
+                        tenant,
+                        goal: request.goal,
+                        // FLOW-002: frozen, versioned execution specification — not a
+                        // replacement instruction or unseen final deliverable.
+                        action: serializeExecutionSpec(executionSpec),
+                        actionClass: 'RECOMMEND',
+                        claimIds: request.claimRefs,
+                        decidedBy: who,
+                        approvedBy: who,
+                        scope: request.targetScope,
+                        autonomy: 'approval',
+                        requestId: id,
+                        now: at,
+                      })
+                    : null;
+                const next =
+                  action === 'approve'
+                    ? await coord.accept(tenant, id)
+                    : await coord.decline(tenant, id, call.fields.reason || `declined by ${who}`);
+                await recordReviewOutcome(db, tenant, {
+                  requestId: id,
+                  scope: request.targetScope,
+                  actionClass: 'RECOMMEND',
+                  approved: action === 'approve',
+                  reviewer: who,
+                  reason: action === 'decline' ? call.fields.reason : undefined,
+                  now: at,
+                });
+                await auditConsole(db, tenant, who, `console.${action}`, `request:${id}`, at);
+                let latencySeconds: number | null;
+                try {
+                  // Savepoint isolates optional telemetry failure on PostgreSQL.
+                  latencySeconds = await db.transaction(
+                    async () => (await coord.recordApprovalLatency(tenant, id, action, who, at)).seconds,
+                  );
+                } catch {
+                  latencySeconds = null;
+                }
+                const receipt = decision ?? existing;
+                return {
+                  state: next.state,
+                  by: who,
+                  latencySeconds,
+                  repeated: false,
+                  ...(receipt
+                    ? {
+                        decisionId: receipt.id,
+                        decisionUrl: `/console/decisions/${encodeURIComponent(receipt.id)}`,
+                        ...(executionSpec
+                          ? { specFingerprint: executionSpec.fingerprint, requestUpdatedAt: request.updatedAt }
+                          : {}),
+                      }
+                    : {}),
+                };
+              });
+              if (action === 'approve' && result.state === 'ACCEPTED' && !result.repeated) {
+                await recordFirstReviewAt(db, tenant, at);
               }
-            } catch {
-              evalCaseId = null;
-            }
-            json(res, 200, {
-              ok: true,
-              supersedes: old.id,
-              supersededBy: neu.id,
-              diff: { before: old.statement, after: neu.statement },
-              affectedRequests,
-              evalCaseId,
-              ...(keyAuth ? { by: who, ...identity } : {}),
-            });
-          } catch (e) {
-            if (e instanceof LedgerError && e.code === 'VERSION_CONFLICT') {
+              if (prefersHtml(req)) {
+                return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
+              }
+              json(res, 200, { ok: action === 'approve', id, ...result, ...identity });
+            } catch (e) {
+              const code = e instanceof ExecutionSpecError ? e.code : undefined;
               json(res, 409, {
                 ok: false,
-                conflict: true,
-                error: e.message,
-                ...(e.detail ?? {}),
+                error: (e as Error).message,
+                ...(code ? { code, ...(e instanceof ExecutionSpecError ? e.detail : {}) } : {}),
+                // The reviewer's explanation survives a stale rejection: the
+                // client restores it so re-review resubmits the same rationale.
+                ...(action === 'decline' && typeof call.fields.reason === 'string' && call.fields.reason.trim() !== ''
+                  ? { preservedDraft: { reason: call.fields.reason } }
+                  : {}),
+              });
+            }
+            return;
+          }
+
+          const deliverableArtifact = path.match(/^\/api\/deliverables\/([^/]+)\/artifact$/);
+          if (method === 'GET' && deliverableArtifact) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            let versionId: string;
+            try {
+              versionId = decodeURIComponent(deliverableArtifact[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed deliverable version id' });
+              return;
+            }
+            const version = await loadDeliverableVersion(db, tenant, versionId);
+            if (!version) {
+              json(res, 404, { ok: false, error: 'deliverable version not found' });
+              return;
+            }
+            const body = readDeliverableArtifact(version, artifactDir);
+            res.writeHead(200, {
+              'content-type': 'text/plain; charset=utf-8',
+              'content-disposition': `attachment; filename="${version.deliverableId}-v${version.version}.txt"`,
+              'cache-control': 'no-store',
+            });
+            res.end(body);
+            return;
+          }
+
+          const deliverableApprove = path.match(/^\/api\/deliverables\/([^/]+)\/approve$/);
+          if (method === 'POST' && deliverableApprove) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (!atLeast(auth.user.role, approverMin)) {
+              json(res, 403, { ok: false, error: `approving requires ${approverMin}` });
+              return;
+            }
+            if (activationDenied(res, auth, true)) return;
+            if (!keyAuth && !authorized(req))
+              return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            let versionId: string;
+            try {
+              versionId = decodeURIComponent(deliverableApprove[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed deliverable version id' });
+              return;
+            }
+            const fingerprint = String(call.fields.fingerprint ?? '').trim();
+            if (!fingerprint) {
+              json(res, 400, { ok: false, error: 'fingerprint required — refresh the deliverable preview' });
+              return;
+            }
+            const who = by(auth.user);
+            const identity = keyAuth ? await verifyingKey(req, versionId, 'approve-deliverable', who) : {};
+            if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+            const version = await loadDeliverableVersion(db, tenant, versionId);
+            if (!version) {
+              json(res, 404, { ok: false, error: 'deliverable version not found' });
+              return;
+            }
+            if (version.externalPublish) {
+              const confirmText = String(call.fields.confirmText ?? '').trim();
+              if (confirmText !== 'PUBLISH') {
+                json(res, 400, {
+                  ok: false,
+                  error:
+                    'type PUBLISH to confirm you are authorizing an external publication — the console records the authorization and publishes nothing itself',
+                });
+                return;
+              }
+            }
+            const request = await coord.get(tenant, version.requestId);
+            try {
+              const result = await db.transaction(async () => {
+                const approved = await approveDeliverableVersion(db, ledger, {
+                  tenant,
+                  versionId,
+                  fingerprint,
+                  approvedBy: who,
+                  now: at,
+                  scope: request?.targetScope ?? 'product',
+                  onBehalfOf: request?.onBehalfOf ?? who,
+                  goal: request?.goal,
+                });
+                await auditConsole(db, tenant, who, 'console.approve-deliverable', `deliverable:${versionId}`, at);
+                return approved;
+              });
+              if (prefersHtml(req)) {
+                return redirect(res, `/console/requests/${encodeURIComponent(version.requestId)}`);
+              }
+              json(res, 200, {
+                ok: true,
+                decisionId: result.decisionId,
+                decisionUrl: `/console/decisions/${encodeURIComponent(result.decisionId)}`,
+                status: result.version.status,
+                ...identity,
+              });
+            } catch (e) {
+              json(res, 409, { ok: false, error: (e as Error).message.replace(/^\[wedge:[^\]]+\]\s*/, '') });
+            }
+            return;
+          }
+
+          const deliverableChanges = path.match(/^\/api\/deliverables\/([^/]+)\/request-changes$/);
+          if (method === 'POST' && deliverableChanges) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (!atLeast(auth.user.role, approverMin)) {
+              json(res, 403, { ok: false, error: `review requires ${approverMin}` });
+              return;
+            }
+            if (activationDenied(res, auth, true)) return;
+            if (!keyAuth && !authorized(req))
+              return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const notes = String(call.fields.notes ?? '').trim();
+            if (!notes) {
+              json(res, 400, { ok: false, error: 'revision notes are required' });
+              return;
+            }
+            let versionId: string;
+            try {
+              versionId = decodeURIComponent(deliverableChanges[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed deliverable version id' });
+              return;
+            }
+            const who = by(auth.user);
+            const identity = keyAuth ? await verifyingKey(req, versionId, 'request-changes', who) : {};
+            if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+            try {
+              const revised = await requestDeliverableRevision(db, tenant, versionId, notes, who, at);
+              await auditConsole(db, tenant, who, 'console.request-changes', `deliverable:${versionId}`, at);
+              if (prefersHtml(req)) {
+                return redirect(res, `/console/requests/${encodeURIComponent(revised.requestId)}`);
+              }
+              json(res, 200, { ok: true, status: revised.status, revisionNotes: revised.revisionNotes, ...identity });
+            } catch (e) {
+              json(res, 409, { ok: false, error: (e as Error).message.replace(/^\[wedge:[^\]]+\]\s*/, '') });
+            }
+            return;
+          }
+
+          // /api/approval-latency — routes/observability.ts (capability: session).
+
+          // Live event stream (SSE): replays + tails audit_log for Mission Control.
+          if (method === 'GET' && path === '/api/events') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            const { handleEventStream } = await import('./events.ts');
+            handleEventStream(req, res, db, tenant);
+            return;
+          }
+          if (method === 'GET' && path === '/api/metrics') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            // FLOW-023: readiness is the authenticated worker/integration
+            // status. `database` is required; `worker` is required once a
+            // worker has ever checked in (a silent worker is an outage) but
+            // reports unconfigured-optional before the first heartbeat so
+            // fresh installs stay green; `integrations` folds every known
+            // collector in — unconfigured-optional when no source was ever
+            // set up, failing when a configured source is broken.
+            const readiness = await checkReadiness(
+              [
+                {
+                  name: 'database',
+                  check: async () => {
+                    await db.prepare('SELECT 1 AS ok').get();
+                    return { ok: true as const, detail: `${db.engine} reachable` };
+                  },
+                },
+                {
+                  name: 'worker',
+                  // Optional until the first heartbeat: a fresh install with no
+                  // worker deployed stays green; a stale heartbeat still fails.
+                  optional: true,
+                  check: async () => workerReadiness(db, tenant, { now: at }),
+                },
+                {
+                  name: 'integrations',
+                  optional: true,
+                  check: async () => {
+                    const config = await loadActivationConfig(db, tenant);
+                    const collectors = new Set(await listKnownCollectors(db, tenant));
+                    if (config) collectors.add(collectorName(config.sourcePath));
+                    if (collectors.size === 0) return { ok: false, unconfigured: true, detail: 'no source configured' };
+                    const parts: string[] = [];
+                    let failing: string | null = null;
+                    for (const collector of collectors) {
+                      const health = await getIntegrationHealth(db, tenant, collector, {
+                        configured: true,
+                        now: at,
+                      });
+                      const projected = integrationReadinessState(health);
+                      parts.push(projected.detail);
+                      if (!projected.ok && projected.unconfigured !== true && !failing) failing = collector;
+                    }
+                    if (failing) return { ok: false, detail: parts.join(' | ') };
+                    return { ok: true as const, detail: parts.join(' | ') };
+                  },
+                },
+              ],
+              { now: at },
+            );
+            json(res, 200, { ...metrics, uptimeMs: Date.now() - metrics.startedAt, readiness });
+            return;
+          }
+
+          // /api/cost-per-signal — routes/observability.ts (capability: session).
+
+          // Override capture (TODO 2.3): a human edits a claim → correctClaim
+          // supersedes the old row and audits the diff; then the eval spine
+          // converts the audit row into a regression case, so every override
+          // teaches the machine exactly what it got wrong. The corrector is the
+          // SESSION identity — the body's `by` is ignored here, as in approvals.
+          const fix = path.match(/^\/api\/claims\/([^/]+)\/correct$/);
+          if (method === 'POST' && fix) {
+            const auth = await sessionOf();
+            if (!auth) {
+              // FLOW-010: expiry during a correction preserves the non-secret
+              // draft (statement/reason, never passwords/secrets) so the human
+              // can re-submit after signing in — approvals are never replayed.
+              let draft: Record<string, string>;
+              try {
+                draft = expiredDraftCarry((await parseCall(req)).fields);
+              } catch {
+                draft = {};
+              }
+              return json(res, 401, sessionExpiredWithDraft(returnPath(), draft));
+            }
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            if (!keyAuth && !authorized(req))
+              return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const statement = (call.fields.statement ?? '').trim();
+            if (!statement) {
+              json(res, 400, {
+                ok: false,
+                error: 'a correction needs the corrected statement — pass { statement }',
               });
               return;
             }
-            json(res, 409, { ok: false, error: (e as Error).message });
-          }
-          return;
-        }
-
-        // Human curation: promote a CANDIDATE claim to VERIFIED so cited
-        // work can proceed to approval. Only roles that may approve may
-        // verify — verification is what makes evidence approvable.
-        const verify = path.match(/^\/api\/claims\/([^/]+)\/verify$/);
-        if (method === 'POST' && verify) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          if (!keyAuth && !authorized(req))
-            return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          if (!atLeast(auth.user.role, approverMin))
-            return json(res, 403, {
-              ok: false,
-              error: `verifying requires ${approverMin} (you are ${auth.user.role})`,
-            });
-          let id: string;
-          try {
-            id = decodeURIComponent(verify[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed claim id' });
-            return;
-          }
-          const who = by(auth.user);
-          const identity = keyAuth ? await verifyingKey(req, id, 'verify', who) : {};
-          if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
-          try {
-            const claim = await ledger.verifyClaim(tenant, id, who, at);
-            await auditConsole(db, tenant, who, 'console.verify', `claim:${id}`, at);
-            json(res, 200, {
-              ok: true,
-              id: claim.id,
-              status: claim.status,
-              ...(keyAuth ? { by: who, ...identity } : {}),
-            });
-          } catch (e) {
-            if (e instanceof LedgerError && e.code === 'MISSING_CLAIM') {
-              json(res, 404, { ok: false, error: (e as Error).message });
+            let id: string;
+            try {
+              id = decodeURIComponent(fix[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed claim id' });
               return;
             }
-            json(res, 409, { ok: false, error: (e as Error).message });
+            const who = by(auth.user);
+            const identity = keyAuth ? await verifyingKey(req, id, 'correct', who) : {};
+            if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+            try {
+              const old = await ledger.get(tenant, id);
+              if (!old) {
+                json(res, 404, { ok: false, error: `unknown claim ${id}` });
+                return;
+              }
+              const rawSeq = call.json && 'expectedSeq' in call.json ? call.json.expectedSeq : call.fields.expectedSeq;
+              const expectedSeq = rawSeq === undefined || rawSeq === null || rawSeq === '' ? undefined : Number(rawSeq);
+              if (expectedSeq !== undefined && !Number.isInteger(expectedSeq)) {
+                json(res, 400, { ok: false, error: 'expectedSeq must be an integer claim version' });
+                return;
+              }
+              const rawVal = call.json && 'value' in call.json ? call.json.value : call.fields.value;
+              let patch: { value?: number | null; unit?: string | null; confidence?: number } | undefined;
+              if (rawVal !== undefined) {
+                if (rawVal !== null && typeof rawVal !== 'string' && typeof rawVal !== 'number')
+                  return json(res, 400, { ok: false, error: 'value must be a finite number or null' });
+                const numVal = rawVal === '' || rawVal === null ? null : Number(rawVal);
+                if (numVal !== null && !Number.isFinite(numVal)) {
+                  json(res, 400, { ok: false, error: 'value must be a finite number or null' });
+                  return;
+                }
+                const rawUnit = call.json && 'unit' in call.json ? call.json.unit : call.fields.unit;
+                const rawConf = call.json && 'confidence' in call.json ? call.json.confidence : call.fields.confidence;
+                let unitPatch: string | null | undefined;
+                if (rawUnit === null) {
+                  unitPatch = null;
+                } else if (rawUnit !== undefined) {
+                  unitPatch = String(rawUnit);
+                }
+                patch = {
+                  value: numVal,
+                  unit: unitPatch,
+                  confidence: rawConf !== undefined ? Number(rawConf) : undefined,
+                };
+              }
+              const { claim: neu, supersededId } = await ledger.correctClaim(tenant, id, statement, who, at, {
+                patch,
+                expectedSeq,
+              });
+              await auditConsole(db, tenant, who, 'console.correct', `claim:${id}`, at, `superseded_by=${neu.id}`);
+              const affectedRequests = (await coord.listPendingAffectedByClaim(tenant, supersededId)).map((r) => ({
+                id: r.id,
+                goal: r.goal,
+                state: r.state,
+                url: `/console/requests/${encodeURIComponent(r.id)}`,
+              }));
+              // Feed the eval spine. The CLAIM_CORRECTED audit row (target
+              // `oldId->newId`) is the spine's intake; a spine failure must not
+              // un-correct the claim, so this degrades to evalCaseId: null.
+              let evalCaseId: string | null = null;
+              try {
+                const seqRow = (await db
+                  .prepare(
+                    "SELECT seq FROM audit_log WHERE tenant = ? AND action = 'CLAIM_CORRECTED' AND target = ? ORDER BY seq DESC LIMIT 1",
+                  )
+                  .get(tenant, `${old.id}->${neu.id}`)) as { seq: number } | undefined;
+                if (seqRow) {
+                  const kase = await proposeEvalFromCorrection(
+                    db,
+                    (cid) =>
+                      ledger.get(tenant, cid).then((c) => (c ? { subject: c.subject, statement: c.statement } : null)),
+                    tenant,
+                    Number(seqRow.seq),
+                    'overrides',
+                  );
+                  evalCaseId = kase.id;
+                }
+              } catch {
+                evalCaseId = null;
+              }
+              json(res, 200, {
+                ok: true,
+                supersedes: old.id,
+                supersededBy: neu.id,
+                diff: { before: old.statement, after: neu.statement },
+                affectedRequests,
+                evalCaseId,
+                ...(keyAuth ? { by: who, ...identity } : {}),
+              });
+            } catch (e) {
+              if (e instanceof LedgerError && e.code === 'VERSION_CONFLICT') {
+                json(res, 409, {
+                  ok: false,
+                  conflict: true,
+                  error: e.message,
+                  ...(e.detail ?? {}),
+                });
+                return;
+              }
+              json(res, 409, { ok: false, error: (e as Error).message });
+            }
+            return;
           }
-          return;
-        }
 
-        // FLOW-003: rebind pending request evidence to current claim replacements.
-        const refresh = path.match(/^\/api\/requests\/([^/]+)\/refresh-evidence$/);
-        if (method === 'POST' && refresh) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
+          // Human curation: promote a CANDIDATE claim to VERIFIED so cited
+          // work can proceed to approval. Only roles that may approve may
+          // verify — verification is what makes evidence approvable.
+          const verify = path.match(/^\/api\/claims\/([^/]+)\/verify$/);
+          if (method === 'POST' && verify) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            if (!keyAuth && !authorized(req))
+              return json(res, 401, { ok: false, error: 'operator secret required (x-vital-operator)' });
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            if (!atLeast(auth.user.role, approverMin))
+              return json(res, 403, {
+                ok: false,
+                error: `verifying requires ${approverMin} (you are ${auth.user.role})`,
+              });
+            let id: string;
+            try {
+              id = decodeURIComponent(verify[1]!);
+            } catch {
+              json(res, 400, { ok: false, error: 'malformed claim id' });
+              return;
+            }
+            const who = by(auth.user);
+            const identity = keyAuth ? await verifyingKey(req, id, 'verify', who) : {};
+            if (!identity) return json(res, 401, { ok: false, error: 'operator signature invalid' });
+            try {
+              const claim = await ledger.verifyClaim(tenant, id, who, at);
+              await auditConsole(db, tenant, who, 'console.verify', `claim:${id}`, at);
+              json(res, 200, {
+                ok: true,
+                id: claim.id,
+                status: claim.status,
+                ...(keyAuth ? { by: who, ...identity } : {}),
+              });
+            } catch (e) {
+              if (e instanceof LedgerError && e.code === 'MISSING_CLAIM') {
+                json(res, 404, { ok: false, error: (e as Error).message });
+                return;
+              }
+              json(res, 409, { ok: false, error: (e as Error).message });
+            }
             return;
           }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          let requestId: string;
-          try {
-            requestId = decodeURIComponent(refresh[1]!);
-          } catch {
-            json(res, 400, { ok: false, error: 'malformed request id' });
-            return;
-          }
-          const who = by(auth.user);
-          try {
-            const next = await coord.refreshEvidence(tenant, requestId, async (claimId) => {
-              const cur = await ledger.currentReplacement(tenant, claimId);
-              return cur && cur.id !== claimId ? cur.id : null;
-            });
-            await auditConsole(db, tenant, who, 'console.refresh_evidence', `request:${requestId}`, at);
-            json(res, 200, {
-              ok: true,
-              id: requestId,
-              state: next.state,
-              claimRefs: next.claimRefs,
-              chainClaimIds: next.chainClaimIds,
-            });
-          } catch (e) {
-            const code = (e as { code?: string }).code;
-            json(res, code === 'NOT_FOUND' ? 404 : 409, { ok: false, error: (e as Error).message });
-          }
-          return;
-        }
 
-        // FLOW-024: permissioned, read-only ledger export with a manifest.
-        // Snapshot is available to any activated member; the full
-        // evidence package requires admin or owner. Nothing is written.
-        const ledgerExport = path === '/api/ledger/export' && method === 'GET';
-        if (ledgerExport) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const kind = url.searchParams.get('kind') ?? 'snapshot';
-          if (kind !== 'snapshot' && kind !== 'evidence-package') {
-            json(res, 400, {
-              ok: false,
-              error: 'unknown export kind — snapshot or evidence-package',
-            });
-            return;
-          }
-          if (kind === 'evidence-package' && !atLeast(auth.user.role, 'admin')) {
-            json(res, 403, { ok: false, error: 'evidence-package export requires admin or owner' });
-            return;
-          }
-          const streamParam = url.searchParams.get('stream');
-          const isStream = streamParam === 'true' || streamParam === '1';
-          if (isStream) {
+          // FLOW-003: rebind pending request evidence to current claim replacements.
+          // POST /api/requests/:id/refresh-evidence — routes/requests.ts
+          // (capability: session, surface: api, body: csrf, activation required).
+
+          // FLOW-024: permissioned, read-only ledger export with a manifest.
+          // Snapshot is available to any activated member; the full
+          // evidence package requires admin or owner. Nothing is written.
+          const ledgerExport = path === '/api/ledger/export' && method === 'GET';
+          if (ledgerExport) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const kind = url.searchParams.get('kind') ?? 'snapshot';
+            if (kind !== 'snapshot' && kind !== 'evidence-package') {
+              json(res, 400, {
+                ok: false,
+                error: 'unknown export kind — snapshot or evidence-package',
+              });
+              return;
+            }
+            if (kind === 'evidence-package' && !atLeast(auth.user.role, 'admin')) {
+              json(res, 403, { ok: false, error: 'evidence-package export requires admin or owner' });
+              return;
+            }
+            const streamParam = url.searchParams.get('stream');
+            const isStream = streamParam === 'true' || streamParam === '1';
+            if (isStream) {
+              res.writeHead(200, {
+                'content-type': 'application/json; charset=utf-8',
+                'content-disposition': `attachment; filename="vital-ledger-${tenant}-${kind}.json"`,
+                'cache-control': 'no-store',
+                'transfer-encoding': 'chunked',
+              });
+              res.write('{"ok":true,"export":');
+              const { manifest } = await streamExportLedger(
+                db,
+                tenant,
+                (chunk) => {
+                  res.write(chunk);
+                },
+                { now: at, kind: kind as ExportKind },
+              );
+              res.write(',"manifest":' + JSON.stringify(manifest) + '}');
+              res.end();
+              return;
+            }
+            const { export: data, manifest } = await exportLedgerWithManifest(db, tenant, kind as ExportKind, at);
             res.writeHead(200, {
               'content-type': 'application/json; charset=utf-8',
               'content-disposition': `attachment; filename="vital-ledger-${tenant}-${kind}.json"`,
               'cache-control': 'no-store',
-              'transfer-encoding': 'chunked',
             });
-            res.write('{"ok":true,"export":');
-            const { manifest } = await streamExportLedger(
+            res.end(JSON.stringify({ ok: true, manifest, export: data }));
+            return;
+          }
+
+          // FLOW-004: browser receipt verification for erased tenants.
+          // Admin or owner only: reads the surviving erased:<slug> receipt
+          // (deleted/retained/deferred/failed) plus the export-file check.
+          if (method === 'GET' && path === '/api/erasure/receipt') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            if (!atLeast(auth.user.role, 'admin')) {
+              json(res, 403, { ok: false, error: 'erasure receipt verification requires admin or owner' });
+              return;
+            }
+            const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase();
+            if (!slug) {
+              json(res, 400, { ok: false, error: 'slug query parameter is required' });
+              return;
+            }
+            const verification = await verifyErasureReceipt(db, slug);
+            if (!verification.found) {
+              json(res, 404, { ok: false, error: `no erasure receipt for "${slug}"` });
+              return;
+            }
+            json(res, 200, { ok: true, ...verification });
+            return;
+          }
+
+          // FLOW-024: permissioned, paginated, tenant-isolated audit history.
+          // Rows carry links to reviewed evidence, authorization, execution
+          // receipts, and outcomes where the row references them.
+          const auditHistory = path === '/api/audit' && method === 'GET';
+          if (auditHistory) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const q = url.searchParams;
+            const query: AuditQuery = {};
+            const actor = q.get('actor');
+            const action = q.get('action');
+            const from = q.get('from');
+            const to = q.get('to');
+            const requestId = q.get('request');
+            const decisionId = q.get('decision');
+            const limit = q.get('limit');
+            const offset = q.get('offset');
+            if (actor !== null) query.actor = actor;
+            if (action !== null) query.action = action;
+            if (from !== null) query.from = from;
+            if (to !== null) query.to = to;
+            if (requestId !== null) query.requestId = requestId;
+            if (decisionId !== null) query.decisionId = decisionId;
+            if (limit !== null) query.limit = Number(limit);
+            if (offset !== null) query.offset = Number(offset);
+            const page = await queryAudit(db, tenant, query);
+            json(res, 200, {
+              ok: true,
+              ...page,
+              rows: page.rows.map((row) => ({ ...row, links: auditLinks(row) })),
+            });
+            return;
+          }
+
+          // F23: Authenticated learning review administration — labeling queue
+          if (method === 'GET' && path === '/api/learning/labeling-queue') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const rawLimit = url.searchParams.get('limit');
+            const limit = rawLimit ? Math.min(Math.max(1, Number(rawLimit)), 200) : 50;
+            const queue = await new CognitiveRouter(db).labelingQueue(tenant, limit);
+            json(res, 200, { ok: true, queue });
+            return;
+          }
+
+          // F23: Authenticated learning review administration — label decision
+          if (method === 'POST' && path === '/api/learning/label') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const rawId = call.json && 'decisionId' in call.json ? call.json.decisionId : call.fields.decisionId;
+            const decisionId = Number(rawId);
+            if (!Number.isInteger(decisionId) || decisionId <= 0) {
+              json(res, 400, { ok: false, error: 'decisionId must be a positive integer' });
+              return;
+            }
+            const rawTier = call.json && 'correctTier' in call.json ? call.json.correctTier : call.fields.correctTier;
+            const validTiers = ['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'];
+            if (typeof rawTier !== 'string' || !validTiers.includes(rawTier)) {
+              json(res, 400, { ok: false, error: `correctTier must be one of: ${validTiers.join(', ')}` });
+              return;
+            }
+            const reviewer = by(auth.user);
+            try {
+              await new CognitiveRouter(db).label(tenant, decisionId, rawTier as any, reviewer);
+              await auditConsole(
+                db,
+                tenant,
+                reviewer,
+                'console.label_decision',
+                String(decisionId),
+                at,
+                `correct_tier=${rawTier}`,
+              );
+              json(res, 200, { ok: true, decisionId, correctTier: rawTier, reviewer });
+            } catch (e) {
+              json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            return;
+          }
+
+          // F23: Authenticated skill card administration — list cards
+          if (method === 'GET' && path === '/api/learning/cards') {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const state = url.searchParams.get('state') as any;
+            const intent = url.searchParams.get('intent') ?? undefined;
+            const cards = await comp.list(tenant, { state: state ?? undefined, intent });
+            json(res, 200, { ok: true, cards });
+            return;
+          }
+
+          // F23: Authenticated skill card administration — get card detail with tests and revisions
+          const cardMatch = path.match(/^\/api\/learning\/cards\/([^/]+)$/);
+          if (method === 'GET' && cardMatch) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const cardId = decodeURIComponent(cardMatch[1]!);
+            const card = await comp.get(tenant, cardId);
+            if (!card) {
+              json(res, 404, { ok: false, error: `skill card ${cardId} not found` });
+              return;
+            }
+            const tests = await comp.transferResults(tenant, cardId);
+            const revisions = await comp.cardRevisions(tenant, cardId);
+            json(res, 200, { ok: true, card, tests, revisions });
+            return;
+          }
+
+          // F23: Authenticated skill card administration — advance card
+          // FLOW-025: evaluation evidence for one card — trust gaps, eval
+          // suite reference, recent runs, and the evidence-only disclaimer.
+          // Read-only (describeCardReadOnly): linking evidence never promotes.
+          // NOTE: registered before the generic card-detail route below, which
+          // would otherwise swallow the /evidence suffix as a card id.
+          const cardEvidenceMatch = path.match(/^\/api\/learning\/cards\/([^/]+)\/evidence$/);
+          if (method === 'GET' && cardEvidenceMatch) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            const cardId = decodeURIComponent(cardEvidenceMatch[1]!);
+            try {
+              const evidence = await cardEvaluationEvidence(db, comp, tenant, cardId);
+              json(res, 200, { ok: true, ...evidence });
+            } catch (e) {
+              json(res, 404, { ok: false, error: (e as Error).message });
+            }
+            return;
+          }
+
+          const advanceMatch = path.match(/^\/api\/learning\/cards\/([^/]+)\/advance$/);
+          if (method === 'POST' && advanceMatch) {
+            const auth = await sessionOf();
+            if (!auth) return sessionExpiredApi();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (activationDenied(res, auth, true)) return;
+            if (!atLeast(auth.user.role, 'admin')) {
+              json(res, 403, { ok: false, error: 'card administration requires admin or owner role' });
+              return;
+            }
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              bodyError(res, e);
+              return;
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const cardId = decodeURIComponent(advanceMatch[1]!);
+            const rawTo = call.json && 'to' in call.json ? call.json.to : call.fields.to;
+            if (typeof rawTo !== 'string' || !rawTo) {
+              json(res, 400, { ok: false, error: 'target state (to) is required' });
+              return;
+            }
+            const evidence = (
+              call.json && 'evidence' in call.json && typeof call.json.evidence === 'object' ? call.json.evidence : {}
+            ) as any;
+            try {
+              const result = await comp.attemptAdvance(tenant, cardId, rawTo as any, evidence);
+              if (result.ok) {
+                await auditConsole(db, tenant, by(auth.user), 'console.advance_card', cardId, at, `to=${rawTo}`);
+              }
+              json(res, result.ok ? 200 : 422, {
+                ok: result.ok,
+                card: result.card,
+                reasons: result.reasons,
+              });
+            } catch (e) {
+              json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            return;
+          }
+
+          // ------------------------------------------------------------ Buzz Webhook & APIs
+          //
+          // SECURITY: every route under /api/buzz is authenticated. These routes
+          // previously had no gate at all, which meant an anonymous caller could
+          // read tenant ledger content (`/canvas/:room`), rewrite room policy
+          // (`/rooms/configure`), engage the scope kill switch
+          // (`/commands` -> `setKill`) and approve a pending human-approval
+          // request without a session or token (`/webhook?action=approve`).
+          //
+          // Two distinct callers are served, and they need different proof:
+          //  - A human in the console: session + CSRF + admin role.
+          //  - Buzz relay/room tooling: an HMAC-signed review token over the
+          //    exact (tenant, request, action) — and only on the webhook path.
+          //    A token minted to approve request X never authorizes halt,
+          //    configure, or command routes. There is no tokenless path.
+          let buzzAdminUser: User | null = null;
+          // The request body can only be read once. Parsing here and re-using the
+          // result is what keeps the POST routes below from blocking forever on a
+          // stream that has already ended.
+          let buzzCall: Call | null = null;
+          if (path === '/api/buzz' || path.startsWith('/api/buzz/')) {
+            buzzCall = method === 'POST' ? await parseCall(req).catch(() => null) : null;
+            const providedToken =
+              method === 'POST'
+                ? (buzzCall?.fields.token ?? (buzzCall?.json?.token as string | undefined))
+                : url.searchParams.get('token');
+            const buzzAuth = await sessionOf();
+            const isAdmin =
+              buzzAuth !== null && buzzAuth.user.tenant === tenant && atLeast(buzzAuth.user.role, 'admin');
+            const signedTokenOk =
+              path === '/api/buzz/webhook' &&
+              typeof providedToken === 'string' &&
+              providedToken.length > 0 &&
+              reviewTokenValid(providedToken, tenant);
+            if (!isAdmin && !signedTokenOk) {
+              return json(res, 401, {
+                ok: false,
+                error: buzzAuth
+                  ? 'admin role required for Buzz room administration'
+                  : 'authentication required (session cookie or a signed review token)',
+              });
+            }
+            // A session-based mutation still needs CSRF: the session alone is not
+            // proof the request came from our own UI.
+            if (
+              isAdmin &&
+              method === 'POST' &&
+              buzzCall &&
+              !signedTokenOk &&
+              !csrfOk(buzzAuth!.session, buzzCall.csrf)
+            ) {
+              return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            }
+            if (isAdmin) {
+              buzzAdminUser = buzzAuth!.user;
+            }
+          }
+          if (path === '/api/buzz/webhook' && (method === 'POST' || method === 'GET')) {
+            let action = url.searchParams.get('action');
+            let token = url.searchParams.get('token');
+            let requestId = url.searchParams.get('req');
+            let forkedParams: any = {};
+            // Token-only approvals are attributed distinctly — a token proves
+            // the link was minted, never which human clicked it. Admin sessions
+            // attribute the admin instead.
+            let actor = buzzAdminUser ? by(buzzAdminUser) : 'human:buzz-review-token';
+
+            if (method === 'POST' && buzzCall) {
+              action = (buzzCall.fields.action ?? buzzCall.json?.action ?? token ?? action) as string;
+              token = (buzzCall.fields.token ?? buzzCall.json?.token ?? token) as string;
+              requestId = (buzzCall.fields.requestId ?? buzzCall.json?.requestId ?? requestId) as string;
+              if (buzzCall.json?.forkedParams) forkedParams = buzzCall.json.forkedParams;
+              if (buzzCall.fields.actor && buzzAdminUser) actor = by(buzzAdminUser);
+            }
+
+            // A signed token proves exactly one thing: someone legitimately minted
+            // this (tenant, request, action). It never supplies an actor identity.
+            // Tokens additionally bind the reviewed request version and an expiry:
+            // legacy tokens without them are refused outright.
+            let tokenUpdatedAt: string | undefined;
+            if (token) {
+              const secret = reviewSecretFromEnv();
+              const verified = secret ? verifyReviewToken(token, secret) : { valid: false as const };
+              if (verified.valid && verified.tenant === tenant) {
+                action = verified.action ?? action;
+                requestId = verified.requestId ?? requestId;
+                const exp = (verified as { expiresAt?: string }).expiresAt;
+                if (!exp || !Number.isFinite(Date.parse(exp)) || Date.parse(exp) <= Date.parse(at)) {
+                  return json(res, 401, {
+                    ok: false,
+                    error:
+                      'review token expired or is a legacy token without expiry — open the request review page and approve there',
+                    code: 'TOKEN_EXPIRED',
+                  });
+                }
+                tokenUpdatedAt = (verified as { requestUpdatedAt?: string }).requestUpdatedAt || undefined;
+              } else if (!buzzAdminUser) {
+                return json(res, 401, { ok: false, error: 'invalid or expired review token' });
+              }
+            }
+
+            if (!requestId) {
+              return json(res, 400, { ok: false, error: 'missing requestId or valid token' });
+            }
+
+            // GET is a confirmation step, never a mutation: a URL that approves
+            // on fetch is prefetchable, CSRF-able and gets executed by link
+            // scanners. A human (or Buzz) confirms with the form below.
+            if (method === 'GET' && (action === 'approve' || action === 'decline')) {
+              const verb = action === 'approve' ? 'Approve' : 'Decline';
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                themeDocument(
+                  `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${verb} request — Vital</title>${themeHead()}</head><body style="padding:0"><main id="main" style="max-width:560px;margin:0 auto;padding:40px 20px 64px"><div class="utility-bar" style="display:flex;justify-content:flex-end;margin-bottom:18px">${themeToggleButton()}</div><div class="card" style="padding:26px 28px"><span class="v-badge v-badge-warn"><span class="dot"></span>Human decision</span><h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:12px 0 8px;color:var(--v-ink)">${verb} request <code>${esc(requestId)}</code>?</h1><p class="sub" style="color:var(--v-muted);font-size:13.5px;line-height:1.6;margin:0 0 20px">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook" style="display:grid;gap:12px;max-width:320px"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" class="v-btn ${action === 'decline' ? 'v-btn-danger' : 'v-btn-primary'}">${verb} request</button></form><p style="margin:20px 0 0"><a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Return to Mission Control</a></p></div></main></body></html>`,
+                ),
+              );
+              return;
+            }
+            if (action === 'approve') {
+              try {
+                const result = await db.transaction(async () => {
+                  await db
+                    .prepare(
+                      `SELECT id FROM requests WHERE tenant = ? AND id = ?${db.engine === 'postgres' ? ' FOR UPDATE' : ''}`,
+                    )
+                    .get(tenant, requestId);
+                  const request = await coord.get(tenant, requestId);
+                  if (!request) throw new Error(`unknown request ${requestId}`);
+                  // Tenant-bound full-hash decision id with a buzz prefix, so a
+                  // console decision and a buzz decision for one request never
+                  // collide and replays return the original receipt.
+                  const decisionId = `dec_buzz_${createHash('sha256')
+                    .update(JSON.stringify([tenant, requestId]))
+                    .digest('hex')}`;
+                  const existing =
+                    (await ledger.getDecision(tenant, decisionId)) ??
+                    (await ledger.getDecisionByRequest(tenant, requestId));
+                  if (existing && request.state !== 'ADMITTED') {
+                    return {
+                      state: request.state,
+                      by: existing.approvedBy,
+                      decisionId: existing.id,
+                      decisionUrl: `/console/decisions/${encodeURIComponent(existing.id)}`,
+                      latencySeconds: null,
+                      repeated: true as boolean,
+                      specFingerprint: null as string | null,
+                      requestUpdatedAt: request.updatedAt,
+                    };
+                  }
+                  if (request.state !== 'ADMITTED')
+                    throw new Error(
+                      `Request is ${request.state}, not awaiting review. Refresh to see its current status.`,
+                    );
+                  // The token must carry the reviewed version — approving blind
+                  // (no bound version) is exactly the TOCTOU this gate closes.
+                  if (!tokenUpdatedAt) {
+                    throw new ExecutionSpecError(
+                      'STALE_REVIEW',
+                      'this approval link carries no reviewed request version — open the request review page and approve there',
+                      { requiresReReview: true },
+                    );
+                  }
+                  assertFreshReview(request, tokenUpdatedAt);
+                  const executionSpec = await validateApprovalBoundary(ledger, request, at, {
+                    expectedRequestUpdatedAt: tokenUpdatedAt,
+                  });
+                  const decision = await ledger.recordDecision({
+                    id: decisionId,
+                    tenant,
+                    goal: request.goal,
+                    action: serializeExecutionSpec(executionSpec),
+                    actionClass: 'RECOMMEND',
+                    claimIds: request.claimRefs,
+                    decidedBy: actor,
+                    approvedBy: actor,
+                    scope: request.targetScope,
+                    autonomy: 'approval',
+                    requestId,
+                    now: at,
+                  });
+                  const next = await coord.accept(tenant, requestId);
+                  await recordReviewOutcome(db, tenant, {
+                    requestId,
+                    scope: request.targetScope,
+                    actionClass: 'RECOMMEND',
+                    approved: true,
+                    reviewer: actor,
+                    now: at,
+                  });
+                  await auditConsole(db, tenant, actor, 'buzz.approve', `request:${requestId}`, at);
+                  let latencySeconds: number | null;
+                  try {
+                    latencySeconds = await db.transaction(
+                      async () => (await coord.recordApprovalLatency(tenant, requestId, action, actor, at)).seconds,
+                    );
+                  } catch {
+                    latencySeconds = null;
+                  }
+                  return {
+                    state: next.state,
+                    by: actor,
+                    decisionId: decision.id,
+                    decisionUrl: `/console/decisions/${encodeURIComponent(decision.id)}`,
+                    latencySeconds,
+                    repeated: false as boolean,
+                    specFingerprint: executionSpec.fingerprint,
+                    requestUpdatedAt: request.updatedAt,
+                  };
+                });
+                if (result.state === 'ACCEPTED' && !result.repeated) {
+                  await recordFirstReviewAt(db, tenant, at);
+                }
+                return json(res, 200, { ok: true, action: 'approve', requestId, ...result });
+              } catch (e) {
+                const code = e instanceof ExecutionSpecError ? e.code : undefined;
+                if ((e as Error).message.startsWith('unknown request')) {
+                  return json(res, 404, { ok: false, error: (e as Error).message });
+                }
+                return json(res, 409, {
+                  ok: false,
+                  error: (e as Error).message,
+                  ...(code ? { code, ...(e instanceof ExecutionSpecError ? e.detail : {}) } : {}),
+                });
+              }
+            }
+
+            if (action === 'decline') {
+              try {
+                const current = await coord.get(tenant, requestId);
+                if (!current) return json(res, 404, { ok: false, error: `unknown request ${requestId}` });
+                // Declining a stale page refuses different content than reviewed.
+                if (tokenUpdatedAt) assertFreshReview(current, tokenUpdatedAt);
+                if (current.state === 'ADMITTED') {
+                  await coord.decline(tenant, requestId, 'Declined via Buzz review card');
+                  await recordReviewOutcome(db, tenant, {
+                    requestId,
+                    scope: current.targetScope,
+                    actionClass: 'RECOMMEND',
+                    approved: false,
+                    reviewer: actor,
+                    reason: 'Declined via Buzz review card',
+                    now: at,
+                  });
+                  await auditConsole(db, tenant, actor, 'buzz.decline', `request:${requestId}`, at);
+                }
+                return json(res, 200, { ok: true, action: 'decline', requestId, status: 'DECLINED' });
+              } catch (e) {
+                const code = e instanceof ExecutionSpecError ? e.code : undefined;
+                return json(res, 409, {
+                  ok: false,
+                  error: (e as Error).message,
+                  ...(code ? { code, ...(e instanceof ExecutionSpecError ? e.detail : {}) } : {}),
+                });
+              }
+            }
+
+            if (action === 'fork') {
+              try {
+                const engine = new TimeTravelForkEngine(db, ledger, coord);
+                const diff = await engine.forkRun(tenant, { requestId }, forkedParams);
+                await auditConsole(db, tenant, actor, 'buzz.fork', `request:${requestId}`, at);
+                return json(res, 200, { ok: true, action: 'fork', diff });
+              } catch (e) {
+                return json(res, 409, { ok: false, error: (e as Error).message });
+              }
+            }
+
+            return json(res, 400, { ok: false, error: `unsupported action "${action}"` });
+          }
+
+          // GET /api/buzz/rooms: list all 12 rooms with config, health status and live gas gauge
+          if (path === '/api/buzz/rooms' && method === 'GET') {
+            const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
+            const gaugeTracker = new RoomBudgetTracker(db, tenant);
+            const allHealth = await evaluator.evaluateAll();
+            const rooms = [];
+            for (const h of allHealth) {
+              const cfg = await loadRoomConfig(db, tenant, h.scope);
+              const gauge = await gaugeTracker.computeGauge(h.scope);
+              rooms.push({ ...h, config: cfg, gauge });
+            }
+            return json(res, 200, { ok: true, rooms });
+          }
+
+          // POST /api/buzz/rooms/configure: configure a room
+          if (path === '/api/buzz/rooms/configure' && method === 'POST') {
+            if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
+            const call = buzzCall;
+            const scope = String(call.fields.scope ?? call.json?.scope ?? '').trim();
+            if (!scope) return json(res, 400, { ok: false, error: 'scope is required' });
+            const updates: any = {};
+            const body = call.json ?? call.fields;
+            if (body.mission) updates.mission = String(body.mission).slice(0, 2000);
+            if (body.autonomy && ['autonomous', 'guarded', 'supervised'].includes(String(body.autonomy))) {
+              updates.autonomy = String(body.autonomy);
+            }
+            const apiBudget = Number(body.budgetCeilingDollars);
+            if (body.budgetCeilingDollars && Number.isFinite(apiBudget) && apiBudget > 0) {
+              if (apiBudget > ROOM_BUDGET_MAX_DOLLARS) {
+                return json(res, 400, { ok: false, error: 'budget ceiling exceeds the cap' });
+              }
+              updates.budgetCeilingDollars = apiBudget;
+            }
+            const apiTokens = Number(body.budgetCeilingTokens);
+            if (body.budgetCeilingTokens && Number.isFinite(apiTokens) && apiTokens > 0) {
+              if (apiTokens > ROOM_BUDGET_MAX_TOKENS) {
+                return json(res, 400, { ok: false, error: 'token ceiling exceeds the cap' });
+              }
+              updates.budgetCeilingTokens = apiTokens;
+            }
+            if (body.active !== undefined) updates.active = Boolean(body.active);
+            const saved = await saveRoomConfig(db, tenant, { scope, ...updates }, 'api');
+            return json(res, 200, { ok: true, config: saved });
+          }
+
+          // GET /api/buzz/canvas/:room: return live canvas markdown
+          const canvasMatch = path.match(/^\/api\/buzz\/canvas\/([^/]+)$/);
+          if (method === 'GET' && canvasMatch) {
+            const scope = decodeURIComponent(canvasMatch[1]!);
+            const canvasSync = new LiveCanvasSynchronizer({ db, tenant, compiler: comp, ledger });
+            const canvas = await canvasSync.generateCanvas(scope);
+            return json(res, 200, { ok: true, canvas });
+          }
+
+          // GET /api/buzz/huddle/audio: returns 60s morning voice briefing audio WAV
+          if (path === '/api/buzz/huddle/audio' && method === 'GET') {
+            const huddleSynth = new AmbientMorningBriefingSynthesizer(db, tenant);
+            let briefing = await huddleSynth.getLatestBriefing();
+            if (!briefing) {
+              briefing = await huddleSynth.synthesizeBriefing({ durationSeconds: 60 });
+            }
+            const audioBuffer = Buffer.from(briefing.audioWavBase64, 'base64');
+            res.writeHead(200, {
+              'content-type': 'audio/wav',
+              'content-length': audioBuffer.length,
+              'cache-control': 'public, max-age=3600',
+            });
+            res.end(audioBuffer);
+            return;
+          }
+
+          // POST /api/buzz/commands: execute in-room slash command
+          if (path === '/api/buzz/commands' && method === 'POST') {
+            if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
+            const call = buzzCall;
+            const command = String(call.fields.command ?? call.json?.command ?? '').trim();
+            const roomScope = String(call.fields.scope ?? call.json?.scope ?? 'core');
+            const actor = String(call.fields.actor ?? call.json?.actor ?? 'operator');
+            const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
+            const result = await executeRoomCommand(command, {
               db,
               tenant,
-              (chunk) => {
-                res.write(chunk);
-              },
-              { now: at, kind: kind as ExportKind },
-            );
-            res.write(',"manifest":' + JSON.stringify(manifest) + '}');
-            res.end();
-            return;
-          }
-          const { export: data, manifest } = await exportLedgerWithManifest(db, tenant, kind as ExportKind, at);
-          res.writeHead(200, {
-            'content-type': 'application/json; charset=utf-8',
-            'content-disposition': `attachment; filename="vital-ledger-${tenant}-${kind}.json"`,
-            'cache-control': 'no-store',
-          });
-          res.end(JSON.stringify({ ok: true, manifest, export: data }));
-          return;
-        }
-
-        // FLOW-004: browser receipt verification for erased tenants.
-        // Admin or owner only: reads the surviving erased:<slug> receipt
-        // (deleted/retained/deferred/failed) plus the export-file check.
-        if (method === 'GET' && path === '/api/erasure/receipt') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          if (!atLeast(auth.user.role, 'admin')) {
-            json(res, 403, { ok: false, error: 'erasure receipt verification requires admin or owner' });
-            return;
-          }
-          const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase();
-          if (!slug) {
-            json(res, 400, { ok: false, error: 'slug query parameter is required' });
-            return;
-          }
-          const verification = await verifyErasureReceipt(db, slug);
-          if (!verification.found) {
-            json(res, 404, { ok: false, error: `no erasure receipt for "${slug}"` });
-            return;
-          }
-          json(res, 200, { ok: true, ...verification });
-          return;
-        }
-
-        // FLOW-024: permissioned, paginated, tenant-isolated audit history.
-        // Rows carry links to reviewed evidence, authorization, execution
-        // receipts, and outcomes where the row references them.
-        const auditHistory = path === '/api/audit' && method === 'GET';
-        if (auditHistory) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const q = url.searchParams;
-          const query: AuditQuery = {};
-          const actor = q.get('actor');
-          const action = q.get('action');
-          const from = q.get('from');
-          const to = q.get('to');
-          const requestId = q.get('request');
-          const decisionId = q.get('decision');
-          const limit = q.get('limit');
-          const offset = q.get('offset');
-          if (actor !== null) query.actor = actor;
-          if (action !== null) query.action = action;
-          if (from !== null) query.from = from;
-          if (to !== null) query.to = to;
-          if (requestId !== null) query.requestId = requestId;
-          if (decisionId !== null) query.decisionId = decisionId;
-          if (limit !== null) query.limit = Number(limit);
-          if (offset !== null) query.offset = Number(offset);
-          const page = await queryAudit(db, tenant, query);
-          json(res, 200, {
-            ok: true,
-            ...page,
-            rows: page.rows.map((row) => ({ ...row, links: auditLinks(row) })),
-          });
-          return;
-        }
-
-        // F23: Authenticated learning review administration — labeling queue
-        if (method === 'GET' && path === '/api/learning/labeling-queue') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const rawLimit = url.searchParams.get('limit');
-          const limit = rawLimit ? Math.min(Math.max(1, Number(rawLimit)), 200) : 50;
-          const queue = await new CognitiveRouter(db).labelingQueue(tenant, limit);
-          json(res, 200, { ok: true, queue });
-          return;
-        }
-
-        // F23: Authenticated learning review administration — label decision
-        if (method === 'POST' && path === '/api/learning/label') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const rawId = call.json && 'decisionId' in call.json ? call.json.decisionId : call.fields.decisionId;
-          const decisionId = Number(rawId);
-          if (!Number.isInteger(decisionId) || decisionId <= 0) {
-            json(res, 400, { ok: false, error: 'decisionId must be a positive integer' });
-            return;
-          }
-          const rawTier = call.json && 'correctTier' in call.json ? call.json.correctTier : call.fields.correctTier;
-          const validTiers = ['CACHE', 'MODEL', 'WORKFLOW', 'HUMAN'];
-          if (typeof rawTier !== 'string' || !validTiers.includes(rawTier)) {
-            json(res, 400, { ok: false, error: `correctTier must be one of: ${validTiers.join(', ')}` });
-            return;
-          }
-          const reviewer = by(auth.user);
-          try {
-            await new CognitiveRouter(db).label(tenant, decisionId, rawTier as any, reviewer);
-            await auditConsole(
-              db,
-              tenant,
-              reviewer,
-              'console.label_decision',
-              String(decisionId),
-              at,
-              `correct_tier=${rawTier}`,
-            );
-            json(res, 200, { ok: true, decisionId, correctTier: rawTier, reviewer });
-          } catch (e) {
-            json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          return;
-        }
-
-        // F23: Authenticated skill card administration — list cards
-        if (method === 'GET' && path === '/api/learning/cards') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const state = url.searchParams.get('state') as any;
-          const intent = url.searchParams.get('intent') ?? undefined;
-          const cards = await comp.list(tenant, { state: state ?? undefined, intent });
-          json(res, 200, { ok: true, cards });
-          return;
-        }
-
-        // F23: Authenticated skill card administration — get card detail with tests and revisions
-        const cardMatch = path.match(/^\/api\/learning\/cards\/([^/]+)$/);
-        if (method === 'GET' && cardMatch) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const cardId = decodeURIComponent(cardMatch[1]!);
-          const card = await comp.get(tenant, cardId);
-          if (!card) {
-            json(res, 404, { ok: false, error: `skill card ${cardId} not found` });
-            return;
-          }
-          const tests = await comp.transferResults(tenant, cardId);
-          const revisions = await comp.cardRevisions(tenant, cardId);
-          json(res, 200, { ok: true, card, tests, revisions });
-          return;
-        }
-
-        // F23: Authenticated skill card administration — advance card
-        // FLOW-025: evaluation evidence for one card — trust gaps, eval
-        // suite reference, recent runs, and the evidence-only disclaimer.
-        // Read-only (describeCardReadOnly): linking evidence never promotes.
-        // NOTE: registered before the generic card-detail route below, which
-        // would otherwise swallow the /evidence suffix as a card id.
-        const cardEvidenceMatch = path.match(/^\/api\/learning\/cards\/([^/]+)\/evidence$/);
-        if (method === 'GET' && cardEvidenceMatch) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          const cardId = decodeURIComponent(cardEvidenceMatch[1]!);
-          try {
-            const evidence = await cardEvaluationEvidence(db, comp, tenant, cardId);
-            json(res, 200, { ok: true, ...evidence });
-          } catch (e) {
-            json(res, 404, { ok: false, error: (e as Error).message });
-          }
-          return;
-        }
-
-        const advanceMatch = path.match(/^\/api\/learning\/cards\/([^/]+)\/advance$/);
-        if (method === 'POST' && advanceMatch) {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, true)) return;
-          if (!atLeast(auth.user.role, 'admin')) {
-            json(res, 403, { ok: false, error: 'card administration requires admin or owner role' });
-            return;
-          }
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            bodyError(res, e);
-            return;
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const cardId = decodeURIComponent(advanceMatch[1]!);
-          const rawTo = call.json && 'to' in call.json ? call.json.to : call.fields.to;
-          if (typeof rawTo !== 'string' || !rawTo) {
-            json(res, 400, { ok: false, error: 'target state (to) is required' });
-            return;
-          }
-          const evidence = (
-            call.json && 'evidence' in call.json && typeof call.json.evidence === 'object' ? call.json.evidence : {}
-          ) as any;
-          try {
-            const result = await comp.attemptAdvance(tenant, cardId, rawTo as any, evidence);
-            if (result.ok) {
-              await auditConsole(db, tenant, by(auth.user), 'console.advance_card', cardId, at, `to=${rawTo}`);
-            }
-            json(res, result.ok ? 200 : 422, {
-              ok: result.ok,
-              card: result.card,
-              reasons: result.reasons,
+              actor,
+              currentScope: roomScope,
+              coord,
+              ledger,
+              evaluator,
             });
-          } catch (e) {
-            json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          return;
-        }
-
-        // ------------------------------------------------------------ Buzz Webhook & APIs
-        //
-        // SECURITY: every route under /api/buzz is authenticated. These routes
-        // previously had no gate at all, which meant an anonymous caller could
-        // read tenant ledger content (`/canvas/:room`), rewrite room policy
-        // (`/rooms/configure`), engage the scope kill switch
-        // (`/commands` -> `setKill`) and approve a pending human-approval
-        // request without a session or token (`/webhook?action=approve`).
-        //
-        // Two distinct callers are served, and they need different proof:
-        //  - A human in the console: session + CSRF + admin role.
-        //  - Buzz relay/room tooling: an HMAC-signed review token over the
-        //    exact (tenant, request, action). There is no tokenless path.
-        let buzzAdminUser: User | null = null;
-        // The request body can only be read once. Parsing here and re-using the
-        // result is what keeps the POST routes below from blocking forever on a
-        // stream that has already ended.
-        let buzzCall: Call | null = null;
-        if (path === '/api/buzz' || path.startsWith('/api/buzz/')) {
-          buzzCall = method === 'POST' ? await parseCall(req).catch(() => null) : null;
-          const providedToken =
-            method === 'POST'
-              ? (buzzCall?.fields.token ?? (buzzCall?.json?.token as string | undefined))
-              : url.searchParams.get('token');
-          const buzzAuth = await sessionOf();
-          const isAdmin = buzzAuth !== null && buzzAuth.user.tenant === tenant && atLeast(buzzAuth.user.role, 'admin');
-          const signedTokenOk =
-            typeof providedToken === 'string' && providedToken.length > 0 && reviewTokenValid(providedToken, tenant);
-          if (!isAdmin && !signedTokenOk) {
-            return json(res, 401, {
-              ok: false,
-              error: buzzAuth
-                ? 'admin role required for Buzz room administration'
-                : 'authentication required (session cookie or a signed review token)',
-            });
-          }
-          // A session-based mutation still needs CSRF: the session alone is not
-          // proof the request came from our own UI.
-          if (isAdmin && method === 'POST' && buzzCall && !signedTokenOk && !csrfOk(buzzAuth!.session, buzzCall.csrf)) {
-            return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          }
-          if (isAdmin) {
-            buzzAdminUser = buzzAuth!.user;
-          }
-        }
-        if (path === '/api/buzz/webhook' && (method === 'POST' || method === 'GET')) {
-          let action = url.searchParams.get('action');
-          let token = url.searchParams.get('token');
-          let requestId = url.searchParams.get('req');
-          let forkedParams: any = {};
-          let actor = buzzAdminUser ? by(buzzAdminUser) : 'buzz:token';
-
-          if (method === 'POST' && buzzCall) {
-            action = (buzzCall.fields.action ?? buzzCall.json?.action ?? token ?? action) as string;
-            token = (buzzCall.fields.token ?? buzzCall.json?.token ?? token) as string;
-            requestId = (buzzCall.fields.requestId ?? buzzCall.json?.requestId ?? requestId) as string;
-            if (buzzCall.json?.forkedParams) forkedParams = buzzCall.json.forkedParams;
-            if (buzzCall.fields.actor && buzzAdminUser) actor = by(buzzAdminUser);
+            return json(res, 200, { ok: true, result });
           }
 
-          // A signed token proves exactly one thing: someone legitimately minted
-          // this (tenant, request, action). It never supplies an actor identity.
-          if (token) {
-            const secret = reviewSecretFromEnv();
-            const verified = secret ? verifyReviewToken(token, secret) : { valid: false as const };
-            if (verified.valid && verified.tenant === tenant) {
-              action = verified.action ?? action;
-              requestId = verified.requestId ?? requestId;
-            } else if (!buzzAdminUser) {
-              return json(res, 401, { ok: false, error: 'invalid or expired review token' });
-            }
-          }
-
-          if (!requestId) {
-            return json(res, 400, { ok: false, error: 'missing requestId or valid token' });
-          }
-
-          // GET is a confirmation step, never a mutation: a URL that approves
-          // on fetch is prefetchable, CSRF-able and gets executed by link
-          // scanners. A human (or Buzz) confirms with the form below.
-          if (method === 'GET' && (action === 'approve' || action === 'decline')) {
-            const verb = action === 'approve' ? 'Approve' : 'Decline';
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });            res.end(
-              themeDocument(
-                `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${verb} request — Vital</title>${themeHead()}</head><body style="padding:0"><main id="main" style="max-width:560px;margin:0 auto;padding:40px 20px 64px"><div class="utility-bar" style="display:flex;justify-content:flex-end;margin-bottom:18px">${themeToggleButton()}</div><div class="card" style="padding:26px 28px"><span class="v-badge v-badge-warn"><span class="dot"></span>Human decision</span><h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:12px 0 8px;color:var(--v-ink)">${verb} request <code>${esc(requestId)}</code>?</h1><p class="sub" style="color:var(--v-muted);font-size:13.5px;line-height:1.6;margin:0 0 20px">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook" style="display:grid;gap:12px;max-width:320px"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" class="v-btn ${action === 'decline' ? 'v-btn-danger' : 'v-btn-primary'}">${verb} request</button></form><p style="margin:20px 0 0"><a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Return to Mission Control</a></p></div></main></body></html>`,
-              ),
-            );
-            return;
-          }
-          if (action === 'approve') {
-            try {
-              const current = await coord.get(tenant, requestId);
-              if (!current) return json(res, 404, { ok: false, error: `unknown request ${requestId}` });
-              if (current.state === 'ADMITTED') {
-                await coord.accept(tenant, requestId);
-                const decisionId = `dec_buzz_${createHash('sha256').update(requestId).digest('hex').slice(0, 12)}`;
-                await ledger.recordDecision({
-                  id: decisionId,
-                  tenant,
-                  goal: current.goal,
-                  action: 'APPROVED via Buzz room review card',
-                  actionClass: 'RECOMMEND',
-                  claimIds: current.claimRefs,
-                  decidedBy: actor,
-                  approvedBy: actor,
-                  scope: current.targetScope,
-                  autonomy: 'approval',
-                });
-                await auditConsole(db, tenant, actor, 'buzz.approve', `request:${requestId}`, at);
+          // Agent SVG mascot images (accessible with or without siteDir)
+          if (method === 'GET' && (path.startsWith('/assets/agents/') || path.startsWith('/agents_images/'))) {
+            const rawName = path.replace(/^\/(assets\/agents|agents_images)\//, '');
+            const fileName = basename(rawName);
+            if (/\.(svg|png|webp|jpg|jpeg|gif)$/i.test(fileName)) {
+              const target = resolvePath(process.cwd(), 'site', 'assets', 'agents', fileName);
+              try {
+                const st = await stat(target);
+                if (st.isFile()) {
+                  const body = await readFile(target);
+                  const type = MIME[extname(target)] ?? 'image/svg+xml';
+                  res.writeHead(200, {
+                    'content-type': type,
+                    'cache-control': 'public, max-age=86400, immutable',
+                  });
+                  res.end(body);
+                  return;
+                }
+              } catch {
+                // fall through
               }
-              return json(res, 200, { ok: true, action: 'approve', requestId, status: 'ACCEPTED' });
-            } catch (e) {
-              return json(res, 409, { ok: false, error: (e as Error).message });
             }
           }
 
-          if (action === 'decline') {
-            try {
-              const current = await coord.get(tenant, requestId);
-              if (!current) return json(res, 404, { ok: false, error: `unknown request ${requestId}` });
-              if (current.state === 'ADMITTED') {
-                await coord.decline(tenant, requestId, 'Declined via Buzz review card');
-                await auditConsole(db, tenant, actor, 'buzz.decline', `request:${requestId}`, at);
-              }
-              return json(res, 200, { ok: true, action: 'decline', requestId, status: 'DECLINED' });
-            } catch (e) {
-              return json(res, 409, { ok: false, error: (e as Error).message });
+          // Static site fallthrough (opt-in via siteDir). Console routes and
+          // the auth pages always take precedence; only unmatched GETs fall
+          // through to files, with traversal-defence inside serveStatic.
+          if (siteDir && method === 'GET') {
+            const file = await serveStatic(siteDir, path, true);
+            if (file) {
+              res.writeHead(200, { 'content-type': file.type });
+              res.end(file.body);
+              return;
             }
           }
 
-          if (action === 'fork') {
-            try {
-              const engine = new TimeTravelForkEngine(db, ledger, coord);
-              const diff = await engine.forkRun(tenant, { requestId }, forkedParams);
-              await auditConsole(db, tenant, actor, 'buzz.fork', `request:${requestId}`, at);
-              return json(res, 200, { ok: true, action: 'fork', diff });
-            } catch (e) {
-              return json(res, 409, { ok: false, error: (e as Error).message });
-            }
-          }
-
-          return json(res, 400, { ok: false, error: `unsupported action "${action}"` });
-        }
-
-        // GET /api/buzz/rooms: list all 12 rooms with config, health status and live gas gauge
-        if (path === '/api/buzz/rooms' && method === 'GET') {
-          const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
-          const gaugeTracker = new RoomBudgetTracker(db, tenant);
-          const allHealth = await evaluator.evaluateAll();
-          const rooms = [];
-          for (const h of allHealth) {
-            const cfg = await loadRoomConfig(db, tenant, h.scope);
-            const gauge = await gaugeTracker.computeGauge(h.scope);
-            rooms.push({ ...h, config: cfg, gauge });
-          }
-          return json(res, 200, { ok: true, rooms });
-        }
-
-        // POST /api/buzz/rooms/configure: configure a room
-        if (path === '/api/buzz/rooms/configure' && method === 'POST') {
-          if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
-          const call = buzzCall;
-          const scope = String(call.fields.scope ?? call.json?.scope ?? '').trim();
-          if (!scope) return json(res, 400, { ok: false, error: 'scope is required' });
-          const updates: any = {};
-          const body = call.json ?? call.fields;
-          if (body.mission) updates.mission = body.mission;
-          if (body.autonomy) updates.autonomy = body.autonomy;
-          if (body.budgetCeilingDollars) updates.budgetCeilingDollars = Number(body.budgetCeilingDollars);
-          if (body.budgetCeilingTokens) updates.budgetCeilingTokens = Number(body.budgetCeilingTokens);
-          if (body.active !== undefined) updates.active = Boolean(body.active);
-          const saved = await saveRoomConfig(db, tenant, { scope, ...updates }, 'api');
-          return json(res, 200, { ok: true, config: saved });
-        }
-
-        // GET /api/buzz/canvas/:room: return live canvas markdown
-        const canvasMatch = path.match(/^\/api\/buzz\/canvas\/([^/]+)$/);
-        if (method === 'GET' && canvasMatch) {
-          const scope = decodeURIComponent(canvasMatch[1]!);
-          const canvasSync = new LiveCanvasSynchronizer({ db, tenant, compiler: comp, ledger });
-          const canvas = await canvasSync.generateCanvas(scope);
-          return json(res, 200, { ok: true, canvas });
-        }
-
-        // GET /api/buzz/huddle/audio: returns 60s morning voice briefing audio WAV
-        if (path === '/api/buzz/huddle/audio' && method === 'GET') {
-          const huddleSynth = new AmbientMorningBriefingSynthesizer(db, tenant);
-          let briefing = await huddleSynth.getLatestBriefing();
-          if (!briefing) {
-            briefing = await huddleSynth.synthesizeBriefing({ durationSeconds: 60 });
-          }
-          const audioBuffer = Buffer.from(briefing.audioWavBase64, 'base64');
-          res.writeHead(200, {
-            'content-type': 'audio/wav',
-            'content-length': audioBuffer.length,
-            'cache-control': 'public, max-age=3600',
-          });
-          res.end(audioBuffer);
-          return;
-        }
-
-        // POST /api/buzz/commands: execute in-room slash command
-        if (path === '/api/buzz/commands' && method === 'POST') {
-          if (!buzzCall) return json(res, 400, { ok: false, error: 'empty request body' });
-          const call = buzzCall;
-          const command = String(call.fields.command ?? call.json?.command ?? '').trim();
-          const roomScope = String(call.fields.scope ?? call.json?.scope ?? 'core');
-          const actor = String(call.fields.actor ?? call.json?.actor ?? 'operator');
-          const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
-          const result = await executeRoomCommand(command, {
-            db,
-            tenant,
-            actor,
-            currentScope: roomScope,
-            coord,
-            ledger,
-            evaluator,
-          });
-          return json(res, 200, { ok: true, result });
-        }
-
-        // Agent SVG mascot images (accessible with or without siteDir)
-        if (method === 'GET' && (path.startsWith('/assets/agents/') || path.startsWith('/agents_images/'))) {
-          const rawName = path.replace(/^\/(assets\/agents|agents_images)\//, '');
-          const fileName = basename(rawName);
-          if (/\.(svg|png|webp|jpg|jpeg|gif)$/i.test(fileName)) {
-            const target = resolvePath(process.cwd(), 'site', 'assets', 'agents', fileName);
-            try {
-              const st = await stat(target);
-              if (st.isFile()) {
-                const body = await readFile(target);
-                const type = MIME[extname(target)] ?? 'image/svg+xml';
-                res.writeHead(200, {
-                  'content-type': type,
-                  'cache-control': 'public, max-age=86400, immutable',
-                });
-                res.end(body);
-                return;
-              }
-            } catch {
-              // fall through
-            }
-          }
-        }
-
-        // Static site fallthrough (opt-in via siteDir). Console routes and
-        // the auth pages always take precedence; only unmatched GETs fall
-        // through to files, with traversal-defence inside serveStatic.
-        if (siteDir && method === 'GET') {
-          const file = await serveStatic(siteDir, path, true);
-          if (file) {
-            res.writeHead(200, { 'content-type': file.type });
-            res.end(file.body);
-            return;
-          }
-        }
-
-        json(res, 404, { ok: false, error: 'not found' });
-      }, { memoize: readsOnly, stats }).catch((err) => {
+          json(res, 404, { ok: false, error: 'not found' });
+        },
+        { memoize: readsOnly, stats },
+      ).catch((err) => {
         metrics.errors += 1;
         const diag = correlateDiagnostic({
           detail: (err as Error).message,

@@ -744,6 +744,8 @@ T('cited claims in task.claimRefs are resolved and prepended to harness command'
     eq(msg.includes('[Grounded Context]'), true, 'grounded context header present:');
     eq(msg.includes('JWT expiry is 3600 seconds'), true, 'claim statement included:');
     eq(msg.includes('[Instruction]\nFix token expiry'), true, 'original command appended:');
+    eq(msg.includes('<<<DATA_BOUNDARY_UNTRUSTED_EXTERNAL_CONTENT_START>>>'), true, 'claims cross as delimited quoted data:');
+    eq(msg.includes('EXTERNAL UNTRUSTED DATA'), true, 'quoted claims carry source chrome:');
   });
 });
 

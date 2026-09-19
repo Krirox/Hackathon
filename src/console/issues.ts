@@ -1,4 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
+import { isSealed, openSecret, sealSecret, secretsKeyFromEnv } from '../core/secrets.ts';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -430,10 +431,31 @@ export async function getGitHubSyncConfig(db: AsyncDb, tenant: string): Promise<
     )
     .get(tenant)) as Record<string, unknown> | undefined;
   if (!row) return null;
+  const stored = row.token ? String(row.token) : null;
+  // Sealed tokens open only with VITAL_SECRETS_KEY. A missing or rotated key
+  // fails loudly — silently syncing unauthenticated (or crashing on garbage)
+  // would be worse than a clear re-link instruction.
+  let token: string | null = stored;
+  if (stored && isSealed(stored)) {
+    const key = secretsKeyFromEnv();
+    if (!key) {
+      throw new Error(
+        '[github:TOKEN_SEALED] stored GitHub token is sealed but VITAL_SECRETS_KEY is not set — set it (or re-link the repository) to resume sync',
+      );
+    }
+    try {
+      token = openSecret(stored, key);
+    } catch (e) {
+      throw new Error(
+        `[github:TOKEN_UNSEALABLE] stored GitHub token did not open: ${(e as Error).message} — re-link the repository with a fresh token`,
+        { cause: e },
+      );
+    }
+  }
   return {
     tenant: String(row.tenant),
     repo: String(row.repo),
-    token: row.token ? String(row.token) : null,
+    token,
     lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
     syncedCount: Number(row.synced_count ?? 0),
     status: (row.status as 'linked' | 'unlinked' | 'error') || 'unlinked',
@@ -451,8 +473,13 @@ export async function saveGitHubSyncConfig(
   now = new Date().toISOString(),
 ): Promise<GitHubSyncConfig> {
   const existing = await getGitHubSyncConfig(db, tenant);
-  const effectiveToken =
-    token !== undefined && token !== null && token.trim() !== '' ? token.trim() : (existing?.token ?? null);
+  const supplied = token !== undefined && token !== null && token.trim() !== '' ? token.trim() : null;
+  const plaintext = supplied ?? existing?.token ?? null;
+  // Seal on every save when the key is configured: legacy plaintext rows
+  // migrate transparently the next time they are written. Without the key
+  // the previous plaintext behaviour is preserved (documented exposure).
+  const key = secretsKeyFromEnv();
+  const effectiveToken = plaintext && key ? sealSecret(plaintext, key) : plaintext;
 
   await db
     .prepare(
@@ -468,6 +495,81 @@ export async function saveGitHubSyncConfig(
     .run(tenant, repo.trim(), effectiveToken, existing?.lastSyncedAt ?? null, existing?.syncedCount ?? 0, updatedBy, now);
 
   return (await getGitHubSyncConfig(db, tenant))!;
+}
+
+/**
+ * Unlink the repository: forget the token, forget the repo, keep the row.
+ *
+ * The row is kept rather than deleted so that "this tenant used to sync" and the
+ * last sync counters survive the unlink — deleting it would make an unlink look
+ * identical to a project that never linked at all. The token is cleared, not
+ * just the repo: leaving a sealed credential behind after the operator asked to
+ * disconnect is the kind of tidy-looking omission that ends up in a report.
+ *
+ * Every push and sync path already refuses when `repo` is empty, so unlinking is
+ * enough to stop outbound writes; nothing else has to remember to check a flag.
+ */
+export async function unlinkGitHubSyncConfig(
+  db: AsyncDb,
+  tenant: string,
+  updatedBy: string,
+  now = new Date().toISOString(),
+): Promise<GitHubSyncConfig | null> {
+  const existing = await getGitHubSyncConfig(db, tenant);
+  if (!existing) return null;
+  await db
+    .prepare(
+      `UPDATE github_project_sync SET repo = '', token = NULL, status = 'unlinked', updated_by = ?, updated_at = ?
+        WHERE tenant = ?`,
+    )
+    .run(updatedBy, now, tenant);
+  await clearGitHubPushError(db, tenant);
+  return await getGitHubSyncConfig(db, tenant);
+}
+
+/** Where the last outbound push failure is recorded, per tenant. */
+const pushErrorKey = (tenant: string): string => `github:push-error:${tenant}`;
+
+export interface GitHubPushError {
+  kind: string;
+  target: string;
+  error: string;
+  at: string;
+}
+
+/**
+ * Record that an outbound push failed.
+ *
+ * Push calls are fire-and-forget: by the time GitHub answers, the board has
+ * already replied to the human. Until now the result was discarded
+ * (`.catch(() => {})`), so a board whose token had been revoked looked exactly
+ * like a board that was never linked — the local write succeeded and the remote
+ * silently diverged. This flips the sync status to `error` and stores the reason
+ * where the dialog reads it.
+ */
+export async function markGitHubSyncError(db: AsyncDb, tenant: string, failure: GitHubPushError): Promise<void> {
+  await db
+    .prepare(`UPDATE github_project_sync SET status = 'error', updated_at = ? WHERE tenant = ? AND repo <> ''`)
+    .run(failure.at, tenant);
+  await db
+    .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(pushErrorKey(tenant), JSON.stringify(failure));
+}
+
+export async function getGitHubPushError(db: AsyncDb, tenant: string): Promise<GitHubPushError | null> {
+  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(pushErrorKey(tenant))) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(String(row.value)) as GitHubPushError;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearGitHubPushError(db: AsyncDb, tenant: string): Promise<void> {
+  await db.prepare('DELETE FROM meta WHERE key = ?').run(pushErrorKey(tenant));
 }
 
 export async function authorizeGitHubRepo(
@@ -1225,6 +1327,14 @@ export interface IssuesBoardOptions {
   engineers: { email: string; name: string }[];
   currentEmail: string;
   syncConfig?: GitHubSyncConfig | null;
+  /**
+   * The last outbound push failure, if any.
+   *
+   * Shown because a push is fire-and-forget: the board answers the human before
+   * GitHub does, so without this the only evidence that the remote stopped
+   * tracking the local board would be the remote itself.
+   */
+  pushError?: GitHubPushError | null;
 }
 
 /**
@@ -1232,7 +1342,7 @@ export interface IssuesBoardOptions {
  * Supports both Board (Kanban) and List (Table) views with instant live search.
  */
 export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions): string {
-  const { csrf, home, engineers, currentEmail, syncConfig } = opts;
+  const { csrf, home, engineers, currentEmail, syncConfig, pushError } = opts;
   const byState = new Map<IssueState, IssueRow[]>();
   for (const s of ISSUE_STATES) byState.set(s, []);
   for (const issue of data.issues) byState.get(issue.state)?.push(issue);
@@ -1491,6 +1601,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
         <div style="font-size:11px;color:var(--v-muted);margin-top:3px;" id="iss-gh-sync-meta">
           ${syncConfig?.lastSyncedAt ? `Last synced: ${esc(syncConfig.lastSyncedAt.slice(0, 16).replace('T', ' '))} (${syncConfig.syncedCount} issues)` : ''}
         </div>
+        <div style="font-size:11px;color:var(--v-tint-risk-ink);margin-top:3px;" id="iss-gh-push-error">${pushError ? `Last push failed (${esc(pushError.kind)}): ${esc(pushError.error)}` : ''}</div>
       </div>
       <div class="iss-field">
         <label for="iss-gh-repo">Repository Path or URL</label>
@@ -1504,6 +1615,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       <div class="iss-dialog-actions" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
         <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-cancel">Cancel</button>
         <div style="display:flex;gap:8px;">
+          <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-unlink" style="${syncConfig?.repo ? '' : 'display:none;'}" title="Forget the repository and its token on this tenant">Unlink</button>
           <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-quick-sync" style="${syncConfig?.repo ? '' : 'display:none;'}">Sync Now ⟳</button>
           <button type="submit" class="iss-btn iss-btn-primary" id="iss-gh-submit">Authorize &amp; Sync</button>
         </div>
@@ -2171,6 +2283,8 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
   var ghLinkedRepo = document.getElementById('iss-gh-linked-repo');
   var ghSyncMeta = document.getElementById('iss-gh-sync-meta');
   var ghRepoInput = document.getElementById('iss-gh-repo');
+  var ghUnlink = document.getElementById('iss-gh-unlink');
+  var ghPushError = document.getElementById('iss-gh-push-error');
 
   function openGitHubDialog() {
     if (!ghDialog) return;
@@ -2189,10 +2303,43 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
           }
           if (ghSyncMeta) ghSyncMeta.textContent = metaText;
           if (ghQuickSync) ghQuickSync.style.display = 'inline-block';
+          if (ghUnlink) ghUnlink.style.display = 'inline-block';
+          if (ghPushError) {
+            ghPushError.textContent = data.config.lastPushError
+              ? 'Last push failed (' + data.config.lastPushError.kind + '): ' + data.config.lastPushError.error
+              : '';
+          }
         }
       })
       .catch(function () {});
   }
+
+  // Unlink: owner-visible, engineer-gated, CSRF-checked, and it forgets the
+  // token as well as the repo. Confirm first — the button sits next to the
+  // primary action and disconnecting by misclick is silently destructive.
+  if (ghUnlink) ghUnlink.addEventListener('click', function (e) {
+    e.preventDefault();
+    if (!window.confirm('Unlink this GitHub repository? Local issues stay; the token is forgotten and pushes stop.')) return;
+    ghUnlink.disabled = true;
+    fetch(home + 'console/issues/github/unlink', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'csrf=' + encodeURIComponent(csrf),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) throw new Error(data.error || 'unlink failed');
+        if (ghConnectedBox) ghConnectedBox.style.display = 'none';
+        if (ghQuickSync) ghQuickSync.style.display = 'none';
+        if (ghUnlink) ghUnlink.style.display = 'none';
+        if (ghRepoInput) ghRepoInput.value = '';
+        if (ghPushError) ghPushError.textContent = '';
+        flash('GitHub repository unlinked');
+        closeGitHubDialog();
+      })
+      .catch(function (err) { flash(err.message || 'Could not unlink the repository', true); })
+      .finally(function () { ghUnlink.disabled = false; });
+  });
 
   function closeGitHubDialog() {
     if (ghDialog) ghDialog.classList.remove('iss-open');

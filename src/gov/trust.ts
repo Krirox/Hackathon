@@ -925,57 +925,171 @@ export const WORKER_HEARTBEAT_STALE_MS = 60_000;
 
 const workerHeartbeatKey = (tenant: string): string => `worker:heartbeat:${tenant}`;
 
+/**
+ * A worker's most recent tick.
+ *
+ * `adapter` and `baseline` exist because "a worker is running" is not the whole
+ * answer: a worker with no real executor attached runs the echo harness, whose
+ * runs report COMPLETED without doing work. Readiness used to say only that a
+ * heartbeat was fresh, which is true of a worker that cannot accomplish anything.
+ * Both fields are optional so a heartbeat written by an older build still parses.
+ */
+export interface WorkerHeartbeat {
+  workerId: string;
+  at: string;
+  /** Adapter name, e.g. `local-echo` or `jcode`. */
+  adapter?: string;
+  /** True when the attached adapter is a test baseline, not a real executor. */
+  baseline?: boolean;
+}
+
 export async function recordWorkerHeartbeat(
   db: AsyncDb,
   tenant: string,
-  input: { workerId: string; now?: string },
+  input: { workerId: string; now?: string; adapter?: string; baseline?: boolean },
 ): Promise<void> {
   const at = input.now ?? new Date().toISOString();
   await db
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(workerHeartbeatKey(tenant), JSON.stringify({ workerId: input.workerId, at }));
+    .run(
+      workerHeartbeatKey(tenant),
+      JSON.stringify({
+        workerId: input.workerId,
+        at,
+        ...(input.adapter ? { adapter: input.adapter } : {}),
+        ...(input.baseline !== undefined ? { baseline: input.baseline } : {}),
+      }),
+    );
 }
 
-export async function readWorkerHeartbeat(
-  db: AsyncDb,
-  tenant: string,
-): Promise<{ workerId: string; at: string } | null> {
-  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(workerHeartbeatKey(tenant))) as
-    { value: string } | undefined;
-  if (!row) return null;
-  try {
-    const parsed = JSON.parse(String(row.value)) as { workerId?: unknown; at?: unknown };
-    if (typeof parsed.workerId !== 'string' || typeof parsed.at !== 'string') return null;
-    return { workerId: parsed.workerId, at: parsed.at };
-  } catch {
-    return null;
+/**
+ * A worker's most recent check-in.
+ *
+ * Memoized per request like `listStops` above: the operations dashboard reads
+ * the same `worker:heartbeat:<tenant>` row twice — once for the executor honesty
+ * banner, once through readiness's worker check. Only the worker process records
+ * a heartbeat, never a request, so within one read-only request both consumers
+ * want the identical value; the entry dies with the response, and a request that
+ * can write disables memoization anyway (see `core/request-cache.ts`).
+ */
+export function readWorkerHeartbeat(db: AsyncDb, tenant: string): Promise<WorkerHeartbeat | null> {
+  return memo(`gov:heartbeat:${tenant}`, async () => {
+    const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(workerHeartbeatKey(tenant))) as
+      { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(String(row.value)) as {
+        workerId?: unknown;
+        at?: unknown;
+        adapter?: unknown;
+        baseline?: unknown;
+      };
+      if (typeof parsed.workerId !== 'string' || typeof parsed.at !== 'string') return null;
+      return {
+        workerId: parsed.workerId,
+        at: parsed.at,
+        ...(typeof parsed.adapter === 'string' ? { adapter: parsed.adapter } : {}),
+        ...(typeof parsed.baseline === 'boolean' ? { baseline: parsed.baseline } : {}),
+      };
+    } catch {
+      return null;
+    }
+  });
+}
+
+/** What the console should tell an operator about execution. */
+export interface ExecutorHealth {
+  state: 'absent' | 'stale' | 'live';
+  workerId: string | null;
+  at: string | null;
+  adapter: string | null;
+  /** True when the attached adapter only pretends to work. */
+  baseline: boolean;
+  /** One honest sentence, ready to render. */
+  detail: string;
+}
+
+/**
+ * The operator-facing answer to "will approved work actually run?".
+ *
+ * Pure, so the copy and the thresholds are reviewable without a server. The
+ * `baseline` case is the one that mattered: a heartbeat said "a worker is alive"
+ * while every request was completed by the echo harness, and nothing in the
+ * console said so — an operator approving work had no way to tell the difference
+ * between execution and a test double.
+ */
+export function describeExecutorHealth(
+  beat: WorkerHeartbeat | null,
+  now: string | number = Date.now(),
+  opts: { staleMs?: number } = {},
+): ExecutorHealth {
+  const staleMs = opts.staleMs ?? WORKER_HEARTBEAT_STALE_MS;
+  if (!beat) {
+    return {
+      state: 'absent',
+      workerId: null,
+      at: null,
+      adapter: null,
+      baseline: false,
+      detail:
+        'No executor has ever checked in here, so approved work will not run. Start one with `vital worker` (or `vital serve --with-worker`).',
+    };
   }
+  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const ageMs = nowMs - Date.parse(beat.at);
+  const stale = !Number.isFinite(ageMs) || ageMs > staleMs;
+  const age = Number.isFinite(ageMs) ? `${Math.max(0, Math.round(ageMs / 1000))}s ago` : 'at an unreadable time';
+  if (stale) {
+    return {
+      state: 'stale',
+      workerId: beat.workerId,
+      at: beat.at,
+      adapter: beat.adapter ?? null,
+      baseline: beat.baseline === true,
+      detail: `Executor ${beat.workerId} is stale — last checked in ${age}. Approved work may sit unexecuted until it returns.`,
+    };
+  }
+  if (beat.baseline === true) {
+    return {
+      state: 'live',
+      workerId: beat.workerId,
+      at: beat.at,
+      adapter: beat.adapter ?? null,
+      baseline: true,
+      detail: `Executor ${beat.workerId} is running the ${beat.adapter ?? 'test-baseline'} harness — a test-baseline adapter, not a real executor (last check-in ${age}). Runs report COMPLETED without doing real work and leave no deliverable to review; attach a real executor (for example JCODE_API_SOCKET) before treating any of this as production execution.`,
+    };
+  }
+  return {
+    state: 'live',
+    workerId: beat.workerId,
+    at: beat.at,
+    adapter: beat.adapter ?? null,
+    baseline: false,
+    detail: `Executor ${beat.workerId} is running${beat.adapter ? ` (${beat.adapter})` : ''}, last check-in ${age}.`,
+  };
 }
 
-/** Readiness projection of the worker heartbeat — shaped for DependencyCheck. */
+/**
+ * Readiness projection of the worker heartbeat — shaped for DependencyCheck.
+ *
+ * Delegates to `describeExecutorHealth` so readiness and the console banner can
+ * never disagree. This check used to report `ok` for a fresh heartbeat from a
+ * worker attached to the echo harness, which is precisely the case an operator
+ * must not mistake for execution: the runs report COMPLETED and produce nothing.
+ */
 export async function workerReadiness(
   db: AsyncDb,
   tenant: string,
   opts: { staleMs?: number; now?: string } = {},
 ): Promise<{ ok: boolean; detail?: string; unconfigured?: boolean }> {
-  const staleMs = opts.staleMs ?? WORKER_HEARTBEAT_STALE_MS;
-  const nowMs = Date.parse(opts.now ?? new Date().toISOString());
   const beat = await readWorkerHeartbeat(db, tenant);
-  if (!beat) {
-    return {
-      ok: false,
-      unconfigured: true,
-      detail: 'no worker heartbeat recorded — run `vital worker` or `vital serve --with-worker`',
-    };
-  }
-  const ageMs = nowMs - Date.parse(beat.at);
-  if (!Number.isFinite(ageMs) || ageMs < 0) {
-    return { ok: false, detail: `worker heartbeat timestamp unreadable (${beat.workerId})` };
-  }
-  if (ageMs > staleMs) {
-    return { ok: false, detail: `worker ${beat.workerId} heartbeat stale (${Math.round(ageMs / 1000)}s old)` };
-  }
-  return { ok: true, detail: `worker ${beat.workerId} heartbeat ${Math.round(ageMs / 1000)}s old` };
+  const health = describeExecutorHealth(beat, opts.now ?? new Date().toISOString(), { staleMs: opts.staleMs });
+  if (health.state === 'absent') return { ok: false, unconfigured: true, detail: health.detail };
+  if (health.state === 'stale') return { ok: false, detail: health.detail };
+  // A live-but-baseline executor is a failure of the *execution* dependency, not
+  // a cosmetic warning: approved work is being completed by a test double.
+  if (health.baseline) return { ok: false, detail: health.detail };
+  return { ok: true, detail: health.detail };
 }
 
 export interface DependencyCheck {

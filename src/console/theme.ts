@@ -4,17 +4,21 @@
 
 /**
  * Console design system — the single source of every rendered color, radius,
- * shadow and type ramp. Light is the default; dark is opt-in and stores the
- * same token names (a rule referencing `var(--v-*)` never needs a dark
- * branch).
+ * shadow and type ramp. Dark is the default: it carries the VITAL brand
+ * system from the marketing entry points (site/styles.css) — dot-matrix
+ * canvas, glass panels, Outfit type, lime/champagne accents — so a visitor
+ * walks home → signup → console without a visual hand-off seam. Light stays
+ * as an opt-in "paper" mode and stores the same token names (a rule
+ * referencing `var(--v-*)` never needs a theme branch).
  *
  * Genre: modern-minimal enterprise console. Macrostructure: Workbench —
  * left rail + stream + inspector, identical on every app page.
  *
- * Decision: light is the default because the brief's reference dashboards are
- * light paper with dark ink and one deep-green accent; dark is kept as an
- * opt-in for long chat/ops sessions, and mirrors the same token names on
- * green-tinted midnight paper so no component needs a second stylesheet.
+ * Decision: the console is the logged-in continuation of a dark glass brand
+ * journey, so dark glass is the default palette and light is the opt-in for
+ * operators who prefer paper. Both mirror the same token names, and the
+ * brand textures (dot-matrix canvas, grain, vignette, spotlight) are
+ * token-driven so light mode gets a subdued version instead of a fork.
  *
  * Usage: every console HTML shell must (1) set `<html data-theme="…">` via
  * THEME_INIT_SCRIPT, (2) inline `themeStyleBlock()`, (3) render
@@ -24,10 +28,10 @@
  * file is the only place a literal color is allowed.
  */
 
-export const VITAL_THEME_VERSION = 2;
+export const VITAL_THEME_VERSION = 3;
 
-/** Default theme when nothing is stored (brief: light premium first). */
-export const DEFAULT_THEME = 'light';
+/** Default theme when nothing is stored (brand: dark glass first). */
+export const DEFAULT_THEME = 'dark';
 
 /** Early paint script: applies stored theme before first render (no flash). */
 export const THEME_INIT_SCRIPT = `(() => {
@@ -82,8 +86,8 @@ export const THEME_TOGGLE_SCRIPT = `(() => {
   try { sync(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'); } catch {}
 })();`;
 
-/** Google Fonts, preconnected — Inter for text, JetBrains Mono for identifiers. */
-export const THEME_FONT_LINKS = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">`;
+/** Google Fonts, preconnected — Outfit for text (brand face), JetBrains Mono for identifiers. */
+export const THEME_FONT_LINKS = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">`;
 
 /**
  * The stylesheet body (no wrapping <style> tag). Exported so documents that
@@ -110,7 +114,20 @@ export function themeCss(): string {
 --v-card-shadow:0 1px 2px rgba(17,19,21,.04);
 --v-card-shadow-hover:0 6px 20px rgba(17,19,21,.08);
 --v-glass:rgba(0,0,0,.015);
---font-display:'Inter',system-ui,sans-serif;--font-body:'Inter',system-ui,sans-serif;--font-mono:'JetBrains Mono',ui-monospace,monospace;
+/* Brand textures, paper-subdued: the same motifs as the site, dialed down so
+   light mode reads as paper instead of glass. Dark overrides all of them. */
+--v-glass-2:rgba(0,0,0,.03);--v-glass-3:rgba(255,255,255,.65);
+--v-glass-border:rgba(17,19,21,.08);--v-glass-border-2:rgba(17,19,21,.14);
+--v-glass-blur:16px;--v-glass-blur-sm:12px;
+--v-canvas-dots:radial-gradient(rgba(17,19,21,.05) .7px,transparent .85px);
+--v-vignette:radial-gradient(ellipse at 50% 32%,rgba(17,19,21,.02),transparent 42%),radial-gradient(ellipse at 50% 110%,rgba(17,19,21,.05),transparent 50%);
+--v-spot:radial-gradient(520px circle at var(--mx) var(--my),rgba(17,19,21,.03),transparent 58%);
+--v-shadow-bar:0 18px 40px rgba(17,19,21,.08);
+--v-glow-accent:rgba(18,107,82,.35);
+--v-grain-opacity:.025;
+/* Pointer position for the spotlight gradient; the shell script updates them. */
+--mx:50%;--my:38%;
+--font-display:'Outfit',system-ui,sans-serif;--font-body:'Outfit',system-ui,sans-serif;--font-mono:'JetBrains Mono',ui-monospace,monospace;
 --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;--sp-12:48px;
 /* ---------------------------------------------------------------- stage ----
    The meeting room is a dark stage in BOTH themes, the way a terminal is: it is
@@ -150,25 +167,40 @@ export function themeCss(): string {
 --v-stage-good-30:rgba(16, 185, 129, 0.3);--v-stage-good-15:rgba(16, 185, 129, 0.15);
 --v-stage-good-8:rgba(16, 185, 129, 0.08);--v-stage-good-0:rgba(16, 185, 129, 0);
 --ease-out:cubic-bezier(0.16,1,0.3,1);
---radius-sm:8px;--radius-md:12px;--radius-lg:16px;--radius-card:20px;--radius-xl:24px;--radius-pill:999px;--radius-input:10px}
+--radius-sm:8px;--radius-md:10px;--radius-lg:14px;--radius-card:16px;--radius-xl:20px;--radius-pill:999px;--radius-input:10px}
 [data-theme="dark"]{color-scheme:dark;
---v-bg-0:#0E1512;--v-bg-1:#141D18;--v-bg-2:#1B2620;--v-bg-3:#243329;
---v-ink:#EDF2EE;--v-ink-strong:#FFFFFF;--v-ink-2:#C3CCC7;--v-muted:#96A09A;--v-faint:#6E7873;
---v-line:rgba(255,255,255,.09);--v-line-strong:rgba(255,255,255,.16);
---v-accent:#4CC39A;--v-accent-ink:#06281C;--v-accent-dim:rgba(76,195,154,.14);--v-accent-2:#4CC39A;
---v-fact:#4CC39A;--v-hypo:#E0A83E;--v-pred:#8AA4D8;--v-risk:#E87A70;
---v-focus:#4CC39A;
---v-tint-good-bg:rgba(76,195,154,.13);--v-tint-good-ink:#7BDDB4;
---v-tint-warn-bg:rgba(224,168,62,.14);--v-tint-warn-ink:#F0BE5C;
+/* Brand glass palette — the values the marketing site ships, mapped onto the
+   console token names so every component inherits the entry-point look. */
+--v-bg-0:#111111;--v-bg-1:rgba(22,22,22,.82);--v-bg-2:rgba(255,255,255,.05);--v-bg-3:rgba(255,255,255,.09);
+--v-ink:#F3F3F3;--v-ink-strong:#FFFFFF;--v-ink-2:#D6D6D6;--v-muted:#9A9A9A;--v-faint:#6A6A6A;
+--v-line:rgba(255,255,255,.1);--v-line-strong:rgba(255,255,255,.22);
+--v-accent:#D9FFA8;--v-accent-ink:#111111;--v-accent-dim:rgba(217,255,168,.15);--v-accent-2:#EAE4DC;
+--v-fact:#9BE08C;--v-hypo:#E8C07A;--v-pred:#8AA4D8;--v-risk:#E87A70;
+--v-focus:#D9FFA8;
+--v-tint-good-bg:rgba(155,224,140,.12);--v-tint-good-ink:#B4E8A6;
+--v-tint-warn-bg:rgba(232,192,122,.13);--v-tint-warn-ink:#F0CE93;
 --v-tint-risk-bg:rgba(232,122,112,.13);--v-tint-risk-ink:#F0978D;
 --v-tint-info-bg:rgba(138,164,216,.14);--v-tint-info-ink:#A9BEE8;
 --v-tint-prose-bg:rgba(255,255,255,.035);
---v-input-bg:#101915;
+--v-input-bg:rgba(255,255,255,.05);
 --v-code-bg:rgba(0,0,0,.42);--v-code-ink:#D7DCE0;
---v-card-shadow:0 1px 3px rgba(0,0,0,.4),0 4px 16px rgba(0,0,0,.3);
---v-card-shadow-hover:0 8px 28px rgba(0,0,0,.45)}
+--v-card-shadow:0 12px 36px rgba(0,0,0,.6);
+--v-card-shadow-hover:0 18px 44px rgba(0,0,0,.7);
+--v-glass:rgba(16,16,16,.72);--v-glass-2:rgba(28,28,28,.9);--v-glass-3:rgba(255,255,255,.04);
+--v-glass-border:rgba(255,255,255,.12);--v-glass-border-2:rgba(255,255,255,.28);
+--v-canvas-dots:radial-gradient(rgba(255,255,255,.16) .7px,transparent .85px);
+--v-vignette:radial-gradient(ellipse at 50% 32%,rgba(255,255,255,.05),transparent 42%),radial-gradient(ellipse at 50% 110%,rgba(0,0,0,.55),transparent 50%);
+--v-spot:radial-gradient(520px circle at var(--mx) var(--my),rgba(255,255,255,.08),transparent 58%);
+--v-shadow-bar:0 18px 40px rgba(0,0,0,.35);
+--v-glow-accent:rgba(217,255,168,.4);
+--v-grain-opacity:.045}
 html,body{overflow-x:clip}
-body{background:var(--v-bg-0)!important;color:var(--v-ink)!important;font-family:var(--font-body);font-size:14px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+body{background:var(--v-bg-0)!important;background-image:var(--v-canvas-dots)!important;background-size:9px 9px!important;color:var(--v-ink)!important;font-family:var(--font-body);font-size:14px;font-weight:300;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+/* Brand texture stack, same layering as the site: vignette sits under the
+   content, grain over it, spotlight tracks the pointer (--mx/--my are set by
+   the shell script). Both pseudo-elements are fixed and non-interactive. */
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;background:var(--v-vignette)}
+body::after{content:'';position:fixed;inset:0;z-index:90;pointer-events:none;opacity:var(--v-grain-opacity);mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 h1,h2,h3,h4{font-style:normal;overflow-wrap:anywhere;min-width:0}
 img,svg{max-width:100%}
 /* ---------------------------------------------------------------- typography */
@@ -176,7 +208,15 @@ img,svg{max-width:100%}
 .v-section-title{font-size:20px;font-weight:650;letter-spacing:-0.02em;margin:0}
 .v-card-title{font-size:15.5px;font-weight:650;letter-spacing:-0.012em;margin:0}
 .v-sub{color:var(--v-muted)!important}
-.v-eyebrow{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--v-muted)}
+.v-eyebrow{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.18em;color:var(--v-muted)}
+/* Brand wordmark + eyebrow pulse, mirroring .signup-mark / .badge-pulse-dot
+   on the marketing pages so entry points and console share one voice. */
+.v-wordmark{font-family:var(--font-display);font-size:20px;font-weight:500;letter-spacing:.25em;color:var(--v-ink-strong);text-transform:uppercase;text-decoration:none;white-space:nowrap}
+.v-wordmark sup{font-size:.5em;letter-spacing:0;margin-left:2px;color:var(--v-muted)}
+.v-pulse-dot{width:6px;height:6px;border-radius:50%;background:var(--v-accent);box-shadow:0 0 10px var(--v-glow-accent);flex-shrink:0;animation:v-pulse 2.4s var(--ease-out) infinite}
+@keyframes v-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+/* Pointer-tracked spotlight layer; the shell sets --mx/--my on :root. */
+.v-spot{position:fixed;inset:0;z-index:0;pointer-events:none;background:var(--v-spot)}
 .v-meta{font-size:12px;color:var(--v-faint)}
 .v-mono{font-family:var(--font-mono)}
 .v-num{font-variant-numeric:tabular-nums}
@@ -196,7 +236,7 @@ img,svg{max-width:100%}
 .v-split{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .v-divider{height:1px;background:var(--v-line);border:0;margin:0}
 /* ------------------------------------------------------------------ surfaces */
-.v-card{background:var(--v-bg-1)!important;border:1px solid var(--v-line)!important;border-radius:var(--radius-card);box-shadow:var(--v-card-shadow);padding:20px 22px}
+.v-card{background:var(--v-bg-1)!important;border:1px solid var(--v-line)!important;border-radius:var(--radius-card);box-shadow:var(--v-card-shadow);padding:20px 22px;backdrop-filter:var(--v-glass-blur);-webkit-backdrop-filter:var(--v-glass-blur)}
 .v-card-flush{padding:0;overflow:hidden}
 .v-card-hover{transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out),transform .15s var(--ease-out)}
 .v-card-hover:hover{border-color:var(--v-line-strong);box-shadow:var(--v-card-shadow-hover);transform:translateY(-1px)}
@@ -385,10 +425,61 @@ a:hover{text-decoration:underline}
 button{font-family:var(--font-body)}
 :focus-visible{outline:2px solid var(--v-focus)!important;outline-offset:2px}
 ::selection{background:var(--v-accent-dim);color:var(--v-ink)}
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.15s!important;transition-duration:.15s!important}.v-card-hover:hover{transform:none}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.15s!important;transition-duration:.15s!important}.v-card-hover:hover{transform:none}.v-pulse-dot{animation:none}}
 @media (max-width:900px){.v-page{padding:16px}.v-card{padding:16px 16px}}
 [data-vital-theme-toggle]{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--v-line-strong);background:var(--v-bg-1);color:var(--v-ink);border-radius:var(--radius-pill);padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
 [data-vital-theme-toggle]:hover{border-color:var(--v-accent)}
+/* ============================================================ agent tasks ==
+   The "Ongoing Tasks" monitor for long-running Jcode executions. Every class
+   is token-only (var(--v-*)) so it inherits dark-glass default + light opt-in
+   for free; per-agent real-time state is expressed via [data-state=…], never
+   a color alone. See docs/agent-tasks-dashboard.md §13. */
+.v-live{display:inline-flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--v-muted);border:1px solid var(--v-line);border-radius:var(--radius-pill);padding:4px 11px;background:var(--v-bg-1)}
+.v-live-dot{width:7px;height:7px;border-radius:50%;background:var(--v-faint);flex-shrink:0}
+.v-live[data-state="live"]{color:var(--v-tint-good-ink);border-color:transparent;background:var(--v-tint-good-bg)}
+.v-live[data-state="live"] .v-live-dot{background:var(--v-fact);box-shadow:0 0 10px var(--v-glow-accent);animation:v-pulse 1.8s var(--ease-out) infinite}
+.v-tasks{display:grid;gap:8px}
+.v-task-row{border:1px solid var(--v-line);border-radius:var(--radius-card);background:var(--v-bg-1);overflow:hidden;transition:border-color .15s var(--ease-out),box-shadow .15s var(--ease-out)}
+.v-task-row[open]{border-color:var(--v-line-strong);box-shadow:var(--v-card-shadow)}
+.v-task-row>summary{list-style:none;cursor:pointer}
+.v-task-row>summary::-webkit-details-marker{display:none}
+.v-task-row-head{display:flex;align-items:flex-start;gap:14px;padding:14px 18px}
+.v-task-row-head:hover{background:var(--v-bg-2)}
+.v-task-status{flex-shrink:0;padding-top:2px}
+.v-task-main{flex:1;min-width:0}
+.v-task-side{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:5px}
+.v-task-count{font-family:var(--font-mono);font-size:11px;color:var(--v-muted)}
+.v-task-detail{border-top:1px solid var(--v-line);padding:14px 18px 16px;display:grid;gap:12px;animation:v-rise .24s var(--ease-out) both}
+.v-task-detail-actions{display:flex;gap:8px}
+/* Per-agent derived state dot — the honest substitute for a status column that
+   does not exist in the schema. Shape + label always accompany color. */
+.v-agent-dot{width:9px;height:9px;border-radius:50%;background:var(--v-faint);flex-shrink:0;display:inline-block}
+.v-agent-dot[data-state="processing"]{background:var(--v-accent);box-shadow:0 0 8px var(--v-glow-accent);animation:v-pulse 1.4s var(--ease-out) infinite}
+.v-agent-dot[data-state="waiting"]{background:var(--v-pred)}
+.v-agent-dot[data-state="done"]{background:var(--v-fact)}
+.v-agent-dot[data-state="risk"]{background:var(--v-risk)}
+.v-agent-tree{display:grid;gap:2px}
+.v-agent-tree-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--radius-sm);min-width:0}
+.v-agent-tree-row.is-active{background:var(--v-accent-dim)}
+.v-agent-tree-row--primary{font-weight:600}
+.v-agent-tree-row--depth-2{margin-left:20px;border-left:2px solid var(--v-line);border-radius:0}
+.v-agent-tree-row--depth-3{margin-left:40px;border-left:2px solid var(--v-line);border-radius:0}
+.v-agent-tree-row--depth-4{margin-left:60px;border-left:2px solid var(--v-line);border-radius:0}
+.v-agent-tree-main{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px}
+.v-agent-tree-goal{font-size:12px;color:var(--v-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.v-guardstrip{display:flex;flex-wrap:wrap;gap:8px}
+.v-guard{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;padding:4px 10px;border-radius:var(--radius-sm);border:1px solid var(--v-line);background:var(--v-bg-2);color:var(--v-ink-2)}
+.v-guard__k{color:var(--v-muted);text-transform:uppercase;letter-spacing:.06em;font-size:9.5px}
+.v-guard[data-state="warn"]{background:var(--v-tint-warn-bg);color:var(--v-tint-warn-ink);border-color:transparent}
+.v-guard[data-state="risk"]{background:var(--v-tint-risk-bg);color:var(--v-tint-risk-ink);border-color:transparent}
+.v-swarm-chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 10px;border-radius:var(--radius-md);background:var(--v-tint-prose-bg);border:1px dashed var(--v-line-strong)}
+.v-swarm-label{font-family:var(--font-mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--v-muted)}
+.v-swarm-hop{font-family:var(--font-mono);font-size:11px;padding:2px 8px;border-radius:var(--radius-pill);background:var(--v-bg-1);border:1px solid var(--v-line);color:var(--v-ink-2)}
+.v-swarm-sep{color:var(--v-faint)}
+.v-progress--hatch>i{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.18) 0 6px,transparent 6px 12px)}
+.v-progress--hatch[data-state="processing"]>i{animation:v-hatch .8s linear infinite}
+@keyframes v-hatch{to{background-position:24px 0}}
+@media (prefers-reduced-motion:reduce){.v-progress--hatch>i{animation:none}.v-live[data-state="live"] .v-live-dot{animation:none}.v-agent-dot[data-state="processing"]{animation:none}}
 `.trim();
 }
 
@@ -397,9 +488,43 @@ export function themeStyleBlock(): string {
   return `<style>${themeCss()}</style>`;
 }
 
+/**
+ * The stage (--v-stage-*) palette, as a standalone `:root` block.
+ *
+ * The live meeting room is a full document that deliberately does NOT ship the
+ * console stylesheet — it is a video surface, not an app page — but its CSS
+ * speaks in --v-stage-* tokens. Before this existed those var() references
+ * resolved to nothing and the room rendered unstyled. The room inlines this
+ * block instead. Keep in sync with the stage family inside themeCss() above.
+ */
+export function stageTokensCss(): string {
+  return `:root{
+--v-stage-void:#05080C;--v-stage-canvas:#080C10;
+--v-stage-1:#0B111A;--v-stage-2:#0E1624;--v-stage-3:#0F172A;--v-stage-4:#111827;
+--v-stage-5:#111B27;--v-stage-6:#131E2E;--v-stage-7:#141E2C;
+--v-stage-line:#1E293B;--v-stage-line-2:#1E2B3C;--v-stage-line-3:#1F2937;--v-stage-line-strong:#334155;
+--v-stage-faint:#475569;--v-stage-muted:#64748B;--v-stage-muted-2:#94A3B8;
+--v-stage-ink-2:#CBD5E1;--v-stage-ink:#E2E8F0;--v-stage-ink-strong:#F8FAFC;
+--v-stage-white:#FFFFFF;--v-stage-soft:#F1F5F9;
+--v-stage-accent:#0F766E;--v-stage-accent-2:#0D9488;--v-stage-accent-dim:#0F5C57;
+--v-stage-accent-dim-2:#115E59;--v-stage-accent-bright:#5EEAD4;
+--v-stage-good:#10B981;--v-stage-good-2:#059669;
+--v-stage-warn:#D97706;--v-stage-warn-2:#B45309;
+--v-stage-risk:#EF4444;--v-stage-risk-2:#DC2626;--v-stage-risk-ink:#FCA5A5;--v-stage-risk-dim:rgba(239, 68, 68, 0.2);
+--v-stage-info:#0369A1;
+--v-stage-scrim:rgba(15, 23, 42, 0.75);
+--v-stage-shadow-50:rgba(0, 0, 0, 0.5);--v-stage-shadow-60:rgba(0, 0, 0, 0.6);--v-stage-shadow-70:rgba(0,0,0,0.7);
+--v-stage-white-5:rgba(255, 255, 255, 0.05);
+--v-stage-accent-bright-20:rgba(94, 234, 212, 0.2);--v-stage-accent-bright-10:rgba(94, 234, 212, 0.1);
+--v-stage-good-70:rgba(16, 185, 129, 0.7);--v-stage-good-40:rgba(16, 185, 129, 0.4);
+--v-stage-good-30:rgba(16, 185, 129, 0.3);
+--ease-out:cubic-bezier(0.16,1,0.3,1);
+--radius-pill:999px}`;
+}
+
 /** Small pill toggle rendered in every top bar / account cluster. */
 export function themeToggleButton(): string {
-  return `<button type="button" data-vital-theme-toggle aria-pressed="false" aria-label="Switch to dark theme" title="Toggle light / dark theme"><span data-theme-icon aria-hidden="true">○</span><span data-theme-label>Light</span></button>`;
+  return `<button type="button" data-vital-theme-toggle aria-pressed="true" aria-label="Switch to light theme" title="Toggle light / dark theme"><span data-theme-icon aria-hidden="true">●</span><span data-theme-label>Dark</span></button>`;
 }
 
 /** Everything a document head needs before first paint: fonts, theme, tokens. */
@@ -436,7 +561,11 @@ export function themeDocument(html: string): string {
   if (/<head[^>]*>/i.test(out)) {
     out = out.replace(/<head([^>]*)>/i, (m) => `${m}${payload}`);
   } else {
-    out = out.replace(/<html([^>]*)>/i, (m) => `${m}<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${payload}</head>`);
+    out = out.replace(
+      /<html([^>]*)>/i,
+      (m) =>
+        `${m}<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${payload}</head>`,
+    );
   }
   // 3. Toggle wiring, once, before </body> — only when a toggle is rendered.
   if (!out.includes('data-vital-theme-toggle') || out.includes(THEME_TOGGLE_MARKER)) return out;

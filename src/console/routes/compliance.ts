@@ -57,6 +57,7 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
       pattern: '/console/audit',
       capability: 'owner',
       surface: 'html',
+      activation: 'required',
       denied: {
         title: 'Audit log',
         message: 'Audit log requires the admin or owner role.',
@@ -91,6 +92,7 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
       pattern: '/console/data',
       capability: 'owner',
       surface: 'html',
+      activation: 'required',
       denied: {
         title: 'Data & retention',
         message: 'Data & retention requires the admin or owner role.',
@@ -122,6 +124,7 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
       pattern: '/console/data/erase',
       capability: 'owner',
       surface: 'html',
+      activation: 'required',
       // Body handling and the CSRF check are declared, not written here: the
       // dispatcher parses the form and verifies the token before this handler
       // runs, so `ctx.call` is guaranteed to be a verified body.
@@ -163,6 +166,7 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
       pattern: '/console/data/export',
       capability: 'owner',
       surface: 'html',
+      activation: 'required',
       // The download answers with the bundle itself, not a page, so a refusal
       // stays a bare line of text rather than a shelled document a browser would
       // render as a JSON-ish page.

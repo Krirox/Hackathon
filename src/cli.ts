@@ -635,6 +635,12 @@ if (cmd === 'status') {
   const target = resolveDbTarget({ flag: flag('--db') });
   const jcodeSocket = flag('--jcode-socket') ?? process.env.JCODE_API_SOCKET;
   const pollIntervalMs = Number(flag('--interval-ms') ?? '1000');
+  // Where MODEL-tier work runs. `cloud` writes a durable executor-job row for
+  // the outbox relay instead of running the work in this process — the lane the
+  // Lambda handler, its Terraform and the deployment doc already assume exists.
+  // Opt-in, because it changes which executor holds the lease.
+  const executorLane: 'local' | 'cloud' =
+    args.includes('--cloud-executor') || process.env.VITAL_EXECUTOR_LANE === 'cloud' ? 'cloud' : 'local';
   const db = openDbTarget(target);
   await migrateDbTarget(db);
 
@@ -643,7 +649,12 @@ if (cmd === 'status') {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 
-  console.log(`vital worker started for tenant "${tenant}" (${JSON.stringify(formatTargetHeader(target, tenant))})`);
+  console.log(
+    `vital worker started for tenant "${tenant}" (${JSON.stringify(formatTargetHeader(target, tenant))})` +
+      (executorLane === 'cloud'
+        ? ' — MODEL-tier work is queued for the cloud executor lane (durable executor-job rows)'
+        : ''),
+  );
   const buzz = await workerBuzzSurface(db, tenant);
   if (buzz) console.log('vital worker: Buzz surface live (run progress streams to room threads)');
   try {
@@ -651,6 +662,7 @@ if (cmd === 'status') {
       tenant,
       jcodeSocketPath: jcodeSocket,
       pollIntervalMs,
+      executorLane,
       signal: controller.signal,
       ...(buzz ? { buzz } : {}),
     });

@@ -20,6 +20,10 @@ export interface ReviewCardOptions {
   driftScore?: number;
   webhookBaseUrl?: string;
   secret?: string;
+  /** Token expiry override. Defaults to mint-time + REVIEW_TOKEN_TTL_MS. */
+  expiresAt?: string;
+  /** Request version the reviewer saw. Bound into both tokens. */
+  requestUpdatedAt?: string;
 }
 
 /**
@@ -51,36 +55,67 @@ export function requireReviewSecret(): string {
   return secret;
 }
 
+export interface ReviewTokenOptions {
+  /** ISO timestamp after which the token refuses. Absent = legacy token. */
+  expiresAt?: string;
+  /** Request updatedAt the reviewer saw. Binds the token to a version. */
+  requestUpdatedAt?: string;
+}
+
+/** Default review-token lifetime: 72h. Cards outlive a long weekend, never a quarter. */
+export const REVIEW_TOKEN_TTL_MS = 72 * 3600_000;
+
 export function mintReviewToken(
   secret: string,
   tenant: string,
   requestId: string,
   action: 'approve' | 'decline',
+  opts: ReviewTokenOptions = {},
 ): string {
-  const payload = `${tenant}:${requestId}:${action}`;
+  const expiresAt = opts.expiresAt ?? '';
+  const requestUpdatedAt = opts.requestUpdatedAt ?? '';
+  const payload = `${tenant}:${requestId}:${action}:${expiresAt}:${requestUpdatedAt}`;
   const hmac = createHmac('sha256', secret).update(payload).digest('hex');
-  return Buffer.from(JSON.stringify({ tenant, requestId, action, sig: hmac })).toString('base64url');
+  return Buffer.from(JSON.stringify({ tenant, requestId, action, expiresAt, requestUpdatedAt, sig: hmac })).toString(
+    'base64url',
+  );
 }
 
 export function verifyReviewToken(
   token: string,
   secret: string,
-): { valid: boolean; tenant?: string; requestId?: string; action?: 'approve' | 'decline' } {
+): {
+  valid: boolean;
+  tenant?: string;
+  requestId?: string;
+  action?: 'approve' | 'decline';
+  expiresAt?: string;
+  requestUpdatedAt?: string;
+} {
   try {
     const raw = Buffer.from(token, 'base64url').toString('utf8');
-    const parsed = JSON.parse(raw) as { tenant: string; requestId: string; action: 'approve' | 'decline'; sig: string };
+    const parsed = JSON.parse(raw) as {
+      tenant: string;
+      requestId: string;
+      action: 'approve' | 'decline';
+      expiresAt?: string;
+      requestUpdatedAt?: string;
+      sig: string;
+    };
     if (!parsed.tenant || !parsed.requestId || !parsed.action || !parsed.sig) {
       return { valid: false };
     }
+    const expiresAt = typeof parsed.expiresAt === 'string' ? parsed.expiresAt : '';
+    const requestUpdatedAt = typeof parsed.requestUpdatedAt === 'string' ? parsed.requestUpdatedAt : '';
     const expect = createHmac('sha256', secret)
-      .update(`${parsed.tenant}:${parsed.requestId}:${parsed.action}`)
+      .update(`${parsed.tenant}:${parsed.requestId}:${parsed.action}:${expiresAt}:${requestUpdatedAt}`)
       .digest('hex');
     const a = Buffer.from(parsed.sig, 'hex');
     const b = Buffer.from(expect, 'hex');
     if (a.length !== b.length || !timingSafeEqual(a, b)) {
       return { valid: false };
     }
-    return { valid: true, tenant: parsed.tenant, requestId: parsed.requestId, action: parsed.action };
+    return { valid: true, tenant: parsed.tenant, requestId: parsed.requestId, action: parsed.action, expiresAt, requestUpdatedAt };
   } catch {
     return { valid: false };
   }
@@ -90,8 +125,15 @@ export function renderReviewCard(opts: ReviewCardOptions): string {
   const baseUrl = (opts.webhookBaseUrl ?? 'http://127.0.0.1:4200').replace(/\/$/, '');
   const secret = opts.secret ?? requireReviewSecret();
 
-  const approveToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'approve');
-  const declineToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'decline');
+  const expiresAt = opts.expiresAt ?? new Date(Date.now() + REVIEW_TOKEN_TTL_MS).toISOString();
+  const approveToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'approve', {
+    expiresAt,
+    requestUpdatedAt: opts.requestUpdatedAt,
+  });
+  const declineToken = mintReviewToken(secret, opts.tenant, opts.requestId, 'decline', {
+    expiresAt,
+    requestUpdatedAt: opts.requestUpdatedAt,
+  });
 
   // Approve/decline land on a confirmation page, not a mutating GET: a link
   // that changes state the moment it is fetched is prefetchable and CSRF-able.
@@ -136,7 +178,7 @@ export function renderReviewCard(opts: ReviewCardOptions): string {
 export function requestToReviewCard(
   req: CoordinationRequest,
   evidenceClaims: { id: string; statement: string; confidence?: number }[] = [],
-  opts: { baseUrl?: string; secret?: string; driftScore?: number } = {},
+  opts: { baseUrl?: string; secret?: string; driftScore?: number; expiresAt?: string } = {},
 ): string {
   return renderReviewCard({
     requestId: req.id,
@@ -155,5 +197,7 @@ export function requestToReviewCard(
     driftScore: opts.driftScore,
     webhookBaseUrl: opts.baseUrl,
     secret: opts.secret,
+    expiresAt: opts.expiresAt,
+    requestUpdatedAt: req.updatedAt,
   });
 }

@@ -95,6 +95,43 @@ Vital provides an authoritative background worker and dispatch subsystem (`src/s
 - **`vital worker`**: Standalone background daemon executing recovery sweeps (`readmitDeferred`, `reclaimStale`, `expireStale`), relaying durable outbox batches (`claimOutbox`/`settleOutbox`), and dispatching runnable requests (`ADMITTED` and `ACCEPTED`) to execution runtimes (`jcode`, `LocalEchoAdapter`, or model executors).
 - **`vital serve --with-worker`**: Runs the HTTP console and the background worker within the same process, suitable for single-node deployments and Docker Compose (`deploy/compose.yml`).
 
+### Execution lanes: where MODEL-tier work runs
+
+By default the worker executes everything itself, through the harness adapter it
+was configured with (`JCODE_API_SOCKET` → jcode, otherwise the echoed test
+baseline). The cloud lane moves MODEL-tier work to the executor that the AWS
+topology already runs:
+
+```bash
+vital worker --tenant acme --db "$DATABASE_URL" --cloud-executor
+# or: VITAL_EXECUTOR_LANE=cloud vital worker ...
+```
+
+With the lane on, a MODEL-tier request is **written as a durable
+`executor-job` row** instead of being run in the worker process. The outbox relay
+then delivers it:
+
+| relay configuration | where the work runs |
+| --- | --- |
+| `sqsSender` supplied by the deployment | sent to SQS → the Lambda executor (its own Firecracker microVM) |
+| no sender | the same Lambda container handler runs in-process (`runJob`) |
+
+Both halves matter:
+
+- **Losing the worker no longer loses the work.** The row is durable, so a crash
+  between the routing decision and the send leaves the request queued rather
+  than stranded, and the relay retries with backoff.
+- **Exactly one executor holds the lease.** The worker does not claim a request
+  it queued: `claimExecution` is a compare-and-swap, and Lambda claims on
+  delivery. Two executors never run the same request.
+- **A `MODEL` tier only.** The Lambda handler caps at 15 minutes and is documented
+  as REFLEX/WORKFLOW + short MODEL work; long jcode runs belong to the Fargate
+  sidecar (`src/jcode/runner.ts`), which is what the local lane already uses.
+
+Leave the lane off until SQS delivery (or the in-process `runJob` fallback, which
+needs a model API key) is actually configured for the environment — otherwise
+the queue fills and nothing executes.
+
 ## AWS (production)
 
 All-AWS, Terraform in `deploy/aws/` (`main.tf` · `variables.tf` ·

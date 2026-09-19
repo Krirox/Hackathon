@@ -2,12 +2,18 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { T, eq, TEN, NOW, fresh, base, sor } from './helpers.ts';
+import { T, eq, rejects, TEN, NOW, fresh, base, sor, cardInput, seedTrace } from './helpers.ts';
 import { ApplicationWorker } from '../src/substrate/worker.ts';
 import { CognitiveRouter } from '../src/router/router.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
 import { setKill } from '../src/gov/trust.ts';
-import { LocalEchoAdapter } from '../src/substrate/harness.ts';
+import { LocalEchoAdapter, type HarnessAdapter } from '../src/substrate/harness.ts';
+import {
+  TRANSFER_TEST_KIND,
+  compileCandidate,
+  enqueueTransferTest,
+  listCompileCandidates,
+} from '../src/console/learning-actions.ts';
 import { migrate, openDb } from '../src/core/db.ts';
 
 console.log('\n\x1b[1mF17 — Router, compiler and operating learning loop\x1b[0m');
@@ -657,4 +663,307 @@ T('CLI learn command runs drift, budget breach, and mining sweeps', async () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+T('learning: a card can be compiled from mined evidence, and the evidence overrides the form', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'test:learning',
+    kind: 'OBSERVATION',
+    statement: 'release evidence for compilation',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'marketing',
+    authorType: 'system',
+    provenance: sor(),
+  });
+
+  // Three successful traces on one intent, each produced by a real executor, so
+  // the origin model is attested rather than asserted.
+  const traceIds: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const { request } = await coord.submit(
+      base({ id: `req-cand-${i}`, goal: `draft launch copy variant ${i}`, claimRefs: [clm.id] }),
+    );
+    await coord.claimExecution(TEN, request.id, 'jcode:worker', NOW, 60_000);
+    const traceId = `tr_cand_${i}`;
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        traceId,
+        TEN,
+        request.id,
+        'marketing',
+        'launch.copy.draft',
+        'draft-launch-copy',
+        '[]',
+        'MODEL',
+        'SUCCESS',
+        '{}',
+        null,
+        0.9,
+        NOW,
+      );
+    traceIds.push(traceId);
+  }
+
+  const candidates = await listCompileCandidates(db, TEN);
+  const candidate = candidates.find((c) => c.intent === 'draft-launch-copy');
+  eq(candidate !== undefined, true, 'the repeated intent is mined as a candidate:');
+  eq(candidate!.blocked, null, 'with executor provenance it is compilable:');
+  eq(candidate!.traceIds.length, 3);
+  eq(candidate!.originModels, ['jcode'], 'the model that ran the traces is read from exec_owner:');
+  eq(candidate!.tiers, ['MODEL']);
+  eq(candidate!.scopes, ['marketing']);
+
+  // The form may describe the procedure; it may not widen what the evidence supports.
+  const baseInput = {
+    intent: 'draft-launch-copy',
+    predicates: ['a release summary exists'],
+    steps: ['read the cited claims', 'draft the copy'],
+    tests: ['every bullet cites a live claim'],
+    toolGrants: ['docs.read'],
+    tier: 'MODEL',
+    scope: 'marketing',
+    owner: 'human:owner',
+    now: NOW,
+  };
+  await rejects(
+    () => compileCandidate(db, comp, TEN, { ...baseInput, tier: 'WORKFLOW' }),
+    'not supported by this evidence',
+  );
+  await rejects(
+    () => compileCandidate(db, comp, TEN, { ...baseInput, scope: 'engineering' }),
+    'not supported by this evidence',
+  );
+  await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, predicates: [] }), 'without predicates');
+  await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, tests: [] }), 'no spec');
+  await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, intent: 'never-seen' }), 'no compilable candidate');
+
+  const card = await compileCandidate(db, comp, TEN, baseInput);
+  eq(card.state, 'CANDIDATE', 'a compiled card starts in CANDIDATE, never promoted:');
+  eq(card.originModels, ['jcode'], 'provenance comes from the evidence, not the form:');
+  eq(card.originScope, 'marketing');
+  eq(card.provenance.traceIds.slice().sort(), traceIds.slice().sort());
+  eq((await comp.list(TEN, {})).length, 1, 'the card is durable — compile() is reachable from the product now:');
+
+  await db.close();
+});
+
+T('learning: traces with no executor provenance are refused, not compiled with a guessed model', async () => {
+  const { db, comp } = await fresh();
+  // Successes with no request behind them: nothing recorded which model produced them.
+  for (let i = 0; i < 3; i++) {
+    await db
+      .prepare(
+        'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(`tr_orphan_${i}`, TEN, null, 'marketing', 'launch.copy.draft', 'orphan-intent', '[]', 'MODEL', 'SUCCESS', '{}', null, 0.9, NOW);
+  }
+  const candidates = await listCompileCandidates(db, TEN);
+  const orphan = candidates.find((c) => c.intent === 'orphan-intent');
+  eq(orphan?.blocked?.includes('no executor provenance'), true, 'the gap is stated, not papered over:');
+  await rejects(
+    () =>
+      compileCandidate(db, comp, TEN, {
+        intent: 'orphan-intent',
+        predicates: ['p'],
+        steps: ['s'],
+        tests: ['t'],
+        toolGrants: [],
+        tier: 'MODEL',
+        scope: 'marketing',
+        owner: 'human:owner',
+        now: NOW,
+      }),
+    'no executor provenance',
+  );
+  await db.close();
+});
+
+T('learning: a transfer test is queued durably, and a bad request is refused before it queues', async () => {
+  const { db, ledger, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_transfer_only');
+  const card = await comp.compile(cardInput(['tr_transfer_only']));
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'test:transfer',
+    kind: 'OBSERVATION',
+    statement: 'release evidence for a transfer run',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'marketing',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const id = await enqueueTransferTest(db, comp, TEN, {
+    cardId: card.id,
+    targetScope: 'engineering',
+    command: 'draft the launch copy',
+    claimIds: [clm.id],
+    maxDollars: 1,
+    maxTokens: 5000,
+    onBehalfOf: 'human:owner',
+    now: NOW,
+  });
+  const row = (await db.prepare('SELECT kind, payload_json, status FROM outbox WHERE id = ?').get(id)) as
+    | { kind: string; payload_json: string; status: string }
+    | undefined;
+  eq(row?.kind, TRANSFER_TEST_KIND);
+  eq(row?.status, 'PENDING');
+  eq(JSON.parse(String(row!.payload_json)).cardId, card.id);
+
+  await rejects(
+    () =>
+      enqueueTransferTest(db, comp, TEN, {
+        cardId: 'skl_missing',
+        targetScope: 'engineering',
+        command: 'x',
+        claimIds: [],
+        maxDollars: 1,
+        maxTokens: 5000,
+        onBehalfOf: 'human:owner',
+        now: NOW,
+      }),
+    'unknown skill card',
+  );
+  await rejects(
+    () =>
+      enqueueTransferTest(db, comp, TEN, {
+        cardId: card.id,
+        targetScope: 'engineering',
+        command: 'x',
+        claimIds: [clm.id],
+        maxDollars: 0,
+        maxTokens: 5000,
+        onBehalfOf: 'human:owner',
+        now: NOW,
+      }),
+    'positive dollar ceiling',
+  );
+  await rejects(
+    () =>
+      enqueueTransferTest(db, comp, TEN, {
+        cardId: card.id,
+        targetScope: 'engineering',
+        command: 'x',
+        claimIds: [],
+        maxDollars: 1,
+        maxTokens: 5000,
+        onBehalfOf: 'human:owner',
+        now: NOW,
+      }),
+    'cited claim',
+  );
+  await db.close();
+});
+
+T('learning: the worker runs a queued transfer test and banks the evidence', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_run');
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'test:transfer-run',
+    kind: 'OBSERVATION',
+    statement: 'release evidence for the transfer run',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'marketing',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const card = await comp.compile(cardInput(['tr_run']));
+  const model: HarnessAdapter = {
+    name: 'model-b',
+    category: 'model',
+    isTestBaseline: false,
+    model: 'model-b',
+    async run(_tenant, requestId) {
+      return {
+        adapter: 'model-b',
+        requestId,
+        status: 'COMPLETED',
+        transcript: 'ok',
+        tools: [],
+        usage: { input: 1, output: 1 },
+        permissions: [],
+        isTestBaseline: false,
+      };
+    },
+  };
+  await enqueueTransferTest(db, comp, TEN, {
+    cardId: card.id,
+    targetScope: 'engineering',
+    command: 'draft the launch copy',
+    claimIds: [clm.id],
+    maxDollars: 1,
+    maxTokens: 5000,
+    onBehalfOf: 'human:owner',
+    now: NOW,
+  });
+
+  const worker = new ApplicationWorker(db, ledger, coord, {
+    tenant: TEN,
+    dispatchRequests: false,
+    transferAdapters: [model, new LocalEchoAdapter(db, ledger, coord)],
+  });
+  const result = await worker.tick(NOW);
+  eq(result.outboxProcessed, 1, 'the queued job was relayed:');
+
+  const tests = await comp.transferResults(TEN, card.id);
+  const cross = tests.find((t) => t.kind === 'cross_model');
+  const smoke = tests.find((t) => t.kind === 'harness_smoke');
+  eq(cross?.variant, 'model-b', 'a real second model banks cross_model evidence:');
+  eq(cross?.passed, true);
+  eq(smoke?.variant, 'local-echo', 'the baseline harness is classified as smoke, not cross-model:');
+  await db.close();
+});
+
+T('learning: a transfer test with only baseline harnesses says so instead of implying promotion', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await seedTrace(comp, db, 'tr_smoke');
+  const clm = await ledger.append({
+    tenant: TEN,
+    subject: 'test:transfer-smoke',
+    kind: 'OBSERVATION',
+    statement: 'release evidence for the smoke-only transfer run',
+    confidence: 1,
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'agent:test',
+    scope: 'marketing',
+    authorType: 'system',
+    provenance: sor(),
+  });
+  const card = await comp.compile(cardInput(['tr_smoke']));
+  await enqueueTransferTest(db, comp, TEN, {
+    cardId: card.id,
+    targetScope: 'engineering',
+    command: 'draft the launch copy',
+    claimIds: [clm.id],
+    maxDollars: 1,
+    maxTokens: 5000,
+    onBehalfOf: 'human:owner',
+    now: NOW,
+  });
+  const worker = new ApplicationWorker(db, ledger, coord, {
+    tenant: TEN,
+    dispatchRequests: false,
+    transferAdapters: [new LocalEchoAdapter(db, ledger, coord)],
+  });
+  await worker.tick(NOW);
+  const tests = await comp.transferResults(TEN, card.id);
+  eq(tests.every((t) => t.kind === 'harness_smoke'), true, 'no cross_model evidence is claimed:');
+  const lastError = String(worker.status().lastError ?? '');
+  eq(lastError.includes('TRANSFER_SMOKE_ONLY'), true, `the worker says the gate is still open: ${lastError}`);
+  await db.close();
 });

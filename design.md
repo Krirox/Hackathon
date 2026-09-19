@@ -24,8 +24,12 @@ purpose. Restyling one must never re-skin the other.
 1. **Console** — Dashboard, Ledger, Approvals, Workflows, Governance, Activity,
    Requests, Claims, Audit, Rooms, Data, Learning, Compiler, Human work, Team,
    Account, detail pages, setup.
-   Shell: `src/console/console-shell.ts` (`renderConsoleShell`, `ws-*` classes).
-   Owns the design tokens, Inter, the theme toggle, and dark mode.
+   Shell: `src/console/console-shell.ts` (`renderConsoleShell`, `vc-*` classes).
+   Owns the design tokens, Outfit, the theme toggle, and the dark-glass brand
+   default. Its chrome is drawn from the marketing brand system in `site/`
+   (`vc-window` floating glass panels on the dot-matrix canvas, `v-wordmark`,
+   `v-pulse-dot` eyebrow, pointer-tracked `v-spot` spotlight) and shares no
+   class, id, or import with the chat shell.
 2. **Workspace / chat** — the Buzz surface: room roster, per-room thread,
    Issues board.
    Shell: `src/console/workspace-shell.ts` (upstream Buzz classes
@@ -50,7 +54,8 @@ look. That is why the chat is exempted rather than restyled.
 - `themeDocument()` (the `res.end` boundary in `serve.ts`) would otherwise
   inject the token block into every `text/html` response, and its `body` rule
   uses `!important` — which would re-font the chat from the system stack to
-  Inter. `buzzDocument()` therefore carries `THEME_OPTOUT_MARKER`
+  Outfit and repaint its canvas onto the brand dot-matrix. `buzzDocument()`
+  therefore carries `THEME_OPTOUT_MARKER`
   (`data-vital-no-theme`) in a `<head>` comment, and `themeDocument()` returns
   any document carrying it untouched.
 - The marker is an HTML comment: it has no visual effect, so the chat's
@@ -64,29 +69,52 @@ look. That is why the chat is exempted rather than restyled.
   `buzz-content-card`), exactly as upstream.
 - Auth pages (login, signup, recovery): single centered card, no rail.
 
-## Theme (light default, dark opt-in)
+## Theme (dark-glass brand default, light opt-in)
 
-Light paper band (L > 85%), grotesk-sans display (Inter 600/700, roman only),
-deep-green accent kept from brand at ≤5% per viewport.
+Dark glass band, the palette the marketing entry points (`site/styles.css`)
+ship, so home → signup → login → console is one continuous brand journey with
+no visual hand-off seam. Display/body is Outfit (300–700, roman only); the
+lime accent (`#D9FFA8`) and champagne (`#EAE4DC`) are kept from brand and used
+sparingly. Light is an opt-in "paper" mode and mirrors the same token names, so
+no component needs a second stylesheet or a theme branch.
 
-- `--v-bg-0`     #F7F8F6 — app canvas
-- `--v-bg-1`     #FFFFFF — raised card
-- `--v-bg-2`     #F2F4F1 — hover / inset
-- `--v-ink`      #111315 — primary text
-- `--v-muted`    #68706D — secondary text
-- `--v-faint`    #929995 — timestamps, metadata
-- `--v-line`     #E5E8E5 — hairlines
-- `--v-accent`   #126B52 — deep green, actions + active states only
-- `--v-fact`     #278A59 — verified / healthy
-- `--v-hypo`     #D99A32 — pending / provisional
-- `--v-risk`     #D95C52 — destructive / halted
-- `--v-pred`     #5577B8 — predictions / info
+Dark (default) — brand glass, mapped onto the console token names:
+
+- `--v-bg-0`     #111111 — app canvas (dot-matrix painted over it)
+- `--v-bg-1`     rgba(22,22,22,.82) — raised glass card
+- `--v-bg-2/3`   rgba(255,255,255,.05/.09) — hover / inset wash
+- `--v-ink`      #F3F3F3 — primary text; `--v-ink-strong` #FFFFFF
+- `--v-muted`    #9A9A9A — secondary text; `--v-faint` #6A6A6A
+- `--v-line`     rgba(255,255,255,.1) — hairlines
+- `--v-accent`   #D9FFA8 — lime, actions + active states; `--v-accent-2` #EAE4DC champagne
+- `--v-fact`     #9BE08C — verified / healthy
+- `--v-hypo`     #E8C07A — pending / provisional
+- `--v-risk`     #E87A70 — destructive / halted
+- `--v-pred`     #8AA4D8 — predictions / info
 - `--v-focus`    var(--v-accent) — 2px focus ring, instant, never animated
-- Dark opt-in mirrors the same names on green-tinted midnight paper.
+
+Light opt-in mirrors every name on paper (`--v-bg-0` #F7F8F6, `--v-accent`
+#126B52 deep green, …) with the brand textures dialed down, so the same markup
+renders as glass or paper purely from `data-theme`.
+
+Brand texture tokens (both themes, dark = full strength, light = subdued):
+
+- `--v-glass*` — panel fill, border and `--v-glass-blur` (16px) / `-sm` (12px)
+- `--v-canvas-dots` — the dot-matrix `background-image` painted on `body`
+- `--v-vignette` / `--v-spot` — the fixed `body::before` vignette and the
+  pointer-tracked `.v-spot` spotlight (`--mx`/`--my` set by the shell script)
+- `--v-grain-opacity` — the fixed `body::after` film-grain overlay (SVG
+  feTurbulence data-URI, `mix-blend-mode: overlay`)
 
 Token law (Console pages): every color and font-family in rendered output
 references a `var(--v-*)` token. A needed value that has no token becomes a new
 token first. Hex in comments is documentation, never paint.
+
+Shared telemetry is decoupled from both shells: `ShellMetrics`,
+`computeShellMetrics` and `computeRoomRecency` live in the neutral
+`src/console/shell-metrics.ts`, so the console shell never imports the chat
+shell (or vice versa) to draw a number. `test/routes.test.ts` budgets it under
+the module key `console/shell-metrics`.
 
 Scope exception — the Workspace/chat is exempt from the token law, not merely
 non-compliant. Its literal Buzz hexes (`#1C1E21`, `#E8EAE6`, `#616061`,
@@ -106,22 +134,29 @@ Sentiment tints (per-theme pairs so pills read on both modes):
 
 ## Typography
 
-- Display: Inter, 600/700, roman always (italic headers banned globally).
-- Body: Inter, 400/500.
+- Display: Outfit, 500/600/700, roman always (italic headers banned globally).
+- Body: Outfit, 300/400/500.
 - Mono: JetBrains Mono, 400/500 — ids, hashes, budgets, timestamps.
-- H1 22px/700 tight; H2 14px/700; eyebrow 11px/600 uppercase tracked.
+- H1 tight; H2 semibold; eyebrow 11px/600 uppercase tracked at .18em.
+- Brand wordmark (`v-wordmark`): Outfit 20px/500, .25em tracking, `sup` ®.
 - Display headers wrap: `overflow-wrap: anywhere; min-width: 0`.
 
 ## Spacing
 
 4pt named scale: `--sp-1:4px --sp-2:8px --sp-3:12px --sp-4:16px
---sp-5:20px --sp-6:24px --sp-8:32px`. Radius: card 12, pill 999, input 8.
+--sp-5:20px --sp-6:24px --sp-8:32px`. Radius (site-aligned): sm 8, md/input
+10, lg 14, card 16, xl 20, pill 999.
 
 ## Motion (motion-cut project: no motion library)
 
 - Easings: `--ease-out: cubic-bezier(0.16,1,0.3,1)`.
-- Reveal: none. Hover: background shift ≤150ms. No layout-property animation.
-- `prefers-reduced-motion: reduce` → opacity-only ≤150ms.
+- Hover: background/border shift ≤150ms; brand CTAs may lift with a
+  compositor-only `transform` (translateY/translateX), never a layout property.
+- Ambient: the eyebrow `v-pulse-dot` breathes on a 2.4s opacity loop; the
+  `v-spot` spotlight tracks the pointer with no transition (rAF-throttled).
+- Reveal: none. No layout-property animation anywhere.
+- `prefers-reduced-motion: reduce` → transitions/animation ≤150ms, hover lift
+  removed, and the ambient pulse disabled (`.v-pulse-dot{animation:none}`).
 - Focus ring appears instantly.
 
 ## Microinteractions stance
