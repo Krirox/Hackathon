@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { memo } from '../core/request-cache.ts';
 import type { AsyncDb } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { HarnessAdapter } from '../substrate/harness.ts';
@@ -684,16 +685,27 @@ function parseStopRow(tenant: string, key: string, value: string): StopRecord | 
   };
 }
 
-export async function listStops(db: AsyncDb, tenant: string): Promise<StopRecord[]> {
-  const rows = (await db
-    .prepare('SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key')
-    .all(`kill:${tenant}:%`)) as { key: string; value: string }[];
-  const out: StopRecord[] = [];
-  for (const row of rows) {
-    const parsed = parseStopRow(tenant, String(row.key), String(row.value));
-    if (parsed) out.push(parsed);
-  }
-  return out;
+/**
+ * Every active stop for the tenant.
+ *
+ * Memoized per request: this is a tenant-wide list, but it was being read once
+ * per room evaluated, so a page that rolls up 13 rooms issued the same scan 13
+ * times. The entry dies with the response, and memoization is off for requests
+ * that can write, so a stop engaged and then read back in one POST still sees
+ * its own write.
+ */
+export function listStops(db: AsyncDb, tenant: string): Promise<StopRecord[]> {
+  return memo(`gov:stops:${tenant}`, async () => {
+    const rows = (await db
+      .prepare('SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key')
+      .all(`kill:${tenant}:%`)) as { key: string; value: string }[];
+    const out: StopRecord[] = [];
+    for (const row of rows) {
+      const parsed = parseStopRow(tenant, String(row.key), String(row.value));
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  });
 }
 
 export async function describeStops(db: AsyncDb, tenant: string): Promise<StopDisplay[]> {

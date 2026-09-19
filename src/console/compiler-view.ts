@@ -52,10 +52,10 @@ interface CardRow {
 
 function driftNote(row: CardRow): string {
   if (row.driftSamples !== null && row.driftSamples < 10) {
-    return `<div style="font-size:10px;color:#9CA3AF;margin-top:4px;">insufficient samples for drift (${esc(String(row.driftSamples))})</div>`;
+    return `<div style="font-size:10px;color:var(--v-faint);margin-top:4px;">insufficient samples for drift (${esc(String(row.driftSamples))})</div>`;
   }
   if (row.driftEwma !== null) {
-    return `<div style="font-size:10px;color:#6B7280;margin-top:4px;">drift EWMA ${esc(row.driftEwma.toFixed(2))}</div>`;
+    return `<div style="font-size:10px;color:var(--v-muted);margin-top:4px;">drift EWMA ${esc(row.driftEwma.toFixed(2))}</div>`;
   }
   return '';
 }
@@ -69,15 +69,20 @@ export async function renderCompilerParts(
   const cards = await comp.list(tenant, {}).catch(() => [] as SkillCard[]);
 
   if (cards.length === 0) {
-    const empty = `<div style="border:1px dashed #D1D5DB;border-radius:8px;padding:28px;text-align:center;color:#6B7280;font-size:13px;">
+    const empty = `<div style="border:1px dashed var(--v-line-strong);border-radius:8px;padding:28px;text-align:center;color:var(--v-muted);font-size:13px;">
 No skill cards compiled yet. Cards appear here as traces are compiled — nothing is demo-seeded.</div>`;
     return {
       boardHtml: empty,
-      metricsHtml: `<div style="border:1px dashed #D1D5DB;border-radius:8px;padding:14px;text-align:center;color:#6B7280;font-size:12px;">No board metrics yet — metrics are computed from real cards and traces.</div>`,
+      metricsHtml: `<div style="border:1px dashed var(--v-line-strong);border-radius:8px;padding:14px;text-align:center;color:var(--v-muted);font-size:12px;">No board metrics yet — metrics are computed from real cards and traces.</div>`,
       rightPanelHtml: `
   <div>
-    <h2 style="font-size:14px;font-weight:700;margin:0 0 14px 0;color:#111827;">Why not trusted yet</h2>
-    <div style="font-size:12px;color:#6B7280;">No trust gates to report until cards exist.</div>
+    <h2 style="font-size:14px;font-weight:700;margin:0 0 6px 0;color:var(--v-ink);font-style:normal;">Why not trusted yet</h2>
+    <p style="font-size:12px;color:var(--v-muted);margin:0 0 12px;line-height:1.5;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded.</p>
+    <div style="display:grid;gap:8px;font-size:12px;">
+      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Quarantine</strong><div style="color:var(--v-muted);font-size:11px;">new cards land here first</div></div>
+      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Shadow → Pilot</strong><div style="color:var(--v-muted);font-size:11px;">measured against live traffic</div></div>
+      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Promoted</strong><div style="color:var(--v-muted);font-size:11px;">transfer-tested, drift-watched</div></div>
+    </div>
   </div>`,
     };
 
@@ -110,22 +115,22 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
     const { card } = row;
     const gapCount = row.trustGaps.length;
     const badge = gapCount === 0
-      ? '<span style="color:#059669;font-size:12px;font-weight:bold;" title="No open trust gaps">✔</span>'
-      : `<span style="color:#D97706;font-size:11px;font-weight:bold;" title="${esc(row.trustGaps.join('; '))}">${esc(String(gapCount))} gap${gapCount === 1 ? '' : 's'}</span>`;
+      ? '<span style="color:var(--v-fact);font-size:12px;font-weight:bold;" title="No open trust gaps">✔</span>'
+      : `<span style="color:var(--v-hypo);font-size:11px;font-weight:bold;" title="${esc(row.trustGaps.join('; '))}">${esc(String(gapCount))} gap${gapCount === 1 ? '' : 's'}</span>`;
     const drift = driftNote(row);
     const gaps =
       gapCount > 0
-        ? `<div style="font-size:10px;color:#B45309;margin-top:4px;">${row.trustGaps.map((g) => esc(g)).join(' · ')}</div>`
+        ? `<div style="font-size:10px;color:var(--v-hypo);margin-top:4px;">${row.trustGaps.map((g) => esc(g)).join(' · ')}</div>`
         : '';
     return `
-    <div style="background:#fff;border:1px solid #E5E7EB;border-radius:8px;padding:10px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+    <div style="background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:8px;padding:10px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
       <div style="display:flex;align-items:baseline;justify-content:space-between;">
-        <div style="font-weight:600;font-size:12px;color:#111827;">${esc(card.intent)}</div>
+        <div style="font-weight:600;font-size:12px;color:var(--v-ink);">${esc(card.intent)}</div>
         ${badge}
       </div>
-      <div style="font-size:10px;color:#6B7280;margin-top:1px;">v${esc(String(card.version))} · ${esc(card.trustTier)} · ${esc(card.validatedAtTier)}</div>
+      <div style="font-size:10px;color:var(--v-muted);margin-top:1px;">v${esc(String(card.version))} · ${esc(card.trustTier)} · ${esc(card.validatedAtTier)}</div>
       <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">
-        ${card.predicates.slice(0, 4).map((t) => `<span style="font-size:9px;background:#F3F4F6;color:#4B5563;padding:1px 5px;border-radius:4px;">${esc(t)}</span>`).join('')}
+        ${card.predicates.slice(0, 4).map((t) => `<span style="font-size:9px;background:var(--v-bg-2);color:var(--v-ink-2);padding:1px 5px;border-radius:4px;">${esc(t)}</span>`).join('')}
       </div>
       ${drift}
       ${gaps}
@@ -134,18 +139,18 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
 
   const renderCol = (colName: string) => {
     const items = rows.filter((r) => r.col === colName);
-    const subNote = colName === 'QUARANTINE' ? '<div style="font-size:8.5px;color:#9CA3AF;font-weight:normal;margin-top:1px;">imported packs enter here</div>' : '';
+    const subNote = colName === 'QUARANTINE' ? '<div style="font-size:8.5px;color:var(--v-faint);font-weight:normal;margin-top:1px;">imported packs enter here</div>' : '';
     const colBg = colName === 'QUARANTINE'
-      ? 'background: repeating-linear-gradient(45deg, #F9FAFB, #F9FAFB 6px, #F3F4F6 6px, #F3F4F6 12px);'
-      : 'background: #F9FAFB;';
+      ? 'background: repeating-linear-gradient(45deg, var(--v-bg-2), var(--v-bg-2) 6px, var(--v-bg-2) 6px, var(--v-bg-2) 12px);'
+      : 'background: var(--v-bg-2);';
     return `
-    <div style="flex:1;min-width:130px;${colBg}border:1px solid #E5E7EB;border-radius:8px;padding:8px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #E5E7EB;">
+    <div style="flex:1;min-width:130px;${colBg}border:1px solid var(--v-line);border-radius:8px;padding:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--v-line);">
         <div>
-          <span style="font-weight:700;font-size:11px;letter-spacing:0.04em;color:#374151;">${colName}</span>
+          <span style="font-weight:700;font-size:11px;letter-spacing:0.04em;color:var(--v-ink-2);">${colName}</span>
           ${subNote}
         </div>
-        <span style="font-size:10px;color:#6B7280;background:#E5E7EB;padding:1px 5px;border-radius:10px;font-weight:600;">${items.length}</span>
+        <span style="font-size:10px;color:var(--v-muted);background:var(--v-line);padding:1px 5px;border-radius:10px;font-weight:600;">${items.length}</span>
       </div>
       <div>
         ${items.map(renderCardItem).join('\n')}
@@ -166,18 +171,18 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
   const share = total > 0 ? (promoted / total) * 100 : null;
   const drifting = rows.filter((r) => r.driftEwma !== null && r.driftSamples !== null && r.driftSamples >= 10).length;
   const metricsHtml = `
-  <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;padding:14px;background:#fff;border:1px solid #E5E7EB;border-radius:10px;">
+  <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;padding:14px;background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:10px;">
     <div>
-      <div style="font-size:11px;color:#6B7280;">cards</div>
-      <div style="font-size:18px;font-weight:700;color:#111827;margin-top:2px;">${esc(String(total))}</div>
+      <div style="font-size:11px;color:var(--v-muted);">cards</div>
+      <div style="font-size:18px;font-weight:700;color:var(--v-ink);margin-top:2px;">${esc(String(total))}</div>
     </div>
     <div>
-      <div style="font-size:11px;color:#6B7280;">promoted</div>
-      <div style="font-size:18px;font-weight:700;color:#0F5C57;margin-top:2px;">${esc(String(promoted))} <span style="font-size:12px;color:#6B7280;font-weight:normal;">of ${esc(String(total))}${share !== null ? ` · ${share.toFixed(1)}% of board` : ''}</span></div>
+      <div style="font-size:11px;color:var(--v-muted);">promoted</div>
+      <div style="font-size:18px;font-weight:700;color:var(--v-accent);margin-top:2px;">${esc(String(promoted))} <span style="font-size:12px;color:var(--v-muted);font-weight:normal;">of ${esc(String(total))}${share !== null ? ` · ${share.toFixed(1)}% of board` : ''}</span></div>
     </div>
     <div>
-      <div style="font-size:11px;color:#6B7280;">drift-monitored</div>
-      <div style="font-size:18px;font-weight:700;color:#111827;margin-top:2px;">${esc(String(drifting))} <span style="font-size:12px;color:#6B7280;font-weight:normal;">promoted cards with enough samples</span></div>
+      <div style="font-size:11px;color:var(--v-muted);">drift-monitored</div>
+      <div style="font-size:18px;font-weight:700;color:var(--v-ink);margin-top:2px;">${esc(String(drifting))} <span style="font-size:12px;color:var(--v-muted);font-weight:normal;">promoted cards with enough samples</span></div>
     </div>
   </div>`;
 
@@ -185,20 +190,20 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
   const withGaps = rows.filter((r) => r.trustGaps.length > 0).slice(0, 6);
   const rightPanelHtml = `
   <div>
-    <h2 style="font-size:14px;font-weight:700;margin:0 0 14px 0;color:#111827;">Why not trusted yet</h2>
+    <h2 style="font-size:14px;font-weight:700;margin:0 0 14px 0;color:var(--v-ink);">Why not trusted yet</h2>
     ${
       withGaps.length === 0
-        ? '<div style="font-size:12px;color:#6B7280;">No open trust gaps on listed cards.</div>'
+        ? '<div style="font-size:12px;color:var(--v-muted);">No open trust gaps on listed cards.</div>'
         : withGaps
             .map(
               (r) => `<div style="margin-bottom:12px;">
-      <div style="font-size:12px;font-weight:600;color:#111827;">${esc(r.card.intent)}</div>
-      <ul style="margin:4px 0 0 16px;padding:0;font-size:11px;color:#B45309;">${r.trustGaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>
+      <div style="font-size:12px;font-weight:600;color:var(--v-ink);">${esc(r.card.intent)}</div>
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:11px;color:var(--v-hypo);">${r.trustGaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>
     </div>`,
             )
             .join('\n')
     }
-    <div style="font-size:11px;color:#9CA3AF;margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board.</div>
+    <div style="font-size:11px;color:var(--v-faint);margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board.</div>
   </div>`;
 
   return { boardHtml, metricsHtml, rightPanelHtml };
@@ -213,11 +218,11 @@ export async function renderCompilerView(
   const parts = await renderCompilerParts(db, comp, tenant, opts);
 
   return `
-<section class="compiler-view" style="font-family:'Inter',sans-serif;color:#111827;">
+<section class="compiler-view" style="font-family:'Inter',sans-serif;color:var(--v-ink);">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
     <div>
-      <h1 style="font-size:22px;font-weight:700;margin:0;color:#0A0F14;">Compiler</h1>
-      <p style="font-size:12px;color:#6B7280;margin:2px 0 0 0;">Skill card autonomous progression, shadow evaluations, and trust verification.</p>
+      <h1 style="font-size:22px;font-weight:700;margin:0;color:var(--v-ink);">Compiler</h1>
+      <p style="font-size:12px;color:var(--v-muted);margin:2px 0 0 0;">Skill card autonomous progression, shadow evaluations, and trust verification.</p>
     </div>
   </div>
 

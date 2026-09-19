@@ -3,6 +3,36 @@ output "alb_dns" {
   value       = aws_lb.main.dns_name
 }
 
+output "alb_zone_id" {
+  description = "Hosted zone id of the ALB itself — the alias target's zone. Route 53 needs it alongside alb_dns, and DNS managed outside this stack needs it too."
+  value       = aws_lb.main.zone_id
+}
+
+output "console_url" {
+  description = "Console entry point: https://<domain_name> when domain_name is set, otherwise the raw ALB DNS. With only acm_certificate_arn set, reach the console through the hostname that certificate covers — the raw ALB DNS name is not on it."
+  value       = var.domain_name != "" ? "https://${var.domain_name}" : "http://${aws_lb.main.dns_name}"
+}
+
+output "console_certificate_arn" {
+  description = "Certificate the HTTPS listener presents: the explicit var.acm_certificate_arn, or the one created for var.domain_name. Null when no TLS is configured."
+  value       = local.certificate_arn
+}
+
+output "console_hosted_zone_id" {
+  description = "Route 53 zone holding the console records (null when domain_name is empty)"
+  value       = local.dns_enabled == 1 ? data.aws_route53_zone.main[0].zone_id : null
+}
+
+output "cluster_name" {
+  description = "ECS cluster holding core, Buzz and the staged jcode service"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "core_service" {
+  description = "core ECS service name — what `aws ecs wait services-stable --cluster <cluster_name> --services <this>` waits on"
+  value       = aws_ecs_service.core.name
+}
+
 output "core_ecr" {
   value = aws_ecr_repository.core.repository_url
 }
@@ -59,7 +89,7 @@ output "buzz_relay_internal_url" {
 output "buzz_relay_public_url" {
   description = "Public relay URL when buzz_hostname is set on the ALB; otherwise null"
   value = var.enable_buzz && var.buzz_hostname != "" ? (
-    var.acm_certificate_arn == "" ? "http://${var.buzz_hostname}" : "https://${var.buzz_hostname}"
+    local.tls_enabled == 0 ? "http://${var.buzz_hostname}" : "https://${var.buzz_hostname}"
   ) : null
 }
 

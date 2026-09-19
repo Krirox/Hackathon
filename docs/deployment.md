@@ -118,7 +118,8 @@ internet → ALB ──→ ECS Fargate vital-core (HOST=0.0.0.0, PORT=3100, VITA
              reserved concurrency = infra budget-death backstop, DLQ after 3×)
 
 Optional: ALB host rule buzz.example.com → Buzz relay (var.buzz_hostname).
-Without it, Buzz stays reachable inside the VPC via Cloud Map only.
+Without it, Buzz stays reachable inside the VPC via Cloud Map only. That name
+must be on the ALB certificate — see "Domain and TLS" below.
 ```
 
 Why this shape, per Vital's own rules:
@@ -155,7 +156,335 @@ First-time bootstrap:
 
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
 2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`, `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`).
-3. Run the `deploy-aws` workflow or run `terraform apply` directly (safe local image fallbacks allow initial infrastructure bootstrap without chicken-and-egg failure).
+3. Run the `deploy-aws` workflow (see *Deploy — GitHub Actions* below). A local
+   `terraform apply` works too, but the images must exist first: `core_image` and
+   `executor_image` are validated as non-empty ECR URIs and the busybox fallback
+   is gone, so the order is **create the repositories → push → apply**, not
+   apply-then-push.
+
+## AWS console walkthrough — entry point, deploy, connect
+
+This is the part the Terraform cannot do for you (or cannot do alone): the AWS
+account, the certificate authority, the secrets, and the first login. Work it in
+this order — each step consumes something the previous one produced.
+
+1. Account prerequisites and the deploy identity (§1)
+2. Domain + certificate (§2)
+3. Images and the apply (*Deploy* — GitHub Actions, or from your machine)
+4. First login (*Connect — first login*)
+
+### 1. Account prerequisites
+
+Sign in as an account administrator, then **set the region selector (top right)
+to `eu-central-1`** before touching anything. Vital is single-region by design
+(`var.region`), and an ALB can only present a certificate from its own region — a
+certificate requested while the console is pointed somewhere else cannot be
+attached, and it presents as a confusing Terraform error rather than a region
+mistake.
+
+Create the deploy identity (once per account, not per deploy):
+
+1. **IAM → Identity providers → Add provider → OpenID Connect.** Provider URL
+   `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`.
+   This is what lets GitHub Actions assume a role with no long-lived AWS keys
+   stored in the repository.
+2. **IAM → Roles → Create role → Web identity**, select that provider, audience
+   `sts.amazonaws.com`, and scope the trust policy to this repository and branch:
+   `repo:<org>/<repo>:ref:refs/heads/main`.
+3. Name it (`vital-github-deploy` is as good as any), attach a policy, and copy
+   the role ARN into the repository secret `AWS_ROLE_TO_ASSUME`.
+
+**On that policy, honestly:** this Terraform creates IAM roles, VPCs, RDS
+instances, ECS services, Lambda functions, S3 buckets and Route 53 records, so
+the deploying principal must be broad — in practice `AdministratorAccess` for a
+pilot. Treat `AWS_ROLE_TO_ASSUME` as an admin credential: anyone able to run the
+`deploy-aws` workflow can change production infrastructure. Scope it later by
+narrowing what the workflow can do, not by hoping a small policy suffices.
+
+### 2. Domain + certificate by hand in the console
+
+Terraform can do both of these (see the reference section below — that is the
+supported path). Do it by hand when the certificate already exists, when the DNS
+lives at another provider, or when you want to see the objects before letting
+Terraform manage them.
+
+**Request the certificate (ACM).**
+
+1. Console search → **Certificate Manager**. Confirm the region is
+   `eu-central-1`.
+2. **Request a certificate → Request a public certificate → Next.**
+3. Fully qualified domain name: `console.example.com`. Add `www.example.com` in
+   *Add another name to this certificate* only if you want it — every name added
+   here must live in the zone you own (see the certificate-coverage note below).
+4. Validation method: **DNS validation**. Key algorithm: leave the default
+   (RSA 2048). **Request.**
+5. Open the certificate and use **Domains → Create records in Route 53** — ACM
+   writes the validation CNAME(s) itself when the zone is in this account. If the
+   zone is elsewhere, copy each CNAME/value pair into your provider and come back
+   once they resolve.
+6. Wait for **Status: Issued** (minutes, not hours — if it sits at *Pending
+   validation*, the CNAME is not resolving yet). Copy the **ARN**.
+
+**Point the name at the ALB (Route 53).**
+
+1. **Route 53 → Hosted zones →** your domain. The **Hosted zone ID** column
+   holds the `Z…` value that `hosted_zone_id` wants.
+2. **Create record.**
+3. Record name `console` (the console appends the zone: `console.example.com`).
+   Record type **A**.
+4. Turn **Alias** on, then **Route traffic to → Alias to Application and Classic
+   Load Balancer →** region `eu-central-1` → select the ALB, named
+   `vital-alb` (or `<project>-alb`).
+5. **Create records.**
+
+Then hand the ARN to the stack — `acm_certificate_arn = "arn:aws:acm:eu-central-1:..."
+in `terraform.tfvars`, or the two-variable Terraform path above — and apply. The
+listener changes are automatic: `:80` becomes a `301` to `:443` and the task
+starts with `SECURE_COOKIES=1`. Confirm with
+`terraform -chdir=deploy/aws output -raw console_url`.
+
+Do **not** add an AAAA record to match. The ALB is IPv4-only, so an AAAA alias
+answers with nothing; set `ip_address_type = "dualstack"` on the ALB first if you
+genuinely need IPv6.
+
+## Domain and TLS (Route 53 + ACM)
+
+A domain is a DNS record pointing at the ALB — there is no instance to attach it
+to. Everything in this section is optional, and it is owned by
+`deploy/aws/dns.tf`: with `domain_name` empty, `terraform plan` is identical to a
+stack that never had a domain.
+
+**Two routes, and they compose** — pick one:
+
+| Route | Use when |
+| --- | --- |
+| `domain_name` + `hosted_zone_id` | Terraform should create the certificate, validate it by DNS, and alias the name to the ALB |
+| `acm_certificate_arn` | You already hold a validated certificate (another account, another region, hand-validated) |
+
+Set both and the explicit ARN wins for the certificate while the DNS records are
+still created: naming the host and holding the certificate are independent
+decisions.
+
+Set the inputs in `terraform.tfvars`:
+
+```hcl
+domain_name    = "console.example.com"
+hosted_zone_id = "Z0123456789ABCDEFGHI"   # the Z… zone id, not the domain name
+# subject_alternative_names = ["www.example.com"]   # must live in that same zone
+```
+
+`aws route53 list-hosted-zones --query 'HostedZones[].{Id:Id,Name:Name}'` prints
+the zone id. Then apply:
+
+1. The certificate is requested in `var.region` (an ALB can only present a
+   certificate from its own region — a `us-east-1` cert is only for CloudFront).
+2. ACM's validation records are written into the zone and Terraform waits until
+   ACM has actually seen them, because an ALB cannot attach a certificate that is
+   still `PENDING_VALIDATION`.
+3. An alias A record points `domain_name` at the ALB.
+
+The zone is **looked up, never created**, so an apply cannot take over a domain's
+DNS and records this stack does not manage are untouched.
+
+Why an alias and not a CNAME: alias records are legal at the apex (`example.com`,
+where a CNAME is not), are free to query, and follow the ALB if AWS moves its
+addresses. No AAAA record is created — the ALB is IPv4-only, and an AAAA alias to
+a single-stack ALB answers with nothing.
+
+Confirm the result with `terraform output console_url`. `terraform output
+alb_zone_id` is the ALB's own hosted zone id — what Route 53 needs alongside
+`alb_dns` to build the alias target. The record in `dns.tf` reads it directly;
+the output exists for DNS managed outside this stack, and for anything else that
+aliases the ALB.
+
+### The certificate must cover every name you serve
+
+`var.buzz_hostname` (the public Buzz relay) rides the same ALB, so that name has
+to be on the certificate — put it in `subject_alternative_names`, or supply an
+`acm_certificate_arn` that already covers it. A hostname in a different zone will
+not validate: every validation record is written to the single zone looked up
+above.
+
+### Secure cookies follow the listener, not a checklist
+
+Attaching a certificate flips port 80 to an HTTPS redirect *and* runs the task
+with `SECURE_COOKIES=1`, so the session cookie carries `Secure` and cannot ride a
+plaintext `http://` downgrade. Both come from the same flag that decides whether
+the HTTPS listener exists, so the cookie policy cannot drift from the listener it
+is protecting. `TRUST_PROXY=1` is set unconditionally — the task is always behind
+the ALB.
+
+Outside AWS, the equivalent is `--secure-cookies` (or `SECURE_COOKIES=1`). It is
+deliberately separate from `--trust-proxy`: trusting proxy headers and requiring
+TLS are independent decisions, and a loopback or TLS-terminating dev setup wants
+the first without the second.
+
+### Update every callback URL
+
+The ALB fronts the webhooks, not just the console. After switching domains, update
+the registered callback URLs at GitHub, Slack and Stripe, or they keep firing at
+the old one.
+
+### If the domain is managed elsewhere
+
+Point a CNAME (or the registrar's ALIAS/ANAME at an apex) at `terraform output
+alb_dns`, and validate the certificate however that provider allows. Leave
+`domain_name` empty so Terraform never tries to write DNS it does not own.
+
+## Deploy — GitHub Actions (the supported path)
+
+`.github/workflows/deploy-aws.yml` builds both images, pushes them to ECR,
+applies Terraform, and smoke-checks the result. It is **manual dispatch only** —
+infrastructure is never a side effect of a test push.
+
+### Set the repository secrets once
+
+GitHub → repo → **Settings → Secrets and variables → Actions**.
+
+*Secrets* (New repository secret). Everything except the first is a `TF_VAR_*`:
+
+| Secret | What it is |
+| --- | --- |
+| `AWS_ROLE_TO_ASSUME` | the OIDC role ARN from §1 — not a `TF_VAR_*` |
+| `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface. Required; no placeholder passes |
+| `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens. Required |
+| `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake. Required |
+| `TF_VAR_SERPER_API_KEY` | search. Required |
+| `TF_VAR_GEMINI_API_KEY` | development-model plane. Required |
+| `TF_VAR_NOVITA_API_KEY` | production-model plane. Required |
+| `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
+| `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | secp256k1 relay key, 64 hex chars |
+| `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex chars; empty = no publishing identity |
+| `TF_VAR_VITAL_REVIEW_SECRET` | 16+ random chars; empty = dead webhook-approve path |
+| `TF_VAR_BOOTSTRAP_EMAIL` | day-0 owner address (§ Connect) |
+| `TF_VAR_BOOTSTRAP_PASSWORD` | day-0 owner password (§ Connect) |
+| `TF_VAR_SETUP_SECRET` | web-claim authorization on a public bind |
+| `TF_BACKEND_BUCKET` | state bucket from `bootstrap-state.sh`; empty = local state |
+
+The six "Required" values fail validation when empty or left as the literal
+placeholder, so a half-filled deploy stops at `terraform plan` instead of
+shipping a known HMAC secret or a model plane that cannot run. Requirements
+first, placeholders never.
+
+*Variables* (New repository variable): `AWS_REGION` (`eu-central-1`),
+`TF_BACKEND_KEY` (default `vital/terraform.tfstate`),
+`TF_BACKEND_DYNAMODB_TABLE` (default `vital-tfstate-locks`).
+
+### Run it
+
+**Actions → deploy-aws → Run workflow →** branch `main` → *optional* `image_tag`
+→ **Run workflow**.
+
+In order the job: typechecks → runs the test suite → assumes the OIDC role → logs
+in to ECR → creates or reuses the `vital-core` and `vital-executor`
+repositories → builds and pushes both images (immutable tags, scan on push) →
+`terraform init` + `terraform apply` with the fresh image URIs → waits for ECS
+stability, probes `/healthz`, and invokes the executor in dry-run mode.
+
+Green means infrastructure applied, the service is stable, the ALB routes to a
+live task, and the Lambda answered. It does **not** mean mail works or model jobs
+succeed — keys, DNS and the first login are still yours to confirm.
+
+### When the smoke check goes red
+
+| Symptom | Likely cause |
+| --- | --- |
+| TLS verification failed on `/healthz` | the probe uses `console_url`; if the certificate was added by hand and covers your hostname, put it in the stack (`domain_name` or `acm_certificate_arn`) so the output names that host |
+| `services-stable` times out | ECS → Clusters → `vital` → Services → `vital-core` → **Events** shows the stopped-task reason |
+| `/healthz` 503 after stability | task is up but not answering on 3100 — check `/vital/core` in CloudWatch Logs |
+| `core_image must be a real ECR URI` | the image variables are validated; see the local path below for the create → push → apply order |
+
+## Deploy — from your machine
+
+Fine for a first pilot or a throwaway stack; remote state is still recommended.
+
+```sh
+cd deploy/aws
+sh bootstrap-state.sh        # versioned + encrypted state bucket, lock table
+# uncomment the backend block in main.tf using the values it prints, then:
+terraform init -backend-config=...   # the exact command the script prints
+```
+
+Create the repositories before anything references an image — both image
+variables are validated as non-empty, so the order is create → push → apply:
+
+```sh
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=eu-central-1
+for r in vital-core vital-executor; do
+  aws ecr describe-repositories --repository-names "$r" >/dev/null 2>&1 || \
+    aws ecr create-repository --repository-name "$r" \
+      --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true
+done
+docker build -f Dockerfile.vital-core -t "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-core:boot" ../..
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-core:boot"
+docker build -f Dockerfile.executor  -t "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-executor:boot" ../..
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-executor:boot"
+```
+
+Then apply, passing the image URIs — and the required secrets, which as
+`TF_VAR_*` environment variables rather than flags so they stay out of shell
+history:
+
+```sh
+terraform plan  -var "core_image=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-core:boot" \
+                -var "executor_image=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/vital-executor:boot"
+terraform apply -var "core_image=..." -var "executor_image=..."
+terraform output          # console_url, alb_dns, alb_zone_id, cluster_name, ...
+```
+
+## Connect — first login
+
+1. **Entry point:** `terraform -chdir=deploy/aws output -raw console_url`.
+2. **Liveness:** `curl -sS <entry>/healthz` → `{"ok":true}`. This is a
+   reachability answer only — see the liveness-vs-readiness rule below.
+3. **Sign in** at `<entry>/login` with the `bootstrap_email` /
+   `bootstrap_password` you set. Those two seed the tenant's first owner **at
+   boot**, so the account exists as soon as the task starts; there is no claim
+   URL to visit first, and the first sign-in forces a password change.
+4. **Prefer claiming in the browser?** Leave the bootstrap pair unset and set
+   `setup_secret`: on a public bind the setup authorization is then required
+   before signup is accepted.
+5. **Rotate the day-0 credentials.** Remove `TF_VAR_BOOTSTRAP_EMAIL` /
+   `TF_VAR_BOOTSTRAP_PASSWORD` and re-apply. Leaving them live means every empty
+   database gets seeded with the same known owner again.
+6. **Then use it.** The rail's **Setup** page (`/setup`) is the activation flow
+   (accountable scope, evidence source, policy, budget). A fresh stack shows an
+   empty review queue because nothing has been proposed yet.
+
+Two surfaces, one deployment, one database: the **console** is where humans read
+and approve, the **chat** is where agents and people talk. A new stack starts
+there, not in either UI's seed data.
+
+## What this stack deliberately does not wire
+
+So you don't hunt for a switch that is not there:
+
+- **The coding-plane drivers are honest dry-runs.** `VITAL_FARGATE_CLUSTER` and
+  `VITAL_FARGATE_TASKDEF` are unset on purpose — `fargateConfig()` reads the
+  cluster variable as "is AWS wired?", so setting it makes the driver report an
+  ECS task ARN it never created (there is no `RunTask` call, and the task role has
+  no `ecs:RunTask` to make one). `VITAL_VM_BACKEND` is unset too, resolving to
+  `local`: process-level directory isolation, not a microVM boundary.
+  `VITAL_LAMBDA_FUNCTION` *is* set, only so audit records name an executor that
+  exists rather than the built-in `vital-coding-executor` phantom.
+- **Snapshots live on EFS, not S3.** `VITAL_SNAPSHOT_DIR` points at the mounted
+  sandbox volume (the default is `data/snapshots` relative to the container's
+  working directory, which would be wiped by the next deploy). The store's S3
+  backend signs with explicit env credentials while Fargate issues task-role
+  credentials through IMDS, so `VITAL_SNAPSHOT_BUCKET` would fail signing rather
+  than persist anything.
+- **GitHub sync and mail are dormant.** `GITHUB_TOKEN`, `STRIPE_*`, `SMTP_URL`
+  and `VITAL_MAILER_ENABLED` are not set, so those integrations stay off until
+  you wire them.
+- **The jcode split is staged, not live** (`jcode_target = "socket"`): the
+  sidecar shares the core task because `JcodeClient` only speaks a socket path.
+- **The Buzz relay's public hostname needs a certificate that covers it.**
+  `buzz_hostname` without SANs (or a supplied cert) puts the listener rule on the
+  HTTPS listener and the browser rejects the name — set both or neither.
+- **The workflow assumes `project = "vital"`.** Repository, cluster and smoke
+  check names are `vital-core`, `vital-executor`, `vital`. Renaming the project
+  means editing `.github/workflows/deploy-aws.yml` as well.
 
 ## Status: liveness vs readiness
 

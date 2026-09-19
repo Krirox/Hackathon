@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { noteStatement } from './request-cache.ts';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { MEETING_TABLES_SQL } from '../meetings/db.ts';
@@ -46,6 +47,36 @@ export interface AsyncDb {
   exec(sql: string): Promise<void>;
   transaction<T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T>;
   close(): Promise<void>;
+}
+
+/**
+ * Count statements against the request in flight (`noteStatement`).
+ *
+ * Applied once, at the composition root, rather than inside each engine: there
+ * are two AsyncDb implementations (`wrapSqlite`, `openPostgres`), and a meter
+ * that lives in one of them measures only half the deployments. Every query
+ * goes through `prepare`, so this counts one per query — which is what makes it
+ * comparable between pages, and what makes it a regression signal: a page whose
+ * count doubles is a page that started asking for the same thing twice.
+ *
+ * It is deliberately independent of memoization: a mutating request does not
+ * memoize reads, so it must still be measurable.
+ */
+export function withStatementCount(db: AsyncDb): AsyncDb {
+  return {
+    engine: db.engine,
+    prepare: (sql: string): AsyncStatement => {
+      noteStatement();
+      return db.prepare(sql);
+    },
+    exec: (sql: string): Promise<void> => {
+      noteStatement();
+      return db.exec(sql);
+    },
+    transaction: <T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T> =>
+      db.transaction(fn, options),
+    close: () => db.close(),
+  };
 }
 
 function wrapSqlite(raw: DatabaseSync): AsyncDb {
@@ -702,6 +733,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
   at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(tenant, action, at);
+-- Serves audit reads that page by sequence (console/audit.ts → ledger/export.ts
+-- queryAudit, and GET /api/audit): tenant filter plus seq ordering. Without it
+-- that lookup scans, and the audit page is the one that grows without bound.
+CREATE INDEX IF NOT EXISTS ix_audit_tenant_seq ON audit_log(tenant, seq);
 
 CREATE TABLE IF NOT EXISTS ledger_seq (tenant TEXT PRIMARY KEY, "next" INTEGER NOT NULL);
 

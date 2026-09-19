@@ -173,6 +173,42 @@ resource "aws_security_group" "ecs" {
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
+  # Buzz relay (buzz.tf): the relay serves :3000 and health-checks on a
+  # separate :8080 server, and both run under THIS group. Without these rules
+  # the service, target group and listener rule all exist and still route
+  # nowhere — the ALB health check fails, so the target never goes healthy
+  # (503 on the public hostname), and core cannot reach the relay over Cloud
+  # Map either, because that is the same group talking to itself.
+  dynamic "ingress" {
+    for_each = var.enable_buzz ? [1] : []
+    content {
+      description     = "relay API from the ALB"
+      from_port       = 3000
+      to_port         = 3000
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb.id]
+    }
+  }
+  dynamic "ingress" {
+    for_each = var.enable_buzz ? [1] : []
+    content {
+      description = "relay API from core (Cloud Map buzz.vital.local:3000)"
+      from_port   = 3000
+      to_port     = 3000
+      protocol    = "tcp"
+      self        = true
+    }
+  }
+  dynamic "ingress" {
+    for_each = var.enable_buzz ? [1] : []
+    content {
+      description     = "relay health server, ALB health check target port"
+      from_port       = 8080
+      to_port         = 8080
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb.id]
+    }
+  }
   # EFS mount targets carry this SG: NFS needs TCP 2049 or the sandbox
   # volume mount hangs at task startup. Self-ingress only — no open NFS.
   ingress {
@@ -665,18 +701,18 @@ resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
-  # With a certificate (var.acm_certificate_arn) port 80 redirects to HTTPS;
-  # without one it forwards (dev only — approvals in plaintext is not a
-  # production posture, see variables.tf).
+  # With a certificate (var.acm_certificate_arn, or the one var.domain_name
+  # provisions) port 80 redirects to HTTPS; without one it forwards (dev only —
+  # approvals in plaintext is not a production posture, see variables.tf).
   dynamic "default_action" {
-    for_each = var.acm_certificate_arn == "" ? [1] : []
+    for_each = local.tls_enabled == 0 ? [1] : []
     content {
       type             = "forward"
       target_group_arn = aws_lb_target_group.core.arn
     }
   }
   dynamic "default_action" {
-    for_each = var.acm_certificate_arn == "" ? [] : [1]
+    for_each = local.tls_enabled == 0 ? [] : [1]
     content {
       type = "redirect"
       redirect {
@@ -689,16 +725,19 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_listener" "https" {
-  count             = var.acm_certificate_arn == "" ? 0 : 1
+  count             = local.tls_enabled
   load_balancer_arn = aws_lb.main.arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = var.acm_certificate_arn
+  certificate_arn   = local.certificate_arn
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.core.arn
   }
+  # An ALB cannot attach a certificate ACM has not validated yet, so wait for
+  # the validation records to be seen (deploy/aws/dns.tf).
+  depends_on = [aws_acm_certificate_validation.console]
 }
 
 resource "aws_ecs_task_definition" "core" {
@@ -744,10 +783,37 @@ resource "aws_ecs_task_definition" "core" {
         { name = "TALK_SURFACE", value = "buzz" },
         { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" },
         { name = "ARTIFACT_DIR", value = "/var/vital/sandboxes/artifacts" },
+        # Sandbox snapshots default to `data/snapshots` RELATIVE to the process
+        # cwd (coding/snapshot-store.ts defaultDir), which on Fargate is the
+        # container filesystem — wiped on every deploy, scale-in and platform
+        # update, silently. Point it at the EFS volume this task already mounts,
+        # next to artifacts. S3 is the other backend the store supports, but its
+        # S3SnapshotStore signs with explicit env credentials and Fargate hands
+        # out task-role credentials via IMDS, so flipping VITAL_SNAPSHOT_BUCKET
+        # here would fail signing rather than persist anything.
+        { name = "VITAL_SNAPSHOT_DIR", value = "/var/vital/sandboxes/snapshots" },
         { name = "ARTIFACT_BUCKET", value = aws_s3_bucket.artifacts.bucket },
+        # The coding drivers record the plane they would use. VITAL_LAMBDA_FUNCTION
+        # only labels an audit record / invoke payload today (lambda-runtime.ts
+        # never calls Lambda), so point it at the function that actually exists
+        # instead of the built-in `vital-coding-executor` phantom.
+        { name = "VITAL_LAMBDA_FUNCTION", value = aws_lambda_function.executor.function_name },
+        # Deliberately NOT set: VITAL_FARGATE_CLUSTER / VITAL_FARGATE_TASKDEF.
+        # fargateConfig() treats the cluster var as "is AWS wired?": with it
+        # unset the driver stays an honest dry-run record, and with it set it
+        # reports an ECS task ARN it never created (no RunTask call exists) and
+        # the task role has no ecs:RunTask to make one. Leave it unset until the
+        # driver actually launches tasks — see the staged note in variables.tf.
         { name = "AWS_REGION", value = var.region },
         { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
-        ], var.enable_buzz ? [
+        ], local.tls_enabled == 1 ? [
+        # Only with a certificate attached (dns.tf): the ALB then terminates
+        # TLS and redirects :80, so the session cookie must carry `Secure` or
+        # the browser will also send it over a plaintext http:// downgrade.
+        # An HTTP-only stack must NOT set this — the browser would reject the
+        # cookie and login would fail closed in a way that looks like a bug.
+        { name = "SECURE_COOKIES", value = "1" }
+      ] : [], var.enable_buzz ? [
         { name = "BUZZ_RELAY_URL", value = local.buzz_discovery }
       ] : [])
       secrets = concat(

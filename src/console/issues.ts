@@ -764,7 +764,14 @@ export async function pushUpdateToGitHub(
     const created = await pushCreateToGitHub(db, tenant, issue, opts);
     return created;
   }
-  const ghNumber = m[1]!;
+  // The regex has exactly one mandatory capture group, so a match always sets
+  // m[1] — but `noUncheckedIndexedAccess` cannot know that. Narrow instead of
+  // asserting, so the miss path reuses the create-not-update behaviour above.
+  const ghNumber = m[1];
+  if (!ghNumber) {
+    const created = await pushCreateToGitHub(db, tenant, issue, opts);
+    return created;
+  }
   const fetchFn = opts?.fetchFn ?? fetch;
   try {
     const res = await fetchFn(
@@ -881,22 +888,26 @@ const LABEL_CLASS: Record<string, string> = {
   Feature: 'iss-pill iss-label-feature',
 };
 
+// State colours are semantic tokens, not a private palette: amber = waiting,
+// faint = parked, blue = moving, green = finished. Same names as every other
+// surface, so dark mode needs no second table.
 const STATE_DOT: Record<IssueState, string> = {
-  BACKLOG: '#F97316',
-  'TO DO': '#94A3B8',
-  'IN PROGRESS': '#3B82F6',
-  DONE: '#10B981',
+  BACKLOG: 'var(--v-hypo)',
+  'TO DO': 'var(--v-faint)',
+  'IN PROGRESS': 'var(--v-pred)',
+  DONE: 'var(--v-fact)',
 };
 
+// Six distinguishable identities that all come from the token set — enough to
+// tell people apart at a glance without introducing a rainbow the rest of the
+// console does not use.
 const AVATAR_PALETTES = [
-  { bg: '#DBEAFE', text: '#1E40AF' }, // blue
-  { bg: '#FCE7F3', text: '#9D174D' }, // pink
-  { bg: '#FEF3C7', text: '#92400E' }, // amber
-  { bg: '#EDE9FE', text: '#5B21B6' }, // violet
-  { bg: '#DCFCE7', text: '#166534' }, // emerald
-  { bg: '#FFE4E6', text: '#9F1239' }, // rose
-  { bg: '#E0F2FE', text: '#075985' }, // sky
-  { bg: '#F3E8FF', text: '#6B21A8' }, // purple
+  { bg: 'var(--v-tint-info-bg)', text: 'var(--v-tint-info-ink)' },
+  { bg: 'var(--v-tint-good-bg)', text: 'var(--v-tint-good-ink)' },
+  { bg: 'var(--v-tint-warn-bg)', text: 'var(--v-tint-warn-ink)' },
+  { bg: 'var(--v-tint-risk-bg)', text: 'var(--v-tint-risk-ink)' },
+  { bg: 'var(--v-accent-dim)', text: 'var(--v-accent)' },
+  { bg: 'var(--v-bg-3)', text: 'var(--v-ink-2)' },
 ];
 
 function getAvatarPalette(str: string): { bg: string; text: string } {
@@ -906,7 +917,7 @@ function getAvatarPalette(str: string): { bg: string; text: string } {
     hash |= 0;
   }
   const item = AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length];
-  return item ?? { bg: '#E2E8F0', text: '#334155' };
+  return item ?? { bg: 'var(--v-bg-3)', text: 'var(--v-ink-2)' };
 }
 
 function parseAssignees(assigneeEmail: string | null): string[] {
@@ -953,10 +964,10 @@ function progressRingHtml(progress: number): string {
   const r = 6.5;
   const c = 2 * Math.PI * r;
   const offset = c - (c * p) / 100;
-  const strokeColor = p > 0 ? '#F97316' : '#CBD5E1';
+  const strokeColor = p > 0 ? 'var(--v-accent)' : 'var(--v-line-strong)';
   return `<span class="iss-progress" title="${p}% complete">
     <svg class="iss-ring-svg" width="14" height="14" viewBox="0 0 18 18">
-      <circle cx="9" cy="9" r="${r}" fill="none" stroke="#E2E8F0" stroke-width="2.5" />
+      <circle cx="9" cy="9" r="${r}" fill="none" stroke="var(--v-line)" stroke-width="2.5" />
       <circle cx="9" cy="9" r="${r}" fill="none" stroke="${strokeColor}" stroke-width="2.5"
         stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}"
         stroke-linecap="round" style="transform:rotate(-90deg);transform-origin:50% 50%;" />
@@ -1013,7 +1024,7 @@ function issueCard(issue: IssueRow, comments: IssueCommentRow[]): string {
   if (imageMatch && imageMatch[1]) {
     previewHtml = `<div class="iss-card-preview-wrap"><img src="${esc(imageMatch[1])}" alt="" class="iss-card-preview-img" /></div>`;
   } else if (issue.title.toLowerCase().includes('user onboarding')) {
-    previewHtml = `<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,#FED7AA 0%,#FBCFE8 50%,#C7D2FE 100%);height:80px;border-radius:8px;margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:#334155;background:rgba(255,255,255,0.75);padding:4px 10px;border-radius:6px;backdrop-filter:blur(4px);">Onboarding flow mockup</span></div>`;
+    previewHtml = `<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>`;
   }
 
   return `<article class="iss-card" draggable="true" data-id="${esc(issue.id)}" data-updated-at="${esc(issue.updatedAt)}" data-assignee="${esc(issue.assigneeEmail ?? '')}" tabindex="0" aria-label="${esc(issue.title)}">
@@ -1085,23 +1096,24 @@ function formatShortDate(iso: string): string {
 
 function prioritySignalSvg(priority: IssuePriority): string {
   let pLevel = 0;
-  let color = '#64748B';
-  if (priority === 'Urgent') { pLevel = 3; color = '#DC2626'; }
-  else if (priority === 'High') { pLevel = 3; color = '#D97706'; }
-  else if (priority === 'Medium') { pLevel = 2; color = '#3B82F6'; }
-  else if (priority === 'Low') { pLevel = 1; color = '#3B82F6'; }
+  let color = 'var(--v-muted)';
+  if (priority === 'Urgent') { pLevel = 3; color = 'var(--v-risk)'; }
+  else if (priority === 'High') { pLevel = 3; color = 'var(--v-hypo)'; }
+  else if (priority === 'Medium') { pLevel = 2; color = 'var(--v-pred)'; }
+  else if (priority === 'Low') { pLevel = 1; color = 'var(--v-pred)'; }
+  const empty = 'var(--v-line-strong)';
 
   return `<span class="iss-row-signal" title="Priority: ${esc(priority)}">
     <svg width="14" height="14" viewBox="0 0 16 16">
-      <rect x="2" y="10" width="2.5" height="4" rx="0.5" fill="${pLevel >= 1 ? color : '#CBD5E1'}"/>
-      <rect x="6.5" y="6" width="2.5" height="8" rx="0.5" fill="${pLevel >= 2 ? color : '#CBD5E1'}"/>
-      <rect x="11" y="2" width="2.5" height="12" rx="0.5" fill="${pLevel >= 3 ? color : '#CBD5E1'}"/>
+      <rect x="2" y="10" width="2.5" height="4" rx="0.5" fill="${pLevel >= 1 ? color : empty}"/>
+      <rect x="6.5" y="6" width="2.5" height="8" rx="0.5" fill="${pLevel >= 2 ? color : empty}"/>
+      <rect x="11" y="2" width="2.5" height="12" rx="0.5" fill="${pLevel >= 3 ? color : empty}"/>
     </svg>
   </span>`;
 }
 
 function statusIndicatorSvg(state: IssueState, progress: number): string {
-  const color = STATE_DOT[state] || '#94A3B8';
+  const color = STATE_DOT[state] || 'var(--v-faint)';
   return `<span class="iss-row-status" title="${esc(state)}">
     <svg width="15" height="15" viewBox="0 0 16 16">
       <circle cx="8" cy="8" r="6" fill="none" stroke="${color}" stroke-width="2"/>
@@ -1128,7 +1140,7 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
     .join('');
 
   const subtasksHtml = subtasks
-    ? `<span class="iss-pill-subtask" title="Subtasks: ${esc(subtasks)}"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#CBD5E1" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="#F97316" stroke-width="2"/></svg> ${esc(subtasks)}</span>`
+    ? `<span class="iss-pill-subtask" title="Subtasks: ${esc(subtasks)}"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ${esc(subtasks)}</span>`
     : '';
 
   const chatHtml = count > 0
@@ -1153,7 +1165,7 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
     : '';
 
   const estimateHtml = estimate
-    ? `<span class="iss-row-estimate" title="Logged / Estimated time"><svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#CBD5E1" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="#F97316" stroke-width="2"/></svg> ${esc(estimate)}</span>`
+    ? `<span class="iss-row-estimate" title="Logged / Estimated time"><svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ${esc(estimate)}</span>`
     : '';
 
   return `<div class="iss-list-row" data-id="${esc(issue.id)}" data-state="${esc(issue.state)}" data-assignee="${esc(issue.assigneeEmail ?? '')}" tabindex="0" role="row" aria-label="${esc(issue.title)}">
@@ -1249,131 +1261,133 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
   return `
 <style>
-  .iss-board { font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#F8FAFC; color:#0F172A; padding:20px 24px 28px; height:100%; overflow:auto; box-sizing:border-box; }
+  .iss-board { font-family:var(--font-body); background:var(--v-bg-0); color:var(--v-ink); padding:20px 24px 28px; height:100%; overflow:auto; box-sizing:border-box; }
   .iss-board * { box-sizing:border-box; }
-  .iss-board h1 { font-size:20px; font-weight:700; letter-spacing:-0.02em; margin:0; color:#0F172A; }
-  .iss-sub { font-size:12.5px; color:#64748B; margin:3px 0 16px; }
-  .iss-live { display:inline-flex; align-items:center; gap:5px; color:#059669; font-weight:600; }
-  .iss-live::before { content:''; width:7px; height:7px; border-radius:50%; background:#10B981; animation:iss-pulse 2s infinite; }
+  .iss-board h1 { font-size:clamp(19px,2.2vw,23px); font-weight:700; letter-spacing:-0.025em; margin:0; color:var(--v-ink); }
+  .iss-sub { font-size:12.5px; color:var(--v-muted); margin:3px 0 16px; }
+  .iss-live { display:inline-flex; align-items:center; gap:5px; color:var(--v-fact); font-weight:600; }
+  .iss-live::before { content:''; width:7px; height:7px; border-radius:50%; background:var(--v-fact); animation:iss-pulse 2s infinite; }
   @keyframes iss-pulse { 0%,100% { opacity:1; } 50% { opacity:0.35; } }
   .iss-toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
   .iss-toolbar .iss-spacer { flex:1; }
-  .iss-btn { border:0; border-radius:8px; padding:7px 14px; font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:all 0.15s ease; display:inline-flex; align-items:center; gap:6px; }
-  .iss-btn-primary { background:#0F172A; color:#FFFFFF; }
-  .iss-btn-primary:hover { background:#1E293B; box-shadow:0 2px 6px rgba(15,23,42,0.15); }
-  .iss-btn-ghost { background:#FFFFFF; color:#475569; border:1px solid #CBD5E1; }
-  .iss-btn-ghost:hover { color:#0F172A; border-color:#94A3B8; background:#F8FAFC; }
+  .iss-btn { border:1px solid transparent; border-radius:var(--radius-md); padding:8px 15px; font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:all 0.15s var(--ease-out); display:inline-flex; align-items:center; gap:6px; min-height:36px; }
+  .iss-btn-primary { background:var(--v-accent); color:var(--v-accent-ink); }
+  .iss-btn-primary:hover { filter:brightness(1.07); }
+  .iss-btn-ghost { background:var(--v-bg-1); color:var(--v-ink-2); border-color:var(--v-line-strong); }
+  .iss-btn-ghost:hover { color:var(--v-accent); border-color:var(--v-accent); }
 
-  .iss-search-box { display:flex; align-items:center; gap:8px; background:#FFFFFF; border:1px solid #CBD5E1; border-radius:8px; padding:7px 12px; width:min(360px, 100%); transition:border-color 0.15s, box-shadow 0.15s; }
-  .iss-search-box:focus-within { border-color:#3B82F6; box-shadow:0 0 0 3px rgba(59,130,246,0.12); }
-  .iss-search-input { border:none; background:transparent; font-size:13px; color:#0F172A; outline:none; width:100%; font-family:inherit; }
+  .iss-search-box { display:flex; align-items:center; gap:8px; background:var(--v-input-bg); border:1px solid var(--v-line-strong); border-radius:var(--radius-input); padding:7px 12px; width:min(360px, 100%); transition:border-color 0.15s, box-shadow 0.15s; }
+  .iss-search-box:focus-within { border-color:var(--v-accent); box-shadow:0 0 0 3px var(--v-accent-dim); }
+  .iss-search-input { border:none; background:transparent; font-size:13px; color:var(--v-ink); outline:none; width:100%; font-family:inherit; }
   .iss-search-icon { font-size:13px; opacity:0.6; }
-  .iss-view-switcher { display:inline-flex; background:#E2E8F0; padding:3px; border-radius:8px; gap:2px; }
-  .iss-view-btn { border:0; background:transparent; color:#64748B; font-size:12px; font-weight:600; padding:5px 10px; border-radius:6px; cursor:pointer; display:inline-flex; align-items:center; gap:5px; font-family:inherit; transition:all 0.15s ease; }
-  .iss-view-btn:hover { color:#0F172A; }
-  .iss-view-btn.active { background:#FFFFFF; color:#0F172A; box-shadow:0 1px 2px rgba(0,0,0,0.06); }
+  .iss-view-switcher { display:inline-flex; background:var(--v-bg-2); padding:3px; border-radius:var(--radius-md); gap:2px; }
+  .iss-view-btn { border:0; background:transparent; color:var(--v-muted); font-size:12px; font-weight:600; padding:5px 10px; border-radius:var(--radius-sm); cursor:pointer; display:inline-flex; align-items:center; gap:5px; font-family:inherit; transition:all 0.15s var(--ease-out); }
+  .iss-view-btn:hover { color:var(--v-ink); }
+  .iss-view-btn.active { background:var(--v-bg-1); color:var(--v-ink); box-shadow:var(--v-card-shadow); }
 
   .iss-columns { display:flex; gap:16px; align-items:flex-start; overflow-x:auto; padding-bottom:18px; }
-  .iss-col { flex:0 0 295px; min-width:280px; max-width:320px; background:#F1F5F9; border:1px solid #E2E8F0; border-radius:14px; padding:12px 10px 14px; }
+  .iss-col { flex:0 0 295px; min-width:280px; max-width:320px; background:var(--v-bg-2); border:1px solid var(--v-line); border-radius:var(--radius-lg); padding:12px 10px 14px; }
   .iss-col-head { display:flex; align-items:center; gap:7px; padding:4px 6px 10px; }
   .iss-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-  .iss-col-title { font-size:11.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#1E293B; margin:0; }
-  .iss-col-dash { font-size:11.5px; color:#94A3B8; font-weight:400; }
-  .iss-col-count { font-size:12px; font-weight:600; color:#64748B; }
-  .iss-col-dots { margin-left:auto; color:#94A3B8; font-size:16px; font-weight:bold; cursor:pointer; padding:0 4px; border-radius:4px; line-height:1; }
-  .iss-col-dots:hover { color:#334155; background:#E2E8F0; }
-  .iss-add { width:100%; border:1.5px dashed #CBD5E1; background:rgba(255,255,255,0.7); color:#64748B; border-radius:10px; padding:7px 0; font-size:17px; font-weight:500; line-height:1; cursor:pointer; margin-bottom:12px; font-family:inherit; display:flex; align-items:center; justify-content:center; transition:all 0.15s ease; }
-  .iss-add:hover { background:#FFFFFF; border-color:#94A3B8; color:#0F172A; box-shadow:0 2px 5px rgba(0,0,0,0.04); }
+  .iss-col-title { font-size:11.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--v-ink); margin:0; }
+  .iss-col-dash { font-size:11.5px; color:var(--v-faint); font-weight:400; }
+  .iss-col-count { font-size:12px; font-weight:600; color:var(--v-muted); }
+  .iss-col-dots { margin-left:auto; color:var(--v-faint); font-size:16px; font-weight:bold; cursor:pointer; padding:0 4px; border-radius:4px; line-height:1; }
+  .iss-col-dots:hover { color:var(--v-ink); background:var(--v-bg-3); }
+  .iss-add { width:100%; border:1.5px dashed var(--v-line-strong); background:transparent; color:var(--v-muted); border-radius:var(--radius-md); padding:7px 0; font-size:17px; font-weight:500; line-height:1; cursor:pointer; margin-bottom:12px; font-family:inherit; display:flex; align-items:center; justify-content:center; transition:all 0.15s var(--ease-out); }
+  .iss-add:hover { background:var(--v-bg-1); border-color:var(--v-accent); color:var(--v-accent); }
   .iss-cards { display:flex; flex-direction:column; gap:10px; min-height:60px; }
-  .iss-cards.iss-dragover { background:#E2E8F0; outline:2px dashed #3B82F6; outline-offset:-2px; border-radius:10px; }
-  .iss-card { background:#FFFFFF; border:1px solid #E2E8F0; border-radius:12px; padding:13px 13px 11px; cursor:grab; box-shadow:0 1px 3px rgba(0,0,0,0.03),0 1px 2px rgba(0,0,0,0.02); transition:border-color 0.15s ease,box-shadow 0.15s ease,transform 0.12s ease; }
-  .iss-card:hover { border-color:#CBD5E1; box-shadow:0 4px 12px -2px rgba(15,23,42,0.08); transform:translateY(-1px); }
+  .iss-cards.iss-dragover { background:var(--v-accent-dim); outline:2px dashed var(--v-accent); outline-offset:-2px; border-radius:var(--radius-md); }
+  .iss-card { background:var(--v-bg-1); border:1px solid var(--v-line); border-radius:var(--radius-md); padding:13px 13px 11px; cursor:grab; box-shadow:var(--v-card-shadow); transition:border-color 0.15s var(--ease-out),box-shadow 0.15s var(--ease-out),transform 0.12s var(--ease-out); }
+  .iss-card:hover { border-color:var(--v-line-strong); box-shadow:var(--v-card-shadow-hover); transform:translateY(-1px); }
   .iss-card.iss-dragging { opacity:0.55; cursor:grabbing; transform:scale(0.98); }
-  .iss-card:focus-visible { outline:2px solid #3B82F6; outline-offset:1px; }
-  .iss-title { font-size:13.5px; font-weight:600; line-height:1.4; color:#1E293B; margin-bottom:9px; overflow-wrap:anywhere; }
+  .iss-card:focus-visible { outline:2px solid var(--v-focus); outline-offset:1px; }
+  .iss-title { font-size:13.5px; font-weight:600; line-height:1.4; color:var(--v-ink); margin-bottom:9px; overflow-wrap:anywhere; }
   .iss-pills { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }
-  .iss-pill { font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:999px; line-height:1.35; }
-  .iss-priority-urgent { background:#FEE2E2; color:#DC2626; border:1px solid #FECACA; }
-  .iss-priority-high { background:#FEF3C7; color:#D97706; border:1px solid #FDE68A; }
-  .iss-priority-medium { background:#E0E7FF; color:#4338CA; border:1px solid #C7D2FE; }
-  .iss-priority-low { background:#EFF6FF; color:#2563EB; border:1px solid #BFDBFE; }
-  .iss-priority-none { background:#F1F5F9; color:#64748B; border:1px solid #E2E8F0; }
-  .iss-label-devops { background:#FFEDD5; color:#C2410C; border:1px solid #FED7AA; }
-  .iss-label-sales { background:#FFEDD5; color:#EA580C; border:1px solid #FED7AA; }
-  .iss-label-marketing { background:#FEF3C7; color:#B45309; border:1px solid #FDE68A; }
-  .iss-label-research { background:#F3E8FF; color:#7E22CE; border:1px solid #E9D5FF; }
-  .iss-label-qa { background:#FFEDD5; color:#C2410C; border:1px solid #FED7AA; }
-  .iss-label-design { background:#FCE7F3; color:#BE185D; border:1px solid #FBCFE8; }
-  .iss-label-frontend { background:#EEF2FF; color:#4F46E5; border:1px solid #E0E7FF; }
-  .iss-label-bug { background:#FEE2E2; color:#DC2626; border:1px solid #FECACA; }
-  .iss-label-feature { background:#DCFCE7; color:#15803D; border:1px solid #BBF7D0; }
-  .iss-label-other { background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; }
+  .iss-pill { font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:var(--radius-pill); line-height:1.35; border:1px solid transparent; }
+  /* Label + priority chips draw from the four semantic tints only, so the
+     board stays readable instead of becoming a rainbow. */
+  .iss-priority-urgent { background:var(--v-tint-risk-bg); color:var(--v-tint-risk-ink); }
+  .iss-priority-high { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-priority-medium { background:var(--v-tint-info-bg); color:var(--v-tint-info-ink); }
+  .iss-priority-low { background:var(--v-tint-info-bg); color:var(--v-tint-info-ink); }
+  .iss-priority-none { background:var(--v-bg-2); color:var(--v-muted); border-color:var(--v-line); }
+  .iss-label-devops { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-label-sales { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-label-marketing { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-label-research { background:var(--v-tint-info-bg); color:var(--v-tint-info-ink); }
+  .iss-label-qa { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-label-design { background:var(--v-tint-risk-bg); color:var(--v-tint-risk-ink); }
+  .iss-label-frontend { background:var(--v-tint-info-bg); color:var(--v-tint-info-ink); }
+  .iss-label-bug { background:var(--v-tint-risk-bg); color:var(--v-tint-risk-ink); }
+  .iss-label-feature { background:var(--v-tint-good-bg); color:var(--v-tint-good-ink); }
+  .iss-label-other { background:var(--v-bg-2); color:var(--v-muted); border-color:var(--v-line); }
   .iss-progress-row { display:flex; align-items:center; gap:12px; margin-bottom:11px; }
   .iss-progress { display:inline-flex; align-items:center; gap:5px; }
-  .iss-progress-text { font-size:11px; font-weight:600; color:#64748B; }
-  .iss-repo-badge { display:inline-flex; align-items:center; gap:4.5px; font-size:11px; font-weight:500; color:#64748B; }
+  .iss-progress-text { font-size:11px; font-weight:600; color:var(--v-muted); }
+  .iss-repo-badge { display:inline-flex; align-items:center; gap:4.5px; font-size:11px; font-weight:500; color:var(--v-muted); }
   .iss-bottom-row { display:flex; align-items:center; justify-content:space-between; min-height:24px; padding-top:2px; }
   .iss-assignees { display:inline-flex; align-items:center; }
-  .iss-avatar { width:22px; height:22px; border-radius:50%; border:2px solid #FFFFFF; font-size:9.5px; font-weight:700; display:inline-grid; place-items:center; box-shadow:0 1px 2px rgba(0,0,0,0.08); margin-left:-6px; position:relative; }
+  .iss-avatar { width:22px; height:22px; border-radius:50%; border:2px solid var(--v-bg-1); font-size:9.5px; font-weight:700; display:inline-grid; place-items:center; box-shadow:var(--v-card-shadow); margin-left:-6px; position:relative; }
   .iss-avatar:first-child { margin-left:0; }
   .iss-meta-group { display:inline-flex; align-items:center; gap:10px; margin-left:auto; }
-  .iss-meta-item { display:inline-flex; align-items:center; gap:3.5px; font-size:11.5px; font-weight:500; color:#64748B; }
+  .iss-meta-item { display:inline-flex; align-items:center; gap:3.5px; font-size:11.5px; font-weight:500; color:var(--v-muted); }
 
   /* List / Table View Styling */
-  .iss-list-container { background:#FFFFFF; border:1px solid #E2E8F0; border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,0.03); overflow:hidden; margin-bottom:20px; }
-  .iss-list-group { border-bottom:1px solid #F1F5F9; }
+  .iss-list-container { background:var(--v-bg-1); border:1px solid var(--v-line); border-radius:var(--radius-lg); box-shadow:var(--v-card-shadow); overflow:hidden; margin-bottom:20px; }
+  .iss-list-group { border-bottom:1px solid var(--v-line); }
   .iss-list-group:last-child { border-bottom:none; }
-  .iss-list-group-header { display:flex; align-items:center; gap:8px; padding:10px 16px; background:#F8FAFC; border-bottom:1px solid #E2E8F0; cursor:pointer; user-select:none; font-size:12px; font-weight:700; color:#475569; letter-spacing:0.04em; }
-  .iss-list-group-header:hover { background:#F1F5F9; color:#0F172A; }
-  .iss-list-chevron { font-size:9px; color:#94A3B8; transition:transform 0.15s ease; width:12px; display:inline-block; }
+  .iss-list-group-header { display:flex; align-items:center; gap:8px; padding:10px 16px; background:var(--v-bg-2); border-bottom:1px solid var(--v-line); cursor:pointer; user-select:none; font-size:12px; font-weight:700; color:var(--v-ink-2); letter-spacing:0.04em; }
+  .iss-list-group-header:hover { background:var(--v-bg-3); color:var(--v-ink); }
+  .iss-list-chevron { font-size:9px; color:var(--v-faint); transition:transform 0.15s var(--ease-out); width:12px; display:inline-block; }
   .iss-list-group.collapsed .iss-list-chevron { transform:rotate(-90deg); }
   .iss-list-group.collapsed .iss-list-rows { display:none; }
   .iss-list-group-title { text-transform:uppercase; }
-  .iss-list-group-count { font-size:11.5px; font-weight:600; color:#64748B; }
+  .iss-list-group-count { font-size:11.5px; font-weight:600; color:var(--v-muted); }
   
-  .iss-list-row { display:flex; align-items:center; justify-content:space-between; padding:9px 16px; border-bottom:1px solid #F8FAFC; transition:background 0.12s ease; cursor:pointer; gap:12px; }
+  .iss-list-row { display:flex; align-items:center; justify-content:space-between; padding:9px 16px; border-bottom:1px solid var(--v-line); transition:background 0.12s var(--ease-out); cursor:pointer; gap:12px; }
   .iss-list-row:last-child { border-bottom:none; }
-  .iss-list-row:hover { background:#F8FAFC; }
-  .iss-list-row:focus-visible { outline:2px solid #3B82F6; outline-offset:-2px; }
+  .iss-list-row:hover { background:var(--v-bg-2); }
+  .iss-list-row:focus-visible { outline:2px solid var(--v-focus); outline-offset:-2px; }
   .iss-row-left { display:flex; align-items:center; gap:10px; min-width:0; flex:1; }
   .iss-row-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
   .iss-row-signal { display:inline-grid; place-items:center; flex-shrink:0; }
-  .iss-row-key { font-size:12px; font-weight:600; color:#64748B; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; min-width:65px; flex-shrink:0; }
+  .iss-row-key { font-size:12px; font-weight:600; color:var(--v-muted); font-family:var(--font-mono); min-width:65px; flex-shrink:0; }
   .iss-row-status { display:inline-grid; place-items:center; flex-shrink:0; }
-  .iss-row-title { font-size:13.5px; font-weight:500; color:#0F172A; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
-  .iss-list-row:hover .iss-row-title { color:#2563EB; }
+  .iss-row-title { font-size:13.5px; font-weight:500; color:var(--v-ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  .iss-list-row:hover .iss-row-title { color:var(--v-accent); }
   
-  .iss-pill-subtask { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600; color:#475569; background:#F1F5F9; border-radius:999px; padding:2px 8px; }
+  .iss-pill-subtask { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600; color:var(--v-ink-2); background:var(--v-bg-2); border-radius:var(--radius-pill); padding:2px 8px; }
   .iss-subtask-icon { font-size:9px; opacity:0.75; }
-  .iss-pill-chat { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:500; color:#64748B; background:#F1F5F9; border-radius:999px; padding:2px 7px; }
-  .iss-pill-milestone { font-size:11px; font-weight:700; border-radius:6px; padding:2px 7px; line-height:1.2; }
-  .iss-pill-mvp { background:#E0F2FE; color:#0284C7; border:1px solid #BAE6FD; }
-  .iss-pill-premvp { background:#F3E8FF; color:#7E22CE; border:1px solid #E9D5FF; }
-  .iss-pill-date { display:inline-flex; align-items:center; gap:4.5px; font-size:11px; font-weight:600; color:#C2410C; background:#FFEDD5; border:1px solid #FED7AA; border-radius:6px; padding:2px 8px; }
-  .iss-row-estimate { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:500; color:#64748B; min-width:55px; }
-  .iss-row-date { font-size:11.5px; font-weight:500; color:#94A3B8; min-width:48px; text-align:right; }
+  .iss-pill-chat { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:500; color:var(--v-muted); background:var(--v-bg-2); border-radius:var(--radius-pill); padding:2px 7px; }
+  .iss-pill-milestone { font-size:11px; font-weight:700; border-radius:var(--radius-sm); padding:2px 7px; line-height:1.2; }
+  .iss-pill-mvp { background:var(--v-tint-info-bg); color:var(--v-tint-info-ink); }
+  .iss-pill-premvp { background:var(--v-tint-warn-bg); color:var(--v-tint-warn-ink); }
+  .iss-pill-date { display:inline-flex; align-items:center; gap:4.5px; font-size:11px; font-weight:600; color:var(--v-tint-warn-ink); background:var(--v-tint-warn-bg); border-radius:var(--radius-sm); padding:2px 8px; }
+  .iss-row-estimate { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:500; color:var(--v-muted); min-width:55px; }
+  .iss-row-date { font-size:11.5px; font-weight:500; color:var(--v-faint); min-width:48px; text-align:right; }
 
-  .iss-dialog-backdrop { position:fixed; inset:0; background:rgba(15,23,42,0.45); backdrop-filter:blur(4px); display:none; align-items:flex-start; justify-content:center; padding:3vh 16px 20px; z-index:9999 !important; overflow-y:auto; }
+  .iss-dialog-backdrop { position:fixed; inset:0; background:rgba(10,15,20,0.42); backdrop-filter:blur(4px); display:none; align-items:flex-start; justify-content:center; padding:3vh 16px 20px; z-index:9999 !important; overflow-y:auto; }
   .iss-dialog-backdrop.iss-open { display:flex !important; }
-  .iss-dialog { background:#FFFFFF; border:1px solid #E2E8F0; border-radius:14px; width:min(520px, 94vw) !important; max-width:520px !important; padding:22px; box-shadow:0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04); max-height:calc(100vh - 40px); overflow-y:auto; margin:auto 0; }
-  .iss-dialog h3 { margin:0 0 14px; font-size:16px; font-weight:700; color:#0F172A; }
+  .iss-dialog { background:var(--v-bg-1); border:1px solid var(--v-line); border-radius:var(--radius-xl); width:min(520px, 94vw) !important; max-width:520px !important; padding:24px; box-shadow:0 24px 60px -12px rgba(10,15,20,0.35); max-height:calc(100vh - 40px); overflow-y:auto; margin:auto 0; }
+  .iss-dialog h3 { margin:0 0 14px; font-size:17px; font-weight:700; letter-spacing:-0.02em; color:var(--v-ink); }
   .iss-field { display:grid; gap:5px; margin-bottom:12px; }
-  .iss-field label { font-size:11.5px; font-weight:600; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
-  .iss-field input, .iss-field textarea, .iss-field select { background:#F8FAFC; border:1px solid #CBD5E1; color:#0F172A; border-radius:8px; padding:9px 12px; font-size:13.5px; font-family:inherit; transition:border-color 0.15s, box-shadow 0.15s; }
+  .iss-field label { font-size:11px; font-weight:600; color:var(--v-muted); text-transform:uppercase; letter-spacing:0.07em; }
+  .iss-field input, .iss-field textarea, .iss-field select { background:var(--v-input-bg); border:1px solid var(--v-line-strong); color:var(--v-ink); border-radius:var(--radius-input); padding:9px 12px; font-size:13.5px; font-family:inherit; transition:border-color 0.15s, box-shadow 0.15s; }
   .iss-field textarea { min-height:80px; resize:vertical; }
-  .iss-field input:focus, .iss-field textarea:focus, .iss-field select:focus { outline:none; border-color:#3B82F6; box-shadow:0 0 0 3px rgba(59,130,246,0.12); background:#FFFFFF; }
+  .iss-field input:focus, .iss-field textarea:focus, .iss-field select:focus { outline:none; border-color:var(--v-accent); box-shadow:0 0 0 3px var(--v-accent-dim); }
   .iss-dialog-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:8px; }
-  .iss-detail { position:fixed; top:0; right:0; height:100%; width:min(450px, 95vw); background:#FFFFFF; border-left:1px solid #E2E8F0; box-shadow:-10px 0 30px rgba(0,0,0,0.08); z-index:950; display:none; flex-direction:column; padding:22px; overflow-y:auto; }
+  .iss-detail { position:fixed; top:0; right:0; height:100%; width:min(450px, 95vw); background:var(--v-bg-1); border-left:1px solid var(--v-line); box-shadow:-12px 0 40px rgba(10,15,20,0.2); z-index:950; display:none; flex-direction:column; padding:22px; overflow-y:auto; }
   .iss-detail.iss-open { display:flex; }
-  .iss-detail h3 { font-size:16px; font-weight:700; color:#0F172A; margin:0 0 6px; overflow-wrap:anywhere; }
-  .iss-detail .iss-desc { font-size:13px; color:#334155; line-height:1.6; white-space:pre-wrap; margin:10px 0 14px; }
-  .iss-comment { border-top:1px solid #F1F5F9; padding:10px 0 2px; margin-top:10px; }
-  .iss-comment-author { font-size:12px; font-weight:600; color:#0F172A; }
-  .iss-comment-at { font-size:11px; color:#94A3B8; margin-left:8px; }
-  .iss-comment-body { font-size:13px; color:#334155; margin-top:4px; white-space:pre-wrap; overflow-wrap:anywhere; }
-  .iss-flash { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#0F172A; color:#FFFFFF; font-size:12.5px; font-weight:500; padding:9px 16px; border-radius:8px; z-index:1000; box-shadow:0 10px 25px rgba(0,0,0,0.15); display:none; }
+  .iss-detail h3 { font-size:17px; font-weight:700; letter-spacing:-0.02em; color:var(--v-ink); margin:0 0 6px; overflow-wrap:anywhere; }
+  .iss-detail .iss-desc { font-size:13px; color:var(--v-ink-2); line-height:1.6; white-space:pre-wrap; margin:10px 0 14px; }
+  .iss-comment { border-top:1px solid var(--v-line); padding:10px 0 2px; margin-top:10px; }
+  .iss-comment-author { font-size:12px; font-weight:600; color:var(--v-ink); }
+  .iss-comment-at { font-size:11px; color:var(--v-faint); margin-left:8px; }
+  .iss-comment-body { font-size:13px; color:var(--v-ink-2); margin-top:4px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .iss-flash { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--v-ink); color:var(--v-bg-1); font-size:12.5px; font-weight:600; padding:10px 16px; border-radius:var(--radius-md); z-index:1000; box-shadow:var(--v-card-shadow-hover); display:none; }
   .iss-flash.iss-open { display:block; }
-  .iss-flash.iss-error { background:#DC2626; color:#FFFFFF; }
+  .iss-flash.iss-error { background:var(--v-risk); color:var(--v-bg-1); }
   .iss-hidden { display:none !important; }
 </style>
 <div class="iss-board" id="iss-board" data-csrf="${esc(csrf)}" data-home="${esc(home)}" data-server-time="${esc(data.serverTime)}">
@@ -1463,18 +1477,18 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
   <div class="iss-dialog-backdrop" id="iss-gh-dialog">
     <form class="iss-dialog" id="iss-gh-form">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" style="color:#0f172a;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" style="color:var(--v-ink);"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         <h3 style="margin:0;font-size:16px;">Sync GitHub Project</h3>
       </div>
-      <p style="font-size:12.5px;color:#64748b;margin:4px 0 14px;line-height:1.4;">
+      <p style="font-size:12.5px;color:var(--v-muted);margin:4px 0 14px;line-height:1.45;">
         Connect your GitHub repository to synchronize issues with this board. Authorize with your repository name and personal access or OAuth token.
       </p>
-      <div id="iss-gh-connected-box" style="${syncConfig?.repo ? '' : 'display:none;'}background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#334155;">
+      <div id="iss-gh-connected-box" style="${syncConfig?.repo ? '' : 'display:none;'}background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--v-ink-2);">
         <div style="font-weight:600;display:flex;align-items:center;gap:6px;">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;"></span>
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--v-fact);"></span>
           Linked: <span id="iss-gh-linked-repo">${esc(syncConfig?.repo ?? '')}</span>
         </div>
-        <div style="font-size:11px;color:#64748b;margin-top:3px;" id="iss-gh-sync-meta">
+        <div style="font-size:11px;color:var(--v-muted);margin-top:3px;" id="iss-gh-sync-meta">
           ${syncConfig?.lastSyncedAt ? `Last synced: ${esc(syncConfig.lastSyncedAt.slice(0, 16).replace('T', ' '))} (${syncConfig.syncedCount} issues)` : ''}
         </div>
       </div>
@@ -1483,10 +1497,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
         <input id="iss-gh-repo" name="repo" required value="${esc(syncConfig?.repo ?? '')}" placeholder="octocat/Hello-World or https://github.com/owner/repo">
       </div>
       <div class="iss-field">
-        <label for="iss-gh-token">Personal Access Token <span style="font-weight:normal;color:#64748b;">(optional for public, required for private)</span></label>
+        <label for="iss-gh-token">Personal Access Token <span style="font-weight:normal;color:var(--v-muted);">(optional for public, required for private)</span></label>
         <input type="password" id="iss-gh-token" name="token" placeholder="${syncConfig?.token ? '•••••••••••••••• (leave blank to keep current)' : 'ghp_... or github_pat_...'}">
       </div>
-      <div id="iss-gh-error" style="display:none;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px 10px;font-size:12px;margin-top:6px;"></div>
+      <div id="iss-gh-error" style="display:none;color:var(--v-tint-risk-ink);background:var(--v-tint-risk-bg);border:1px solid var(--v-line);border-radius:var(--radius-sm);padding:8px 10px;font-size:12px;margin-top:6px;"></div>
       <div class="iss-dialog-actions" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
         <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-cancel">Cancel</button>
         <div style="display:flex;gap:8px;">
@@ -1568,14 +1582,12 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
   }
 
   var AVATAR_PALETTES = [
-    { bg: '#DBEAFE', text: '#1E40AF' },
-    { bg: '#FCE7F3', text: '#9D174D' },
-    { bg: '#FEF3C7', text: '#92400E' },
-    { bg: '#EDE9FE', text: '#5B21B6' },
-    { bg: '#DCFCE7', text: '#166534' },
-    { bg: '#FFE4E6', text: '#9F1239' },
-    { bg: '#E0F2FE', text: '#075985' },
-    { bg: '#F3E8FF', text: '#6B21A8' }
+    { bg: 'var(--v-tint-info-bg)', text: 'var(--v-tint-info-ink)' },
+    { bg: 'var(--v-tint-good-bg)', text: 'var(--v-tint-good-ink)' },
+    { bg: 'var(--v-tint-warn-bg)', text: 'var(--v-tint-warn-ink)' },
+    { bg: 'var(--v-tint-risk-bg)', text: 'var(--v-tint-risk-ink)' },
+    { bg: 'var(--v-accent-dim)', text: 'var(--v-accent)' },
+    { bg: 'var(--v-bg-3)', text: 'var(--v-ink-2)' }
   ];
 
   function getAvatarPaletteClient(str) {
@@ -1648,23 +1660,24 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
   function prioritySignalSvgClient(priority) {
     var pLevel = 0;
-    var color = '#64748B';
-    if (priority === 'Urgent') { pLevel = 3; color = '#DC2626'; }
-    else if (priority === 'High') { pLevel = 3; color = '#D97706'; }
-    else if (priority === 'Medium') { pLevel = 2; color = '#3B82F6'; }
-    else if (priority === 'Low') { pLevel = 1; color = '#3B82F6'; }
+    var color = 'var(--v-muted)';
+    if (priority === 'Urgent') { pLevel = 3; color = 'var(--v-risk)'; }
+    else if (priority === 'High') { pLevel = 3; color = 'var(--v-hypo)'; }
+    else if (priority === 'Medium') { pLevel = 2; color = 'var(--v-pred)'; }
+    else if (priority === 'Low') { pLevel = 1; color = 'var(--v-pred)'; }
+    var empty = 'var(--v-line-strong)';
 
     return '<span class="iss-row-signal" title="Priority: ' + escHtml(priority) + '">' +
       '<svg width="14" height="14" viewBox="0 0 16 16">' +
-        '<rect x="2" y="11" width="2" height="3" rx="0.5" fill="' + (pLevel >= 1 ? color : '#E2E8F0') + '" />' +
-        '<rect x="6" y="8" width="2" height="6" rx="0.5" fill="' + (pLevel >= 2 ? color : '#E2E8F0') + '" />' +
-        '<rect x="10" y="5" width="2" height="9" rx="0.5" fill="' + (pLevel >= 3 ? color : '#E2E8F0') + '" />' +
+        '<rect x="2" y="11" width="2" height="3" rx="0.5" fill="' + (pLevel >= 1 ? color : empty) + '" />' +
+        '<rect x="6" y="8" width="2" height="6" rx="0.5" fill="' + (pLevel >= 2 ? color : empty) + '" />' +
+        '<rect x="10" y="5" width="2" height="9" rx="0.5" fill="' + (pLevel >= 3 ? color : empty) + '" />' +
       '</svg>' +
     '</span>';
   }
 
   function statusIndicatorSvgClient(state, progress) {
-    var color = STATE_DOT[state] || '#94A3B8';
+    var color = STATE_DOT[state] || 'var(--v-faint)';
     return '<span class="iss-row-status" title="' + escHtml(state) + '">' +
       '<svg width="15" height="15" viewBox="0 0 16 16">' +
         '<circle cx="8" cy="8" r="6" fill="none" stroke="' + color + '" stroke-width="2"/>' +
@@ -1729,10 +1742,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     var r = 6.5;
     var c = 2 * Math.PI * r;
     var offset = c - (c * p) / 100;
-    var strokeColor = p > 0 ? '#F97316' : '#CBD5E1';
+    var strokeColor = p > 0 ? 'var(--v-accent)' : 'var(--v-line-strong)';
     return '<span class="iss-progress" title="' + p + '% complete">' +
       '<svg class="iss-ring-svg" width="14" height="14" viewBox="0 0 18 18">' +
-        '<circle cx="9" cy="9" r="' + r + '" fill="none" stroke="#E2E8F0" stroke-width="2.5" />' +
+        '<circle cx="9" cy="9" r="' + r + '" fill="none" stroke="var(--v-line)" stroke-width="2.5" />' +
         '<circle cx="9" cy="9" r="' + r + '" fill="none" stroke="' + strokeColor + '" stroke-width="2.5" ' +
           'stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + offset.toFixed(1) + '" ' +
           'stroke-linecap="round" style="transform:rotate(-90deg);transform-origin:50% 50%;" />' +
@@ -1788,7 +1801,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     if (imgMatch) {
       previewHtml = '<div class="iss-card-preview-wrap"><img src="' + escHtml(imgMatch[1]) + '" alt="" class="iss-card-preview-img" /></div>';
     } else if (issue.title && issue.title.toLowerCase().indexOf('user onboarding') !== -1) {
-      previewHtml = '<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,#FED7AA 0%,#FBCFE8 50%,#C7D2FE 100%);height:80px;border-radius:8px;margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:#334155;background:rgba(255,255,255,0.75);padding:4px 10px;border-radius:6px;backdrop-filter:blur(4px);">Onboarding flow mockup</span></div>';
+      previewHtml = '<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>';
     }
 
     return '<article class="iss-card" draggable="true" data-id="' + escHtml(issue.id) + '" data-updated-at="' + escHtml(issue.updatedAt) + '" data-assignee="' + escHtml(issue.assigneeEmail || '') + '" tabindex="0" aria-label="' + escHtml(issue.title) + '">' +
@@ -1817,7 +1830,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     }).join('');
 
     var subtasksHtml = subtasks
-      ? '<span class="iss-pill-subtask" title="Subtasks: ' + escHtml(subtasks) + '"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#CBD5E1" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="#F97316" stroke-width="2"/></svg> ' + escHtml(subtasks) + '</span>'
+      ? '<span class="iss-pill-subtask" title="Subtasks: ' + escHtml(subtasks) + '"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ' + escHtml(subtasks) + '</span>'
       : '';
 
     var chatHtml = commentCount > 0
@@ -1839,7 +1852,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       : '';
 
     var estimateHtml = estimate
-      ? '<span class="iss-row-estimate" title="Logged / Estimated time"><svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#CBD5E1" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="#F97316" stroke-width="2"/></svg> ' + escHtml(estimate) + '</span>'
+      ? '<span class="iss-row-estimate" title="Logged / Estimated time"><svg width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ' + escHtml(estimate) + '</span>'
       : '';
 
     return '<div class="iss-list-row" data-id="' + escHtml(issue.id) + '" data-state="' + escHtml(issue.state) + '" data-assignee="' + escHtml(issue.assigneeEmail || '') + '" tabindex="0" role="row" aria-label="' + escHtml(issue.title) + '">' +
@@ -2280,7 +2293,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
   function openDetail(id) {
     if (!id) return;
     detail.dataset.issueId = id;
-    detail.innerHTML = '<p style="color:#64748B;font-size:12.5px;">Loading…</p>';
+    detail.innerHTML = '<p style="color:var(--v-muted);font-size:12.5px;">Loading…</p>';
     detail.classList.add('iss-open');
     detail.setAttribute('aria-hidden', 'false');
     fetch(home + 'console/issues/detail?id=' + encodeURIComponent(id), { headers: { 'accept': 'application/json' } })
@@ -2290,7 +2303,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
         renderDetail(data.issue, data.comments || []);
       })
       .catch(function (err) {
-        detail.innerHTML = '<p style="color:#DC2626;font-size:12.5px;">' + escHtml(err.message) + '</p>';
+        detail.innerHTML = '<p style="color:var(--v-risk);font-size:12.5px;">' + escHtml(err.message) + '</p>';
       });
   }
   function closeDetail() {
@@ -2341,7 +2354,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       '<button type="button" id="iss-detail-close" class="iss-btn iss-btn-ghost" style="padding:4px 8px;" aria-label="Close">✕</button></div>' +
       '<div class="iss-pills" style="margin-top:8px;">' +
       '<span class="' + (PRIORITY_CLASS[issue.priority] || 'iss-pill iss-priority-none') + '">' + escHtml(issue.priority) + '</span>' + labels + '</div>' +
-      '<div class="iss-desc">' + (issue.description ? escHtml(issue.description) : '<em style="color:#94A3B8;">No description</em>') + '</div>' +
+      '<div class="iss-desc">' + (issue.description ? escHtml(issue.description) : '<em style="color:var(--v-faint);">No description</em>') + '</div>' +
       '<form id="iss-edit-form">' +
       '<input type="hidden" name="csrf" value="' + escHtml(csrf) + '">' +
       '<input type="hidden" name="issueId" value="' + escHtml(issue.id) + '">' +
@@ -2356,9 +2369,9 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       '</select></div>' +
       '<div class="iss-field"><label for="iss-e-progress">Progress %</label><input id="iss-e-progress" name="progress" type="number" min="0" max="100" value="' + Number(issue.progress || 0) + '"></div>' +
       '<div style="display:flex;gap:8px;margin-top:10px;"><button type="submit" class="iss-btn iss-btn-primary">Save changes</button>' +
-      '<button type="button" id="iss-delete" class="iss-btn iss-btn-ghost" style="color:#DC2626;border-color:#FCA5A5;">Delete</button></div>' +
+      '<button type="button" id="iss-delete" class="iss-btn iss-btn-ghost" style="color:var(--v-risk);border-color:var(--v-risk);">Delete</button></div>' +
       '</form>' +
-      '<div style="margin-top:20px;"><strong style="font-size:13px;color:#0F172A;">Comments (' + comments.length + ')</strong>' + (commentHtml || '<p style="color:#94A3B8;font-size:12px;margin:8px 0;">No comments yet.</p>') + '</div>' +
+      '<div style="margin-top:20px;"><strong style="font-size:13px;color:var(--v-ink);">Comments (' + comments.length + ')</strong>' + (commentHtml || '<p style="color:var(--v-faint);font-size:12px;margin:8px 0;">No comments yet.</p>') + '</div>' +
       '<form id="iss-comment-form" style="margin-top:12px;">' +
       '<input type="hidden" name="csrf" value="' + escHtml(csrf) + '">' +
       '<input type="hidden" name="issueId" value="' + escHtml(issue.id) + '">' +

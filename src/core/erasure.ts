@@ -13,6 +13,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { AsyncDb } from './db.ts';
+import { forTenant } from './tenant.ts';
 import { exportLedger, type LedgerExport } from '../ledger/export.ts';
 
 /**
@@ -336,7 +337,14 @@ export async function collectErasureArtifacts(
       result.failed.push({ ref, reason: e instanceof Error ? e.message : String(e) });
       continue;
     }
-    const row = (await db.prepare('SELECT COUNT(*) AS n FROM claims WHERE raw_ref = ?').get(ref)) as { n: number };
+    // DELIBERATELY cross-tenant (see this function's contract above): the
+    // artifact store is shared, so a ref still claimed by ANY tenant's ledger
+    // must not be deleted — that is what retainedShared means. `allowGlobal`
+    // records that decision here, where a reader (or a tenant-scope guard run)
+    // would otherwise "correct" it into deleting another tenant's blob.
+    const row = (await forTenant(db, tenant)
+      .statement('SELECT COUNT(*) AS n FROM claims WHERE raw_ref = ?', { allowGlobal: true })
+      .get(ref)) as { n: number };
     if (Number(row.n) > 0) {
       result.retainedShared.push(ref);
       continue;

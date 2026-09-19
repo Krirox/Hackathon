@@ -1,6 +1,6 @@
 import type { AsyncDb } from '../core/db.ts';
 import { type BuzzSurface } from './buzz.ts';
-import { roomForScope, normalizeScope, loadRoomConfig, saveRoomConfig, type RoomConfig } from './rooms.ts';
+import { roomForScope, normalizeScope, loadRoomConfig, saveRoomConfig, resolveRoomDef, type RoomConfig } from './rooms.ts';
 import { STATUS_BADGES } from './health.ts';
 
 export interface BudgetGasGauge {
@@ -42,7 +42,7 @@ export class RoomBudgetTracker {
   /** Computes the live gas gauge for a room */
   async computeGauge(rawScope: string): Promise<BudgetGasGauge> {
     const scope = normalizeScope(rawScope);
-    const room = roomForScope(scope);
+    const room = (await resolveRoomDef(this.db, this.tenant, scope)) ?? roomForScope(scope);
     const config = await loadRoomConfig(this.db, this.tenant, scope);
     const at = this.now();
     const oneHourAgo = new Date(Date.parse(at) - 3600 * 1000).toISOString();

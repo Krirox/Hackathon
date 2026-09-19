@@ -1,5 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
-import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, roomForScope } from '../talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, resolveRoomDef } from '../talk/rooms.ts';
 import { ScopeHealthEvaluator, type RoomHealthEvaluation } from '../talk/health.ts';
 import { RoomBudgetTracker, type BudgetGasGauge } from '../talk/budget-gauge.ts';
 import type { BuzzSurface } from '../talk/buzz.ts';
@@ -21,6 +21,9 @@ const esc = (s: string): string =>
 export interface BuzzRoomRow {
   scope: string;
   roomName: string;
+  /** The room's own agent. Custom rooms carry their own; a canonical room's
+   *  falls back to its definition. Data only — the row markup is unchanged. */
+  agentName: string;
   health: RoomHealthEvaluation;
   gauge: BudgetGasGauge;
   autonomy: string;
@@ -51,6 +54,7 @@ export async function buildBuzzRoster(
     rooms.push({
       scope: health.scope,
       roomName: health.roomName,
+      agentName: config.agentName,
       health,
       gauge,
       autonomy: config.autonomy,
@@ -364,8 +368,7 @@ export function renderBuzzRoster(data: BuzzRosterData, home: string, _csrf: stri
       room.health.pendingApprovals > 0
         ? ` <span style="background:#CD2553;color:#fff;font-size:11px;font-weight:700;min-width:20px;height:20px;display:inline-grid;place-items:center;border-radius:999px;padding:0 6px;">${room.health.pendingApprovals}</span>`
         : '';
-    const roomDef = roomForScope(room.scope);
-    const agentName = roomDef?.agentName ?? 'agent';
+    const agentName = room.agentName;
     const avatar = getScopeAvatarSrc(room.scope);
     return `<div style="display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid #E8E8E8;">
   <img src="${esc(avatar)}" alt="${esc(agentName)}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid #E2E8F0;background:#F8FAFC;" loading="lazy">
@@ -403,8 +406,11 @@ export async function renderBuzzRoom(
   coord?: Coordinator,
 ): Promise<string | null> {
   const scope = normalizeScope(rawScope);
-  const def = roomForScope(scope);
-  if (def.scope !== scope) return null;
+  // Canonical rooms resolve from the builtin list; user-made rooms (created
+  // via /setup/rooms) resolve from stored custom records. An unknown scope
+  // still returns null so it 404s instead of rendering the wrong room.
+  const def = await resolveRoomDef(db, tenant, scope);
+  if (!def) return null;
 
   const evaluator = new ScopeHealthEvaluator(db, tenant, {});
   const health = await evaluator.evaluateScope(scope);
@@ -426,12 +432,21 @@ export async function renderBuzzRoom(
   agentList.push('<option value="@coding-agent (#ops / engineering)"></option>');
   agentList.push('<option value="@engineering-agent (#ops / engineering)"></option>');
   const userOptions = [...agentList, ...userList].join('');
+  // Approvals for THIS room only. The predicate mirrors the room's pending
+  // badge in ScopeHealthEvaluator exactly — a request that needs human minutes
+  // and TARGETS this scope, in PROPOSED or ADMITTED — so the cards a room shows
+  // always add up to the number on its badge. Previously this listed every
+  // ADMITTED request in the tenant, which put the same approval cards in every
+  // room regardless of scope.
   const pendingForRoom: { id: string; goal: string; updatedAt: string }[] = [];
   if (coord) {
     try {
-      const allPending = await coord.list(tenant, { state: 'ADMITTED' });
-      for (const r of allPending) {
-        if (r.bid.humanMinutes > 0) pendingForRoom.push({ id: r.id, goal: r.goal, updatedAt: r.updatedAt });
+      for (const state of ['PROPOSED', 'ADMITTED'] as const) {
+        for (const r of await coord.list(tenant, { state })) {
+          if (r.targetScope === scope && r.bid.humanMinutes > 0) {
+            pendingForRoom.push({ id: r.id, goal: r.goal, updatedAt: r.updatedAt });
+          }
+        }
       }
     } catch (e) {
       void e;

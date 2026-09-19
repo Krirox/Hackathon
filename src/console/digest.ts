@@ -102,9 +102,20 @@ export async function renderDigest(
   opts: { since?: string } = {},
 ): Promise<string> {
   const entries = await composeDigest(db, tenant, now, opts);
-  const window = `<p>NOTICE activity window (UTC): ${opts.since ? esc(opts.since) : 'all recorded history'} through ${esc(now)}, inclusive.</p>
-<p>Informational only — no approval required and no review attention consumed. Same-scope topics are grouped when successive notices are at most 24 hours apart within this window; latest activity first.</p>`;
-  if (entries.length === 0) return `${window}<p class="sub">Digest empty — no notices in this time window.</p>`;
+  // The window note is the page's fixed frame, so it reads as a lead sentence
+  // rather than a bare paragraph. The exact since/now instants stay on the page
+  // because "the last 7 days" is only auditable if you can see the boundaries.
+  const window = `<p class="v-sub">NOTICE activity window (UTC): ${opts.since ? esc(opts.since) : 'all recorded history'} through ${esc(now)}, inclusive.</p>
+<p class="v-meta">Informational only — no approval required and no review attention consumed. Same-scope topics are grouped when successive notices are at most 24 hours apart within this window; latest activity first.</p>`;
+  if (entries.length === 0) {
+    // The window note stays even when empty: "no notices in this window" is
+    // only meaningful alongside the window it refers to.
+    return `${window}<div class="v-empty" style="margin-top:16px;">
+  <h3>Digest empty — no notices in this time window</h3>
+  <p>NOTICEs are informational: they never ask for a decision and never consume review attention, so an empty digest is a healthy digest. Widen the window to look further back.</p>
+  <p><a class="v-btn v-btn-secondary v-btn-sm" href="${esc(digestUrl('all'))}">Show all history</a></p>
+</div>`;
+  }
   const groups: string[] = [];
   for (const entry of entries) {
     const notices: string[] = [];
@@ -114,15 +125,25 @@ export async function renderDigest(
       const evidence: string[] = [];
       for (const cid of new Set([...request.claimRefs, ...request.chainClaimIds])) {
         const claim = await db.prepare('SELECT id FROM claims WHERE tenant = ? AND id = ?').get(tenant, cid);
-        if (claim) evidence.push(`<a href="/console/claims/${esc(encodeURIComponent(cid))}">Evidence ${esc(cid)}</a>`);
+        if (claim) evidence.push(`<a href="${esc(digestClaimUrl(cid))}">Evidence ${esc(cid)}</a>`);
         else evidence.push('Evidence unavailable');
       }
       notices.push(
-        `<li><a href="/console/requests/${esc(encodeURIComponent(id))}">Request ${esc(id)}</a> · ${esc(request.updatedAt)}<br>${evidence.join(' · ') || 'No evidence references.'}</li>`,
+        `<li class="v-row"><span class="v-row-main"><a href="${esc(digestRequestUrl(id))}">Request ${esc(id)}</a><span class="v-meta">${esc(request.updatedAt)}</span></span><span class="v-meta">${evidence.join(' · ') || 'No evidence references.'}</span></li>`,
       );
     }
-    groups.push(`<article><h2>${esc(entry.goal)}</h2><p>${esc(entry.scope)} · ${entry.followOnCount + 1} notice(s)${entry.followOnCount ? ` · +${entry.followOnCount} more` : ''}</p>
-<p>First activity: ${esc(entry.startedAt)} · Latest activity: ${esc(entry.updatedAt)}</p><ul>${notices.join('')}</ul></article>`);
+    const followOn = entry.followOnCount ? `<span class="v-badge">+${entry.followOnCount} more</span>` : '';
+    groups.push(`<article class="v-card" style="margin-bottom:14px;">
+  <div class="v-split" style="align-items:flex-start;margin-bottom:8px;">
+    <div style="min-width:0;">
+      <p class="v-eyebrow">${esc(entry.scope)}</p>
+      <h2 class="v-card-title" style="margin-top:4px;">${esc(entry.goal)}</h2>
+    </div>
+    <span class="v-badge"><span class="dot"></span>${entry.followOnCount + 1} notice(s)</span>${followOn}
+  </div>
+  <p class="v-meta">First activity: ${esc(entry.startedAt)} · Latest activity: ${esc(entry.updatedAt)}</p>
+  <ul class="v-list">${notices.join('')}</ul>
+</article>`);
   }
   return window + groups.join('');
 }

@@ -82,7 +82,7 @@ export async function renderRoomsSetupPage(
   }
 
   const noticeHtml = notice
-    ? `<div style="background:#FFFFFF;border:1px solid #0F5C57;color:#0B4A45;padding:12px 16px;border-radius:8px;margin-bottom:24px;">✓ ${esc(notice)}</div>`
+    ? `<div class="success" role="status" style="margin:0 0 20px;"><strong>✓ ${esc(notice)}</strong></div>`
     : '';
 
   const roomCardsHtml = configs
@@ -93,46 +93,46 @@ export async function renderRoomsSetupPage(
       const sors = cfg.connectedSoRs ?? [...def.defaultSoRs];
 
       return `
-      <div style="border:1px solid #E4E4E1;background:#FFFFFF;border-radius:8px;padding:18px;margin-bottom:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <div style="display:flex;align-items:center;gap:12px;">
-            <input type="checkbox" id="room_active_${esc(cfg.scope)}" name="active_${esc(cfg.scope)}" value="1" ${isChecked} ${isCore ? 'disabled checked' : ''} style="width:19px;height:19px;accent-color:#0F5C57;cursor:pointer;">
-            <label for="room_active_${esc(cfg.scope)}" style="font-weight:600;font-size:16px;color:#0A0F14;cursor:pointer;">
-              🟢 #${esc(cfg.name)}
-              <span style="font-size:12px;font-weight:normal;color:#6B7280;margin-left:6px;">(scope:${esc(cfg.scope)})</span>
-              ${isCore ? '<span style="font-size:11px;background:#E4E4E1;color:#0F5C57;padding:2px 6px;border-radius:4px;margin-left:6px;">Mandatory Root</span>' : ''}
+      <div class="v-card" style="margin:0 0 14px;padding:18px 20px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:8px;">
+          <div style="display:flex;align-items:center;gap:11px;min-width:0;">
+            <input type="checkbox" id="room_active_${esc(cfg.scope)}" name="active_${esc(cfg.scope)}" value="1" ${isChecked} ${isCore ? 'disabled checked' : ''} style="width:17px;height:17px;accent-color:var(--v-accent);cursor:pointer;flex-shrink:0;">
+            <label for="room_active_${esc(cfg.scope)}" style="cursor:pointer;min-width:0;">
+              <span style="font-weight:650;font-size:15px;color:var(--v-ink);">#${esc(cfg.name)}</span>
+              <span class="v-meta" style="margin-left:6px;">scope:${esc(cfg.scope)}</span>
+              ${isCore ? '<span class="v-tag" style="margin-left:6px;">Mandatory root</span>' : ''}
             </label>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <label style="font-size:11px;color:#4B5563;">🤖 alias
-              <input type="text" name="agentName_${esc(cfg.scope)}" value="${esc(cfg.agentName)}" pattern="[a-z0-9_-]+-agent" title="lowercase, must end in -agent" style="font-size:12px;padding:3px 8px;border:1px solid #B7B7B1;border-radius:4px;background:#FFFFFF;">
+            <label class="v-meta" style="display:flex;align-items:center;gap:6px;">agent alias
+              <input class="v-input" type="text" name="agentName_${esc(cfg.scope)}" value="${esc(cfg.agentName)}" pattern="[a-z0-9_-]+-agent" title="lowercase, must end in -agent" style="width:170px;font-size:12px;padding:5px 8px;">
             </label>
           </div>
         </div>
 
-        <p style="color:#4B5563;font-size:14px;margin:0 0 12px 0;">${esc(def.duties)}</p>
+        <p class="v-sub" style="margin:0 0 12px;">${esc(def.duties)}</p>
 
-        <details style="background:#FAFAF8;border-radius:6px;padding:12px 16px;border:1px solid #E4E4E1;">
-          <summary style="font-size:13px;color:#0F5C57;cursor:pointer;font-weight:600;user-select:none;">
-            ⚙️ Tune Room Behavior & Mandate (Mission, Autonomy, Quotas & Data Feeds)
+        <details style="background:var(--v-bg-2);border-radius:var(--radius-md);padding:11px 14px;border:1px solid var(--v-line);">
+          <summary style="font-size:12.5px;color:var(--v-accent);cursor:pointer;font-weight:600;user-select:none;">
+            Tune room behaviour &amp; mandate — mission, autonomy, quotas and data feeds
           </summary>
           
           <div style="margin-top:16px;display:grid;grid-template-columns:1fr;gap:16px;">
             <!-- 1. Mission Prompt -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
-                🎯 Mission Prompt (Natural Language Mandate):
+              <label class="v-eyebrow" style="display:block;margin-bottom:6px;">
+                Mission prompt (natural-language mandate)
               </label>
-              <textarea name="mission_${esc(cfg.scope)}" rows="2" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;font-family:monospace;box-sizing:border-box;">${esc(cfg.mission)}</textarea>
-              <div style="font-size:11px;color:#6B7280;margin-top:4px;">Custom instruction defining the autonomous agent's mandate, constraints, and target outcomes.</div>
+              <textarea class="v-input" name="mission_${esc(cfg.scope)}" rows="2" style="font-family:var(--font-mono);font-size:12.5px;">${esc(cfg.mission)}</textarea>
+              <p class="v-meta" style="margin-top:4px;">Defines the autonomous agent's mandate, constraints and target outcomes.</p>
             </div>
 
             <!-- 2. Autonomy Tier -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
-                🛡️ Autonomy Level:
+              <label class="v-eyebrow" style="display:block;margin-bottom:6px;">
+                Autonomy level
               </label>
-              <select name="autonomy_${esc(cfg.scope)}" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
+              <select class="v-input v-select" name="autonomy_${esc(cfg.scope)}" style="font-size:13px;">
                 <option value="autonomous" ${cfg.autonomy === 'autonomous' ? 'selected' : ''}>Autonomous — Agents execute end-to-end without pausing.</option>
                 <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default) — Routine work is autonomous; yellow review gates (🟡) trigger on budget pressure, sensitive actions, or low confidence.</option>
                 <option value="supervised" ${cfg.autonomy === 'supervised' ? 'selected' : ''}>Supervised — Every state change requires explicit human sign-off (coord.settle).</option>
@@ -140,39 +140,39 @@ export async function renderRoomsSetupPage(
             </div>
 
             <!-- 3. Financial Guardrails -->
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
               <div>
-                <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
-                  💵 Monthly Spend Ceiling ($):
+                <label class="v-eyebrow" style="display:block;margin-bottom:6px;">
+                  Monthly spend ceiling (dollars)
                 </label>
-                <input type="number" name="budget_${esc(cfg.scope)}" value="${cfg.budgetCeilingDollars}" min="50" max="50000" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
-                <div style="font-size:11px;color:#6B7280;margin-top:4px;">Hard stop limit. Breaching halts the room immediately.</div>
+                <input class="v-input" type="number" name="budget_${esc(cfg.scope)}" value="${cfg.budgetCeilingDollars}" min="50" max="50000">
+                <p class="v-meta" style="margin-top:4px;">Hard stop: breaching it halts the room immediately.</p>
               </div>
               <div>
-                <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:6px;">
-                  🪙 Monthly Token Quota:
+                <label class="v-eyebrow" style="display:block;margin-bottom:6px;">
+                  Monthly token quota
                 </label>
-                <input type="number" name="tokens_${esc(cfg.scope)}" value="${cfg.budgetCeilingTokens}" min="100000" step="500000" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
-                <div style="font-size:11px;color:#6B7280;margin-top:4px;">Total LLM token budget before yellow/red alerts trigger.</div>
+                <input class="v-input" type="number" name="tokens_${esc(cfg.scope)}" value="${cfg.budgetCeilingTokens}" min="100000" step="500000">
+                <p class="v-meta" style="margin-top:4px;">Total model tokens before warning alerts trigger.</p>
               </div>
             </div>
 
             <!-- 4. Connected Systems of Record (SoR) -->
             <div>
-              <label style="display:block;font-size:12px;font-weight:600;color:#0A0F14;margin-bottom:8px;">
-                🔌 Connected Systems of Record (SoR Data Feeds):
+              <label class="v-eyebrow" style="display:block;margin-bottom:8px;">
+                Connected systems of record (data feeds)
               </label>
-              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:8px;background:#FFFFFF;padding:10px;border-radius:6px;border:1px solid #E4E4E1;">
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:8px;background:var(--v-bg-1);padding:11px 13px;border-radius:var(--radius-md);border:1px solid var(--v-line);">
                 ${AVAILABLE_SORS.map(
                   (sor) => `
-                  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#4B5563;cursor:pointer;">
-                    <input type="checkbox" name="sor_${esc(cfg.scope)}_${esc(sor.id)}" value="1" ${sors.includes(sor.id) ? 'checked' : ''} style="accent-color:#0F5C57;">
+                  <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--v-ink-2);cursor:pointer;">
+                    <input type="checkbox" name="sor_${esc(cfg.scope)}_${esc(sor.id)}" value="1" ${sors.includes(sor.id) ? 'checked' : ''} style="accent-color:var(--v-accent);">
                     <span>${esc(sor.label)}</span>
                   </label>
                 `,
                 ).join('')}
               </div>
-              <div style="font-size:11px;color:#6B7280;margin-top:4px;">Selects which evidence collectors and diff streams pipe real-time ground truth into this room.</div>
+              <p class="v-meta" style="margin-top:4px;">Selects which evidence collectors and diff streams pipe ground truth into this room.</p>
             </div>
           </div>
         </details>
@@ -190,20 +190,18 @@ export async function renderRoomsSetupPage(
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #FAFAF8; color: #0A0F14; margin: 0; padding: 32px 16px; line-height: 1.5; letter-spacing: -0.011em; -webkit-font-smoothing: antialiased; }
-    .container { max-width: 900px; margin: 0 auto; }
-    h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px 0; color: #0A0F14; }
-    p.sub { color: #6B7280; margin: 0 0 24px 0; font-size: 14px; line-height: 1.5; }
-    .preset-btn { background: #FFFFFF; color: #0A0F14; border: 1px solid #E4E4E1; padding: 14px 16px; border-radius: 8px; cursor: pointer; text-align: left; font-size: 13px; transition: all 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
-    .preset-btn:hover { background: #F9F9F8; border-color: #0F5C57; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,0.04); }
-    .submit-btn { background: #0F5C57; color: #FFFFFF; font-weight: 600; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; font-family: inherit; transition: background 0.15s ease, transform 0.1s ease; }
-    .submit-btn:hover { background: #0B4A45; color: #FFFFFF; }
-    .submit-btn:active { transform: translateY(1px); }
+    /* Layout only — the token system supplies every color and radius. */
+    body { margin: 0; padding: 26px 16px 56px; }
+    .container { max-width: 940px; margin: 0 auto; }
+    .preset-btn { background: var(--v-bg-1); color: var(--v-ink); border: 1px solid var(--v-line); padding: 13px 15px; border-radius: var(--radius-md); cursor: pointer; text-align: left; font-size: 13px; font-family: inherit; transition: border-color .15s var(--ease-out), background .15s var(--ease-out); }
+    .preset-btn:hover { background: var(--v-bg-2); border-color: var(--v-accent); }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>🏛️ Vital Autonomous Room Provisioning & Tuning Wizard</h1>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <main id="main" class="container">
+    <nav class="v-breadcrumb" aria-label="Breadcrumb" style="margin-bottom:14px;"><a href="${esc(home)}">Console</a><span class="sep">/</span><strong>Rooms &amp; autonomy</strong></nav>
+    <h1 class="v-page-title">Vital Autonomous Room Provisioning & Tuning Wizard</h1>
     <p class="sub">
       Select active autonomous agent rooms mapped to your enterprise scopes. Define custom mandates, set autonomy guardrails (Autonomous / Guarded / Supervised), configure hard financial spend ceilings, and connect real-time data feeds.
     </p>
@@ -211,17 +209,17 @@ export async function renderRoomsSetupPage(
     ${noticeHtml}
 
     <!-- Quick Preset Bundles -->
-    <div style="background:#FFFFFF;border:1px solid #E4E4E1;border-radius:8px;padding:18px;margin-bottom:28px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0;font-size:15px;color:#0A0F14;">⚡ Quick-Start Preset Bundles</h3>
-        <span style="font-size:12px;color:#6B7280;">Click to auto-select relevant rooms</span>
+    <div class="v-card" style="margin:0 0 20px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+        <h2 class="v-card-title">Quick-start preset bundles</h2>
+        <span class="v-meta">Click to auto-select the relevant rooms</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:10px;">
         ${INDUSTRY_PRESETS.map(
           (p) => `
-          <button type="button" class="preset-btn" onclick="applyPreset('${esc(p.id)}')">
-            <strong style="color:#0F5C57;">${esc(p.name)}</strong>
-            <div style="font-size:12px;color:#6B7280;margin-top:6px;line-height:1.4;">${esc(p.description)}</div>
+          <button type="button" class="preset-btn v-card-hover" onclick="applyPreset('${esc(p.id)}')">
+            <strong style="color:var(--v-accent);">${esc(p.name)}</strong>
+            <div class="v-meta" style="margin-top:6px;line-height:1.45;white-space:normal;">${esc(p.description)}</div>
           </button>
         `,
         ).join('')}
@@ -231,31 +229,36 @@ export async function renderRoomsSetupPage(
     <form method="POST" action="/setup/rooms">
       <input type="hidden" name="csrf" value="${esc(csrfToken)}">
       
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-        <h3 style="margin:0;font-size:16px;color:#0A0F14;">📋 Room Selection & Configuration Roster</h3>
-        <span style="font-size:12px;color:#6B7280;">Uncheck rooms to avoid workspace clutter</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+        <h2 class="v-card-title">Room selection &amp; configuration roster</h2>
+        <span class="v-meta">Uncheck rooms to keep the workspace quiet</span>
       </div>
 
       ${roomCardsHtml}
 
-      <div style="border:1px dashed #B7B7B1;border-radius:8px;padding:16px;margin-top:8px;">
-        <h4 style="margin:0 0 8px 0;font-size:14px;color:#0A0F14;">＋ Create custom room</h4>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:8px;">
-          <input type="text" name="newRoomId" placeholder="id (e.g. design)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
-          <input type="text" name="newRoomName" placeholder="Display name" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
-          <input type="text" name="newRoomScope" placeholder="scope ^[a-z0-9-]{2,32}$" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
-          <input type="text" name="newRoomAgent" placeholder="agent (*-agent)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
-          <input type="text" name="newRoomMission" placeholder="mission (optional)" style="font-size:13px;padding:6px;border:1px solid #B7B7B1;border-radius:4px;">
+      <div style="border:1px dashed var(--v-line-strong);border-radius:var(--radius-md);padding:16px;margin-top:8px;">
+        <h2 class="v-card-title" style="margin-bottom:8px;">Create a custom room</h2>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));gap:8px;">
+          <input class="v-input" type="text" name="newRoomId" placeholder="id (e.g. design)" style="font-size:13px;">
+          <input class="v-input" type="text" name="newRoomName" placeholder="Display name" style="font-size:13px;">
+          <input class="v-input" type="text" name="newRoomScope" placeholder="scope ^[a-z0-9-]{2,32}$" style="font-size:13px;">
+          <input class="v-input" type="text" name="newRoomAgent" placeholder="agent (*-agent)" style="font-size:13px;">
+          <input class="v-input" type="text" name="newRoomMission" placeholder="mission (optional)" style="font-size:13px;">
+          <select class="v-input" name="newRoomCategory" aria-label="Room category" style="font-size:13px;">
+            <option value="product">Product &amp; delivery</option>
+            <option value="core">Core rooms</option>
+            <option value="launch">Launch &amp; risk</option>
+          </select>
         </div>
-        <div style="font-size:11px;color:#6B7280;margin-top:6px;">Leave all five blank to skip. Fill all five to create the room on save.</div>
+        <p class="v-meta" style="margin-top:6px;">Leave every field blank to skip. Fill the room fields to create it on save — category picks its sidebar group.</p>
       </div>
 
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:32px;padding-top:20px;border-top:1px solid #E4E4E1;">
-        <a href="${esc(home)}" style="color:#6B7280;text-decoration:none;font-size:14px;">← Back to the console</a>
-        <button type="submit" class="submit-btn">Save & Deploy Configured Rooms</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:28px;padding-top:18px;border-top:1px solid var(--v-line);flex-wrap:wrap;">
+        <a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Back to the console</a>
+        <button type="submit" class="v-btn v-btn-primary">Save & Deploy Configured Rooms</button>
       </div>
     </form>
-  </div>
+  </main>
 
   <script>
     const presets = ${JSON.stringify(INDUSTRY_PRESETS)};

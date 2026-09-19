@@ -251,8 +251,11 @@ resource "aws_lb_target_group" "buzz" {
 }
 
 resource "aws_lb_listener_rule" "buzz_host" {
-  count        = var.enable_buzz && var.buzz_hostname != "" ? 1 : 0
-  listener_arn = var.acm_certificate_arn == "" ? aws_lb_listener.http.arn : aws_lb_listener.https[0].arn
+  count = var.enable_buzz && var.buzz_hostname != "" ? 1 : 0
+  # local.tls_enabled, not var.acm_certificate_arn: a certificate provisioned
+  # from var.domain_name (deploy/aws/dns.tf) also moves this rule to the HTTPS
+  # listener. Reading the variable here would silently park the relay on :80.
+  listener_arn = local.tls_enabled == 0 ? aws_lb_listener.http.arn : aws_lb_listener.https[0].arn
   priority     = 20
   action {
     type             = "forward"

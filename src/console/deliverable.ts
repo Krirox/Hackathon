@@ -28,7 +28,7 @@ const classLabel = (c: DeliverableItem['classification']): string => {
 
 function renderItem(item: DeliverableItem): string {
   const fail = item.checkFailed
-    ? `<p style="color:#B91C1C"><strong>Check failed:</strong> ${esc(item.checkFailed)}</p>`
+    ? `<p style="color:var(--v-risk)"><strong>Check failed:</strong> ${esc(item.checkFailed)}</p>`
     : '';
   const cites =
     item.claimIds.length > 0
@@ -40,7 +40,7 @@ function renderItem(item: DeliverableItem): string {
 function renderChecks(version: DeliverableVersion): string {
   const draft = version.draftCheck;
   if (draft.ok && !version.items.some((i) => i.checkFailed)) {
-    return '<p style="color:#0F7A3D">All grounding checks passed.</p>';
+    return '<p style="color:var(--v-fact)">All grounding checks passed.</p>';
   }
   const parts: string[] = [];
   if (draft.unverified.length > 0) {
@@ -73,14 +73,14 @@ function addedHtml(diff: { added: string[] }): string {
 function renderClaimChips(claims: string[]): string {
   if (claims.length === 0) return '';
   return `<div class="claim-chips" style="margin:8px 0 10px 0;">
-<p class="sub" style="margin:0 0 6px 0;font-size:12px;color:#4B5563;">
+<p class="sub" style="margin:0 0 6px 0;font-size:12px;color:var(--v-muted);">
   Referenced evidence claims (click chip to insert <code>[claim:id]</code>):
 </p>
 <div style="display:flex;flex-wrap:wrap;gap:6px;">
   ${claims
     .map(
       (cid) =>
-        `<button type="button" class="claim-chip" data-cite-claim="${esc(cid)}" style="background:#F3F4F6;border:1px solid #E5E7EB;border-radius:12px;padding:3px 9px;font-size:11px;font-family:'JetBrains Mono',monospace;cursor:pointer;color:#1F2937;">+ [claim:${esc(cid)}]</button>`,
+        `<button type="button" class="claim-chip" data-cite-claim="${esc(cid)}" style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-pill);padding:3px 9px;font-size:11px;font-family:var(--font-mono);cursor:pointer;color:var(--v-ink-2);">+ [claim:${esc(cid)}]</button>`,
     )
     .join('')}
 </div>
@@ -309,5 +309,5 @@ export async function deliverableDetailPage(
   const versions = await listDeliverableVersions(db, opts.tenant, deliverableId);
   if (versionNum !== null && !versions.some((v) => v.version === versionNum)) return null;
   const section = await renderDeliverableSection(db, ledger, record.requestId, opts, artifactDir);
-  return `<p class="sub"><a href="/console/requests/${esc(encodeURIComponent(record.requestId))}" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:#fff;border:1px solid #E4E4E1;border-radius:6px;font-size:13px;font-weight:500;color:#0F5C57;text-decoration:none;">← Back to request</a></p>${section}`;
+  return `<p class="sub"><a class="v-btn v-btn-secondary v-btn-sm" href="/console/requests/${esc(encodeURIComponent(record.requestId))}">← Back to request</a></p>${section}`;
 }

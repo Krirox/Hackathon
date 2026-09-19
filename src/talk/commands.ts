@@ -2,7 +2,7 @@ import type { AsyncDb } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { setKill, recoverStop } from '../gov/trust.ts';
-import { normalizeScope, roomForScope, loadRoomConfig, saveRoomConfig, type RoomConfig } from './rooms.ts';
+import { normalizeScope, loadRoomConfig, saveRoomConfig, roomDisplayName, type RoomConfig } from './rooms.ts';
 import { ScopeHealthEvaluator, formatStatusBeacon } from './health.ts';
 
 export interface CommandContext {
@@ -72,7 +72,7 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
 
     await setKill(ctx.db, ctx.tenant, { scope, actionClass: '*' }, ctx.actor, at, { reason });
 
-    const roomLabel = scope === '*' ? 'ALL ROOMS' : `#${roomForScope(scope).name}`;
+    const roomLabel = scope === '*' ? 'ALL ROOMS' : `#${await roomDisplayName(ctx.db, ctx.tenant, scope)}`;
     return {
       handled: true,
       command: 'halt',
@@ -101,7 +101,7 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
         reason,
         now: at,
       });
-      const roomLabel = scope === '*' ? 'ALL ROOMS' : `#${roomForScope(scope).name}`;
+      const roomLabel = scope === '*' ? 'ALL ROOMS' : `#${await roomDisplayName(ctx.db, ctx.tenant, scope)}`;
       return {
         handled: true,
         command: 'recover',
@@ -184,7 +184,7 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
         command: 'cost',
         scope,
         output: [
-          `📊 **Spend & Gas Gauge for #${roomForScope(scope).name}**:`,
+          `📊 **Spend & Gas Gauge for #${await roomDisplayName(ctx.db, ctx.tenant, scope)}**:`,
           `- **Monthly Spend**: $${dollars.toFixed(2)} / $${config.budgetCeilingDollars.toFixed(2)} (${pct.toFixed(1)}%)`,
           `- **Tokens Consumed**: ${tokens.toLocaleString()} / ${config.budgetCeilingTokens.toLocaleString()}`,
           `- **Available Headroom**: $${headroom.toFixed(2)}`,

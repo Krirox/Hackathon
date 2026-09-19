@@ -80,7 +80,7 @@ export async function renderLearningPage(
 
   return `<p class="sub"><a href="/console/workflows">← Workflows</a></p>
 <h1>Learning review</h1>
-<p class="sub">Signed in as ${esc(opts.actor)}. Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card.</p>
+<p class="sub">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card.</p>
 ${labeledNotice(opts.notice)}
 <h2>Labeling queue (${queue.length})</h2>
 ${queueRows}

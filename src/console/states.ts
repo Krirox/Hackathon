@@ -7,36 +7,28 @@
  * No behavior lives here — pages compose these fragments.
  */
 
+import { themeCss } from './theme.ts';
+
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-/** Responsive + skip-link + focus CSS shared by page() and detailDocument(). */
-export const CONSOLE_SHARED_CSS = [
-  "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');",
-  'body{font-family:\'Inter\',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;line-height:1.5;-webkit-font-smoothing:antialiased;letter-spacing:-0.011em}',
-  'a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}',
-  'a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100;border-radius:0 0 6px 0;font-weight:500;font-size:13px}',
-  'a.skip-link:focus{left:0}',
-  'button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}',
-  'input,textarea,select{border:1px solid #E4E4E1;border-radius:6px;padding:9px 12px;background:#fff;color:#0A0F14;font-family:inherit;font-size:13px;transition:border-color .15s ease,box-shadow .15s ease}',
-  'input:focus,textarea:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}',
-  'button{background:#0F5C57;color:#fff;font-weight:600;padding:9px 16px;border-radius:6px;border:0;cursor:pointer;font-family:inherit;font-size:13px;transition:background .15s ease,transform .1s ease}',
-  'button:hover{background:#0B4A45}',
-  'button:active{transform:translateY(1px)}',
-  'button:disabled{opacity:0.6;cursor:not-allowed}',
-  '.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03),0 1px 2px rgba(0,0,0,0.02);transition:border-color .15s ease,box-shadow .15s ease}',
-  '.card:hover{border-color:#D1D1CB;box-shadow:0 4px 12px rgba(0,0,0,0.05)}',
-  ".badge{display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;padding:3px 8px;border-radius:4px;border:1px solid #E4E4E1;background:#fff}",
-  "pre,code{font-family:'JetBrains Mono',monospace}",
-  'pre{background:#F5F5F3;border:1px solid #E4E4E1;border-radius:6px;padding:12px 14px;overflow-x:auto}',
-  'table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto}',
-  '.table-wrap{overflow-x:auto;max-width:100%}',
-  '@media (max-width:640px){body{padding:12px}form{max-width:100%}input,textarea,select,button{min-height:44px}}',
-  '@media (max-width:600px){.card-grid{display:block}.card{margin-bottom:12px}table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid #E4E4E1;border-radius:8px;margin-bottom:8px}table.stacked td{display:block;border:0}}',
-  '.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:12px}',
-  '.error-summary{border:1px solid #FCA5A5;border-radius:8px;padding:14px 16px;margin:12px 0;background:#FEF2F2;color:#991B1B}',
-  '.success{border:1px solid #86EFAC;border-radius:8px;padding:14px 16px;margin:12px 0;background:#F0FDF4;color:#166534}',
-].join('\n');
+/**
+ * Shared console stylesheet: the design system plus the handful of rules a
+ * standalone console document needs (skip link, stacked tables). Token-only —
+ * a literal color here would be a second palette that drifts from
+ * `theme.ts`.
+ */
+export const CONSOLE_SHARED_CSS = `${themeCss()}
+body{padding:28px 20px 48px;max-width:960px;margin:0 auto}
+a.skip-link{position:absolute;left:-9999px;top:0;background:var(--v-accent);color:var(--v-accent-ink);padding:8px 14px;z-index:100;border-radius:0 0 var(--radius-sm) 0;font-weight:600;font-size:13px}
+a.skip-link:focus{left:0}
+pre,code{font-family:var(--font-mono)}
+pre{background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-sm);padding:12px 14px;overflow-x:auto;font-size:12px}
+.table-wrap{overflow-x:auto;max-width:100%}
+.err{color:var(--v-risk);font-size:13px}
+.error-summary{border:1px solid var(--v-line);border-left:3px solid var(--v-risk);border-radius:var(--radius-md);padding:14px 16px;margin:12px 0;background:var(--v-tint-risk-bg);color:var(--v-tint-risk-ink)}
+.success{border:1px solid var(--v-line);border-left:3px solid var(--v-fact);border-radius:var(--radius-md);padding:14px 16px;margin:12px 0;background:var(--v-tint-good-bg);color:var(--v-tint-good-ink)}
+@media (max-width:640px){body{padding:14px}table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid var(--v-line);border-radius:var(--radius-sm);margin-bottom:8px}table.stacked td{display:block;border:0}}`;
 
 export function skipLink(target = '#main'): string {
   return `<a class="skip-link" href="${esc(target)}">Skip to main content</a>`;

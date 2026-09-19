@@ -19,35 +19,42 @@ export const esc = (s: string): string =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const CSS = `
-:root{--ink:#0A0F14;--teal:#0F5C57;--bg:#FAFAF8;--line:#E4E4E1;--add:#E6F4EA;--add-b:#137333;--del:#FCE8E6;--del-b:#A50E0E;--mono:'JetBrains Mono',ui-monospace,monospace}
-body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--ink);margin:0;font-size:14px}
-.top{border-bottom:1px solid var(--line);background:#fff;padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-.steps{display:flex;gap:6px;font-size:12px;color:#6B7280}.steps b{color:var(--teal)}.steps .done{color:#137333}
+/* This surface used to carry its own palette (--ink/--teal/--bg + raw hex). It
+   now reads the token sheet, so a theme change or a dark-mode fix lands here
+   without editing review code. The local names are kept as aliases so the rules
+   below stay readable: each one points at a theme token, none at a literal. */
+:root{--ink:var(--v-ink);--teal:var(--v-accent);--bg:var(--v-bg-0);--line:var(--v-line);--add:var(--v-tint-good-bg);--add-b:var(--v-fact);--del:var(--v-tint-risk-bg);--del-b:var(--v-risk);--mono:var(--font-mono)}
+body{font-family:var(--font-body);background:var(--bg);color:var(--ink);margin:0;font-size:14px}
+.top{border-bottom:1px solid var(--line);background:var(--v-bg-1);padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.steps{display:flex;gap:6px;font-size:12px;color:var(--v-muted)}.steps b{color:var(--teal)}.steps .done{color:var(--v-fact)}
 .layout{display:grid;grid-template-columns:250px 1fr 280px;gap:0;min-height:calc(100vh - 120px)}
 @media(max-width:1100px){.layout{grid-template-columns:220px 1fr}.side-r{display:none}}
 @media(max-width:760px){.layout{grid-template-columns:1fr}.side-l{max-height:200px;overflow:auto}}
-.side-l{border-right:1px solid var(--line);background:#fff;padding:12px;overflow:auto}
-.side-r{border-left:1px solid var(--line);background:#fff;padding:12px;overflow:auto;font-size:13px}
+.side-l{border-right:1px solid var(--line);background:var(--v-bg-1);padding:12px;overflow:auto}
+.side-r{border-left:1px solid var(--line);background:var(--v-bg-1);padding:12px;overflow:auto;font-size:13px}
 .main{padding:12px 16px;overflow:auto;min-width:0}
-.diff{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.diff{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--v-bg-1)}
 .diff.inline{grid-template-columns:1fr}
 .pane{overflow:auto;min-width:0}.pane+.pane{border-left:1px solid var(--line)}
-.pane h4{margin:0;padding:8px 12px;background:#F3F4F2;font-size:12px;position:sticky;top:0}
+.pane h4{margin:0;padding:8px 12px;background:var(--v-bg-2);font-size:12px;position:sticky;top:0}
 pre{margin:0;padding:8px 0;font-family:var(--mono);font-size:12.5px;line-height:1.6}
-.ln{display:flex;min-width:0}.ln .no{flex:0 0 44px;text-align:right;padding-right:10px;color:#9AA0A6;user-select:none}
+.ln{display:flex;min-width:0}.ln .no{flex:0 0 44px;text-align:right;padding-right:10px;color:var(--v-faint);user-select:none}
 .ln .tx{white-space:pre-wrap;word-break:break-word;padding-right:12px;flex:1}
 .ln.add{background:var(--add)}.ln.del{background:var(--del)}
 .ln .mk{font-weight:700;color:var(--add-b)}.ln.del .mk{color:var(--del-b)}
-.hunk{border-bottom:1px solid var(--line)}.hunk-bar{display:flex;gap:8px;align-items:center;padding:6px 10px;background:#F8FAF8;font-size:12px;position:sticky}
-.hunk-bar form{display:inline}.btn{padding:4px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;font-size:12px;font-weight:600}
-.btn.pri{background:var(--teal);color:#fff;border-color:var(--teal)}.btn.dan{color:var(--del-b)}.btn:hover{filter:brightness(.96)}
+.hunk{border-bottom:1px solid var(--line)}.hunk-bar{display:flex;gap:8px;align-items:center;padding:6px 10px;background:var(--v-bg-2);font-size:12px;position:sticky}
+.hunk-bar form{display:inline}.btn{padding:4px 10px;border:1px solid var(--line);border-radius:6px;background:var(--v-bg-1);cursor:pointer;font-size:12px;font-weight:600}
+.btn.pri{background:var(--teal);color:var(--v-accent-ink);border-color:var(--teal)}.btn.dan{color:var(--del-b)}.btn:hover{filter:brightness(.96)}
 .file-row{display:flex;gap:6px;align-items:center;padding:5px 8px;border-radius:6px;font-family:var(--mono);font-size:12.5px}
-.file-row:hover{background:#F3F4F2}.file-row.sel{background:#E8F0EE}.st{font-weight:700;width:16px}.st.M{color:#B06000}.st.A{color:#137333}.st.D{color:#A50E0E}.st.R{color:#6B4EFF}
-.card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:12px;margin-bottom:12px}
-.meter{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}.ok{color:#137333}.bad{color:#A50E0E}.mut{color:#6B7280}
-.tk-k{color:#7C3AED}.tk-s{color:#0B6E4F}.tk-c{color:#6B7280;font-style:italic}.tk-n{color:#B06000}
+.file-row:hover{background:var(--v-bg-2)}.file-row.sel{background:var(--v-accent-dim)}.st{font-weight:700;width:16px}.st.M{color:var(--v-hypo)}.st.A{color:var(--v-fact)}.st.D{color:var(--v-risk)}.st.R{color:var(--v-pred)}
+.card{border:1px solid var(--line);border-radius:8px;background:var(--v-bg-1);padding:12px;margin-bottom:12px}
+.meter{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}.ok{color:var(--v-fact)}.bad{color:var(--v-risk)}.mut{color:var(--v-muted)}
+/* Syntax roles, not brand colours: keyword/string/comment/number map onto the
+   epistemic palette (prediction, fact, faint, hypothesis) so highlighting stays
+   semantically consistent with the rest of the console. */
+.tk-k{color:var(--v-pred)}.tk-s{color:var(--v-fact)}.tk-c{color:var(--v-faint);font-style:italic}.tk-n{color:var(--v-hypo)}
 textarea.code{width:100%;min-height:300px;font-family:var(--mono);font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:10px}
-.tabs{display:flex;gap:8px;margin:12px 0}.term{background:#101418;color:#D7DCE0;border-radius:8px;padding:12px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;max-height:320px;overflow:auto}
+.tabs{display:flex;gap:8px;margin:12px 0}.term{background:var(--v-code-bg);color:var(--v-code-ink);border-radius:8px;padding:12px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;max-height:320px;overflow:auto}
 table.meta{border-collapse:collapse;width:100%;font-size:12.5px}table.meta td{border-bottom:1px solid var(--line);padding:5px 4px;vertical-align:top}
 `;
 
@@ -58,7 +65,7 @@ function shell(title: string, inner: string): string {
 const L=document.getElementById('paneL'),R=document.getElementById('paneR');let lock=false;
 function sync(a,b){a&&b&&a.addEventListener('scroll',()=>{if(lock)return;lock=true;b.scrollTop=a.scrollTop;b.scrollLeft=a.scrollLeft;lock=false;});}
 sync(L,R);sync(R,L);
-document.querySelectorAll('[data-h]').forEach(el=>{el.addEventListener('mouseenter',()=>{const h=el.getAttribute('data-h');document.querySelectorAll('[data-h="'+h+'"]').forEach(x=>x.style.outline='2px solid #0F5C57');});el.addEventListener('mouseleave',()=>{document.querySelectorAll('.ln').forEach(x=>x.style.outline='');});});
+document.querySelectorAll('[data-h]').forEach(el=>{el.addEventListener('mouseenter',()=>{const h=el.getAttribute('data-h');document.querySelectorAll('[data-h="'+h+'"]').forEach(x=>x.style.outline='2px solid var(--v-accent)');});el.addEventListener('mouseleave',()=>{document.querySelectorAll('.ln').forEach(x=>x.style.outline='');});});
 let dirty=false;document.querySelectorAll('textarea.code').forEach(t=>t.addEventListener('input',()=>{dirty=true;const d=document.getElementById('dirty');if(d)d.style.display='inline';}));
 document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{const m=f.getAttribute('data-confirm');if(typeof window.confirm==='function'&&!window.confirm(m))e.preventDefault();}));
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
@@ -200,7 +207,7 @@ ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value=
 <div><form method="post" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="accept-all"><button class="btn pri" type="submit">Accept All</button></form>
 <form method="post" style="display:inline" data-confirm="Reject ALL agent changes and restore baseline?"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="reject-all"><input type="hidden" name="confirm" value="1"><button class="btn dan" type="submit">Reject All</button></form>
 <span class="mut">reviewed by ${esc(user)}</span></div></div>
-<div class="steps" style="padding:8px 20px;border-bottom:1px solid var(--line);background:#fff">${stepHtml}</div>
+<div class="steps" style="padding:8px 20px;border-bottom:1px solid var(--line);background:var(--v-bg-1)">${stepHtml}</div>
 <div class="layout"><div class="side-l"><b>CHANGED FILES</b> (${files.length})${sidebar}</div><div class="main">${main}</div><div class="side-r">${right}</div></div>
 <form id="noop" onsubmit="return false" style="display:none"></form>`;
   return shell(`Review ${doc.missionId}`, body);

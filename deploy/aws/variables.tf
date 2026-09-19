@@ -143,43 +143,83 @@ variable "db_max_allocated_storage" {
   default     = 100
 }
 
+# These six used to default to the literal string "CHANGEME", which meant a
+# deploy that forgot a TF_VAR_* shipped a *known* HMAC secret, webhook secret
+# and model key — the same failure mode core_image's validation already refuses
+# ("a misconfigured apply cannot deploy a dead service"). They now default to
+# empty and fail validation, so the apply stops before Secrets Manager, ECS or
+# the Lambda ever see a placeholder.
+
 variable "tenant_hmac_secret" {
   description = "TALK HMAC secret (talk surface fallback). Set via TF_VAR_*, never in git."
   type        = string
   sensitive   = true
-  default     = "CHANGEME"
+  default     = ""
+
+  validation {
+    condition     = length(var.tenant_hmac_secret) > 0 && var.tenant_hmac_secret != "CHANGEME"
+    error_message = "tenant_hmac_secret must be a real secret — it signs the talk surface. Pass it as TF_VAR_tenant_hmac_secret (CI) or tenant_hmac_secret in terraform.tfvars. A placeholder here is a forgeable HMAC on every deployment."
+  }
 }
 
 variable "vital_core_secret" {
   description = "Core secret minting scope tokens (substrate/identity)"
   type        = string
   sensitive   = true
-  default     = "CHANGEME"
+  default     = ""
+
+  validation {
+    condition     = length(var.vital_core_secret) > 0 && var.vital_core_secret != "CHANGEME"
+    error_message = "vital_core_secret must be a real secret — it mints scope tokens. Pass it as TF_VAR_vital_core_secret (CI) or vital_core_secret in terraform.tfvars."
+  }
 }
 
 variable "webhook_secret" {
   description = "Shared secret for scheduler webhook intake"
   type        = string
   sensitive   = true
-  default     = "CHANGEME"
+  default     = ""
+
+  validation {
+    condition     = length(var.webhook_secret) > 0 && var.webhook_secret != "CHANGEME"
+    error_message = "webhook_secret must be a real secret — it authenticates webhook intake. Pass it as TF_VAR_webhook_secret (CI) or webhook_secret in terraform.tfvars. A placeholder here accepts forged webhooks."
+  }
 }
 
 variable "serper_api_key" {
-  type      = string
-  sensitive = true
-  default   = "CHANGEME"
+  description = "Serper (search) API key. Required: the model plane has no keyless mode, so an unrunnable deployment is refused up front."
+  type        = string
+  sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = length(var.serper_api_key) > 0 && var.serper_api_key != "CHANGEME"
+    error_message = "serper_api_key must be a real key without the placeholder — pass TF_VAR_serper_api_key. Set all three API keys or the executor plane cannot run a single job."
+  }
 }
 
 variable "gemini_api_key" {
-  type      = string
-  sensitive = true
-  default   = "CHANGEME"
+  description = "Gemini API key (development-model plane). Required — see serper_api_key."
+  type        = string
+  sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = length(var.gemini_api_key) > 0 && var.gemini_api_key != "CHANGEME"
+    error_message = "gemini_api_key must be a real key without the placeholder — pass TF_VAR_gemini_api_key."
+  }
 }
 
 variable "novita_api_key" {
-  type      = string
-  sensitive = true
-  default   = "CHANGEME"
+  description = "Novita API key (production-model plane, APPROVED_PROD_MODELS). Required — see serper_api_key."
+  type        = string
+  sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = length(var.novita_api_key) > 0 && var.novita_api_key != "CHANGEME"
+    error_message = "novita_api_key must be a real key without the placeholder — pass TF_VAR_novita_api_key."
+  }
 }
 
 variable "allowed_egress_hosts" {
@@ -201,9 +241,32 @@ variable "lambda_reserved_concurrency" {
 }
 
 variable "acm_certificate_arn" {
-  description = "ACM cert for ALB HTTPS. Empty = HTTP-forward (dev only): approvals travel in plaintext and must never carry production authority. Set for any pilot."
+  description = "ACM cert for ALB HTTPS. Empty = HTTP-forward (dev only): approvals travel in plaintext and must never carry production authority. Set for any pilot. Alternative to domain_name (which creates the cert here); an explicit ARN wins if both are set."
   type        = string
   default     = ""
+}
+
+variable "domain_name" {
+  description = "Public hostname to serve the console on (e.g. console.example.com). Empty = no certificate and no DNS records, port 80 forwards (dev only). Setting it provisions an ACM certificate, validates it by DNS and aliases the name to the ALB — hosted_zone_id must be set too."
+  type        = string
+  default     = ""
+}
+
+variable "hosted_zone_id" {
+  description = "Route 53 public hosted zone that owns domain_name. Required when domain_name is set — the zone is looked up, never created, so an apply cannot take over a domain's DNS."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.hosted_zone_id == "" || can(regex("^Z[0-9A-Z]+$", var.hosted_zone_id))
+    error_message = "hosted_zone_id must be a Route 53 zone id like Z0123456789ABCDEFGHI, not a domain name. Find it with: aws route53 list-hosted-zones --query 'HostedZones[].{Id:Id,Name:Name}'."
+  }
+}
+
+variable "subject_alternative_names" {
+  description = "Extra hostnames on the same certificate, every one of them inside hosted_zone_id (e.g. [\"www.example.com\"]). A hostname in a different zone will not validate: its DNS validation record would be written to the wrong zone."
+  type        = list(string)
+  default     = []
 }
 
 variable "alb_internal" {
@@ -309,7 +372,7 @@ variable "buzz_relay_private_key" {
 }
 
 variable "buzz_hostname" {
-  description = "Optional host header for public Buzz relay access via the ALB (e.g. buzz.example.com). Empty = internal Cloud Map only."
+  description = "Optional host header for public Buzz relay access via the ALB (e.g. buzz.example.com). Empty = internal Cloud Map only. The certificate must cover this name — put it in subject_alternative_names, or supply an acm_certificate_arn that already does."
   type        = string
   default     = ""
 }

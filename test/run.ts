@@ -49,11 +49,16 @@ import './learning.test.ts';
 import './e2e-gates.test.ts';
 import './buzz.test.ts';
 import './buzz-chat-first.test.ts';
+import './custom-rooms.test.ts';
 import './fabrication-guard.test.ts';
 import './buzz-avatars.test.ts';
 import './issues-panel.test.ts';
 import './coding-agent.test.ts';
 import './meeting.test.ts';
+import './request-cache.test.ts';
+import './routes.test.ts';
+import './tenant-scope.test.ts';
+import './tokens.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

@@ -473,6 +473,41 @@ T('the session cookie is HttpOnly, SameSite=Lax, and Secure behind TLS', () => {
   eq(sessionCookie('tok', NOW, true).includes('Secure'), true);
 });
 
+T('FLOW-006: secureCookies reaches the response, so the session cannot ride a plaintext downgrade', async () => {
+  // The unit above proves sessionCookie() *can* add Secure. This proves the
+  // server actually asks it to: behind the ALB the cookie must be Secure, and a
+  // flag that stops at the CLI is not a security control. Both directions are
+  // asserted so a hardcoded `true` cannot pass this by accident either.
+  const { db } = await authed();
+  try {
+    for (const secureCookies of [false, true]) {
+      const s = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
+        tenant: TEN,
+        now: () => NOW,
+        secureCookies,
+      });
+      try {
+        const pre = await preCsrf(s.port);
+        const res = await fetch(`http://127.0.0.1:${s.port}/login`, {
+          method: 'POST',
+          redirect: 'manual',
+          headers: { cookie: pre.cookie },
+          body: `csrf=${pre.csrf}&email=${encodeURIComponent(SIGNUP.email)}&password=${encodeURIComponent(SIGNUP.password)}`,
+        });
+        eq(res.status, 303, `login succeeds (secure=${secureCookies}):`);
+        const session = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('vital_session=')) ?? '';
+        eq(session.length > 0, true, `a session cookie is issued (secure=${secureCookies}):`);
+        eq(session.includes('HttpOnly'), true, `HttpOnly (secure=${secureCookies}):`);
+        eq(session.includes('Secure'), secureCookies, `Secure tracks secureCookies=${secureCookies}:`);
+      } finally {
+        await s.close();
+      }
+    }
+  } finally {
+    await db.close();
+  }
+});
+
 // -------------------------------------------------------- tenant isolation ----
 
 T('tenants are isolated: same email, different tenant, different account', async () => {
@@ -1212,9 +1247,11 @@ T('FINAL-001: authenticated back links resolve to the console home in both serve
       );
       const rooms = await call(s.port, '/console/settings/rooms', { cookie });
       eq(rooms.status, 200);
+      // Presentation of the link is the design system's business; the
+      // contract is that it points home and says so.
       eq(
-        rooms.body.includes(
-          `<a href="${home}" style="color:#6B7280;text-decoration:none;font-size:14px;">← Back to the console</a>`,
+        new RegExp(`<a[^>]*href="${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>← Back to the console</a>`).test(
+          rooms.body,
         ),
         true,
         `rooms back link is ${home} (siteDir=${siteDir}):`,

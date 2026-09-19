@@ -1,22 +1,24 @@
 import type { ConsoleReport, CostPoint, TierBucket } from './report.ts';
 import { COST_CURVE_BUDGET, MAX_CARDS_PER_STATE, MAX_NEEDS_HUMAN, MAX_ROOMS, ROOM_REQUESTS } from './report.ts';
 
+import { THEME_INIT_SCRIPT, THEME_TOGGLE_SCRIPT, themeStyleBlock, themeToggleButton } from './theme.ts';
+
 /**
  * Static renderer for the console read model: one self-contained HTML file,
  * inline SVG charts, zero dependencies, zero backend. Numbers are computed
  * by `buildReport`; this file only draws them. Glyphs accompany every
- * semantic color (never color alone); canvas is #FAFAF8, ink #0A0F14,
- * accent deep teal #0F5C57 per the deck system (idea.md §27).
+ * semantic color (never color alone); surfaces resolve via `var(--v-*)`
+ * tokens (dark default, light opt-in — see theme.ts).
  */
 
-const INK = '#0A0F14';
-const MUTED = '#6B7280';
-const TEAL = '#0F5C57';
-const HAIRLINE = '#E4E4E1';
-const FACT = '#0F7A3D';
-const HYPO = '#B45309';
-const PRED = '#4338CA';
-const RISK = '#B91C1C';
+const INK = 'var(--v-ink)';
+const MUTED = 'var(--v-muted)';
+const TEAL = 'var(--v-accent)';
+const HAIRLINE = 'var(--v-line)';
+const FACT = 'var(--v-fact)';
+const HYPO = 'var(--v-hypo)';
+const PRED = 'var(--v-pred)';
+const RISK = 'var(--v-risk)';
 
 export const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -88,7 +90,7 @@ export function lineChart(points: CostPoint[], target: number, w = 560, h = 220)
     ${segments.join('')}${dots}${labels}</svg>`;
 }
 
-const TIER_COLORS = { REFLEX: '#0F5C57', WORKFLOW: '#3E8E87', MODEL: '#93C4BE', HUMAN: '#D8E8E5' } as const;
+const TIER_COLORS = { REFLEX: 'var(--v-accent)', WORKFLOW: 'var(--v-accent-2)', MODEL: 'var(--v-pred)', HUMAN: 'var(--v-faint)' } as const;
 
 /** Stacked percentage area over weekly buckets. */
 export function tierStack(buckets: TierBucket[], w = 360, h = 220): string {
@@ -128,7 +130,7 @@ export function tierStack(buckets: TierBucket[], w = 360, h = 220): string {
 
 function tag(kind: string): string {
   const s = KIND_STYLE[kind] ?? { color: MUTED, glyph: '○' };
-  return `<span style="display:inline-block;background:${s.color};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">${s.glyph} ${esc(kind)}</span>`;
+  return `<span style="display:inline-block;background:${s.color};color:var(--v-bg-1);font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">${s.glyph} ${esc(kind)}</span>`;
 }
 
 /**
@@ -174,7 +176,7 @@ function needsHumanCard(
   if (live) {
     title = `<a href="${esc(needsHumanTaskUrl(n.requestId))}">${esc(n.goal)}</a>`;
   }
-  return `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${title}</div><div class="sub">${esc(n.state)}</div></div>`;
+  return `<div class="card"><div class="sub"><span style="display:inline-block;background:${RISK};color:var(--v-bg-1);font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">! RISK</span> · ${esc(n.scope)} · due ${esc(n.deadline)}</div><div style="font-weight:700">${title}</div><div class="sub">${esc(n.state)}</div></div>`;
 }
 
 export function renderHtml(r: ConsoleReport, live = false): string {
@@ -229,11 +231,13 @@ export function renderHtml(r: ConsoleReport, live = false): string {
     if (r.omitted.cards > 0) parts.push(`${r.omitted.cards} cards beyond the compiler columns`);
     return parts.length > 0 ? `<p class="sub">Also beyond this view: ${parts.join(' · ')}</p>` : '';
   };
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vital Console — ${esc(r.tenant)}</title>
+  return `<!DOCTYPE html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vital Console — ${esc(r.tenant)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:${INK};margin:0 auto;padding:28px 24px;max-width:1280px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}h1{font-size:26px;font-weight:600;letter-spacing:-0.025em;margin:16px 0 12px}h2{font-size:15px;font-weight:600;letter-spacing:-0.015em;margin:28px 0 12px;color:#111827}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.card{border:1px solid ${HAIRLINE};border-radius:10px;padding:18px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03),0 1px 2px rgba(0,0,0,0.02);transition:border-color .15s ease,box-shadow .15s ease}.card:hover{border-color:#D1D1CB;box-shadow:0 4px 12px rgba(0,0,0,0.05)}.big{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:4px 0}.sub{font-size:12px;color:${MUTED};line-height:1.4}.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.bar{height:6px;background:${HAIRLINE};border-radius:3px;overflow:hidden;margin:6px 0}.bar>i{display:block;height:100%;background:${TEAL};border-radius:3px}a{color:${TEAL};text-decoration:none}a:hover{text-decoration:underline}code,pre{font-family:'JetBrains Mono',monospace}button{font-family:inherit}nav[aria-label="Console"]{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;background:#fff;border:1px solid ${HAIRLINE};border-radius:8px;margin-top:24px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}nav[aria-label="Console"] a{padding:6px 12px;border-radius:5px;font-size:13px;font-weight:500;color:#374151;text-decoration:none;transition:all 0.15s ease}nav[aria-label="Console"] a:hover{background:#F3F4F6;color:#111827}nav[aria-label="Console"] a[aria-current="page"]{background:${TEAL};color:#fff}</style>
+<script>${THEME_INIT_SCRIPT}</script>
+${themeStyleBlock()}
+<style>body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--v-bg-0);color:var(--v-ink);margin:0 auto;padding:28px 24px;max-width:1280px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}h1{font-size:26px;font-weight:600;letter-spacing:-0.025em;margin:16px 0 12px}h2{font-size:15px;font-weight:600;letter-spacing:-0.015em;margin:28px 0 12px;color:var(--v-ink)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.card,.v-card{border:1px solid var(--v-line);border-radius:10px;padding:18px;background:var(--v-bg-1);box-shadow:var(--v-card-shadow);transition:border-color .15s ease,box-shadow .15s ease}.card:hover{border-color:var(--v-line-strong)}.big{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:4px 0}.sub,.v-sub{font-size:12px;color:var(--v-muted);line-height:1.4}.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.bar{height:6px;background:var(--v-line);border-radius:3px;overflow:hidden;margin:6px 0}.bar>i{display:block;height:100%;background:var(--v-accent);border-radius:3px}a{color:var(--v-accent);text-decoration:none}a:hover{text-decoration:underline}code,pre{font-family:'JetBrains Mono',monospace}button{font-family:inherit}nav[aria-label="Console"]{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:8px;margin-top:24px}nav[aria-label="Console"] a{padding:6px 12px;border-radius:5px;font-size:13px;font-weight:500;color:var(--v-muted);text-decoration:none;transition:all 0.15s ease}nav[aria-label="Console"] a:hover{background:var(--v-bg-2);color:var(--v-ink)}nav[aria-label="Console"] a[aria-current="page"]{background:var(--v-accent);color:var(--v-accent-ink)}</style>
 </head><body>
-<p class="sub">${esc(r.tenant)} · ${esc(r.at)}</p>${omittedLine()}
+<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><p class="sub">${esc(r.tenant)} · ${esc(r.at)}</p>${themeToggleButton()}</div>${omittedLine()}
 <h1>Reality health</h1>
 <div class="grid">
 <div class="card"><div class="sub">stale-fact rate</div><div class="big">${(h.staleFactRate * 100).toFixed(1)}%</div><div class="bar"><i style="width:${Math.min(100, (h.staleFactRate / h.staleFactGate) * 100).toFixed(0)}%"></i></div><div class="sub">gate &lt; ${(h.staleFactGate * 100).toFixed(0)}%</div></div>
@@ -254,6 +258,7 @@ export function renderHtml(r: ConsoleReport, live = false): string {
 <div class="cols">${['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'].map((s) => `<div><div class="sub">${s}</div>${cards(s)}</div>`).join('')}</div>
 <h2>Rooms</h2>
 ${rooms || '<p class="sub">no rooms yet</p>'}
+<script>${THEME_TOGGLE_SCRIPT}</script>
 </body></html>`;
 }
 
@@ -416,7 +421,7 @@ export const CONSOLE_NAV_SCRIPT = `(() => {
 })();`;
 
 export function renderAccountCluster(email: string, role: string, csrf: string): string {
-  return `<div style="margin-top:24px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 16px;background:#fff;border:1px solid ${HAIRLINE};border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.03)" class="sub"><span>signed in as <strong style="color:#0A0F14">${esc(email)}</strong> · <span style="font-family:'JetBrains Mono',monospace;font-size:11px;background:#F3F4F6;padding:2px 6px;border-radius:4px;border:1px solid #E5E7EB">${esc(role)}</span></span><a href="/account" style="color:${TEAL};font-weight:500">account</a><a href="/team" style="color:${TEAL};font-weight:500">team</a><a href="/settings/rooms" style="color:${TEAL};font-weight:500">rooms</a><form method="post" action="/logout" style="display:inline;margin-left:auto"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280;color:#fff;border:none;border-radius:5px;padding:6px 14px;font-size:12px;font-weight:500;cursor:pointer">Sign out</button></form></div>`;
+  return `<div style="margin-top:24px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 16px;background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:12px;box-shadow:var(--v-card-shadow)" class="sub"><span>signed in as <strong style="color:var(--v-ink)">${esc(email)}</strong> · <span class="v-mono" style="font-size:11px;background:var(--v-bg-2);padding:2px 6px;border-radius:4px;border:1px solid var(--v-line)">${esc(role)}</span></span><a href="/account" style="color:var(--v-accent);font-weight:500">account</a><a href="/team" style="color:var(--v-accent);font-weight:500">team</a><a href="/settings/rooms" style="color:var(--v-accent);font-weight:500">rooms</a><form method="post" action="/logout" style="display:inline;margin-left:auto"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:var(--v-ink-2);color:var(--v-bg-1);border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:500;cursor:pointer">Sign out</button></form></div>`;
 }
 
 export function needsHumanTaskUrl(requestId: string): string {
@@ -483,6 +488,32 @@ export function withReturnTo(url: string, returnTo?: string): string {
 }
 
 /** Shared paginated list shell for the /console view-all routes (FLOW-020). */
+/**
+ * Console data table. Cell contents are pre-built HTML — callers own their own
+ * escaping (they already escape every user-controlled value they interpolate).
+ * Returns '' for an empty row set so a caller never renders a bare header.
+ */
+export function renderTable(headers: string[], rows: string[][]): string {
+  if (rows.length === 0) return '';
+  return `<div class="v-table-wrap"><table class="v-table">
+<thead><tr>${headers.map((h) => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead>
+<tbody>${rows.map((cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>
+</table></div>`;
+}
+
+/** A titled group inside a list page (e.g. "Pending decision (3)"). */
+export function renderListSection(heading: string, body: string): string {
+  return `<section class="v-list-group"><h2>${esc(heading)}</h2>${body}</section>`;
+}
+
+/**
+ * The Console list-page frame: page title, a search/filter bar, an explicit
+ * result count, the caller's body, and pagination.
+ *
+ * This owns the page's <h1>, so a caller that wraps it in `detailDocument`
+ * must pass `hideHeader: true` — otherwise the title renders twice. That
+ * duplication is what this frame replaced.
+ */
 export function renderListPage(opts: {
   title: string;
   heading: string;
@@ -498,20 +529,26 @@ export function renderListPage(opts: {
   returnNote?: string;
 }): string {
   const pages = [
-    opts.prevUrl ? `<a href="${esc(opts.prevUrl)}">Previous</a>` : '',
-    opts.nextUrl ? `<a href="${esc(opts.nextUrl)}">Next</a>` : '',
+    opts.prevUrl ? `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(opts.prevUrl)}">← Previous</a>` : '',
+    opts.nextUrl ? `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(opts.nextUrl)}">Next →</a>` : '',
   ]
     .filter(Boolean)
-    .join(' · ');
-  return `<h1>${esc(opts.heading)}</h1>
-<form method="get" action="${esc(opts.searchAction)}">
-<label class="sub" for="q">search</label>
-<input id="q" name="q" value="${esc(opts.query)}">
-<button type="submit">Search</button>
-<a href="${esc(opts.clearUrl)}">Clear</a>
+    .join('');
+  const count = `${opts.total.toLocaleString()} total · showing ${opts.shown.toLocaleString()}`;
+  return `<div class="v-page-head">
+  <div>
+    <p class="v-eyebrow">${esc(opts.title)}</p>
+    <h1 class="v-page-title">${esc(opts.heading)}</h1>
+  </div>
+</div>
+<form class="v-filterbar" method="get" action="${esc(opts.searchAction)}" role="search">
+  <label class="v-sr-only" for="q">Search ${esc(opts.heading.toLowerCase())}</label>
+  <input id="q" name="q" class="v-input" type="search" value="${esc(opts.query)}" placeholder="Search ${esc(opts.heading.toLowerCase())}…" autocomplete="off">
+  <button class="v-btn v-btn-primary" type="submit">Search</button>
+  <a class="v-btn v-btn-ghost" href="${esc(opts.clearUrl)}">Clear</a>
 </form>
-<p class="sub">${opts.total} total · showing ${opts.shown}${opts.truncated ? ' · explicit truncation: narrow the search or page further' : ''}</p>
+<p class="v-meta v-count">${esc(count)}${opts.truncated ? ' · explicit truncation: narrow the search or page further' : ''}</p>
 ${opts.body}
-${pages ? `<p class="sub">${pages}</p>` : ''}
-${opts.returnNote ? `<p class="sub">${esc(opts.returnNote)}</p>` : ''}`;
+${pages ? `<nav class="v-pager" aria-label="Pagination">${pages}</nav>` : ''}
+${opts.returnNote ? `<p class="v-meta">${esc(opts.returnNote)}</p>` : ''}`;
 }

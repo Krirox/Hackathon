@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
+import { memo } from '../core/request-cache.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { User } from '../core/auth.ts';
@@ -87,9 +88,22 @@ const signupKey = (tenant: string): string => `activation:signupAt:${tenant}`;
 const firstReviewKey = (tenant: string): string => `activation:firstReviewAt:${tenant}`;
 const sampleKey = (tenant: string): string => `activation:sample:${tenant}`;
 
+/**
+ * One activation meta value, read at most once per request.
+ *
+ * The dashboard asks for the same keys from several widgets — the activation
+ * panel, the journey milestone and the readiness block each read the config — so
+ * before this the dashboard issued three identical lookups for one page view.
+ * Memoization is per request and off for mutating methods, so a POST that writes
+ * a key and then reads it back still sees its own write.
+ */
 async function metaGet(db: AsyncDb, key: string): Promise<string | null> {
-  const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as { value: string } | undefined;
-  return r ? String(r.value) : null;
+  return memo(`activation:meta:${key}`, async () => {
+    const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as
+      | { value: string }
+      | undefined;
+    return r ? String(r.value) : null;
+  });
 }
 
 async function metaSet(db: AsyncDb, key: string, value: string): Promise<void> {
@@ -564,23 +578,31 @@ export async function seedSampleWalkthrough(
   return { claimId: claim.id, requestId: admitted.request.id };
 }
 
-const STATUS_COLOR: Record<ChecklistStatus, string> = {
-  done: '#0F7A3D',
-  pending: '#B45309',
-  blocked: '#6B7280',
+/**
+ * Status is communicated by tint + text, never by color alone: every badge
+ * carries its own label and a leading dot.
+ */
+const CHECK_TONE: Record<ChecklistStatus, string> = {
+  done: 'v-badge-good',
+  pending: 'v-badge-warn',
+  blocked: 'v-badge-risk',
 };
 
-const SOURCE_COLOR: Record<SourceConnectionState, string> = {
-  unconfigured: '#6B7280',
-  disabled: '#6B7280',
-  syncing: '#4338CA',
-  empty: '#B45309',
-  delayed: '#B45309',
-  rate_limited: '#4338CA',
-  rejected: '#B91C1C',
-  failed: '#B91C1C',
-  ready: '#0F7A3D',
+const SOURCE_TONE: Record<SourceConnectionState, string> = {
+  unconfigured: 'v-badge',
+  disabled: 'v-badge',
+  syncing: 'v-badge-info',
+  empty: 'v-badge-warn',
+  delayed: 'v-badge-warn',
+  rate_limited: 'v-badge-info',
+  rejected: 'v-badge-risk',
+  failed: 'v-badge-risk',
+  ready: 'v-badge-good',
 };
+
+function statusBadge(tone: string, label: string): string {
+  return `<span class="v-badge ${tone}"><span class="dot"></span>${esc(label)}</span>`;
+}
 
 function renderSourceHealthCard(state: ActivationState): string {
   const health = state.sourceHealth;
@@ -605,39 +627,44 @@ export function renderActivationPanel(state: ActivationState, csrf: string, home
     .map((item) => {
       const action =
         item.actionHref && item.actionLabel ? ` <a href="${esc(item.actionHref)}">${esc(item.actionLabel)}</a>` : '';
-      return `<li style="margin-bottom:10px">
-<span style="display:inline-block;background:${STATUS_COLOR[item.status]};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">${esc(item.status)}</span>
-<strong>${esc(item.label)}</strong> — ${esc(item.detail)}${action}
+      return `<li class="v-row" style="align-items:flex-start;">
+<span class="v-row-main" style="align-items:flex-start;">${statusBadge(CHECK_TONE[item.status], item.status)}
+<span style="min-width:0;"><strong>${esc(item.label)}</strong><br><span class="v-sub">${esc(item.detail)}</span></span></span>${action}
 </li>`;
     })
     .join('');
   const receipt = state.firstReceipt
-    ? `<div class="card"><div class="sub">first source item</div>
-<div style="font-weight:700">${esc(state.firstReceipt.summary)}</div>
-<div class="sub">status ${esc(state.firstReceipt.status)} · ${esc(state.firstReceipt.createdAt)}${state.firstReceipt.claimId ? ` · <a href="/console/claims/${esc(encodeURIComponent(state.firstReceipt.claimId))}">view evidence</a>` : ''}</div></div>`
+    ? `<div class="v-card" style="margin-top:12px;"><p class="v-eyebrow">First source item</p>
+<p style="font-weight:650;margin:6px 0 2px;">${esc(state.firstReceipt.summary)}</p>
+<p class="v-meta">status ${esc(state.firstReceipt.status)} · ${esc(state.firstReceipt.createdAt)}${state.firstReceipt.claimId ? ` · <a href="/console/claims/${esc(encodeURIComponent(state.firstReceipt.claimId))}">view evidence</a>` : ''}</p></div>`
     : '';
   const timing = state.timeToFirstReview
     ? `<p class="sub">Time since signup: ${esc(String(state.timeToFirstReview.elapsedSeconds ?? 0))}s${state.timeToFirstReview.firstReviewAt ? ` · first review after ${esc(String(state.timeToFirstReview.elapsedSeconds ?? 0))}s` : ' · awaiting first trustworthy review'}</p>`
     : '';
   const next = state.nextAction
-    ? `<div class="card" style="border-color:#0F5C57"><div class="sub">next useful action</div>
-<div style="font-size:20px;font-weight:800"><a href="${esc(state.nextAction.href)}">${esc(state.nextAction.label)}</a></div>
-<p>${esc(state.nextAction.detail)}</p></div>`
+    ? `<div class="v-card" style="border-left:3px solid var(--v-accent);">
+<p class="v-eyebrow">next useful action</p>
+<p style="font-size:17px;font-weight:650;margin:6px 0 4px;"><a href="${esc(state.nextAction.href)}">${esc(state.nextAction.label)}</a></p>
+<p class="v-sub">${esc(state.nextAction.detail)}</p></div>`
     : '';
   const sample = state.sampleActive
-    ? `<p class="sub">Sample walkthrough is active — evidence in scope <code>${esc(SAMPLE_SCOPE)}</code> is labeled demo data, not customer proof.</p>`
-    : `<form method="post" action="/setup/sample" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280">Run labeled sample walkthrough</button></form>`;
-  return `<section id="activation-setup" style="margin-bottom:24px">
-<h1>Organization setup</h1>
-<p class="sub">Finish these steps to reach your first cited review without using the CLI. <a href="/setup">Open setup</a> · <a href="${esc(home)}">Dashboard</a></p>
+    ? `<p class="v-sub">Sample walkthrough is active — evidence in scope <code>${esc(SAMPLE_SCOPE)}</code> is labeled demo data, not customer proof.</p>`
+    : `<form method="post" action="/setup/sample"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-secondary v-btn-sm">Run labeled sample walkthrough</button></form>`;
+  return `<section id="activation-setup" style="margin-bottom:16px;">
+<div class="v-split">
+  <div><p class="v-eyebrow">Activation</p><h1 class="v-section-title" style="margin-top:4px;">Organization setup</h1></div>
+  <div class="v-tabs"><a class="v-tab" href="/setup">Open setup</a><a class="v-tab" href="${esc(home)}">Dashboard</a></div>
+</div>
+<p class="v-lede">Finish these steps to reach your first cited review without using the CLI.</p>
 ${next}
-<div class="card">
-<div class="sub">source connection · <span style="color:${SOURCE_COLOR[state.sourceState]}">${esc(state.sourceState)}</span></div>
-<p>${esc(state.sourceStateDetail)}</p>
+<div class="v-card">
+<p class="v-eyebrow">Source connection</p>
+<p style="margin:6px 0 0;">${statusBadge(SOURCE_TONE[state.sourceState], state.sourceState)}</p>
+<p class="v-sub" style="margin-top:6px;">${esc(state.sourceStateDetail)}</p>
 ${renderSourceHealthCard(state)}
 ${receipt}
 </div>
-<ol style="list-style:none;padding:0">${items}</ol>
+<ol class="v-stack-sm" style="list-style:none;padding:0;margin:0;">${items}</ol>
 ${timing}
 <p>${sample}</p>
 </section>`;
@@ -660,78 +687,77 @@ export function renderSetupPage(
     .join('');
   const msg = message ? `<p class="err">${esc(message)}</p>` : '';
   const healthCard = state.sourceHealth
-    ? `<div class="card"><div class="sub">connection health · <span style="color:${SOURCE_COLOR[state.sourceState]}">${esc(state.sourceState)}</span></div>
-<p>${esc(state.sourceStateDetail)}</p>
+    ? `<div class="v-card" style="margin:0 0 16px;"><div class="v-split" style="margin-bottom:6px;"><h2 class="v-card-title">Connection health</h2>${statusBadge(SOURCE_TONE[state.sourceState], state.sourceState)}</div>
+<p class="v-sub">${esc(state.sourceStateDetail)}</p>
 ${renderSourceHealthCard(state)}</div>`
     : '';
   const syncForm = config
-    ? `<section id="sync"><h2>Sync source</h2>
-<p class="sub">Pull new or changed files from <code>${esc(config.sourcePath)}</code> into scope <code>${esc(config.scope)}</code>.</p>
-<form method="post" action="/setup/test-source" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#6B7280">Test connection</button></form>
-<form method="post" action="/setup/ingest" style="display:inline;margin-left:8px"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Sync now</button></form>
-<p class="sub">States: <strong>unconfigured</strong> · <strong>disabled</strong> · <strong>empty</strong> · <strong>delayed</strong> · <strong>rate_limited</strong> · <strong>syncing</strong> · <strong>ready</strong> · <strong>failed</strong> · <strong>rejected</strong></p>
+    ? `<section id="sync" class="v-card" style="margin:0 0 16px;"><h2 class="v-card-title">Sync source</h2>
+<p class="v-sub" style="margin:4px 0 12px;">Pull new or changed files from <code>${esc(config.sourcePath)}</code> into scope <code>${esc(config.scope)}</code>.</p>
+<div class="v-tabs"><form method="post" action="/setup/test-source" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-secondary v-btn-sm">Test connection</button></form>
+<form method="post" action="/setup/ingest" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-primary v-btn-sm">Sync now</button></form></div>
+<p class="v-meta" style="margin-top:12px;">States: unconfigured · disabled · empty · delayed · rate_limited · syncing · ready · failed · rejected</p>
 </section>`
     : '';
   const workflowForm =
     config && state.sourceState === 'ready'
-      ? `<section id="workflow"><h2>First release workflow</h2>
-<p class="sub">Your first ingested evidence can start the Ship-to-Result fan-out.</p>
-<form method="post" action="/setup/start-release"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Start release workflow</button></form></section>`
+      ? `<section id="workflow" class="v-card" style="margin:0 0 16px;"><h2 class="v-card-title">First release workflow</h2>
+<p class="v-sub" style="margin:4px 0 12px;">Your first ingested evidence can start the Ship-to-Result fan-out.</p>
+<form method="post" action="/setup/start-release"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-primary v-btn-sm">Start release workflow</button></form></section>`
       : '';
-  const roomsSection = `<section id="rooms"><h2>Rooms</h2>
-<p class="sub">Choose which autonomous rooms are active and tune their mandate, autonomy, spend ceiling, and connected data feeds.</p>
-<p><a href="/setup/rooms">Open room provisioning</a></p></section>`;
-  const dataSection = `<section id="data"><h2>Data portability &amp; retention</h2>
-<p class="sub">Download your reality ledger export, cryptographic audit history, or manage GDPR Article 17 erasure.</p>
-<p><a href="/console/data">Open Data &amp; Retention</a></p></section>`;
+  const roomsSection = `<section id="rooms" class="v-card" style="margin:0 0 16px;"><h2 class="v-card-title">Rooms</h2>
+<p class="v-sub" style="margin:4px 0 12px;">Choose which autonomous rooms are active and tune their mandate, autonomy, spend ceiling, and connected data feeds.</p>
+<a class="v-btn v-btn-secondary v-btn-sm" href="/setup/rooms">Open room provisioning</a></section>`;
+  const dataSection = `<section id="data" class="v-card" style="margin:0 0 16px;"><h2 class="v-card-title">Data portability &amp; retention</h2>
+<p class="v-sub" style="margin:4px 0 12px;">Download your reality ledger export, cryptographic audit history, or manage GDPR Article 17 erasure.</p>
+<a class="v-btn v-btn-secondary v-btn-sm" href="/console/data">Open Data &amp; Retention</a></section>`;
+  // Layout-only rules; every color, radius and shadow comes from the token
+  // system injected at the response boundary (theme.ts).
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup — organization activation</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:800px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
-h1{font-size:26px;font-weight:600;letter-spacing:-0.02em;margin:12px 0 8px 0;color:#0A0F14}
-h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:20px 0 10px;color:#111827}
-a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
-form{display:grid;gap:16px}
-input,select{padding:10px 12px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:14px;color:#0A0F14;background:#fff;transition:border-color .15s,box-shadow .15s}
-input:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}
-label{font-size:13px;font-weight:500;color:#374151;display:grid;gap:4px;margin-bottom:8px}
-button{padding:10px 18px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;font-family:inherit;font-size:14px;transition:background .15s ease}
-button:hover{background:#0B4A45}
-.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:13px;line-height:1.4}
-.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
-code{font-family:'JetBrains Mono',monospace;font-size:12px;background:#F3F4F6;padding:2px 6px;border-radius:4px}
-section{background:#fff;border:1px solid #E4E4E1;border-radius:10px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+body{margin:0 auto;padding:28px 20px 48px;max-width:840px}
+form.settings{display:grid;gap:16px}
+label{font-size:12.5px;font-weight:600;color:var(--v-muted);display:grid;gap:5px;margin-bottom:4px}
+fieldset{border:0;margin:0;padding:0}
 </style>
 </head><body>
-<p class="sub"><a href="${esc(home)}">← Dashboard</a> · <a href="/setup/rooms">Autonomous Agent Rooms &amp; Autonomy Tiers</a> · <a href="/console/data">Data Portability &amp; Retention →</a></p>
-<h1>Guided setup</h1>
-<p class="sub">Configure source, accountable human, scope, approval policy, and budget. Sample walkthrough data is always labeled and kept in scope <code>${esc(SAMPLE_SCOPE)}</code>.</p>
+<a class="skip-link" href="#main">Skip to main content</a>
+<main id="main">
+<nav class="v-breadcrumb" aria-label="Breadcrumb" style="margin-bottom:14px;"><a href="${esc(home)}">Console</a><span class="sep">/</span><strong>Setup</strong><span class="sep">·</span><a href="/setup/rooms">Rooms &amp; autonomy</a><span class="sep">·</span><a href="/console/data">Data &amp; retention</a></nav>
+<h1 class="v-page-title">Guided setup</h1>
+<p class="v-lede">Configure source, accountable human, scope, approval policy, and budget. Sample walkthrough data is always labeled and kept in scope <code>${esc(SAMPLE_SCOPE)}</code>.</p>
 ${msg}
 ${healthCard}
-<form method="post" action="/setup">
+<form class="settings" method="post" action="/setup">
 <input type="hidden" name="csrf" value="${esc(csrf)}">
-<section id="accountable"><h2>Accountable human</h2>
-<label>Owner <select name="accountableOwnerId" required>${ownerOptions}</select></label></section>
-<section id="scope"><h2>Scope</h2>
-<label>Release scope <input name="scope" required value="${esc(config?.scope ?? 'engineering')}" placeholder="engineering"></label></section>
-<section id="source"><h2>Evidence source</h2>
-<label>Source directory or GitHub repository (e.g. <code>owner/repo</code> or <code>/path/to/changelog</code>) <input name="sourcePath" required value="${esc(config?.sourcePath ?? '')}" placeholder="owner/repo or /path/to/changelog"></label>
-<label>Artifact store <input name="artifactDir" value="${esc(config?.artifactDir ?? defaultArtifactDir(users[0]?.tenant ?? 'tenant'))}"></label></section>
-<section id="policy"><h2>Approval policy</h2>
+<section id="accountable" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 1</p><h2 class="v-card-title">Accountable human</h2>
+<p class="v-sub" style="margin:4px 0 10px;">Every claim needs a named human owner (invariant I3).</p>
+<label>Owner <select class="v-input v-select" name="accountableOwnerId" required>${ownerOptions}</select></label></section>
+<section id="scope" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 2</p><h2 class="v-card-title">Scope</h2>
+<p class="v-sub" style="margin:4px 0 10px;">The scope gates which rooms and grants the work inherits.</p>
+<label>Release scope <input class="v-input" name="scope" required value="${esc(config?.scope ?? 'engineering')}" placeholder="engineering"></label></section>
+<section id="source" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 3</p><h2 class="v-card-title">Evidence source</h2>
+<p class="v-sub" style="margin:4px 0 10px;">Collection is deterministic (L0) — no model reads raw material.</p>
+<label>Source directory or GitHub repository (e.g. <code>owner/repo</code> or <code>/path/to/changelog</code>) <input class="v-input" name="sourcePath" required value="${esc(config?.sourcePath ?? '')}" placeholder="owner/repo or /path/to/changelog"></label>
+<label>Artifact store <input class="v-input" name="artifactDir" value="${esc(config?.artifactDir ?? defaultArtifactDir(users[0]?.tenant ?? 'tenant'))}"></label></section>
+<section id="policy" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 4</p><h2 class="v-card-title">Approval policy</h2>
+<p class="v-sub" style="margin:4px 0 10px;">Who may approve beginning work for this scope.</p>
 <label>Minimum approver role
-<select name="approverRole">
+<select class="v-input v-select" name="approverRole">
 <option value="member"${config?.approverRole === 'member' || !config ? ' selected' : ''}>member</option>
 <option value="admin"${config?.approverRole === 'admin' ? ' selected' : ''}>admin</option>
 <option value="owner"${config?.approverRole === 'owner' ? ' selected' : ''}>owner</option>
 </select></label></section>
-<section id="budget"><h2>Attention budget</h2>
-<label>Daily dollars <input name="dailyBudgetDollars" type="number" min="1" step="1" value="${esc(String(config?.dailyBudgetDollars ?? 100))}"></label>
-<label>Human minutes / day <input name="humanMinutesBudget" type="number" min="1" step="1" value="${esc(String(config?.humanMinutesBudget ?? 60))}"></label></section>
-<button type="submit">Save setup</button>
+<section id="budget" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 5</p><h2 class="v-card-title">Attention budget</h2>
+<p class="v-sub" style="margin:4px 0 10px;">Hard ceilings the coordinator enforces on spend and operator minutes.</p>
+<label>Daily dollars <input class="v-input" name="dailyBudgetDollars" type="number" min="1" step="1" value="${esc(String(config?.dailyBudgetDollars ?? 100))}"></label>
+<label>Human minutes / day <input class="v-input" name="humanMinutesBudget" type="number" min="1" step="1" value="${esc(String(config?.humanMinutesBudget ?? 60))}"></label></section>
+<button type="submit" class="v-btn v-btn-primary" style="justify-self:start;">Save setup</button>
 </form>
 ${syncForm}
 ${workflowForm}
 ${roomsSection}
 ${dataSection}
+</main>
 </body></html>`;
 }

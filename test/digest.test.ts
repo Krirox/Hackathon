@@ -23,6 +23,17 @@ import {
 } from '../src/console/render.ts';
 import { claimDetail, detailBackTarget, parseDetailNav, requestDetail } from '../src/console/detail.ts';
 
+/**
+ * Forms that could change tenant data, as opposed to page chrome. The shell's
+ * global search is a GET and its sign-out posts to /logout; neither mutates the
+ * tenant. Anything else on a read-only page is a regression.
+ */
+function mutationForms(html: string): string[] {
+  return [...html.matchAll(/<form[^>]*>/gi)]
+    .map((m) => m[0])
+    .filter((f) => !/method="get"/i.test(f) && !/action="\/logout"/i.test(f));
+}
+
 import { buildReport } from '../src/console/report.ts';
 import {
   SEARCH_MAX_LIMIT,
@@ -266,7 +277,11 @@ for (const siteDir of [undefined, 'site']) {
       eq(html.includes(NOW), true);
       eq(html.includes('Older notice'), false);
       eq(html.includes('Future notice'), false);
-      eq(html.includes('<form'), false);
+      // Read-only means "offers no way to change anything", not "contains no
+      // <form> element": the digest now renders inside the console shell, whose
+      // chrome carries the global search (GET) and sign-out (POST /logout)
+      // forms on every page. Assert the invariant instead of its old proxy.
+      eq(mutationForms(html).length, 0, 'digest offers no mutation form:');
       eq(html.includes('data-review-action'), false);
       for (const value of ['1', '7', '30', 'all']) eq(html.includes(`href="/console/digest?days=${value}"`), true);
       for (const value of ['30', 'all']) {
@@ -364,7 +379,7 @@ T('FLOW-021: member read permission, activation, foreign tenants and disabled se
     eq(html.includes('Private foreign topic'), false);
     eq(html.includes(foreignClaim.id), false);
     eq(html.includes('Evidence unavailable'), true);
-    eq(html.includes('<form'), false);
+    eq(mutationForms(html).length, 0, 'foreign digest offers no mutation form:');
     eq((await get(active.token, '/console/requests/foreign-notice')).status, 404);
     eq((await get(active.token, `/console/claims/${foreignClaim.id}`)).status, 404);
     await disableUser(db, TEN, member.id, NOW);

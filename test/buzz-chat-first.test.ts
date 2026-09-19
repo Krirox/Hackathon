@@ -493,7 +493,7 @@ T('/console/dashboard renders role-based departmental views (legal, finance)', a
   }
 });
 
-T('/account renders within workspace shell with 13-room sidebar and security settings', async () => {
+T('/account renders in the console shell with one Chat button and no room list', async () => {
   const { db, ledger, coord, comp } = await setupTestApp();
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
@@ -508,7 +508,116 @@ T('/account renders within workspace shell with 13-room sidebar and security set
     eq(accountHtml.includes('Change password'), true, 'renders change password');
     eq(accountHtml.includes('Two-factor authentication'), true, 'renders MFA section');
     eq(accountHtml.includes('vital-dashboard-btn'), true, 'embedded within workspace shell');
-    eq(accountHtml.includes('#general'), true, 'includes canonical rooms in sidebar');
+    // Split contract: console pages link to chat exactly once (the topbar
+    // Chat button) and never embed the room list — rooms live in the chat.
+    eq(accountHtml.includes('id="go-to-chat-btn"'), true, 'one Chat button:');
+    eq(accountHtml.includes('class="ws-room"'), false, 'no room entries in the console sidebar:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+/**
+ * The two surfaces must stay visually separate. The Workspace mirrors upstream
+ * Buzz (its own system font stack and palette); the Console owns the design
+ * tokens. These are rendered by two different shells chosen once in
+ * `wrapInWorkspaceShell`, and `themeDocument()` — which runs on every
+ * text/html response at the `res.end` boundary and whose body rule uses
+ * `!important` — must not reach the chat.
+ *
+ * This is a regression test: the tokens were once injected into the chat, which
+ * silently re-fonted it from Buzz's system stack to Inter and repainted its
+ * canvas. Nothing else in the suite would have caught that.
+ */
+T('surface split: the chat carries no Console tokens; the Console does', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+    const get = async (p: string) => await (await fetch(`http://127.0.0.1:${server.port}${p}`, { headers: { cookie } })).text();
+
+    const chat = await get('/console/buzz/general');
+    eq(chat.includes('--v-bg-0:'), false, 'chat carries no Console token definitions:');
+    eq(chat.includes('data-theme='), false, 'chat is not given a Console theme attribute:');
+    eq(chat.includes('data-vital-no-theme'), true, 'chat opts out of the token injection:');
+    eq(chat.includes('class="buzz-window"'), true, 'chat renders the Buzz shell:');
+    eq(
+      chat.includes('-apple-system, BlinkMacSystemFont'),
+      true,
+      'chat keeps Buzz\u2019s native system font stack (not Inter):',
+    );
+    // The only Inter on a chat page is the unused webfont <link>, never a rule.
+    eq(/font-family:[^;}]*Inter/i.test(chat), false, 'no CSS rule re-fonts the chat to Inter:');
+    eq(chat.includes('data-vital-theme-toggle'), false, 'chat renders no theme toggle:');
+
+    const console_ = await get('/console/requests');
+    eq(console_.includes('--v-bg-0:'), true, 'console page carries the token definitions:');
+    eq(console_.includes('data-theme='), true, 'console page carries the theme attribute:');
+    eq(console_.includes('buzz-window'), false, 'console page does not render the Buzz shell:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+/**
+ * A room shows only the approvals that target ITS scope. The card list used to
+ * enumerate every ADMITTED request in the tenant, so the same "Approval
+ * requested" cards appeared in every room regardless of scope, and the list did
+ * not even agree with the room's own pending badge (which is target-scoped).
+ */
+T('room approvals are scoped to the room, and agree with its pending badge', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const claim = await ledger.append({
+      tenant: TEN,
+      subject: 'release:approvals',
+      kind: 'FACT',
+      statement: 'ships',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'sync:gh',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+      validUntil: null,
+    });
+    const propose = (targetScope: string, goal: string) =>
+      coord.submit({
+        tenant: TEN,
+        messageClass: 'REQUEST' as const,
+        originScope: 'product',
+        targetScope,
+        goal,
+        claimRefs: [claim.id],
+        deliverableSchema: 'feasibility.v1',
+        onBehalfOf: 'human:owner',
+        bid: { dollars: 2, humanMinutes: 10 },
+        now: NOW,
+      });
+    // Distinct goals so cross-room leakage is unambiguous.
+    await propose('infra', 'INFRA-ONLY approval');
+    await propose('finance', 'FINANCE-ONLY approval');
+
+    const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+    const room = async (scope: string) =>
+      await (await fetch(`http://127.0.0.1:${server.port}/console/buzz/${scope}`, { headers: { cookie } })).text();
+
+    const infra = await room('infra');
+    eq(infra.includes('INFRA-ONLY approval'), true, 'infra room shows its own approval:');
+    eq(infra.includes('FINANCE-ONLY approval'), false, 'infra room does not show finance approvals:');
+
+    const finance = await room('finance');
+    eq(finance.includes('FINANCE-ONLY approval'), true, 'finance room shows its own approval:');
+    eq(finance.includes('INFRA-ONLY approval'), false, 'finance room does not show infra approvals:');
+
+    // A room with no human work of its own shows none at all.
+    const legal = await room('legal');
+    eq(legal.includes('INFRA-ONLY approval'), false, 'an unrelated room shows no approvals:');
+    eq(legal.includes('FINANCE-ONLY approval'), false, 'an unrelated room shows no approvals:');
   } finally {
     await server.close();
     await db.close();

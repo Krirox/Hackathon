@@ -3,8 +3,12 @@ region  = "eu-central-1"
 project = "vital"
 
 # Filled by the deploy workflow after `docker push` (ECR image URIs with :tag).
-core_image     = ""
-executor_image = ""
+# Both must be non-empty: the busybox fallback was removed so a misconfigured
+# apply cannot deploy a dead service. Repositories are created by the workflow
+# (or by a targeted apply) before any image exists, so a local first apply is
+# create-repos -> push -> apply. See docs/deployment.md.
+# core_image     = "<account>.dkr.ecr.eu-central-1.amazonaws.com/vital-core:boot"
+# executor_image = "<account>.dkr.ecr.eu-central-1.amazonaws.com/vital-executor:boot"
 jcode_image    = "ghcr.io/1jehuang/jcode:v0.84.0"
 
 desired_count     = 2
@@ -20,12 +24,15 @@ db_multi_az       = true
 db_max_allocated_storage = 100
 
 # All secrets via TF_VAR_* env in CI (see .github/workflows/deploy-aws.yml).
-tenant_hmac_secret = "CHANGEME"
-vital_core_secret  = "CHANGEME"
-webhook_secret     = "CHANGEME"
-serper_api_key     = "CHANGEME"
-gemini_api_key     = "CHANGEME"
-novita_api_key     = "CHANGEME"
+# Required, and deliberately NOT prefilled with a placeholder: an empty value or
+# the literal "CHANGEME" fails validation, so a half-filled deploy stops before
+# it ships a known HMAC/webhook secret or a dead model plane.
+# tenant_hmac_secret = ""
+# vital_core_secret  = ""
+# webhook_secret     = ""
+# serper_api_key     = ""
+# gemini_api_key     = ""
+# novita_api_key     = ""
 # Console mutation gate (empty = ungated dev only). Pilot: set via TF_VAR_operator_secret.
 # operator_secret = "CHANGEME"
 # Buzz agent identities + review tokens (empty = fail closed: no publishing identity, dead webhook approve path).
@@ -38,6 +45,11 @@ novita_api_key     = "CHANGEME"
 # setup_secret via TF_VAR_setup_secret
 # ALB HTTPS (empty = HTTP-forward dev only). Pilot: ACM cert ARN.
 # acm_certificate_arn = ""
+# ...or let Terraform create + validate the cert and name the host (dns.tf).
+# The zone is looked up, never created. An explicit acm_certificate_arn wins if both are set.
+# domain_name           = "console.example.com"
+# hosted_zone_id        = "Z0123456789ABCDEFGHI"   # aws route53 list-hosted-zones
+# subject_alternative_names = ["www.example.com"]  # must live in that same zone
 # Private ALB posture (keep deployment private first — F01):
 # alb_internal      = true
 # alb_ingress_cidrs = ["10.0.0.0/16"]

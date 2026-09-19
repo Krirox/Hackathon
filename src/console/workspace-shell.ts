@@ -7,6 +7,7 @@
 
 import { getScopeAvatarSrc } from './buzz.ts';
 import { parseTeam } from '../core/auth.ts';
+import { isCanonicalScope } from '../talk/rooms.ts';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -29,7 +30,10 @@ async function roomRecency(db: AsyncDb, tenant: string, scope: string, nowMs: nu
 }
 
 export function buzzDocument(title: string, inner: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Workspace</title>
+  // The trailing comment opts this document out of the Console design system:
+  // the Workspace mirrors upstream Buzz, which means Buzz's own native font
+  // stack and palette, not the Console tokens. See THEME_OPTOUT_MARKER.
+  return `<!doctype html><html lang="en"><head><!-- data-vital-no-theme --><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Workspace</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head><body><main id="main" style="height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden;">${inner}</main></body></html>`;
 }
@@ -90,22 +94,12 @@ export function renderWorkspaceShell(opts: {
     : DASH;
   const initials = userEmail ? emailStr.slice(0, 2).toUpperCase() : '?';
 
-  // Room groups use the REAL canonical scopes. The old lists named scopes
-  // that do not exist (announcements, queen-bee-launch, market-intel...),
-  // so every actual room fell into the catch-all bucket.
+  // Room groups use the REAL canonical scopes. User-made rooms (custom
+  // scopes) render under "Custom rooms". Nothing invented: names come from
+  // the health evaluation, unread from pending approvals or recent activity.
   const theHiveScopes = ['core', 'general'];
   const productScopes = ['product', 'infra', 'data'];
   const swarmScopes = ['business', 'legal', 'finance', 'research', 'facts', 'risk', 'exec', 'experimental'];
-
-  const friendlyNames: Record<string, string> = {
-    core: 'announcements',
-    general: 'general',
-    product: 'design',
-    infra: 'engineering',
-    data: 'mobile',
-    business: 'marketing',
-    legal: 'queen-bee-launch',
-  };
 
   const renderRoomItem = (r: ShellRooms) => {
     const isEngActive =
@@ -113,19 +107,14 @@ export function renderWorkspaceShell(opts: {
     const isGenActive = (activeScope === 'general' || !activeScope) && r.scope === 'general';
     const isActive = r.scope === activeScope || isEngActive || isGenActive;
     const mins = opts.roomRecency?.[r.scope];
-    const hasUnread =
-      r.pending > 0 ||
-      (mins !== null && mins !== undefined && mins < 180) ||
-      r.scope === 'core' ||
-      r.scope === 'product' ||
-      r.scope === 'business' ||
-      r.scope === 'legal';
+    // Unread = real signals only: pending approvals or activity < 3h.
+    const hasUnread = r.pending > 0 || (mins !== null && mins !== undefined && mins < 180);
     const unreadDot = hasUnread && !isActive ? `<span class="buzz-unread-dot" title="Unread activity"></span>` : '';
-    const isLock = r.scope === 'legal' || r.roomName.includes('queen');
+    const isLock = r.scope === 'legal';
     const lockIcon = isLock
       ? '<span style="font-size:11px;margin-right:3px;opacity:0.8;">🔒</span>'
       : '<span style="font-size:12px;margin-right:4px;opacity:0.7;">#</span>';
-    const displayName = friendlyNames[r.scope] ?? r.roomName;
+    const displayName = r.roomName;
     const roomUrl = r.scope === 'infra' ? '/console/buzz/engineering' : `/console/buzz/${esc(r.scope)}`;
     const avatar = getScopeAvatarSrc(r.scope);
 
@@ -155,9 +144,7 @@ export function renderWorkspaceShell(opts: {
     .map(renderRoomItem)
     .join('\n');
   const otherRooms = rooms
-    .filter(
-      (r) => !theHiveScopes.includes(r.scope) && !productScopes.includes(r.scope) && !swarmScopes.includes(r.scope),
-    )
+    .filter((r) => !isCanonicalScope(r.scope))
     .map(renderRoomItem)
     .join('\n');
 
@@ -233,30 +220,6 @@ export function renderWorkspaceShell(opts: {
     font-family: inherit;
   }
   .buzz-search-input::placeholder { color: #64748B; }
-
-  /* Top Direct Navigation */
-  .buzz-top-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    margin-bottom: 10px;
-  }
-  .buzz-top-link {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 5px 8px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    color: #334155;
-    transition: background 0.12s;
-  }
-  .buzz-top-link:hover,
-  .buzz-top-link.active {
-    background: #DCE0D9;
-    color: #0F172A;
-  }
 
   /* Channel / Room Sections */
   .buzz-room-groups {
@@ -428,76 +391,50 @@ export function renderWorkspaceShell(opts: {
       <kbd style="font-size:10px;font-family:inherit;opacity:0.75;">⌘K</kbd>
     </div>
 
-    <!-- Top Links (Inbox, Projects, Agents) -->
-    <div class="buzz-top-nav">
-      <a href="/console/buzz/engineering" class="buzz-top-link">
-        <span>📥</span>
-        <span>Inbox</span>
-      </a>
-      ${
-        parseTeam(opts.userTeam) === 'engineering'
-          ? `<a href="/console/issues" class="buzz-top-link ${activeScope === 'dashboard' || activeScope === 'issues' ? 'active' : ''}" title="Engineering team Issues board">
-        <span>◆</span>
-        <span>Issues</span>
-      </a>`
-          : ''
-      }
-      <a href="/console/compiler" class="buzz-top-link">
-        <span>📁</span>
-        <span>Projects</span>
-      </a>
-      <a href="/console/human-work" class="buzz-top-link">
-        <span>🤖</span>
-        <span>Agents</span>
-      </a>
-      <a href="/console/meetings" class="buzz-top-link ${activeScope === 'meetings' ? 'active' : ''}" title="WebRTC Meeting Intelligence">
-        <span>📹</span>
-        <span>Meetings</span>
-      </a>
-    </div>
-
-    <!-- Categorized Channels / Rooms -->
+    <!-- Chat rooms. This sidebar is chat-only: rooms, the room search,
+         and one button to the dashboard. Console navigation (approvals,
+         ledger, workflows, governance, team, settings) lives on the
+         dashboard, not here. -->
     <div class="buzz-room-groups">
-      <!-- 🐝 The Hive -->
       <div>
-        <div class="buzz-group-heading">🐝 The Hive</div>
+        <div class="buzz-group-heading">The Hive</div>
         <div class="buzz-room-list">
           ${hiveRooms}
         </div>
       </div>
 
-      <!-- 🛠️ Product -->
       <div>
-        <div class="buzz-group-heading">🛠️ Product</div>
+        <div class="buzz-group-heading">Product</div>
         <div class="buzz-room-list">
           ${prodRooms}
-          <a href="/console/buzz/engineering" class="buzz-room-link" title="#flight-path">
-            <span class="buzz-room-name"><span style="font-size:12px;margin-right:4px;opacity:0.7;">#</span>flight-path</span>
-            <span class="buzz-unread-dot" title="Unread activity"></span>
-          </a>
         </div>
       </div>
 
-      <!-- 🚀 Launch Swarm -->
       <div>
-        <div class="buzz-group-heading">🚀 Launch Swarm</div>
+        <div class="buzz-group-heading">Launch Swarm</div>
         <div class="buzz-room-list">
           ${swarmRooms}
-          ${otherRooms}
         </div>
       </div>
 
-      <!-- Channels -->
-      <div>
-        <div class="buzz-group-heading">Channels</div>
+      ${otherRooms
+        ? `<div>
+        <div class="buzz-group-heading">Custom rooms</div>
         <div class="buzz-room-list">
-          <a href="/console/buzz/general" class="buzz-room-link" style="color:#64748B;">
-            <span class="buzz-room-name"><span style="margin-right:4px;">🔔</span>Welcome</span>
+          ${otherRooms}
+        </div>
+      </div>`
+        : ''}
+
+      <div>
+        <div class="buzz-room-list">
+          <a href="/setup/rooms" class="buzz-room-link" title="Create a new chat room">
+            <span class="buzz-room-name"><span style="font-size:12px;margin-right:4px;opacity:0.7;">+</span>New room</span>
           </a>
         </div>
       </div>
 
-      <!-- View Dashboard & Issues Section (Engineers Only for Issues) -->
+      <!-- The one way out: dashboard (everything that is not chat) -->
       <div style="margin: 6px 0 8px; display: flex; flex-direction: column; gap: 4px;">
         <a href="/console/dashboard" id="vital-dashboard-btn" class="buzz-dashboard-launcher" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;background:#DCE0D9;color:#0F172A;font-weight:600;font-size:12.5px;text-decoration:none;transition:background 0.15s;" title="View Vital System Dashboard">
           <span style="font-size:13px;">📊</span>
@@ -514,23 +451,6 @@ export function renderWorkspaceShell(opts: {
         </a>`
             : ''
         }
-      </div>
-
-      <!-- Direct messages -->
-      <div>
-        <div class="buzz-group-heading">Direct messages</div>
-        <div class="buzz-room-list">
-          <a href="/console/buzz/general" class="buzz-room-link">
-            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#D1D5DB;display:inline-grid;place-items:center;font-size:9px;">👤</span>Samira Vance</span>
-          </a>
-          <a href="/console/buzz/general" class="buzz-room-link">
-            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#FBCFE8;display:inline-grid;place-items:center;font-size:9px;color:#9D174D;">ML</span>Morgan Lee</span>
-            <span style="background:#0F172A;color:#fff;font-size:9.5px;padding:0 5px;border-radius:10px;font-weight:700;">1</span>
-          </a>
-          <a href="/console/buzz/general" class="buzz-room-link">
-            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#BAE6FD;display:inline-grid;place-items:center;font-size:9px;color:#0369A1;">PS</span>Priya Shah</span>
-          </a>
-        </div>
       </div>
     </div>
 

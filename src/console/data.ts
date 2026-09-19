@@ -25,8 +25,9 @@ export function renderDataPage(tenant: string, opts: DataPageOptions): string {
     ? `<div class="error-summary" role="alert"><p><strong>${esc(opts.error)}</strong></p></div>`
     : '';
 
-  return `<p class="sub"><a href="${esc(opts.home ?? '/')}">← Back to console</a></p>
-<h1>Data &amp; retention</h1>
+  // No page-level back link: detailDocument already renders one above this
+  // body, and repeating it produced "Back to console ← Back to console".
+  return `<h1>Data &amp; retention</h1>
 <p class="sub">Manage organization data portability, cryptographic audit exports, and GDPR Article 17 erasure.</p>
 ${noticeHtml}
 ${errorHtml}
@@ -37,7 +38,7 @@ ${errorHtml}
     Download the complete portable snapshot of this organization's history: typed claims, claim links, decisions, Context Bundles, measured outcomes, and the append-only audit trail (JSON format).
   </p>
   <div style="margin-top:16px;">
-    <a href="/console/data/export" download="${esc(tenant)}-ledger-export.json" style="display:inline-flex;align-items:center;gap:6px;background:#0F5C57;color:#fff;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;font-size:13px;">
+    <a href="/console/data/export" download="${esc(tenant)}-ledger-export.json" style="display:inline-flex;align-items:center;gap:6px;background:var(--v-accent);color:var(--v-accent-ink);font-weight:600;padding:10px 18px;border-radius:10px;text-decoration:none;font-size:13px;">
       ⬇ Download Ledger Export (JSON)
     </a>
   </div>
@@ -66,31 +67,31 @@ ${errorHtml}
   </p>
   <form method="get" action="/receipts/erasure" style="margin-top:12px;display:flex;gap:8px;max-width:480px;">
     <input name="slug" placeholder="Organization slug (e.g. acme)" required style="flex:1;">
-    <button type="submit" style="background:#4B5563;">Verify Receipt</button>
+    <button type="submit" style="background:var(--v-ink-2);">Verify Receipt</button>
   </form>
 </div>
 
-<div class="card" style="border-color:#FCA5A5;background:#FFFBFB;">
-  <h2 style="color:#B91C1C;">Danger Zone — Permanent Tenant Erasure</h2>
+<div class="card" style="border-color:var(--v-risk);background:var(--v-tint-risk-bg);">
+  <h2 style="color:var(--v-tint-risk-ink);">Danger Zone — Permanent Tenant Erasure</h2>
   <p class="sub">
     Permanently delete all claims, decisions, outcomes, credentials, and member sessions for <strong>${esc(tenant)}</strong>.
     An in-memory export is verified before deletion commits, and an immutable proof receipt is recorded under <code>erased:${esc(tenant)}</code>.
   </p>
-  <p class="sub" style="color:#B91C1C;font-weight:500;">
+  <p class="sub" style="color:var(--v-tint-risk-ink);font-weight:500;">
     ⚠️ This action cannot be undone. To proceed, type the organization slug <code>${esc(tenant)}</code> below and confirm.
   </p>
   <form method="post" action="/console/data/erase" style="margin-top:16px;max-width:480px;display:grid;gap:12px;">
     <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
-    <label style="font-size:13px;font-weight:500;color:#374151;">
+    <label style="font-size:13px;font-weight:500;color:var(--v-ink-2);">
       Confirm organization slug
       <input name="confirmSlug" required placeholder="${esc(tenant)}" style="margin-top:4px;">
     </label>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#374151;">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--v-ink-2);">
       <input type="checkbox" name="confirmed" required>
       I understand that this will permanently erase all data for ${esc(tenant)}.
     </label>
     <div>
-      <button type="submit" style="background:#B91C1C;color:#fff;border:none;padding:10px 18px;border-radius:6px;font-weight:600;cursor:pointer;">
+      <button type="submit" style="background:var(--v-risk);color:var(--v-bg-1);border:none;padding:10px 18px;border-radius:10px;font-weight:600;cursor:pointer;">
         Permanently Erase Organization
       </button>
     </div>

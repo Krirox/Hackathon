@@ -545,7 +545,7 @@ T('charts draw data, not decoration — values appear in the SVG', async () => {
 T('the HTML report carries headlines, evidence tags, and compiler gaps', async () => {
   const { db, ledger, coord, comp } = await seeded();
   const html = renderHtml(await buildReport(db, ledger, coord, comp, TEN, NOW));
-  for (const needle of ['Reality health', '$25', 'Needs a human', 'Compiler', 'Rooms', '✓ FACT', 'FAFAF8']) {
+  for (const needle of ['Reality health', '$25', 'Needs a human', 'Compiler', 'Rooms', '✓ FACT', 'F7F8F6']) {
     eq(html.includes(needle), true, `report contains "${needle}":`);
   }
 });

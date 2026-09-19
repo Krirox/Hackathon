@@ -18,6 +18,26 @@ jobs:
       contents: read
     env:
       AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+    # This job applies a stack whose database is RDS Postgres, while `npm test`
+    # exercises the sqlite dialect. Without a Postgres service here, the engine
+    # actually being deployed is verified only by ci.yml on the branch — which is
+    # not the tree being deployed (a dispatched run can be any ref, and reworked
+    # SQL can land between the two). Mirrors ci.yml so the deploy applies code
+    # that has passed on the target engine.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vital
+          POSTGRES_USER: vital
+          POSTGRES_PASSWORD: vital-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vital -d vital"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,6 +46,10 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The engine being deployed: derived schema, dialect helpers, nextSeq.
+      - run: npm run test:postgres
+        env:
+          TEST_PG_URL: postgres://vital:vital-ci@localhost:5432/vital
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
@@ -82,13 +106,21 @@ jobs:
             -var "executor_image=$EXECUTOR_IMAGE"
       - name: Smoke check
         run: |
-          echo "Waiting for ECS service stability..."
-          aws ecs wait services-stable --cluster vital --services vital-core
-          ALB=$(terraform -chdir=deploy/aws output -raw alb_dns)
-          echo "Checking healthz endpoint..."
-          HEALTH=$(curl -fsSL --retry 5 --retry-delay 3 "http://$ALB/healthz")
+          CLUSTER=$(terraform -chdir=deploy/aws output -raw cluster_name)
+          CORE=$(terraform -chdir=deploy/aws output -raw core_service)
+          echo "Waiting for ECS service stability ($CLUSTER/$CORE)..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$CORE"
+          # console_url, not alb_dns. With a certificate attached (var.domain_name
+          # or var.acm_certificate_arn) the :80 listener 301s to https, and curl -L
+          # then follows to https://<alb-dns>/healthz — a name the certificate does
+          # not cover, so TLS verification fails and the step goes red on a healthy
+          # deploy. console_url is the name the certificate actually serves.
+          BASE=$(terraform -chdir=deploy/aws output -raw console_url)
+          echo "Checking $BASE/healthz ..."
+          HEALTH=$(curl -fsSL --retry 5 --retry-delay 3 "$BASE/healthz")
           echo "$HEALTH" | grep '"ok":true'
           echo "Verifying non-billable executor dry-run invocation..."
-          aws lambda invoke --function-name vital-executor \
+          FN=$(terraform -chdir=deploy/aws output -raw executor_function)
+          aws lambda invoke --function-name "$FN" \
             --payload '{"dryRun":true}' \
             --cli-binary-format raw-in-base64-out /dev/null

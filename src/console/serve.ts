@@ -9,7 +9,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, extname, resolve as resolvePath, sep as pathSep } from 'node:path';
 import type { Socket } from 'node:net';
-import type { AsyncDb } from '../core/db.ts';
+import { withStatementCount, type AsyncDb } from '../core/db.ts';
 import {
   AuthError,
   changePassword,
@@ -100,6 +100,7 @@ import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import { cardEvaluationEvidence, describeCardReadOnly } from '../compiler/registry.ts';
 import { eraseTenant, verifyErasureReceipt } from '../core/erasure.ts';
 import { approvalMessage, effectiveKeys, listOperatorKeys, operatorKeyId, verifyApproval } from '../gov/operator.ts';
+import { REQUEST_STATES } from '../core/types.ts';
 import { buildReport } from './report.ts';
 import {
   clearFilterUrl,
@@ -123,11 +124,22 @@ import {
   renderConsoleNav,
   renderHtml,
   renderListPage,
+  renderListSection,
+  renderTable,
   requestDetailUrl,
   resolveConsoleHome,
   withReturnTo,
 } from './render.ts';
 import { renderDigest, digestWindowSince, type DigestDays } from './digest.ts';
+import { statusChip } from './components.ts';
+import {
+  DEFAULT_THEME,
+  THEME_TOGGLE_MARKER,
+  THEME_TOGGLE_SCRIPT,
+  themeDocument,
+  themeHead,
+  themeToggleButton,
+} from './theme.ts';
 import { renderReview } from './review.ts';
 import { renderLearningPage, renderLearningCardPage } from './learning.ts';
 import { renderAuditPage } from './audit.ts';
@@ -179,6 +191,25 @@ import { join } from 'node:path';
 import { proposeEvalFromCorrection } from '../evals/runner.ts';
 import { CognitiveRouter } from '../router/router.ts';
 import { isBrowserForm, loginPath, safeReturnPath, sessionExpiredPayload } from './session-flow.ts';
+// Route table: declared capability per route, enforced in one place below.
+import {
+  capabilityAllows,
+  matchRoute,
+  validateRoutes,
+  type AuthContext,
+  type RouteDef,
+} from './routes/registry.ts';
+import { observabilityRoutes, type ObservabilityEnv } from './routes/observability.ts';
+import { complianceRoutes, type ComplianceEnv } from './routes/compliance.ts';
+import { createRequestStats, memo as memoize, withRequestCache } from '../core/request-cache.ts';
+// `shellMetrics as shellMetricsFor`: the page branches below keep local
+// `shellMetrics` / `teamMetrics` bindings, and shadowing the import there would
+// make it easy to call the unmemoized path by accident.
+import {
+  roomHealth,
+  roomRecency,
+  shellMetrics as shellMetricsFor,
+} from './shell-reads.ts';
 import {
   accountNav,
   addPreCsrfToken,
@@ -209,6 +240,7 @@ import { renderReviewPage } from './code-review.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
+import { renderConsoleShell } from './console-shell.ts';
 import {
   ISSUE_PRIORITIES,
   ISSUE_STATES,
@@ -236,7 +268,14 @@ import {
   type IssueState,
 } from './issues.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
-import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
+import {
+  CANONICAL_ROOMS,
+  ROOM_CATEGORIES,
+  ROOM_CATEGORY_LABELS,
+  loadRoomConfig,
+  normalizeScope,
+  saveRoomConfig,
+} from '../talk/rooms.ts';
 import { renderCompilerView, renderCompilerParts } from './compiler-view.ts';
 import { renderOperationsDashboard } from './operations-dashboard.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
@@ -360,7 +399,6 @@ export interface ConsoleServerOptions {
   host?: string;
   tenant?: string;
   now?: () => string;
-  fetchFn?: typeof fetch;
   /** Set behind TLS so the session cookie gains `Secure`. */
   secureCookies?: boolean;
   /**
@@ -404,6 +442,11 @@ export interface ConsoleServerOptions {
    * clients cannot spoof their own IP or scheme.
    */
   trustProxy?: boolean;
+  /**
+   * Outbound HTTP for GitHub board sync, injected so tests can stub the network
+   * instead of calling api.github.com. Defaults to the global `fetch`.
+   */
+  fetchFn?: typeof fetch;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -473,25 +516,56 @@ const redirect = (res: ServerResponse, location: string, cookie?: string): void 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/**
+ * Extracts the *content* a page contributes to the workspace shell: the
+ * page's own <main> is unwrapped (the shell renders the single
+ * `<main id="main">` landmark) and its skip link is dropped for the same
+ * reason. Scripts are preserved — they are page behaviour, not layout.
+ */
+function workspaceInnerHtml(html: string): string {
+  const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html;
+  return body
+    .replace(/<a\b[^>]*class="skip-link"[^>]*>[\s\S]*?<\/a>/gi, '')
+    .replace(/<\/?main\b[^>]*>/gi, '')
+    // detailDocument's "Back to console" anchor is kept: it is the only link to
+    // the console root that the shell-agnostic tests pin, and a shelled page is
+    // still reachable with the rail hidden.
+    .trim();
+}
+
 async function wrapInWorkspaceShell(
   html: string,
   db: import('../core/db.ts').AsyncDb,
   tenant: string,
   home: string,
   auth: { user: import('../core/auth.ts').User; session: { csrfToken: string } },
-  navKey?: import('./render.ts').NavKey,
+  // Wider than NavKey on purpose: NavKey covers the legacy console nav, while
+  // the shell also names pages that nav never had (compiler). The only consumer
+  // that needs a real NavKey is renderConsoleNav, cast there.
+  navKey?: string,
   activeScope?: string | null,
   isDrawer?: boolean,
 ): Promise<string> {
-  const innerHtml = html.includes('<body>') ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) : html;
+  // The Workspace/chat pages render the Buzz shell (workspace-shell.ts) and
+  // keep upstream Buzz's own document, fonts and palette; the Console pages
+  // render the redesigned Console shell. Chat is identified by its nav key, the
+  // only place the two families differ. This split is deliberate — restyling
+  // the Console must never re-skin the chat.
+  const isChat = navKey === 'buzz';
+  const innerHtml = isChat
+    ? // Buzz keeps upstream's exact body slice: the shell owns a #main landmark
+      // and the chat document already supplies one, so nothing is stripped.
+      (html.includes('<body>') ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) : html)
+    : workspaceInnerHtml(html);
   if (isDrawer) {
     return innerHtml;
   }
-  const rooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
+  const roomsWithCategory = (await roomHealth(db, tenant)).map((h) => ({
     scope: h.scope,
     roomName: h.roomName,
     badge: h.badge,
     pending: h.pendingApprovals,
+    category: h.category,
   }));
   const isAdmin = (await import('../core/auth.ts')).atLeast(auth.user.role, 'admin');
   const avail: Record<string, boolean> = {
@@ -507,23 +581,46 @@ async function wrapInWorkspaceShell(
   };
   const nav = (await import('./render.ts')).renderConsoleNav(
     (await import('./render.ts')).buildConsoleNav(home, avail),
-    navKey,
+    navKey as import('./render.ts').NavKey | undefined,
   );
   const cluster = (await import('./render.ts')).renderAccountCluster(
     auth.user.email,
     auth.user.role,
     auth.session.csrfToken,
   );
-  const shellWs = await import('./workspace-shell.ts');
-  const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
-  const shellRecency = await shellWs.computeRoomRecency(
+  const shellMetrics = await shellMetricsFor(db, tenant);
+  const shellRecency = await roomRecency(
     db,
     tenant,
-    rooms.map((r) => r.scope),
+    roomsWithCategory.map((r) => r.scope),
   );
-  const shell = renderWorkspaceShell({
-    rooms,
+  if (isChat) {
+    // Byte-for-byte upstream Buzz: the chat document's own <head> (system font
+    // stack, Buzz palette) is preserved and nothing is theme-injected, so the
+    // Workspace looks exactly like Buzz. Adding the Console token block here
+    // would re-font the chat and repaint its canvas, which is why it is not
+    // applied on this path.
+    const shell = renderWorkspaceShell({
+      rooms: roomsWithCategory.map(({ category: _category, ...room }) => room),
+      activeScope,
+      home,
+      consoleNav: nav,
+      accountCluster: cluster,
+      innerHtml,
+      userEmail: auth.user.email,
+      userRole: auth.user.role,
+      userTeam: auth.user.team,
+      tenant,
+      metrics: shellMetrics,
+      roomRecency: shellRecency,
+    });
+    return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
+  }
+
+  const shell = renderConsoleShell({
+    rooms: roomsWithCategory,
     activeScope,
+    navKey,
     home,
     consoleNav: nav,
     accountCluster: cluster,
@@ -535,41 +632,50 @@ async function wrapInWorkspaceShell(
     metrics: shellMetrics,
     roomRecency: shellRecency,
   });
-  return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
+  const head = html.replace(/[\s\S]*?<head[^>]*>/i, '').replace(/<\/head>[\s\S]*/i, '');
+  const openBody = /<body[^>]*>/i.exec(html)?.[0] ?? '<body>';
+  return themeDocument(
+    `<!doctype html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}</head>${openBody}${shell}</body></html>`,
+  );
 }
 
+/**
+ * Standalone compact document: auth, recovery, MFA and utility pages that
+ * render before a workspace session exists. Uses the shared design system
+ * (theme.ts) rather than a private copy of the tokens, so a token change
+ * lands everywhere at once.
+ */
 function page(title: string, body: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  return `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
+${themeHead()}
 <style>
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:880px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
-h1{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin:0 0 16px 0;color:#0A0F14}
-h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:24px 0 12px;color:#111827}
-a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
-form:not([style*="display:inline"]){max-width:400px;display:grid;gap:12px;background:#fff;border:1px solid #E4E4E1;border-radius:10px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+/* Compact utility surface: one readable column, no rail, generous paper. */
+body{margin:0;padding:28px 20px 56px}
+.utility-wrap{max-width:880px;margin:0 auto}
+.utility-bar{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:18px}
+h1{font-size:clamp(22px,3vw,28px);font-weight:700;letter-spacing:-0.025em;margin:0 0 14px;color:var(--v-ink)}
+h2{font-size:16px;font-weight:650;letter-spacing:-0.015em;margin:24px 0 10px;color:var(--v-ink)}
+a{color:var(--v-accent);text-decoration:none}a:hover{text-decoration:underline}
+form:not([style*="display:inline"]){max-width:400px;display:grid;gap:12px;background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:var(--radius-card);padding:24px;box-shadow:var(--v-card-shadow)}
 form[style*="display:inline"]{display:inline!important;border:none!important;padding:0!important;background:none!important;box-shadow:none!important}
-input,textarea,select{padding:10px 12px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:14px;color:#0A0F14;background:#fff;transition:border-color .15s,box-shadow .15s}
-input:focus,textarea:focus,select:focus{border-color:#0F5C57;box-shadow:0 0 0 3px rgba(15,92,87,.12);outline:none}
-label{font-size:13px;font-weight:500;color:#374151;display:grid;gap:4px}
-button{padding:10px 18px;border:0;border-radius:6px;background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;min-height:44px;font-family:inherit;font-size:14px;transition:background .15s ease,transform .1s ease}
-button:hover{background:#0B4A45}
+input,textarea,select{padding:10px 12px;border:1px solid var(--v-line-strong);border-radius:var(--radius-input);font-family:inherit;font-size:14px;color:var(--v-ink);background:var(--v-input-bg);transition:border-color .15s,box-shadow .15s}
+input:focus,textarea:focus,select:focus{border-color:var(--v-accent);box-shadow:0 0 0 3px var(--v-accent-dim);outline:none}
+label{font-size:13px;font-weight:500;color:var(--v-muted);display:grid;gap:4px}
+button{padding:10px 18px;border:0;border-radius:var(--radius-md);background:var(--v-accent);color:var(--v-accent-ink);font-weight:600;cursor:pointer;min-height:44px;font-family:inherit;font-size:14px;transition:filter .15s ease,transform .1s ease}
+button:hover{filter:brightness(1.08)}
 button:active{transform:translateY(1px)}
 button:disabled{opacity:0.6;cursor:not-allowed}
-.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03);margin-bottom:16px}
-.err{color:#B91C1C;font-size:13px}.sub{color:#6B7280;font-size:13px;line-height:1.4}
-.error-summary{border:1px solid #FCA5A5;border-radius:8px;padding:14px 16px;margin:12px 0;background:#FEF2F2;color:#991B1B}
-.success{border:1px solid #86EFAC;border-radius:8px;padding:14px 16px;margin:12px 0;background:#F0FDF4;color:#166534}
-a.skip-link{position:absolute;left:-9999px;top:0;background:#0F5C57;color:#fff;padding:8px 14px;z-index:100;border-radius:0 0 6px 0;font-size:13px;font-weight:500}a.skip-link:focus{left:0}
-button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #0F5C57;outline-offset:2px}
-table{border-collapse:collapse;max-width:100%;display:block;overflow-x:auto;background:#fff;border:1px solid #E4E4E1;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.02)}
-th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #E4E4E1}
-th{background:#F9F9F8;font-size:12px;font-weight:600;color:#4B5563;text-transform:uppercase;letter-spacing:0.04em}
+.card{border:1px solid var(--v-line);border-radius:var(--radius-card);padding:20px 22px;background:var(--v-bg-1);box-shadow:var(--v-card-shadow);margin-bottom:16px}
+.err{color:var(--v-risk);font-size:13px}.sub{color:var(--v-muted);font-size:13px;line-height:1.5}
+.error-summary{border:1px solid var(--v-line);border-left:3px solid var(--v-risk);border-radius:var(--radius-md);padding:14px 16px;margin:12px 0;background:var(--v-tint-risk-bg);color:var(--v-tint-risk-ink)}
+.success{border:1px solid var(--v-line);border-left:3px solid var(--v-fact);border-radius:var(--radius-md);padding:14px 16px;margin:12px 0;background:var(--v-tint-good-bg);color:var(--v-tint-good-ink)}
+a.skip-link{position:absolute;left:-9999px;top:0;background:var(--v-accent);color:var(--v-accent-ink);padding:8px 14px;z-index:100;border-radius:0 0 6px 0;font-size:13px;font-weight:500}a.skip-link:focus{left:0}
 .table-wrap{overflow-x:auto;max-width:100%}
 table.stacked thead{}
 @media (max-width:640px){body{padding:16px}form{max-width:100%}input,textarea,select,button{min-height:44px}}
-@media (max-width:600px){table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid #E4E4E1;border-radius:8px;margin-bottom:8px}table.stacked td{display:block;border:0}}
+@media (max-width:600px){table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid var(--v-line);border-radius:var(--radius-sm);margin-bottom:8px}table.stacked td{display:block;border:0}}
 </style>
-</head><body><a class="skip-link" href="#main">Skip to main content</a><main id="main">${body}</main></body></html>`;
+</head><body><a class="skip-link" href="#main">Skip to main content</a><div class="utility-wrap"><div class="utility-bar">${themeToggleButton()}</div><main id="main">${body}</main></div><script ${THEME_TOGGLE_MARKER}>${THEME_TOGGLE_SCRIPT}</script></body></html>`;
 }
 
 function prefersHtml(req: IncomingMessage): boolean {
@@ -732,10 +838,10 @@ function forgotPasswordPage(csrf: string, opts: { error?: string; notice?: strin
   const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
   const mailerNote = hasMailerConfigured()
     ? `<p class="sub">Enter your account email. If an account exists, a single-use password reset link will be sent to your inbox.</p>`
-    : `<div class="card" style="background:#F9FAFB;margin:12px 0 16px 0;padding:14px 16px;">
-<p class="sub" style="margin:0 0 6px 0;font-weight:600;color:#374151;">Operator-assisted password recovery</p>
+    : `<div class="card" style="background:var(--v-bg-2);margin:12px 0 16px 0;padding:14px 16px;">
+<p class="sub" style="margin:0 0 6px 0;font-weight:600;color:var(--v-ink);">Operator-assisted password recovery</p>
 <p class="sub" style="margin:0;">Transactional outbound email is not configured for this self-hosted installation. Submitting this form records an audited reset token in the ledger.</p>
-<p class="sub" style="margin:6px 0 0 0;color:#4B5563;"><strong>Next steps:</strong> Ask your system operator to deliver your link using <code>vital reset-link</code>, or contact your team owner. <strong>Expected turnaround:</strong> typically under 1 hour during business hours.</p>
+<p class="sub" style="margin:6px 0 0 0;color:var(--v-muted);"><strong>Next steps:</strong> Ask your system operator to deliver your link using <code>vital reset-link</code>, or contact your team owner. <strong>Expected turnaround:</strong> typically under 1 hour during business hours.</p>
 </div>`;
 
   return page(
@@ -868,7 +974,7 @@ function accountPage(
     if (hasMailerConfigured()) {
       return `<p class="sub">Email not yet verified — recovery links are not trusted until verification completes. <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Send verification link</button></form></p>`;
     }
-    return `<p class="sub">Email not yet verified — automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code>vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day). <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" style="background:#4B5563;">Request operator verification</button></form></p>`;
+    return `<p class="sub">Email not yet verified — automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code>vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day). <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary" style="min-height:auto;">Request operator verification</button></form></p>`;
   })();
   const mfaBlock = extra.mfaHint ? `<p class="sub">${esc(extra.mfaHint)}</p>` : '';
   // FINAL-005: authenticator enrollment, factor list, and recovery codes.
@@ -878,7 +984,7 @@ function accountPage(
       const factors = extra.mfa.factors
         .map(
           (f) =>
-            `<form method="post" action="/account/mfa/remove" style="display:inline;margin-left:8px"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="factorId" value="${esc(f.id)}"><button type="submit" style="background:#6B7280">Remove ${esc(f.kind)} factor</button></form>`,
+            `<form method="post" action="/account/mfa/remove" style="display:inline;margin-left:8px"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="factorId" value="${esc(f.id)}"><button type="submit" class="v-btn v-btn-sm v-btn-ghost">Remove ${esc(f.kind)} factor</button></form>`,
         )
         .join('');
       return `<h2>Two-factor authentication</h2>
@@ -1142,7 +1248,7 @@ function disableForm(csrf: string, u: User, users: User[], confirmation?: Disabl
     consequences = `<p class="sub">Disabling <strong>${esc(confirmation.person.name)}</strong> (${esc(confirmation.person.email)}) ${esc(confirmation.sessionConsequence)} ${esc(confirmation.accessConsequence)}${workNote}${ownerNote}</p>`;
   }
   return `<details>
-  <summary style="cursor:pointer;color:#6B7280">Disable</summary>
+  <summary style="cursor:pointer;color:var(--v-muted)">Disable</summary>
   <form method="post" action="/team/disable" style="margin-top:8px;display:grid;gap:8px;max-width:360px">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
     <input type="hidden" name="userId" value="${esc(u.id)}">
@@ -1158,7 +1264,7 @@ function disableForm(csrf: string, u: User, users: User[], confirmation?: Disabl
     </select>`
         : ''
     }
-    <button type="submit" style="background:#6B7280">Disable member</button>
+    <button type="submit" class="v-btn v-btn-secondary" style="min-height:auto;">Disable member</button>
   </form>
 </details>`;
 }
@@ -1248,7 +1354,7 @@ function teamPage(
     <form method="post" action="/team/invitation/revoke" style="display:inline">
       <input type="hidden" name="csrf" value="${esc(csrf)}">
       <input type="hidden" name="invitationId" value="${esc(inv.id)}">
-      <button type="submit" style="background:#6B7280">Revoke</button>
+      <button type="submit" class="v-btn v-btn-sm v-btn-ghost">Revoke</button>
     </form>`
           : '';
       return `<tr>
@@ -1547,7 +1653,20 @@ ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
 }
 
 /** Stable audit identity string for a user. */
+/**
+ * The acting user as recorded: `usr_… (email)`. This string is load-bearing —
+ * it is written into audit rows AND it is the message body an operator signs
+ * (`approvalMessage`, verified per-request against the same value), so it must
+ * not change shape. For the name shown in the interface use `actorLabel`.
+ */
 const by = (u: User): string => `${u.id} (${u.email})`;
+
+/**
+ * How the interface names the viewer. The email — never the internal `usr_…`
+ * row id, which is a database key with no place in a page. Distinct from `by`
+ * on purpose: `by` is an audit/signature value, this is display only.
+ */
+const actorLabel = (u: User): string => u.email;
 
 /**
  * Dashboard search (FLOW-020) over the existing home path: permissioned
@@ -1563,22 +1682,38 @@ async function dashboardSearchSection(
   base: string,
   returnTo: string,
 ): Promise<string> {
-  const form = `<section aria-label="Search"><h2>Search</h2>
-<form method="get" action="${esc(base)}">
-  <label class="sub" for="q">search requests and claims</label>
-  <input id="q" name="q" value="${esc(state.q ?? '')}">
-  <label class="sub" for="state">status (blank for all)</label>
-  <input id="state" name="state" value="${esc(state.states?.[0] ?? '')}">
-  <label class="sub" for="scope">scope (blank for all)</label>
-  <input id="scope" name="scope" value="${esc(state.scopes?.[0] ?? '')}">
-  <label class="sub" for="since">since (inclusive date)</label>
-  <input id="since" name="since" type="date" value="${esc(state.since ?? '')}">
-  <label class="sub" for="until">until (inclusive date)</label>
-  <input id="until" name="until" type="date" value="${esc(state.until ?? '')}">
-  <label class="sub" for="workflow">workflow id (blank for all)</label>
-  <input id="workflow" name="workflow" value="${esc(state.workflowId ?? '')}">
-  <button type="submit">Search</button>
-  <a href="${esc(clearFilterUrl(base))}">Clear</a>
+  // Filter bar: a search field plus compact controls. Field names are
+  // unchanged, so deep links and server-side validation keep working.
+  const stateOptions = REQUEST_STATES.map(
+    (s) =>
+      `<option value="${esc(s)}"${state.states?.[0] === s ? ' selected' : ''}>${esc(s.replace(/_/g, ' ').toLowerCase())}</option>`,
+  ).join('');
+  const form = `<section aria-label="Search" class="v-card" style="padding:16px 18px;margin-bottom:16px;">
+<div class="v-split" style="margin-bottom:12px;">
+  <div><h2 class="v-card-title">Search the ledger</h2>
+  <p class="v-sub" style="font-size:12px;margin:3px 0 0;">Requests and claims, filtered by status, scope, type and date.</p></div>
+  <a href="${esc(clearFilterUrl(base))}" class="v-btn v-btn-secondary v-btn-sm">Clear all</a>
+</div>
+<form method="get" action="${esc(base)}" style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(100%,140px),1fr));align-items:end;">
+  <label class="v-kpi-label" for="q" style="grid-column:1/-1;display:grid;gap:5px;">Search
+    <input class="v-input" id="q" name="q" value="${esc(state.q ?? '')}" placeholder="goal, subject or claim id" style="font-weight:400;text-transform:none;letter-spacing:normal;">
+  </label>
+  <label class="v-kpi-label" for="state" style="display:grid;gap:5px;">Status
+    <select class="v-input v-select" id="state" name="state"><option value="">any</option>${stateOptions}</select>
+  </label>
+  <label class="v-kpi-label" for="scope" style="display:grid;gap:5px;">Scope
+    <input class="v-input" id="scope" name="scope" value="${esc(state.scopes?.[0] ?? '')}" placeholder="any" style="font-weight:400;text-transform:none;letter-spacing:normal;">
+  </label>
+  <label class="v-kpi-label" for="since" style="display:grid;gap:5px;">Since
+    <input class="v-input" id="since" name="since" type="date" value="${esc(state.since ?? '')}">
+  </label>
+  <label class="v-kpi-label" for="until" style="display:grid;gap:5px;">Until
+    <input class="v-input" id="until" name="until" type="date" value="${esc(state.until ?? '')}">
+  </label>
+  <label class="v-kpi-label" for="workflow" style="display:grid;gap:5px;">Workflow
+    <input class="v-input" id="workflow" name="workflow" value="${esc(state.workflowId ?? '')}" placeholder="any id" style="font-weight:400;text-transform:none;letter-spacing:normal;">
+  </label>
+  <button type="submit" class="v-btn v-btn-primary">Search</button>
 </form>`;
   const scoped = state.scopes ?? [];
   const filtering =
@@ -1613,23 +1748,26 @@ async function dashboardSearchSection(
   });
   if (requests.total + claims.total === 0) {
     const model = noResultsModel(base, state);
-    return `${form}<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p></section>`;
+    return `${form}<div class="v-empty"><h3>${esc(model.title)}</h3><p>${esc(model.body)}</p><p><a class="v-btn v-btn-secondary v-btn-sm" href="${esc(model.clearUrl)}">Clear search and filters</a></p></div></section>`;
   }
   const groups = partitionRequestsByDecision(requests.rows);
   const requestRow = (r: RequestSummary): string =>
-    `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), returnTo))}">${esc(r.goal)}</a> <span class="sub">${esc(r.state)} · ${esc(r.originScope)}→${esc(r.targetScope)}</span></li>`;
+    `<a class="v-row" href="${esc(withReturnTo(requestDetailUrl(r.id), returnTo))}"><span class="v-row-main"><strong class="v-truncate">${esc(r.goal)}</strong><span class="v-meta">${esc(r.state)} · ${esc(r.originScope)}→${esc(r.targetScope)}</span></span><span class="v-meta" aria-hidden="true">→</span></a>`;
   const claimRow = (c: ClaimSummary): string =>
-    `<li><a href="${esc(withReturnTo(claimDetailUrl(c.id), returnTo))}">${esc(c.subject)}</a> <span class="sub">${esc(c.kind)} · ${esc(c.status)}</span></li>`;
-  let body = `<p class="sub">${requests.total} matching request(s) · ${claims.total} matching claim(s)</p>`;
-  if (groups.pending.length > 0) body += `<h3>Pending decision</h3><ul>${groups.pending.map(requestRow).join('')}</ul>`;
-  if (groups.active.length > 0)
-    body += `<h3>Approved or executing</h3><ul>${groups.active.map(requestRow).join('')}</ul>`;
-  if (groups.other.length > 0) body += `<h3>Other states</h3><ul>${groups.other.map(requestRow).join('')}</ul>`;
+    `<a class="v-row" href="${esc(withReturnTo(claimDetailUrl(c.id), returnTo))}"><span class="v-row-main"><strong class="v-truncate">${esc(c.subject)}</strong><span class="v-meta">${esc(c.kind)} · ${esc(c.status)}</span></span><span class="v-meta" aria-hidden="true">→</span></a>`;
+  const group = (label: string, rows: string[]): string =>
+    rows.length === 0
+      ? ''
+      : `<h3 class="v-eyebrow" style="margin:16px 0 2px;">${esc(label)}</h3><div class="v-stack-sm" style="gap:0;">${rows.join('')}</div>`;
+  let body = `<p class="v-sub v-num" style="font-size:12.5px;">${requests.total} matching request(s) · ${claims.total} matching claim(s)</p>`;
+  body += group('Pending decision', groups.pending.map(requestRow));
+  body += group('Approved or executing', groups.active.map(requestRow));
+  body += group('Other states', groups.other.map(requestRow));
   if (requests.truncated)
-    body += `<p class="sub">explicit truncation: showing ${requests.rows.length} of ${requests.total} matching requests</p>`;
+    body += `<p class="v-meta" style="margin-top:8px;">explicit truncation: showing ${requests.rows.length} of ${requests.total} matching requests</p>`;
   if (claims.truncated)
-    body += `<p class="sub">explicit truncation: showing ${claims.rows.length} of ${claims.total} matching claims</p>`;
-  if (claims.rows.length > 0) body += `<h3>Claims</h3><ul>${claims.rows.map(claimRow).join('')}</ul>`;
+    body += `<p class="v-meta">explicit truncation: showing ${claims.rows.length} of ${claims.total} matching claims</p>`;
+  body += group('Claims', claims.rows.map(claimRow));
   const pages: string[] = [];
   if (requests.offset > 0)
     pages.push(
@@ -1639,9 +1777,9 @@ async function dashboardSearchSection(
     pages.push(
       `<a href="${esc(listStateUrl(base, { ...state, offset: requests.offset + requests.rows.length }))}">Next</a>`,
     );
-  if (pages.length > 0) body += `<p class="sub">${pages.join(' · ')}</p>`;
+  if (pages.length > 0) body += `<nav class="v-pagination" style="margin-top:12px;">${pages.join('')}</nav>`;
   const paths = viewAllPaths();
-  body += `<p class="sub"><a href="${esc(clearFilterUrl(base))}">Clear search and filters</a> · Browse: <a href="${esc(paths.requests)}">All requests</a> · <a href="${esc(paths.claims)}">All claims</a> · <a href="${esc(paths.rooms)}">All rooms</a> · <a href="${esc(paths.humanWork)}">All human work</a> · <a href="${esc(paths.workflows)}">Workflows</a> · <a href="${esc(paths.digest)}">Digest</a></p>`;
+  body += `<p class="v-meta" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--v-line);"><a href="${esc(clearFilterUrl(base))}">Clear search and filters</a> · Browse: <a href="${esc(paths.requests)}">All requests</a> · <a href="${esc(paths.claims)}">All claims</a> · <a href="${esc(paths.rooms)}">All rooms</a> · <a href="${esc(paths.humanWork)}">All human work</a> · <a href="${esc(paths.workflows)}">Workflows</a> · <a href="${esc(paths.digest)}">Digest</a></p>`;
   return `${form}${body}</section>`;
 }
 
@@ -1777,12 +1915,16 @@ async function triggerMentionHandoffs(
 }
 
 export function startConsoleServer(
-  db: AsyncDb,
+  rawDb: AsyncDb,
   ledger: Ledger,
   coord: Coordinator,
   comp: OrganizationalCompiler,
   opts: ConsoleServerOptions = {},
 ): Promise<ConsoleServer> {
+  // One decorator, here, so every statement the console issues is counted
+  // against the request that asked for it — including the ones inside domain
+  // modules, which never see the request object.
+  const db = withStatementCount(rawDb);
   const tenant = opts.tenant ?? 'acme';
   const bindHost = opts.host ?? DEFAULT_BIND_HOST;
   const publicBind = !isLoopbackBindHost(bindHost);
@@ -1923,11 +2065,13 @@ export function startConsoleServer(
     );
 
   const readinessPill = (status: string): string => {
-    if (status === 'ok')
-      return '<span style="display:inline-block;background:#0F7A3D;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">ok</span>';
+    // Tri-state rather than pass/fail: an optional dependency that was never
+    // configured is *grey*, not red — a red pill would claim a failure that
+    // never happened.
+    if (status === 'ok') return '<span class="v-badge v-badge-good"><span class="dot"></span>ok</span>';
     if (status === 'unconfigured-optional')
-      return '<span style="display:inline-block;background:#9CA3AF;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">not configured</span>';
-    return '<span style="display:inline-block;background:#B91C1C;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">needs attention</span>';
+      return '<span class="v-badge"><span class="dot" style="background:var(--v-faint)"></span>not configured</span>';
+    return '<span class="v-badge v-badge-risk"><span class="dot"></span>needs attention</span>';
   };
 
   const renderSystemReadiness = async (at: string): Promise<string> => {
@@ -1935,14 +2079,20 @@ export function startConsoleServer(
     const items = r.checks
       .map(
         (c) =>
-          `<li style="margin-bottom:6px">${readinessPill(c.status)} <strong>${esc(c.name)}</strong>${c.detail ? ` — <span class="sub">${esc(c.detail)}</span>` : ''}</li>`,
+          `<li class="v-row"><span class="v-row-main">${readinessPill(c.status)}<strong>${esc(c.name)}</strong></span><span class="v-meta">${c.detail ? esc(c.detail) : ''}</span></li>`,
       )
       .join('');
     const headline = r.ready ? 'System is ready' : 'System needs attention';
-    return `<section id="system-readiness" style="margin-bottom:24px">
-<h1>${esc(headline)}</h1>
-<ul style="list-style:none;padding:0;margin:8px 0 0 0">${items}</ul>
-<p class="sub"><a href="/setup">Setup</a> · <a href="/api/metrics" rel="noreferrer">Raw readiness (JSON)</a></p>
+    return `<section id="system-readiness" class="v-card" style="margin-bottom:16px;">
+<div class="v-split" style="margin-bottom:6px;">
+  <div>
+    <p class="v-eyebrow">System readiness</p>
+    <h2 class="v-card-title" style="margin-top:4px;">${esc(headline)}</h2>
+  </div>
+  <a class="v-btn v-btn-secondary v-btn-sm" href="/api/metrics" rel="noreferrer">Raw readiness (JSON)</a>
+</div>
+<ul style="list-style:none;padding:0;margin:6px 0 0">${items}</ul>
+<p class="v-meta" style="margin-top:10px;"><a href="/setup">Continue setup</a></p>
 </section>`;
   };
 
@@ -1956,6 +2106,45 @@ export function startConsoleServer(
   const mfaChallenges = new Map<string, { userId: string; tenant: string; expiresAtMs: number }>();
   const MFA_COOKIE = 'vital_mfa';
   const MFA_CHALLENGE_TTL_MS = 5 * 60_000;
+  /**
+   * Single ingestion point for the design system: whatever page producer
+   * answered the request (shell-wrapped, detail document, utility page, legacy
+   * producer), the HTML response carries the tokens, the early paint script
+   * and the theme toggle exactly once. Fragments and non-HTML bodies pass
+   * through untouched, and the marketing site's own stylesheet is never
+   * rewritten because only text/html console responses are transformed.
+   */
+  const themeAwareHtml = (res: ServerResponse): void => {
+    const end = res.end.bind(res) as (...args: never[]) => ServerResponse;
+    const writeHead = res.writeHead.bind(res) as (...args: never[]) => ServerResponse;
+    // `res.writeHead(status, headers)` does not populate `res.getHeader()`,
+    // so the content type has to be captured as it is written.
+    let contentType = '';
+    res.writeHead = ((...args: unknown[]) => {
+      for (const arg of args) {
+        if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
+          const raw = (arg as Record<string, unknown>)['content-type'];
+          if (raw !== undefined) contentType = String(raw);
+        }
+      }
+      return writeHead(...(args as never[]));
+    }) as typeof res.writeHead;
+    let settled = false;
+    res.end = ((chunk?: unknown, encoding?: unknown, callback?: unknown) => {
+      if (settled) return end(chunk as never, encoding as never, callback as never);
+      settled = true;
+      const type = contentType || String(res.getHeader('content-type') ?? '');
+      if (type.includes('text/html') && typeof chunk === 'string') {
+        return end(
+          themeDocument(chunk) as never,
+          encoding as never,
+          callback as never,
+        );
+      }
+      return end(chunk as never, encoding as never, callback as never);
+    }) as typeof res.end;
+  };
+
   const rateOk = (key: string, limit: number, windowMs: number, atMs: number): boolean => {
     const b = buckets.get(key);
     if (!b || atMs > b.reset) {
@@ -1991,9 +2180,72 @@ export function startConsoleServer(
     const signalingHub = new MeetingSignalingHub(db);
     const wsUpgrade = createWebSocketUpgradeHandler(signalingHub);
 
-    const server: Server = createServer((req, res) => {
+    // ---------------------------------------------------------- route table ----
+    // Routes moved off the legacy if-chain. Their capability is declared in
+    // routes/*.ts and enforced by `matchRoute` + `capabilityAllows` below, so
+    // "does this require a session" is answerable by reading one table instead
+    // of tracing a branch. Unmigrated routes still fall through to the chain.
+    // A union of the env each migrated domain declares. A domain module asks
+    // only for what it uses; the server satisfies all of them, and because a
+    // handler's parameter is contravariant a narrow handler slots into this
+    // wider list without a cast.
+    type ConsoleRouteEnv = ObservabilityEnv & ComplianceEnv;
+    /** Shelled console page: the chrome stays here, the page body comes from the domain. */
+    const shellPage: ComplianceEnv['shellPage'] = async (auth, page) => {
+      const opts = {
+        tenant,
+        actor: by(auth.user),
+        actorLabel: actorLabel(auth.user),
+        csrf: auth.session.csrfToken,
+        canApprove: false,
+        requiredRole: approverMin,
+        operatorMode: 'session' as const,
+        home,
+      };
+      return wrapInWorkspaceShell(
+        detailDocument(page.title, page.body, { ...opts, hideHeader: page.hideHeader }),
+        db,
+        tenant,
+        home,
+        auth,
+        page.navKey,
+      );
+    };
+    const routeEnv: ConsoleRouteEnv = {
+      db,
+      tenant,
+      home,
+      shellPage,
+      exportLedger: (t, at) => exportLedger(db, t, at),
+      eraseTenant: (t, actor, at) => eraseTenant(db, t, actor, at),
+      actorOf: (auth) => by(auth.user),
+      redirect: (res, location, opts) =>
+        redirect(res, location, opts?.clearSession ? CLEAR_SESSION_COOKIE : undefined),
+      vitalVersion: '0.0.1',
+      // Read at request time: the address is only known after listen().
+      get boundAddress(): string {
+        return boundAddress;
+      },
+      // FLOW-006: liveness answers through the LB path too — the target group's
+      // probe and the smoke script land here with ALB proxy headers attached.
+      // `scheme`/`viaProxy` let the smoke check prove the LB→task path, not just
+      // loopback reachability.
+      forwarded: (req) => {
+        const fwd = resolveRequestContext(req, trustProxy);
+        return { scheme: fwd.scheme, viaProxy: fwd.viaProxy };
+      },
+      liveness: (at) => liveness(at),
+      rateOk,
+      approvalLatency: (t) => coord.approvalLatencyStats(t),
+      costPerSignal: (t) => new CognitiveRouter(db).costPerSignal(t),
+    };
+    const routes: RouteDef<ConsoleRouteEnv>[] = [...observabilityRoutes(), ...complianceRoutes()];
+    // Fail at boot, not at request time: a route that cannot register is a 404
+    // in production and a mystery in review.
+    validateRoutes(routes);      const server: Server = createServer((req, res) => {
       const started = Date.now();
       let logPath = 'unmatched';
+      themeAwareHtml(res);
       res.on('finish', () => {
         metrics.requests += 1;
         console.log(
@@ -2003,10 +2255,28 @@ export function startConsoleServer(
             path: logPath,
             status: res.statusCode,
             ms: Date.now() - started,
+            // Render cost, not just latency: `sql` is the statements this
+            // request prepared and `memo` the reads it served from the request
+            // cache. A page whose sql count climbs is duplicating work again —
+            // the failure mode that is invisible in a screenshot and in a
+            // functional test, and that only shows up as "the console got
+            // slower" months later. Logged for every request; the path is
+            // already normalised above, so no tenant data is added here.
+            sql: stats.sql,
+            memo: stats.memoHits,
           }),
         );
       });
-      void (async () => {
+      // One request-scoped cache for everything below: the same read inside this
+      // request resolves once, no matter how many widgets ask for it. Mutating
+      // methods opt out — a POST that writes and then re-renders must not be
+      // handed the pre-write read from earlier in the same request.
+      // Reads-only requests memoize; a request that can write does not.
+      const readsOnly = (req.method ?? 'GET') === 'GET';
+      // Counters live here, outside the request context, because the log line is
+      // written on `finish` — after the context that would have held them.
+      const stats = createRequestStats();
+      void withRequestCache(async () => {
         const url = new URL(req.url ?? '/', 'http://console');
         const path = url.pathname;
         const method = req.method ?? 'GET';
@@ -2023,9 +2293,18 @@ export function startConsoleServer(
           logPath = '/console/meetings/:id/room';
         else if (/^\/console\/meetings\/[^/]+$/.test(path) && path !== '/console/meetings/room' && path !== '/console/meetings/detail')
           logPath = '/console/meetings/:id';
+        // Chat room names are tenant data too, and this is the busiest page in
+        // the product — logged as `unmatched` it made the render-cost metric
+        // useless for exactly the surface it was most needed on.
+        else if (/^\/console\/buzz\/[^/]+$/.test(path)) logPath = '/console/buzz/:room';
         else if (
           [
             home,
+            '/console',
+            '/console/rooms',
+            '/console/requests',
+            '/console/human-work',
+            '/console/claims',
             '/console/meetings',
             '/console/meetings/room',
             '/console/meetings/detail',
@@ -2087,21 +2366,10 @@ export function startConsoleServer(
           ].includes(path)
         )
           logPath = path;
-        // FLOW-006: liveness answers through the LB path too — the target
-        // group's probe and the smoke script both land here with ALB
-        // proxy headers attached. `proto`/`viaProxy` let the smoke check
-        // prove the LB→task path, not just loopback reachability.
-        if (method === 'GET' && path === '/healthz') {
-          const fwd = resolveRequestContext(req, trustProxy);
-          return json(res, 200, {
-            ok: true,
-            vital: '0.0.1',
-            listen: boundAddress,
-            proto: fwd.scheme,
-            viaProxy: fwd.viaProxy,
-            ...liveness(now()),
-          });
-        }
+        // NOTE: /healthz lives in routes/observability.ts (capability: public).
+        // It is dispatched further down, after the session closures exist — and
+        // deliberately before any tenant/cookie DB read, because the target
+        // group probes it every 30s per task and it must stay constant-cost.
         const ip = resolveRequestContext(req, trustProxy).clientIp;
         const at = now();
 
@@ -2128,6 +2396,89 @@ export function startConsoleServer(
         const sessionExpiredApi = (): void => {
           json(res, 401, sessionExpiredPayload(returnPath()));
         };
+
+        // ------------------------------------------------- route table dispatch
+        // The single enforcement point for declared capabilities. A hit is fully
+        // handled here and returns; everything not yet migrated falls through to
+        // the chain below, so migration can proceed route by route.
+        const routeHit = matchRoute(routes, method, path);
+        if (routeHit) {
+          const declared = routeHit.route;
+          // A declared pattern is already identifier-free, so a migrated route
+          // can never log as `unmatched` (or leak an id) by being forgotten in
+          // the allow-list above — which is how `/console/rooms` spent its time
+          // logging as `unmatched` while being the most expensive page.
+          logPath = declared.pattern;
+          const capability = declared.capability;
+          const isPage = declared.surface === 'html';
+          // Only pay for a session lookup when the route demands one.
+          const auth = capability === 'public' ? null : await sessionOf();
+          if (capability !== 'public' && !auth) {
+            // A browser following a nav link must land on the login form with a
+            // way back; an API caller must get a status it can act on.
+            return isPage ? redirectLogin() : sessionExpiredApi();
+          }
+          // Identical for both surfaces by choice: legacy HTML pages answered a
+          // foreign tenant with JSON as well, and the tenant mismatch means the
+          // caller's session does not belong to this deployment at all.
+          if (auth && auth.user.tenant !== tenant)
+            return json(res, 403, { ok: false, error: 'wrong tenant' });
+          // Session freshness precedes the role decision, matching the legacy
+          // order: an un-activated account is sent to change its password rather
+          // than told about a page it cannot see yet.
+          if (isPage && auth && activationDenied(res, auth, false)) return;
+          if (!capabilityAllows(capability, auth)) {
+            const denied = declared.denied;
+            if (isPage && auth && denied && denied.as !== 'text') {
+              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+              res.end(
+                await shellPage(auth, {
+                  title: denied.title,
+                  body: `<p class="sub">${esc(denied.message)}</p>`,
+                  navKey: denied.navKey ?? '',
+                }),
+              );
+              return;
+            }
+            if (isPage && denied?.as === 'text') {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+              res.end(denied.message);
+              return;
+            }
+            return json(res, 403, { ok: false, error: 'forbidden' });
+          }
+          // Declared body handling: parse + CSRF once, here, so "this route
+          // checks its token" is a property of the table rather than of the
+          // handler. The parsed body is handed over, so a handler cannot forget
+          // to read it or accidentally read it twice.
+          let call: Call | null = null;
+          if (declared.body === 'csrf') {
+            if (!auth) return sessionExpiredApi();
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return bodyError(res, e); // 413 for body bombs, 400 for malformed JSON
+            }
+            if (!csrfOk(auth.session, call.csrf))
+              return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          }
+          await declared.handler({
+            req,
+            res,
+            url,
+            path,
+            method,
+            params: routeHit.params,
+            ip,
+            at,
+            auth: auth as AuthContext | null,
+            call,
+            env: routeEnv,
+            memo: { memo: memoize },
+          });
+          return;
+        }
+
         const accessState = await tenantAccessState(db, tenant);
         const exposeResetToken = process.env.VITAL_EXPOSE_RESET_TOKEN === '1';
 
@@ -2907,21 +3258,7 @@ export function startConsoleServer(
           }
         }
 
-        // ------------------------------------------------------- the console
-        // Public, unauthenticated, rate-limited: lets a static site show a
-        // live console pill. Deliberately returns nothing sensitive.
-        if (method === 'GET' && path === '/api/health') {
-          if (!rateOk(`health:${ip ?? '-'}`, 60, 60_000, Date.parse(at)))
-            return json(res, 429, { ok: false, error: 'slow down' });
-          // CORS open on purpose: this route is for public status pills on
-          // the static site and carries nothing sensitive.
-          res.writeHead(200, {
-            'content-type': 'application/json',
-            'access-control-allow-origin': '*',
-          });
-          res.end(JSON.stringify({ ok: true, engine: db.engine, at }));
-          return;
-        }
+        // /api/health — routes/observability.ts (public, rate-limited).
         const deliverableByRequest = path.match(/^\/console\/deliverables\/by-request\/([^/]+)$/);
         if (method === 'GET' && deliverableByRequest) {
           const auth = await sessionOf();
@@ -2960,6 +3297,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: atLeast(auth.user.role, approverMin),
             requiredRole: approverMin,
@@ -2986,19 +3324,46 @@ export function startConsoleServer(
             return respondGetError(req, res, 400, 'days must be 1, 7, 30 or all');
           const window = days as DigestDays;
           const since = digestWindowSince(at, window);
-          const navigation = `<nav aria-label="Digest time window">${(['1', '7', '30', 'all'] as DigestDays[]).map((value) => `<a href="/console/digest?days=${value}"${value === window ? ' aria-current="page"' : ''}>${value === 'all' ? 'All history' : `Last ${value} day(s)`}</a>`).join(' ')}</nav>`;
+          // Wording kept verbatim: the labels are pinned by the digest tests.
+          const windows: { value: DigestDays; label: string }[] = [
+            { value: '1', label: 'Last 1 day(s)' },
+            { value: '7', label: 'Last 7 day(s)' },
+            { value: '30', label: 'Last 30 day(s)' },
+            { value: 'all', label: 'All history' },
+          ];
+          const navigation = `<div class="v-page-head">
+  <div>
+    <p class="v-eyebrow">System</p>
+    <h1 class="v-page-title">Digest</h1>
+    <p class="v-sub" style="margin-top:6px;">Informational NOTICEs, grouped by topic. Nothing here needs a decision.</p>
+  </div>
+  <nav class="v-segmented" aria-label="Digest time window">${windows.map((w) => `<a href="/console/digest?days=${w.value}"${w.value === window ? ' aria-current="page"' : ''}>${esc(w.label)}</a>`).join('')}</nav>
+</div>`;
           const body = navigation + (await renderDigest(coord, db, tenant, at, { since }));
-          const html = detailDocument('Digest', body, {
+          const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
-            operatorMode: 'session',
+            operatorMode: 'session' as const,
             home,
-          });
+          };
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(html);
+          // Digest is a nav item, so it wears the same console chrome as every
+          // other list page. It used to call detailDocument directly and render
+          // as an orphan: no rail, no top bar, no way back.
+          res.end(
+            await wrapInWorkspaceShell(
+              detailDocument('Digest', body, { ...detailOpts, hideHeader: true }),
+              db,
+              tenant,
+              home,
+              auth,
+              'digest',
+            ),
+          );
           return;
         }
         // FINAL-004: human surface for learning review (labeling + card gaps).
@@ -3012,6 +3377,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -3023,7 +3389,7 @@ export function startConsoleServer(
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               await wrapInWorkspaceShell(
-                detailDocument('Learning review', body, detailOpts),
+                detailDocument('Learning review', body, { ...detailOpts, hideHeader: true }),
                 db,
                 tenant,
                 home,
@@ -3047,7 +3413,7 @@ export function startConsoleServer(
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
             await wrapInWorkspaceShell(
-              detailDocument('Learning review', body, detailOpts),
+              detailDocument('Learning review', body, { ...detailOpts, hideHeader: true }),
               db,
               tenant,
               home,
@@ -3072,6 +3438,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -3081,11 +3448,12 @@ export function startConsoleServer(
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
             await wrapInWorkspaceShell(
-              detailDocument('Compiler — Why Not Trusted Yet', content, detailOpts),
+              detailDocument('Compiler — Why Not Trusted Yet', content, { ...detailOpts, hideHeader: true }),
               db,
               tenant,
               home,
               auth,
+              'compiler',
             ),
           );
           return;
@@ -3122,6 +3490,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -3629,8 +3998,11 @@ export function startConsoleServer(
           const meetings = await meetingService.listMeetings(tenant);
           const body = renderMeetingLibraryView({ meetings, home, csrf: auth.session.csrfToken });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          // The library is a management surface (browse, review, join), so it
+          // renders in the Console shell — never in the chat shell. Only the
+          // live room itself is a real-time space.
           res.end(
-            await wrapInWorkspaceShell(buzzDocument('Meetings', body), db, tenant, home, auth, 'buzz', 'meetings'),
+            await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'),
           );
           return;
         }
@@ -3702,8 +4074,9 @@ export function startConsoleServer(
             home,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          // Review surface (transcript, notes, intelligence): Console shell.
           res.end(
-            await wrapInWorkspaceShell(buzzDocument(details.meeting.title, body), db, tenant, home, auth, 'buzz', 'meetings'),
+            await wrapInWorkspaceShell(body, db, tenant, home, auth, 'meetings'),
           );
           return;
         }
@@ -3918,6 +4291,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -3929,7 +4303,7 @@ export function startConsoleServer(
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               await wrapInWorkspaceShell(
-                detailDocument('Skill card', body, detailOpts),
+                detailDocument('Skill card', body, { ...detailOpts, hideHeader: true }),
                 db,
                 tenant,
                 home,
@@ -3950,7 +4324,7 @@ export function startConsoleServer(
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
             await wrapInWorkspaceShell(
-              detailDocument('Skill card', body, detailOpts),
+              detailDocument('Skill card', body, { ...detailOpts, hideHeader: true }),
               db,
               tenant,
               home,
@@ -4001,158 +4375,10 @@ export function startConsoleServer(
             return redirect(res, '/console/learning?error=' + encodeURIComponent((e as Error).message));
           }
         }
-        // FINAL-006: admin audit-log surface (the audit API existed with no page).
-        if (method === 'GET' && path === '/console/audit') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              await wrapInWorkspaceShell(
-                detailDocument(
-                  'Audit log',
-                  '<p class="sub">Audit log requires the admin or owner role.</p>',
-                  detailOpts,
-                ),
-                db,
-                tenant,
-                home,
-                auth,
-                'audit',
-              ),
-            );
-            return;
-          }
-          const offsetRaw = Number(url.searchParams.get('offset') ?? '0');
-          const { html } = await renderAuditPage(db, tenant, {
-            actor: url.searchParams.get('actor') ?? undefined,
-            action: url.searchParams.get('action') ?? undefined,
-            from: url.searchParams.get('from') ?? undefined,
-            to: url.searchParams.get('to') ?? undefined,
-            request: url.searchParams.get('request') ?? undefined,
-            offset: Number.isSafeInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(detailDocument('Audit log', html, detailOpts), db, tenant, home, auth, 'audit'),
-          );
-          return;
-        }
-        if (method === 'GET' && path === '/console/data') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              await wrapInWorkspaceShell(
-                detailDocument(
-                  'Data & retention',
-                  '<p class="sub">Data & retention requires the admin or owner role.</p>',
-                  detailOpts,
-                ),
-                db,
-                tenant,
-                home,
-                auth,
-                'data',
-              ),
-            );
-            return;
-          }
-          const html = renderDataPage(tenant, {
-            csrf: auth.session.csrfToken,
-            home,
-            notice: url.searchParams.get('notice') ?? undefined,
-            error: url.searchParams.get('error') ?? undefined,
-          });
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(
-            await wrapInWorkspaceShell(
-              detailDocument('Data & retention', html, detailOpts),
-              db,
-              tenant,
-              home,
-              auth,
-              'data',
-            ),
-          );
-          return;
-        }
-        if (method === 'GET' && path === '/console/data/export') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end('Export requires the admin or owner role.');
-            return;
-          }
-          const bundle = await exportLedger(db, tenant, at);
-          res.writeHead(200, {
-            'content-type': 'application/json; charset=utf-8',
-            'content-disposition': `attachment; filename="${tenant}-ledger-export.json"`,
-            'cache-control': 'no-store',
-          });
-          res.end(JSON.stringify(bundle, null, 2));
-          return;
-        }
-        if (method === 'POST' && path === '/console/data/erase') {
-          const auth = await sessionOf();
-          if (!auth) return redirectLogin();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          if (activationDenied(res, auth, false)) return;
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end('Erasure requires the admin or owner role.');
-            return;
-          }
-          let call: Call;
-          try {
-            call = await parseCall(req);
-          } catch (e) {
-            return json(res, 400, { ok: false, error: (e as Error).message });
-          }
-          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-          const confirmSlug = (call.fields.confirmSlug ?? '').trim();
-          const confirmed = call.fields.confirmed;
-          if (confirmSlug !== tenant || confirmed !== 'on') {
-            redirect(
-              res,
-              `/console/data?error=${encodeURIComponent('Typed confirmation did not match organization slug.')}`,
-            );
-            return;
-          }
-          try {
-            await eraseTenant(db, tenant, by(auth.user), at);
-            return redirect(res, `/receipts/erasure/${encodeURIComponent(tenant)}`, CLEAR_SESSION_COOKIE);
-          } catch (e) {
-            redirect(res, `/console/data?error=${encodeURIComponent((e as Error).message)}`);
-          }
-          return;
-        }
+        // The compliance surfaces — audit log, data & retention, ledger export
+        // and the erasure POST — live in routes/compliance.ts with a declared
+        // capability, surface and body policy. Nothing in that domain is left
+        // in this chain.
         if (method === 'GET' && path === '/console/workflows') {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
@@ -4317,6 +4543,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -4337,19 +4564,27 @@ export function startConsoleServer(
                 offset: state.offset,
               });
               const groups = partitionRequestsByDecision(pageResult.rows);
-              const row = (r: { id: string; goal: string; state: string }): string =>
-                `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a> <span class="sub">${esc(r.id)} · ${esc(r.state)}</span></li>`;
+              const row = (r: { id: string; goal: string; state: string }): string[] => [
+                `<a class="v-strong" href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a>`,
+                `<span class="v-mono v-meta">${esc(r.id)}</span>`,
+                statusChip(r.state),
+              ];
+              const REQUEST_COLUMNS = ['Request', 'ID', 'State'];
+              const group = (heading: string, rows2: { id: string; goal: string; state: string }[]): string =>
+                rows2.length === 0
+                  ? ''
+                  : renderListSection(
+                      `${heading} (${rows2.length})`,
+                      renderTable(REQUEST_COLUMNS, rows2.map(row)),
+                    );
               let body = '';
               if (pageResult.total === 0) {
                 const model = noResultsModel('/console/requests', state);
                 body = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p>`;
               } else {
-                if (groups.pending.length > 0)
-                  body += `<h2>Pending decision (${groups.pending.length})</h2><ul>${groups.pending.map(row).join('')}</ul>`;
-                if (groups.active.length > 0)
-                  body += `<h2>Approved or executing (${groups.active.length})</h2><ul>${groups.active.map(row).join('')}</ul>`;
-                if (groups.other.length > 0)
-                  body += `<h2>Other states (${groups.other.length})</h2><ul>${groups.other.map(row).join('')}</ul>`;
+                body += group('Pending decision', groups.pending);
+                body += group('Approved or executing', groups.active);
+                body += group('Other states', groups.other);
                 if (pageResult.truncated)
                   body += `<p class="sub">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching requests</p>`;
               }
@@ -4378,7 +4613,7 @@ export function startConsoleServer(
                   clearUrl: clearFilterUrl('/console/requests'),
                   body,
                 }),
-                detailOpts,
+                { ...detailOpts, hideHeader: true },
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
               res.end(
@@ -4411,9 +4646,17 @@ export function startConsoleServer(
               body = `<p class="sub">${esc(model.title)}: ${esc(model.body)} <a href="${esc(model.clearUrl)}">Clear search and filters</a></p>`;
             } else {
               body =
-                `<ul>${pageResult.rows.map((c) => `<li><a href="${esc(withReturnTo(claimDetailUrl(c.id), here))}">${esc(c.subject)}</a> <span class="sub">${esc(c.id)} · ${esc(c.kind)} · ${esc(c.status)}</span></li>`).join('')}</ul>` +
+                renderTable(
+                  ['Subject', 'ID', 'Kind', 'Status'],
+                  pageResult.rows.map((c) => [
+                    `<a class="v-strong" href="${esc(withReturnTo(claimDetailUrl(c.id), here))}">${esc(c.subject)}</a>`,
+                    `<span class="v-mono v-meta">${esc(c.id)}</span>`,
+                    `<span class="v-badge">${esc(c.kind)}</span>`,
+                    statusChip(c.status),
+                  ]),
+                ) +
                 (pageResult.truncated
-                  ? `<p class="sub">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching claims</p>`
+                  ? `<p class="v-meta">explicit truncation: showing ${pageResult.rows.length} of ${pageResult.total} matching claims</p>`
                   : '');
             }
             const prev =
@@ -4441,7 +4684,7 @@ export function startConsoleServer(
                 clearUrl: clearFilterUrl('/console/claims'),
                 body,
               }),
-              detailOpts,
+              { ...detailOpts, hideHeader: true },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(
@@ -4477,6 +4720,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: false,
             requiredRole: approverMin,
@@ -4485,35 +4729,72 @@ export function startConsoleServer(
           };
           if (path === '/console/rooms') {
             const q = (state.q ?? '').trim().toLowerCase();
-            const allScopes = (await db
-              .prepare(
-                `SELECT scope FROM (SELECT origin_scope AS scope FROM requests WHERE tenant = ? UNION SELECT target_scope AS scope FROM requests WHERE tenant = ?) ORDER BY scope`,
-              )
-              .all(tenant, tenant)) as { scope: unknown }[];
-            let scopes = allScopes.map((r) => String(r.scope));
-            if (q) scopes = scopes.filter((s) => s.toLowerCase().includes(q));
-            const total = scopes.length;
-            const pageScopes = scopes.slice(offset, offset + limit);
-            const items: string[] = [];
-            for (const scope of pageScopes) {
-              const n = (await db
-                .prepare(
-                  `SELECT COUNT(*) AS n FROM requests WHERE tenant = ? AND (origin_scope = ? OR target_scope = ?)`,
-                )
-                .get(tenant, scope, scope)) as { n: unknown };
-              items.push(
-                `<li><a href="${esc(`/console/requests?scope=${encodeURIComponent(scope)}&return=${encodeURIComponent(here)}`)}">${esc(scope)}</a> <span class="sub">${Number(n?.n ?? 0)} request(s)</span></li>`,
-              );
+            // The rooms page lists ROOMS, not whichever scopes happen to appear
+            // in requests. Deriving it from `requests` hid any room with no
+            // traffic and stripped every room of its category — the grouping the
+            // chat roster no longer displays. `evaluateAll` returns every
+            // canonical and custom room with its own category, so this page can
+            // carry that grouping instead of a flat list of derived strings.
+            const evaluations = await roomHealth(db, tenant);
+            let roomRows = evaluations.map((e) => ({
+              scope: e.scope,
+              roomName: e.roomName,
+              category: e.category,
+              status: e.status,
+              pending: e.pendingApprovals,
+              budget: e.budgetPercentage,
+              stops: e.activeStops,
+            }));
+            if (q) {
+              roomRows = roomRows.filter((r) => `${r.roomName} ${r.scope}`.toLowerCase().includes(q));
             }
+            // Stable order regardless of evaluation order: category, then name.
+            const categoryRank = new Map(ROOM_CATEGORIES.map((c, i) => [c, i] as const));
+            roomRows.sort(
+              (a, b) =>
+                (categoryRank.get(a.category) ?? ROOM_CATEGORIES.length) -
+                  (categoryRank.get(b.category) ?? ROOM_CATEGORIES.length) ||
+                a.roomName.localeCompare(b.roomName),
+            );
+            const total = roomRows.length;
+            const pageRooms = roomRows.slice(offset, offset + limit);
+            const roomUrl = (scope: string) =>
+              scope === 'infra' ? '/console/buzz/engineering' : `/console/buzz/${encodeURIComponent(scope)}`;
+            const roomRow = (r: (typeof roomRows)[number]) => [
+              `<a class="v-strong" href="${esc(roomUrl(r.scope))}">#${esc(r.roomName)}</a>`,
+              `<span class="v-mono v-meta">${esc(r.scope)}</span>`,
+              `<a href="${esc(`/console/requests?scope=${encodeURIComponent(r.scope)}&return=${encodeURIComponent(here)}`)}" class="v-meta">${statusChip(r.status)}</a>`,
+              r.pending > 0
+                ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.pending} waiting</span>`
+                : '<span class="v-meta">—</span>',
+              r.stops > 0
+                ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.stops} stop${r.stops === 1 ? '' : 's'}</span>`
+                : '<span class="v-meta">—</span>',
+              `<span class="v-num v-meta">${Math.round(r.budget)}%</span>`,
+            ];
+            // Group the current page by category, in the canonical order.
+            const roomGroups = ROOM_CATEGORIES.map((category) => {
+              const inGroup = pageRooms.filter((r) => r.category === category);
+              if (inGroup.length === 0) return '';
+              return `<section class="v-list-group">
+<h2>${esc(ROOM_CATEGORY_LABELS[category])}<span class="v-meta" style="font-weight:500;">${inGroup.length} room${inGroup.length === 1 ? '' : 's'}</span></h2>
+${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], inGroup.map(roomRow))}
+</section>`;
+            })
+              .filter(Boolean)
+              .join('');
             const body =
               total === 0
                 ? `<p class="sub">No results: no rooms match this search. <a href="${esc(clearFilterUrl('/console/rooms'))}">Clear search and filters</a></p>`
-                : `<ul>${items.join('')}</ul>${offset + pageScopes.length < total ? `<p class="sub">explicit truncation: showing ${pageScopes.length} of ${total} rooms</p>` : ''}`;
+                : roomGroups +
+                  (offset + pageRooms.length < total
+                    ? `<p class="v-meta">explicit truncation: showing ${pageRooms.length} of ${total} rooms</p>`
+                    : '');
             const prev =
               offset > 0 ? listStateUrl('/console/rooms', { ...state, offset: Math.max(0, offset - limit) }) : null;
             const next =
-              offset + pageScopes.length < total
-                ? listStateUrl('/console/rooms', { ...state, offset: offset + pageScopes.length })
+              offset + pageRooms.length < total
+                ? listStateUrl('/console/rooms', { ...state, offset: offset + pageRooms.length })
                 : null;
             const html = detailDocument(
               'Rooms',
@@ -4523,14 +4804,14 @@ export function startConsoleServer(
                 searchAction: '/console/rooms',
                 query: state.q ?? '',
                 total,
-                truncated: offset + pageScopes.length < total,
-                shown: pageScopes.length,
+                truncated: offset + pageRooms.length < total,
+                shown: pageRooms.length,
                 prevUrl: prev,
                 nextUrl: next,
                 clearUrl: clearFilterUrl('/console/rooms'),
                 body,
               }),
-              detailOpts,
+              { ...detailOpts, hideHeader: true },
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'rooms'));
@@ -4546,21 +4827,53 @@ export function startConsoleServer(
           work.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
           const total = work.length;
           const pageWork = work.slice(offset, offset + limit);
+          // The approval queue belongs on this page, not only on the legacy
+          // dashboard chrome. "Human work" is where a person is asked to decide,
+          // and a page that says "Pending human review" without offering Approve
+          // or Decline is a dead end. renderReview already owns the request
+          // approval contract (csrf, requestUpdatedAt optimistic locking, the
+          // explicit `confirmed` checkbox, decline reason, operator fields), so
+          // this reuses it rather than inventing a second approval path.
+          const approvalQueue =
+            path === '/console/human-work'
+              ? await renderReview(coord, ledger, {
+                  tenant,
+                  actor: by(auth.user),
+                  actorLabel: actorLabel(auth.user),
+                  csrf: auth.session.csrfToken,
+                  canApprove: atLeast(auth.user.role, approverMin),
+                  requiredRole: approverMin,
+                  operatorMode: keyAuth ? 'signature' : operatorSecret ? 'secret' : 'session',
+                  home,
+                })
+              : '';
           const body =
             total === 0
               ? `<p class="sub">No results: no human work matches this search. <a href="${esc(clearFilterUrl('/console/human-work'))}">Clear search and filters</a></p>`
-              : `<ul>${pageWork.map((r) => `<li><a href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a> <span class="sub">${esc(r.id)} · ${esc(r.state)}</span></li>`).join('')}</ul>${offset + pageWork.length < total ? `<p class="sub">explicit truncation: showing ${pageWork.length} of ${total} items</p>` : ''}`;
+              : renderTable(
+                  ['Work', 'ID', 'State'],
+                  pageWork.map((r) => [
+                    `<a class="v-strong" href="${esc(withReturnTo(requestDetailUrl(r.id), here))}">${esc(r.goal)}</a>`,
+                    `<span class="v-mono v-meta">${esc(r.id)}</span>`,
+                    statusChip(r.state),
+                  ]),
+                ) +
+                (offset + pageWork.length < total
+                  ? `<p class="v-meta">explicit truncation: showing ${pageWork.length} of ${total} items</p>`
+                  : '');
           const prev =
             offset > 0 ? listStateUrl('/console/human-work', { ...state, offset: Math.max(0, offset - limit) }) : null;
           const next =
             offset + pageWork.length < total
               ? listStateUrl('/console/human-work', { ...state, offset: offset + pageWork.length })
               : null;
+          // The page is the approval queue plus the inventory behind it, so its
+          // title names the job (decide) rather than the row type (human work).
           const html = detailDocument(
-            'Human work',
+            'Approvals',
             renderListPage({
-              title: 'Human work',
-              heading: 'Human work',
+              title: 'Approvals',
+              heading: 'Approvals',
               searchAction: '/console/human-work',
               query: state.q ?? '',
               total,
@@ -4569,12 +4882,14 @@ export function startConsoleServer(
               prevUrl: prev,
               nextUrl: next,
               clearUrl: clearFilterUrl('/console/human-work'),
-              body,
+              // Queue first — the decision is the point of the page; the table
+              // below is the full inventory of work that touched human minutes.
+              body: `${approvalQueue}${approvalQueue ? '<p class="v-eyebrow" style="margin:22px 0 8px;">All human work</p>' : ''}${body}`,
             }),
-            detailOpts,
+            { ...detailOpts, hideHeader: true },
           );
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'humanWork'));
+          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, path === '/console/human-work' ? 'approvals' : 'rooms'));
           return;
         }
         const detail = path.match(/^\/console\/(claims|requests|decisions)\/([^/]+)$/);
@@ -4597,6 +4912,7 @@ export function startConsoleServer(
           const detailOpts = {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: atLeast(auth.user.role, approverMin),
             requiredRole: approverMin,
@@ -4750,6 +5066,7 @@ export function startConsoleServer(
           const review = await renderReview(coord, ledger, {
             tenant,
             actor: by(auth.user),
+            actorLabel: actorLabel(auth.user),
             csrf: auth.session.csrfToken,
             canApprove: atLeast(auth.user.role, approverMin),
             requiredRole: approverMin,
@@ -4767,17 +5084,16 @@ export function startConsoleServer(
           ].includes(rawScope)
             ? (rawScope as DashboardDepartment)
             : 'all';
-          const rawTab = (url.searchParams.get('tab') ?? 'compiler').toLowerCase();
-          const validTabs = ['compiler', 'ledger', 'coordination', 'router', 'governance', 'world', 'economics', 'evals', 'feed'] as const;
-          const activeTab = validTabs.includes(rawTab as any) ? (rawTab as typeof validTabs[number]) : 'compiler';
-          const deptEvaluations = await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll();
+          const rawTab = (url.searchParams.get('tab') ?? 'home').toLowerCase();
+          const validTabs = ['home', 'approvals', 'ledger', 'workflows', 'governance', 'activity', 'compiler', 'coordination', 'router', 'world', 'economics', 'evals', 'feed'] as const;
+          const activeTab = validTabs.includes(rawTab as any) ? (rawTab as typeof validTabs[number]) : 'home';
+          const deptEvaluations = await roomHealth(db, tenant);
 
           const compilerParts = await renderCompilerParts(db, comp, tenant);
-          const shellWs = await import('./workspace-shell.ts');
-          const shellMetrics = await shellWs.computeShellMetrics(db, tenant, {
+          const shellMetrics = await shellMetricsFor(db, tenant, {
             dailyBudgetDollars: coord.limits.maxDailyDollars,
           });
-          const recencyByScope = await shellWs.computeRoomRecency(
+          const recencyByScope = await roomRecency(
             db,
             tenant,
             CANONICAL_ROOMS.map((r) => r.scope),
@@ -5096,6 +5412,7 @@ export function startConsoleServer(
                   scope: String(call.fields.newRoomScope ?? ''),
                   agentName: String(call.fields.newRoomAgent ?? ''),
                   mission: String(call.fields.newRoomMission ?? ''),
+                  category: String(call.fields.newRoomCategory ?? ''),
                 },
                 by(auth.user),
               );
@@ -5227,21 +5544,24 @@ export function startConsoleServer(
             'team',
           );
           const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-          const teamRooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
+          const teamRooms = (await roomHealth(db, tenant)).map((h) => ({
             scope: h.scope,
             roomName: h.roomName,
             badge: h.badge,
             pending: h.pendingApprovals,
+            category: h.category,
           }));
-          const teamInner = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
-          const shellWs = await import('./workspace-shell.ts');
-          const teamMetrics = await shellWs.computeShellMetrics(db, tenant);
-          const teamRecency = await shellWs.computeRoomRecency(
+          // Same inner-body extraction as every other shelled page: the shell
+          // owns the skip link and the #main landmark, so a page must not ship
+          // a second copy of either.
+          const teamInner = workspaceInnerHtml(html);
+          const teamMetrics = await shellMetricsFor(db, tenant);
+          const teamRecency = await roomRecency(
             db,
             tenant,
             teamRooms.map((r) => r.scope),
           );
-          const teamShelled = renderWorkspaceShell({
+          const teamShelled = renderConsoleShell({
             rooms: teamRooms,
             home,
             consoleNav: teamNav,
@@ -6149,16 +6469,7 @@ export function startConsoleServer(
           return;
         }
 
-        // Approval-latency distribution (TODO 2.3): the curation-cost clock.
-        // Session-gated like every other read — a latency distribution leaks
-        // who approves what, and how slowly.
-        if (method === 'GET' && path === '/api/approval-latency') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          json(res, 200, await coord.approvalLatencyStats(tenant));
-          return;
-        }
+        // /api/approval-latency — routes/observability.ts (capability: session).
 
         // Live event stream (SSE): replays + tails audit_log for Mission Control.
         if (method === 'GET' && path === '/api/events') {
@@ -6225,16 +6536,7 @@ export function startConsoleServer(
           return;
         }
 
-        // Cost-per-signal (TODO 4.1): the spend-side gate — MODEL share of
-        // arrivals vs <1%. Read-only, but it leaks routing economics; keep it
-        // behind the same session gate as the other read APIs.
-        if (method === 'GET' && path === '/api/cost-per-signal') {
-          const auth = await sessionOf();
-          if (!auth) return sessionExpiredApi();
-          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-          json(res, 200, await new CognitiveRouter(db).costPerSignal(tenant));
-          return;
-        }
+        // /api/cost-per-signal — routes/observability.ts (capability: session).
 
         // Override capture (TODO 2.3): a human edits a claim → correctClaim
         // supersedes the old row and audits the diff; then the eval spine
@@ -6829,13 +7131,13 @@ export function startConsoleServer(
           // scanners. A human (or Buzz) confirms with the form below.
           if (method === 'GET' && (action === 'approve' || action === 'decline')) {
             const verb = action === 'approve' ? 'Approve' : 'Decline';
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0A0F14;color:#F4F7F5;padding:40px;"><h2>${verb} request <code>${esc(requestId)}</code>?</h2><p style="color:#9FB0A9;">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" style="background:#10B981;color:#04120C;border:0;border-radius:6px;padding:12px 20px;font-size:15px;cursor:pointer;">${verb}</button></form><p><a href="${esc(home)}" style="color:#10B981;">Return to Mission Control</a></p></body></html>`,
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });            res.end(
+              themeDocument(
+                `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${verb} request — Vital</title>${themeHead()}</head><body style="padding:0"><main id="main" style="max-width:560px;margin:0 auto;padding:40px 20px 64px"><div class="utility-bar" style="display:flex;justify-content:flex-end;margin-bottom:18px">${themeToggleButton()}</div><div class="card" style="padding:26px 28px"><span class="v-badge v-badge-warn"><span class="dot"></span>Human decision</span><h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:12px 0 8px;color:var(--v-ink)">${verb} request <code>${esc(requestId)}</code>?</h1><p class="sub" style="color:var(--v-muted);font-size:13.5px;line-height:1.6;margin:0 0 20px">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook" style="display:grid;gap:12px;max-width:320px"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" class="v-btn ${action === 'decline' ? 'v-btn-danger' : 'v-btn-primary'}">${verb} request</button></form><p style="margin:20px 0 0"><a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Return to Mission Control</a></p></div></main></body></html>`,
+              ),
             );
             return;
           }
-
           if (action === 'approve') {
             try {
               const current = await coord.get(tenant, requestId);
@@ -7005,7 +7307,7 @@ export function startConsoleServer(
         }
 
         json(res, 404, { ok: false, error: 'not found' });
-      })().catch((err) => {
+      }, { memoize: readsOnly, stats }).catch((err) => {
         metrics.errors += 1;
         const diag = correlateDiagnostic({
           detail: (err as Error).message,

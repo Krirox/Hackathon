@@ -583,16 +583,21 @@ export async function createFeatureWorkspace(
   return input.id;
 }
 
-const LIFECYCLE_COLOR: Record<WorkspaceLifecycle, string> = {
-  SOURCED: '#6B7280',
-  FAN_OUT: '#4338CA',
-  EXECUTING: '#4338CA',
-  EXECUTION_COMPLETE: '#B45309',
-  MEASUREMENT_PENDING: '#B45309',
-  OUTCOME_VERIFIED: '#0F7A3D',
-  CANCELLED: '#6B7280',
-  BLOCKED: '#B91C1C',
+/** Tint class per lifecycle state — the label always travels with the color. */
+const LIFECYCLE_TONE: Record<WorkspaceLifecycle, string> = {
+  SOURCED: 'v-badge',
+  FAN_OUT: 'v-badge-info',
+  EXECUTING: 'v-badge-info',
+  EXECUTION_COMPLETE: 'v-badge-warn',
+  MEASUREMENT_PENDING: 'v-badge-warn',
+  OUTCOME_VERIFIED: 'v-badge-good',
+  CANCELLED: 'v-badge',
+  BLOCKED: 'v-badge-risk',
 };
+
+function lifecycleBadge(lifecycle: WorkspaceLifecycle): string {
+  return `<span class="v-badge ${LIFECYCLE_TONE[lifecycle]}"><span class="dot"></span>${esc(lifecycle)}</span>`;
+}
 
 export function renderWorkflowListPage(
   items: WorkflowListItem[],
@@ -600,13 +605,13 @@ export function renderWorkflowListPage(
 ): string {
   const rows =
     items.length === 0
-      ? '<p class="sub">No release workflows yet. <a href="/setup">Configure a source</a> and start your first release workflow.</p>'
+      ? '<div class="v-empty"><h3>No release workflows yet</h3><p>Configure an evidence source, then start your first release workflow — its fan-out legs appear here.</p><p><a class="v-btn v-btn-secondary v-btn-sm" href="/setup">Configure a source</a></p></div>'
       : `<table><thead><tr><th>Release</th><th>Kind</th><th>State</th><th>Owner</th><th>Updated</th></tr></thead><tbody>${items
           .map(
             (w) =>
               `<tr><td><a href="${esc(w.url)}">${esc(w.subject)}</a><div class="sub">${esc(w.summary ?? '')}</div></td>
 <td>${esc(w.kind)}</td>
-<td><span style="color:${LIFECYCLE_COLOR[w.lifecycle]}">${esc(w.lifecycle)}</span></td>
+<td>${lifecycleBadge(w.lifecycle)}</td>
 <td>${esc(w.owner)}</td><td>${esc(w.updatedAt)}</td></tr>`,
           )
           .join('')}</tbody></table>`;
@@ -614,7 +619,7 @@ export function renderWorkflowListPage(
     'Release workflows',
     `<p class="sub"><a href="${esc(opts.home)}">← Dashboard</a></p>
 <h1>Release workflows</h1>
-<p class="sub">Signed in as ${esc(opts.actor)}. Follow one release from source evidence to measured outcome.</p>
+<p class="sub">Follow one release from source evidence to measured outcome.</p>
 ${rows}`,
   );
 }
@@ -700,7 +705,7 @@ export function renderWorkflowDetailPage(
     forms.push(`<form method="post" action="/console/workflows/${esc(encodeURIComponent(view.id))}/cancel" style="display:inline;margin-left:8px">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input name="reason" required placeholder="cancellation reason" style="width:200px">
-<button type="submit" style="background:#B91C1C">Cancel workflow</button></form>`);
+<button type="submit" class="v-btn v-btn-danger v-btn-sm">Cancel workflow</button></form>`);
   }
 
   let measurementNote = 'Measurement unsupported at this stage';
@@ -716,8 +721,8 @@ export function renderWorkflowDetailPage(
     `Workflow ${view.subject}`,
     `<p class="sub"><a href="${esc(opts.home)}">← Dashboard</a> · <a href="/console/workflows">All workflows</a></p>
 <h1>${esc(view.subject)}</h1>
-<p><span style="color:${LIFECYCLE_COLOR[view.lifecycle]};font-weight:700">${esc(view.lifecycle)}</span>
-· ${esc(measurementNote)} · owner ${esc(view.owner)} · updated ${esc(view.updatedAt)}</p>
+<p>${lifecycleBadge(view.lifecycle)}
+<span class="v-sub">· ${esc(measurementNote)} · owner ${esc(view.owner)} · updated ${esc(view.updatedAt)}</span></p>
 ${view.summary ? `<p>${esc(view.summary)}</p>` : ''}
 ${view.blocker ? `<p class="err">Blocker: ${esc(view.blocker)}</p>` : ''}
 ${view.nextAction ? `<p><strong>Next:</strong> ${esc(view.nextAction)}</p>` : ''}
@@ -738,19 +743,11 @@ function pageShell(title: string, body: string): string {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Vital</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#FAFAF8;color:#0A0F14;margin:0 auto;padding:32px 24px;max-width:960px;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
-h1{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin:0 0 16px 0;color:#0A0F14}
-h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:20px 0 10px;color:#111827}
-a{color:#0F5C57;text-decoration:none}a:hover{text-decoration:underline}
-.sub{color:#6B7280;font-size:13px;line-height:1.4}.err{color:#B91C1C;font-size:13px}
-.card{border:1px solid #E4E4E1;border-radius:10px;padding:20px;background:#fff;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #E4E4E1;border-radius:8px;overflow:hidden}
-td,th{border-bottom:1px solid #E4E4E1;padding:10px 14px;text-align:left;font-size:13px}
-th{background:#F9F9F8;font-weight:600;color:#4B5563;text-transform:uppercase;font-size:11px;letter-spacing:0.04em}
-input,button{padding:9px 14px;border:1px solid #E4E4E1;border-radius:6px;font-family:inherit;font-size:13px}
-button{background:#0F5C57;color:#fff;font-weight:600;cursor:pointer;border:0;transition:background .15s ease}
-button:hover{background:#0B4A45}
-label{display:block;margin:8px 0;font-size:13px;font-weight:500;color:#374151}
-code,pre{font-family:'JetBrains Mono',monospace}
-</style></head><body>${body}</body></html>`;
+/* Layout only — color, radius and shadow come from the token system. */
+body{margin:0 auto;padding:26px 20px 48px;max-width:1020px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{border-bottom:1px solid var(--v-line);padding:10px 14px;text-align:left}
+th{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--v-muted)}
+label{display:block;margin:8px 0;font-size:12.5px;font-weight:600;color:var(--v-muted)}
+</style></head><body><a class="skip-link" href="#main">Skip to main content</a><main id="main">${body}</main></body></html>`;
 }

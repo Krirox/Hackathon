@@ -8,7 +8,7 @@
 // simulated, and timestamps are the records' own.
 
 import type { AsyncDb } from '../core/db.ts';
-import { firstReviewAt, signupAt, SAMPLE_SCOPE } from './activation.ts';
+import { firstReviewAt, loadActivationConfig, signupAt, SAMPLE_SCOPE } from './activation.ts';
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -124,22 +124,18 @@ export async function buildTenantJourney(
   const signedUpAt = (await signupAt(db, tenant)) ?? (await firstUserCreatedAt(db, tenant));
 
   // Stage 2 — setup: an ActivationConfig exists (written by /setup POST).
-  const configRaw = (await db
-    .prepare('SELECT value FROM meta WHERE key = ?')
-    .get(`activation:config:${tenant}`)) as { value: string } | undefined;
-  let configuredAt: string | null = null;
-  let setupHref = '/setup';
-  if (configRaw) {
-    try {
-      const cfg = JSON.parse(configRaw.value) as { configuredAt?: unknown; scope?: unknown };
-      if (typeof cfg.configuredAt === 'string') configuredAt = cfg.configuredAt;
-      if (typeof cfg.scope === 'string' && cfg.scope !== '') {
-        setupHref = `/console/buzz/${encodeURIComponent(cfg.scope)}`;
-      }
-    } catch {
-      configuredAt = null; // unreadable config renders as not-done, not as guessed data
-    }
-  }
+  //
+  // Read through activation.ts rather than re-parsing the same key here: two
+  // readers of one record meant two SQL statements and two JSON.parse shapes to
+  // keep in step. `loadActivationConfig` is request-memoized, so the dashboard's
+  // activation panel and this journey share one read. A config that will not
+  // parse still renders as not-done, never as guessed data.
+  const activationConfig = await loadActivationConfig(db, tenant);
+  const configuredAt: string | null = activationConfig?.configuredAt ?? null;
+  const setupHref =
+    activationConfig && activationConfig.scope !== ''
+      ? `/console/buzz/${encodeURIComponent(activationConfig.scope)}`
+      : '/setup';
 
   // Stage 3 — first source: real ingested evidence, excluding the labeled
   // sample walkthrough scope (mirrors ingestClaimCount in activation.ts).
@@ -249,9 +245,9 @@ function markerFor(done: boolean, current: boolean): string {
 }
 
 function colorFor(done: boolean, current: boolean): string {
-  if (done) return '#047857';
-  if (current) return '#0F5C57';
-  return '#9CA3AF';
+  if (done) return 'var(--v-fact)';
+  if (current) return 'var(--v-accent)';
+  return 'var(--v-faint)';
 }
 
 function headlineFor(journey: TenantJourney, signedUp: string | null): string {
@@ -267,35 +263,44 @@ function headlineFor(journey: TenantJourney, signedUp: string | null): string {
 
 export function renderJourneyMilestone(journey: TenantJourney, home: string): string {
   const signedUp = journey.stages[0]!.at;
+  const doneCount = journey.stages.filter((s) => s.at !== null).length;
   const items = journey.stages
     .map((s, i) => {
       const done = s.at !== null;
       const current = journey.currentIndex === i;
       const marker = markerFor(done, current);
       const color = colorFor(done, current);
-      const labelColor = color;
-      const weight = current ? 'font-weight:800' : 'font-weight:600';
-      const label = s.href ? `<a href="${esc(s.href)}">${esc(s.label)}</a>` : esc(s.label);
+      const weight = current ? '700' : '600';
+      const label = s.href
+        ? `<a href="${esc(s.href)}" style="color:var(--v-ink)">${esc(s.label)}</a>`
+        : esc(s.label);
       const when = whenFor(s.at, current);
       const elapsed =
         done && signedUp !== null && s.at !== null && s.id !== 'signup'
           ? ` · +${fmtElapsed(signedUp, s.at)} from signup`
           : '';
-      return `<li style="display:flex;gap:10px;align-items:baseline;margin:6px 0">
-<span style="color:${color};font-weight:800" aria-hidden="true">${marker}</span>
-<span style="${weight};color:${labelColor}">${label}</span>
-<span style="color:#6B7280;font-size:12.5px">— ${esc(s.detail)}${elapsed}</span>
-<span style="margin-left:auto;color:#9CA3AF;font-size:11.5px;white-space:nowrap">${esc(when)}</span>
+      let markerBg = 'var(--v-bg-2)';
+      if (done) markerBg = 'var(--v-tint-good-bg)';
+      else if (current) markerBg = 'var(--v-accent-dim)';
+      return `<li style="display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:12px;align-items:start;padding:11px 0;border-bottom:1px solid var(--v-line);">
+<span aria-hidden="true" style="width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:${markerBg};color:${color};">${marker}</span>
+<span style="min-width:0;"><span style="font-weight:${weight};font-size:13.5px;color:${color};">${label}</span><br><span class="v-sub">${esc(s.detail)}${elapsed}</span></span>
+<span class="v-meta" style="white-space:nowrap;">${esc(when)}</span>
 </li>`;
     })
     .join('');
 
   const headline = headlineFor(journey, signedUp);
 
-  return `<section id="tenant-journey" style="margin-bottom:24px">
-<h1 style="font-size:20px">First-run journey</h1>
-<p class="sub">Signup → setup → first source → approval → deliverable → measured outcome. Every milestone is a durable record — nothing is simulated. <a href="${esc(home)}console/requests">Review queue</a></p>
-<ol style="list-style:none;padding:0;border:1px solid #E4E4E1;border-radius:10px;background:#fff;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,0.03)">${items}</ol>
-<p class="sub">${headline}</p>
+  return `<section id="tenant-journey" class="v-card" style="margin-bottom:16px;">
+<div class="v-split" style="margin-bottom:4px;">
+  <div><p class="v-eyebrow">First-run journey</p>
+  <h2 class="v-card-title" style="margin-top:4px;">${doneCount} of ${journey.stages.length} milestones recorded</h2></div>
+  <div class="v-tabs"><a class="v-tab" href="${esc(home)}console/requests">Review queue</a><a class="v-tab" href="/setup">Setup</a></div>
+</div>
+<p class="v-sub" style="margin-bottom:6px;">Signup → setup → first source → approval → deliverable → measured outcome. Every milestone is a durable record — nothing is simulated.</p>
+<div class="v-progress" style="margin-bottom:4px;"><i style="width:${Math.round((doneCount / journey.stages.length) * 100)}%"></i></div>
+<ol style="list-style:none;padding:0;margin:0;">${items}</ol>
+<p class="v-sub" style="margin-top:10px;">${headline}</p>
 </section>`;
 }

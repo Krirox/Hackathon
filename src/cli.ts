@@ -70,7 +70,7 @@ import { workerBuzzSurface } from './talk/buzz-runtime.ts';
  *   tsx src/cli.ts stop --engage <scope>/<action-class> --reason <text> --tenant slug [--recovery-requires <text>] [--db <target>]
  *   tsx src/cli.ts report [--db path] [--out report.html] [--tenant slug]
  *   tsx src/cli.ts report --manifest <snapshot|evidence-package|backup-reference> --tenant slug
- *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme] [--trust-proxy]
+ *   tsx src/cli.ts serve [--db var/vital.db] [--port 3100] [--tenant acme] [--trust-proxy] [--secure-cookies]
  *   tsx src/cli.ts drill --policy-only [--tenant slug] [--db <target>]
  *   tsx src/cli.ts drill --runtime --scope <scope> --class <action-class> --tenant <slug> [--db <target>]
  *   tsx src/cli.ts ingest-files --tenant acme --scope engineering --source dir --artifacts dir --db path
@@ -501,6 +501,12 @@ if (cmd === 'status') {
   // FLOW-006: behind the ALB the task must trust proxy headers for client
   // IP and scheme; direct/loopback serving leaves them ignored.
   const trustProxy = args.includes('--trust-proxy') || process.env.TRUST_PROXY === '1';
+  // Behind the ALB the cookie must carry `Secure`: without it the browser will
+  // also send the session over a plaintext http:// downgrade, and SameSite=Lax
+  // alone does not cover that. Deliberately a separate flag rather than implied
+  // by --trust-proxy — trusting proxy headers and requiring TLS are independent,
+  // and a loopback/TLS-terminating dev setup wants the first without the second.
+  const secureCookies = args.includes('--secure-cookies') || process.env.SECURE_COOKIES === '1';
   const server = await startConsoleServer(db, createLedger(db), createCoordinator(db), new OrganizationalCompiler(db), {
     port,
     host,
@@ -510,6 +516,7 @@ if (cmd === 'status') {
     operatorSecret: process.env.VITAL_OPERATOR_SECRET,
     operatorKeys: parseOperatorKeys(process.env.VITAL_OPERATOR_KEYS),
     trustProxy,
+    secureCookies,
   });
   const localUrl =
     server.host === '0.0.0.0' || server.host === '::'

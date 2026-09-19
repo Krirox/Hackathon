@@ -9,8 +9,7 @@ export interface CanonicalRoomDefinition {
   readonly name: string;
   readonly scope: string;
   readonly channel: string;
-  readonly agentName: string;
-  readonly duties: string;
+  readonly agentName: string;  readonly duties: string;
   readonly triggers: string;
   readonly healthMetric: string;
   readonly defaultMission: string;
@@ -19,6 +18,8 @@ export interface CanonicalRoomDefinition {
   readonly defaultBudgetTokens: number;
   readonly defaultSoRs: readonly string[];
   readonly recommendedModel: string;
+  /** Sidebar group. Set on synthesized custom defs; canonical defs use categoryForScope(). */
+  readonly category?: RoomCategory;
 }
 
 export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
@@ -345,6 +346,77 @@ export function roomForScope(rawScope: string): CanonicalRoomDefinition {
   return found ?? CANONICAL_ROOMS[0]!;
 }
 
+/** Room categories: the sidebar groups every room (built-in or user-made) belongs to. */
+export const ROOM_CATEGORIES = ['core', 'product', 'launch'] as const;
+export type RoomCategory = (typeof ROOM_CATEGORIES)[number];
+
+export const ROOM_CATEGORY_LABELS: Record<RoomCategory, string> = {
+  core: 'Core rooms',
+  product: 'Product & delivery',
+  launch: 'Launch & risk',
+};
+
+export function isRoomCategory(v: string): v is RoomCategory {
+  return (ROOM_CATEGORIES as readonly string[]).includes(v);
+}
+
+/** True when the scope names a built-in room (not a user-made one). */
+export function isCanonicalScope(rawScope: string): boolean {
+  const scope = normalizeScope(rawScope);
+  return CANONICAL_ROOMS.some((r) => r.scope === scope || r.id === scope);
+}
+
+/** Canonical sidebar group for any scope (custom rooms carry their own). */
+export function categoryForScope(rawScope: string): RoomCategory {
+  const scope = normalizeScope(rawScope);
+  if (scope === 'core' || scope === 'general') return 'core';
+  if (scope === 'product' || scope === 'infra' || scope === 'data') return 'product';
+  return 'launch';
+}
+
+/**
+ * Resolve the display definition for any scope: built-in rooms use their
+ * canonical definition; user-made rooms (see createCustomRoom) synthesize
+ * one from the stored custom record. Returns null for unknown scopes so
+ * callers can 404 instead of rendering the wrong room.
+ */
+export async function resolveRoomDef(
+  db: AsyncDb,
+  tenant: string,
+  rawScope: string,
+): Promise<CanonicalRoomDefinition | null> {
+  const scope = normalizeScope(rawScope);
+  const canonical = CANONICAL_ROOMS.find((r) => r.scope === scope || r.id === scope);
+  if (canonical) return canonical;
+  const customs = await listCustomRooms(db, tenant);
+  const custom = customs.find((c) => c.scope === scope || c.id === scope);
+  if (!custom) return null;
+  const mission = custom.mission || `Team room for ${custom.name}.`;
+  return {
+    id: custom.id,
+    name: custom.name,
+    scope: custom.scope,
+    channel: custom.channel,
+    agentName: custom.agentName,
+    category: custom.category,
+    duties: mission,
+    triggers: 'Direct mentions and handoffs.',
+    healthMetric: 'Request queue depth',
+    defaultMission: mission,
+    defaultAutonomy: 'guarded',
+    defaultBudgetDollars: 500,
+    defaultBudgetTokens: 2_000_000,
+    defaultSoRs: [],
+    recommendedModel: '—',
+  };
+}
+
+/** Display name for any scope (canonical, custom, or raw fallback). */
+export async function roomDisplayName(db: AsyncDb, tenant: string, rawScope: string): Promise<string> {
+  const def = await resolveRoomDef(db, tenant, rawScope);
+  return def ? def.name : normalizeScope(rawScope);
+}
+
 export function channelForScope(rawScope: string): string {
   return roomForScope(rawScope).channel;
 }
@@ -391,7 +463,26 @@ const configKey = (tenant: string, scope: string): string => `room:config:${tena
 export const SEED_DEFAULT_SCOPES: readonly string[] = ['general', 'business', 'infra'];
 
 export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: string): Promise<RoomConfig> {
-  const def = roomForScope(rawScope);
+  const scope = normalizeScope(rawScope);
+  const resolved =
+    (await resolveRoomDef(db, tenant, scope)) ??
+    ({
+      id: scope,
+      name: scope,
+      scope,
+      channel: `chan-${scope}`,
+      agentName: `${scope}-agent`,
+      duties: '',
+      triggers: '',
+      healthMetric: '',
+      defaultMission: '',
+      defaultAutonomy: 'guarded',
+      defaultBudgetDollars: 500,
+      defaultBudgetTokens: 2_000_000,
+      defaultSoRs: [],
+      recommendedModel: '—',
+    } as CanonicalRoomDefinition);
+  const def = resolved;
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(configKey(tenant, def.scope))) as
     { value: string } | undefined;
   if (!row) {
@@ -451,6 +542,8 @@ export interface CustomRoomDefinition {
   channel: string;
   agentName: string;
   mission: string;
+  /** Sidebar group. Closed set — see ROOM_CATEGORIES. Older records default to 'product'. */
+  category: RoomCategory;
 }
 
 const customKey = (tenant: string, scope: string): string => `room:custom:${tenant}:${normalizeScope(scope)}`;
@@ -463,7 +556,10 @@ export async function listCustomRooms(db: AsyncDb, tenant: string): Promise<Cust
   for (const r of rows) {
     try {
       const p = JSON.parse(String(r.value)) as CustomRoomDefinition;
-      if (p && typeof p.scope === 'string' && typeof p.agentName === 'string') out.push(p);
+      if (p && typeof p.scope === 'string' && typeof p.agentName === 'string') {
+        if (!isRoomCategory(p.category)) p.category = 'product';
+        out.push(p);
+      }
     } catch {
       continue;
     }
@@ -474,13 +570,18 @@ export async function listCustomRooms(db: AsyncDb, tenant: string): Promise<Cust
 export async function createCustomRoom(
   db: AsyncDb,
   tenant: string,
-  input: { id: string; name: string; scope: string; agentName: string; mission: string },
+  input: { id: string; name: string; scope: string; agentName: string; mission: string; category?: string },
   by = 'system',
 ): Promise<CustomRoomDefinition> {
   const scope = normalizeScope(input.scope);
   if (!/^[a-z0-9-]{2,32}$/.test(scope)) throw new Error('[rooms:BAD_SCOPE] scope must match ^[a-z0-9-]{2,32}$');
   if (!/^[a-z0-9_-]+-agent$/i.test(input.agentName.trim())) {
     throw new Error('[rooms:BAD_AGENT] agentName must look like *-agent');
+  }
+  const rawCategory = (input.category ?? '').trim().toLowerCase();
+  const category = rawCategory === '' ? 'product' : rawCategory;
+  if (!isRoomCategory(category)) {
+    throw new Error(`[rooms:BAD_CATEGORY] category must be one of ${ROOM_CATEGORIES.join(', ')}`);
   }
   if (CANONICAL_ROOMS.some((r) => r.scope === scope || r.id === scope)) {
     throw new Error(`[rooms:SCOPE_TAKEN] ${scope} is a built-in room`);
@@ -494,6 +595,7 @@ export async function createCustomRoom(
     channel: `chan-${scope}`,
     agentName: input.agentName.trim().toLowerCase(),
     mission: input.mission.trim().slice(0, 500),
+    category,
   };
   const now = new Date().toISOString();
   await db
@@ -506,7 +608,7 @@ export async function createCustomRoom(
       by,
       'POLICY_MUTATE',
       `room:${scope}`,
-      JSON.stringify({ created: true, agentName: def.agentName }),
+      JSON.stringify({ created: true, agentName: def.agentName, category: def.category }),
       now,
     );
   return def;

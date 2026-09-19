@@ -17,6 +17,18 @@ export interface ReviewOptions {
   home?: string;
   notice?: string;
   draft?: boolean;
+  /**
+   * Skip the document's own <h1> and "signed in as" line. Set by list pages,
+   * whose body (renderListPage) already renders the page title — without this
+   * the heading and the actor line each appear twice.
+   */
+  hideHeader?: boolean;
+  /**
+   * The viewer's name for display (email). Deliberately separate from `actor`,
+   * which is the audited, signature-bound `usr_… (email)` value — that one must
+   * keep its exact shape, this one is only ever painted.
+   */
+  actorLabel?: string;
 }
 
 export function operatorFields(opts: ReviewOptions, id: string, action: string): string {
@@ -26,6 +38,36 @@ export function operatorFields(opts: ReviewOptions, id: string, action: string):
   const message = approvalMessage(opts.tenant, id, action, opts.actor);
   return `<details><summary>Message to sign with your operator key</summary><pre>${esc(message)}</pre></details><label>Operator signature <input type="password" name="operatorSignature" required autocomplete="off"></label>`;
 }
+
+/** Token-scoped queue styles (design.md Workbench voice). Logic untouched. */
+export const REVIEW_STYLE = `<style>
+.rv-queue{font-family:var(--font-body)}
+.rv-eyebrow{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--v-muted)}
+.rv-title{font-size:18px;font-weight:700;margin:2px 0 0;color:var(--v-ink);font-style:normal}
+.rv-actor{font-size:12px;color:var(--v-muted);margin:6px 0 0}
+.rv-note{font-size:11.5px;color:var(--v-faint);margin:4px 0 0;max-width:70ch}
+.rv-pager{font-size:12px;color:var(--v-muted);margin:10px 0;display:flex;gap:12px;align-items:center}
+.rv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:12px;margin-top:12px}
+.rv-card{background:var(--v-bg-1);border:1px solid var(--v-line);border-left:3px solid var(--v-hypo);border-radius:var(--radius-card);padding:14px 16px;box-shadow:var(--v-card-shadow)}
+.rv-card h3{font-size:13.5px;font-weight:700;margin:0 0 4px;font-style:normal}
+.rv-card h3 a{color:var(--v-ink);text-decoration:none}
+.rv-card h3 a:hover{color:var(--v-accent)}
+.rv-meta{font-size:11px;color:var(--v-faint);font-family:var(--font-mono);overflow-wrap:anywhere}
+.rv-row{font-size:12px;color:var(--v-ink-2);margin:6px 0 0}
+.rv-evidence{background:var(--v-tint-prose-bg);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;margin:8px 0 0;font-size:12px}
+.rv-evidence summary{cursor:pointer;font-weight:600;font-size:12px;color:var(--v-ink)}
+.rv-evidence ul{margin:8px 0 0;padding-left:18px;display:grid;gap:6px}
+.rv-evidence code{font-family:var(--font-mono);font-size:11px}
+.rv-forms{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.rv-forms form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.rv-forms button{border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;min-height:36px}
+.rv-approve button{background:var(--v-accent);color:var(--v-accent-ink);border:0}
+.rv-approve button:hover{filter:brightness(1.1)}
+.rv-decline button{background:transparent;color:var(--v-ink);border:1px solid var(--v-line-strong)}
+.rv-decline button:hover{border-color:var(--v-risk)}
+.rv-empty{border:1px dashed var(--v-line-strong);border-radius:var(--radius-card);padding:28px 20px;text-align:center;color:var(--v-muted);font-size:13px;background:transparent}
+.rv-refresh{font-size:12px;margin-top:10px;display:inline-block}
+</style>`;
 
 /** Session-specific controls must never enter the shared report cache or static exports. */
 export async function renderReview(coord: Coordinator, ledger: Ledger, opts: ReviewOptions): Promise<string> {
@@ -47,7 +89,7 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
     const forms = opts.canApprove
       ? ['approve', 'decline']
           .map((action) => {
-            return `<form data-review-action="${action}" action="/api/requests/${esc(encodeURIComponent(r.id))}/${action}" method="post">
+            return `<form class="${action === 'approve' ? 'rv-approve' : 'rv-decline'}" data-review-action="${action}" action="/api/requests/${esc(encodeURIComponent(r.id))}/${action}" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input type="hidden" name="requestUpdatedAt" value="${esc(r.updatedAt)}">
 ${action === 'decline' ? '<label>Decline reason <textarea name="reason" required maxlength="2000"></textarea></label>' : ''}
@@ -60,22 +102,23 @@ ${operatorFields(opts, r.id, action)}
       : `<p>Review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
     const sampleBanner =
       r.id.startsWith(SAMPLE_REQUEST_PREFIX) || r.originScope === SAMPLE_SCOPE
-        ? `<p style="background:#B45309;color:#0A0F14;padding:8px;border-radius:6px;font-weight:700">SAMPLE WALKTHROUGH — labeled demo data in scope ${esc(SAMPLE_SCOPE)}, not customer evidence.</p>`
+        ? `<p style="background:var(--v-tint-warn-bg);color:var(--v-tint-warn-ink);padding:8px 10px;border-radius:8px;font-weight:700;font-size:12px;border:1px solid var(--v-line);">SAMPLE WALKTHROUGH — labeled demo data in scope ${esc(SAMPLE_SCOPE)}, not customer evidence.</p>`
         : '';
-    cards.push(`<article class="card" data-review-request="${esc(r.id)}">
+    cards.push(`<article class="rv-card" data-review-request="${esc(r.id)}">
 ${sampleBanner}
-<h3><a href="/console/requests/${esc(encodeURIComponent(r.id))}">${esc(r.goal)}</a></h3><p><code>${esc(r.id)}</code> · ${esc(r.originScope)} → ${esc(r.targetScope)}</p>
-<p>Deliverable: ${esc(r.deliverableSchema)} · Deadline: ${esc(r.bid.deadline)}</p>
-<p>Budget: ${r.bid.dollars} dollars · ${r.bid.tokens} tokens · ${r.bid.humanMinutes} human minutes</p>
-<details><summary>Evidence (${r.claimRefs.length} references)</summary><ul>${evidence.join('') || '<li>No evidence references</li>'}</ul>${r.claimRefs.length > 20 ? `<p>Only the first 20 references are shown. <a href="/console/requests/${esc(encodeURIComponent(r.id))}">Inspect all evidence before approving.</a></p>` : ''}</details>
-${forms}<p role="status" aria-live="polite" data-review-status></p></article>`);
+<h3><a href="/console/requests/${esc(encodeURIComponent(r.id))}">${esc(r.goal)}</a></h3><p class="rv-meta">${esc(r.id)} · ${esc(r.originScope)} → ${esc(r.targetScope)}</p>
+<p class="rv-row">Deliverable: ${esc(r.deliverableSchema)} · Deadline: ${esc(r.bid.deadline)}</p>
+<p class="rv-row">Budget: ${r.bid.dollars} dollars · ${r.bid.tokens} tokens · ${r.bid.humanMinutes} human minutes</p>
+<details class="rv-evidence"><summary>Evidence (${r.claimRefs.length} references)</summary><ul>${evidence.join('') || '<li>No evidence references</li>'}</ul>${r.claimRefs.length > 20 ? `<p>Only the first 20 references are shown. <a href="/console/requests/${esc(encodeURIComponent(r.id))}">Inspect all evidence before approving.</a></p>` : ''}</details>
+<div class="rv-forms">${forms}</div><p role="status" aria-live="polite" data-review-status></p></article>`);
   }
-  return `<section id="pending-review" class="review-root"><h2>Pending review (${pending.length})</h2>
-<p>Signed in as ${esc(opts.actor)}. Approval records a decision to BEGIN work, not final-deliverable authorization or evidence of execution or measurement.</p>
-<nav aria-label="Review pages">${page > 0 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page - 1}#pending-review">Previous reviews</a>` : ''} Page ${page + 1} of ${Math.max(1, Math.ceil(pending.length / 100))} ${pending.length > (page + 1) * 100 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page + 1}#pending-review">Next reviews</a>` : ''}</nav>
+  return `${REVIEW_STYLE}<section id="pending-review" class="review-root rv-queue"><p class="rv-eyebrow">Approval queue · ${pending.length} awaiting</p><h2 class="rv-title">Pending review</h2>
+<p class="rv-actor">Signed in as ${esc(opts.actorLabel ?? opts.actor)}</p>
+<p class="rv-note">Approval records a decision to BEGIN work, not final-deliverable authorization or evidence of execution or measurement.</p>
+<nav class="rv-pager" aria-label="Review pages">${page > 0 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page - 1}#pending-review">Previous reviews</a>` : ''}<span>Page ${page + 1} of ${Math.max(1, Math.ceil(pending.length / 100))}</span>${pending.length > (page + 1) * 100 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page + 1}#pending-review">Next reviews</a>` : ''}</nav>
 <noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript>
-<div class="grid">${cards.join('') || '<p>No admitted requests awaiting human review.</p>'}</div>
-<p><a href="#" data-review-refresh>Refresh review queue</a></p></section>
+<div class="rv-grid">${cards.join('') || '<div class="rv-empty">Queue clear — no admitted requests awaiting human review.</div>'}</div>
+<p><a class="rv-refresh" href="#" data-review-refresh>Refresh review queue</a></p></section>
 <script>${REVIEW_SCRIPT}</script>`;
 }
 

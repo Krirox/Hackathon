@@ -4,7 +4,7 @@ import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { listStops } from '../gov/trust.ts';
-import { CANONICAL_ROOMS, normalizeScope, roomForScope, loadRoomConfig } from './rooms.ts';
+import { CANONICAL_ROOMS, normalizeScope, roomForScope, loadRoomConfig, listCustomRooms, resolveRoomDef, categoryForScope, type RoomCategory } from './rooms.ts';
 import { type BuzzSurface, type BuzzNostrEvent } from './buzz.ts';
 
 export type RoomHealthStatus = 'healthy' | 'degraded' | 'halted' | 'idle';
@@ -13,6 +13,8 @@ export interface RoomHealthEvaluation {
   scope: string;
   channel: string;
   roomName: string;
+  /** Sidebar group. Canonical rooms map via categoryForScope; customs carry their own. */
+  category: RoomCategory;
   status: RoomHealthStatus;
   badge: string; // '🟢' | '🟡' | '🔴' | '⚪'
   reasons: string[];
@@ -59,7 +61,9 @@ export class ScopeHealthEvaluator {
 
   async evaluateScope(rawScope: string): Promise<RoomHealthEvaluation> {
     const scope = normalizeScope(rawScope);
-    const room = roomForScope(scope);
+    const customDef = await resolveRoomDef(this.db, this.tenant, scope);
+    const room = customDef ?? roomForScope(scope);
+    const category: RoomCategory = customDef?.category ?? categoryForScope(scope);
     const config = await loadRoomConfig(this.db, this.tenant, scope);
     const at = this.now();
     const reasons: string[] = [];
@@ -70,6 +74,7 @@ export class ScopeHealthEvaluator {
         scope,
         channel: room.channel,
         roomName: room.name,
+        category,
         status: 'idle',
         badge: STATUS_BADGES.idle,
         reasons: ['Room is currently disabled / dormant'],
@@ -197,6 +202,7 @@ export class ScopeHealthEvaluator {
       scope,
       channel: room.channel,
       roomName: room.name,
+      category,
       status,
       badge: STATUS_BADGES[status],
       reasons,
@@ -228,6 +234,13 @@ export class ScopeHealthEvaluator {
     for (const r of configs) {
       const parts = r.key.split(':');
       if (parts[3]) scopesToEval.add(parts[3]);
+    }
+    try {
+      for (const c of await listCustomRooms(this.db, this.tenant)) {
+        scopesToEval.add(c.scope);
+      }
+    } catch {
+      // custom rooms are best-effort in health rollups
     }
 
     for (const s of scopesToEval) {

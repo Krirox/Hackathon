@@ -11,8 +11,21 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
+# git is a runtime dependency of the code-review surface: console/code-review.ts
+# reviews a workspace through coding/diff.ts, which shells out to the `git`
+# binary (git status --porcelain, git show). node:22-slim ships no git, so
+# without this the review page reports "not a git repository" for every
+# workspace — the feature is present in the app and dead in the image.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# Agent mascot SVGs. The console serves /assets/agents/* from
+# <cwd>/site/assets/agents regardless of --site (serve.ts), and buzz.ts points
+# agent avatars at those paths — so they must ship even though the marketing
+# site itself is deliberately not in this image (it is deployed separately).
+COPY site/assets/agents ./site/assets/agents
 # jcode sidecar reaches core over localhost; the socket path is shared via volume in ECS.
 ENV HOST=0.0.0.0 PORT=3100 VITAL_TENANT=acme
 EXPOSE 3100
