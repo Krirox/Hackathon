@@ -2,7 +2,7 @@ import { T, eq, TEN, NOW, fresh, sor, base, withHarness, rejects } from './helpe
 import { createServer } from 'node:net';
 import { JcodeClient } from '../src/jcode/client.ts';
 import { JcodeRunner, defaultPermissionPolicy, createGovernedPermissionPolicy } from '../src/jcode/runner.ts';
-import { socketPathFrom } from '../src/jcode/protocol.ts';
+import { runtimeDirFrom, socketPathFrom } from '../src/jcode/protocol.ts';
 import { FilesystemArtifactStore } from '../src/ingest/collectors.ts';
 import { setKill, recordTrustOutcome, evaluateFreeze } from '../src/gov/trust.ts';
 import { mintScopeToken } from '../src/substrate/identity.ts';
@@ -643,6 +643,26 @@ T('JcodeClient defaults to socketPathFrom() and 15s requestTimeoutMs', () => {
   const c = new JcodeClient();
   eq(c.socketPath, socketPathFrom());
   eq(c.requestTimeoutMs, 15_000);
+});
+
+T('socket resolution mirrors upstream: override, runtime dir, per-user fallback', () => {
+  // Verified against crates/jcode-harness-api/src/sockets.rs: JCODE_API_SOCKET
+  // wins, then JCODE_RUNTIME_DIR, then XDG_RUNTIME_DIR, then a per-user
+  // temp fallback. A client resolving anywhere else can never connect.
+  eq(socketPathFrom({ JCODE_API_SOCKET: '/custom/jcode.sock' } as NodeJS.ProcessEnv, 'linux'), '/custom/jcode.sock');
+  eq(
+    socketPathFrom({ JCODE_RUNTIME_DIR: '/run/u1000', TMPDIR: '/tmp' } as NodeJS.ProcessEnv, 'linux'),
+    '/run/u1000/jcode-api.sock',
+  );
+  eq(
+    socketPathFrom({ XDG_RUNTIME_DIR: '/run/u1000', TMPDIR: '/tmp' } as NodeJS.ProcessEnv, 'linux'),
+    '/run/u1000/jcode-api.sock',
+  );
+  const fallback = socketPathFrom({ TMPDIR: '/tmp', USER: 'priya' } as NodeJS.ProcessEnv, 'linux');
+  eq(fallback, '/tmp/jcode-priya/jcode-api.sock');
+  const anon = socketPathFrom({ TMPDIR: '/tmp' } as unknown as NodeJS.ProcessEnv, 'linux');
+  eq(anon, '/tmp/jcode-user/jcode-api.sock');
+  eq(runtimeDirFrom({ JCODE_RUNTIME_DIR: '/run/u1000' } as NodeJS.ProcessEnv, '/tmp'), '/run/u1000');
 });
 
 T('renewExecutionLease enforces CAS and renews lease interval', async () => {

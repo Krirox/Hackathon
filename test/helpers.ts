@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { after, test } from 'node:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -233,6 +234,24 @@ export const vitals = (over: Partial<Vitals> = {}): Vitals => ({
   returnedOutputs: 0,
   ...over,
 });
+
+/**
+ * Team-VM root that lives for one assertion block. Worker dispatch with a
+ * non-baseline adapter provisions real workspace directories; without this
+ * they land in the production default (/var/vital/sandboxes, or a drive-root
+ * `\var\` on Windows). Restores the previous value (possibly unset) after.
+ */
+export async function withVmRoot<T>(fn: (root: string) => Promise<T>): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), 'vital-vm-'));
+  const prev = process.env.VITAL_VM_ROOT;
+  process.env.VITAL_VM_ROOT = root;
+  try {
+    return await fn(root);
+  } finally {
+    if (prev === undefined) delete process.env.VITAL_VM_ROOT;
+    else process.env.VITAL_VM_ROOT = prev;
+  }
+}
 
 /** A harness that lives for one assertion block. */
 export async function withHarness<T>(fn: (h: FakeHarness) => Promise<T>): Promise<T> {

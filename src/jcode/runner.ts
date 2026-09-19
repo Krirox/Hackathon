@@ -415,7 +415,7 @@ export class JcodeRunner extends EventEmitter {
       blocks.push(`[Cross-Room Evidence]\n${crossLines}`);
     }
     blocks.push(`[Instruction]\n${task.command}`);
-    let prompt = blocks.join('\n\n');
+    const prompt = blocks.join('\n\n');
 
     // Content screening on input prompt
     if (this.contentScreen) {

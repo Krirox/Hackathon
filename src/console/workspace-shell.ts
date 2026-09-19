@@ -55,7 +55,9 @@ export function renderWorkspaceShell(opts: {
   const sidebarRooms = sorted
     .map((r) => {
       const isActive = r.scope === activeScope;
-      const activeStyle = isActive ? 'background:#E6F4F1;color:#0F5C57;font-weight:600;' : 'color:#374151;';
+      const activeStyle = isActive
+        ? 'background:#E6F4F1;color:#0F5C57;font-weight:600;border-left:3px solid #0F5C57;padding-left:8px;'
+        : 'color:#374151;border-left:3px solid transparent;';
       const pending =
         r.pending > 0
           ? `<span style="background:#FEF3C7;color:#92400E;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600;">${r.pending}</span>`
@@ -90,7 +92,7 @@ export function renderWorkspaceShell(opts: {
   
   /* Top Bar */
   .top-header { height: 48px; border-bottom: 1px solid #E5E7EB; background: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; flex-shrink: 0; z-index: 100; }
-  .brand-group { display: flex; align-items: center; gap: 12px; width: 280px; }
+  .brand-group { display: flex; align-items: center; gap: 12px; width: 260px; }
   .vital-logo { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 16px; color: #0F5C57; text-decoration: none; }
   .logo-bars { display: flex; gap: 2.5px; align-items: flex-end; height: 16px; }
   .logo-bar { width: 3.5px; background: #0F5C57; border-radius: 1px; }
@@ -100,14 +102,14 @@ export function renderWorkspaceShell(opts: {
   .org-switcher { display: flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 500; color: #374151; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
   .org-switcher:hover { background: #F3F4F6; }
 
-  .omni-search { flex: 1; max-width: 520px; display: flex; align-items: center; gap: 8px; background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 5px 12px; font-size: 12px; color: #6B7280; }
+  .omni-search { flex: 1; max-width: 480px; display: flex; align-items: center; gap: 8px; background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 5px 12px; font-size: 12px; color: #6B7280; }
   .omni-search input { border: none; background: transparent; outline: none; width: 100%; font-size: 12px; color: #111827; }
 
-  .header-metrics { display: flex; align-items: center; gap: 16px; font-size: 12px; }
-  .metric-item { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
-  .metric-val { font-weight: 700; color: #111827; }
-  .metric-label { font-size: 10px; color: #6B7280; }
-  .user-circle { width: 28px; height: 28px; border-radius: 50%; background: #0F5C57; color: #fff; display: grid; place-items: center; font-weight: 600; font-size: 11px; }
+  .header-metrics { display: flex; align-items: center; gap: 18px; font-size: 12px; }
+  .metric-item { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+  .metric-val { font-weight: 700; font-size: 12.5px; color: #111827; }
+  .metric-label { font-size: 10px; color: #6B7280; text-transform: lowercase; }
+  .user-circle { width: 28px; height: 28px; border-radius: 50%; background: #0F5C57; color: #fff; display: grid; place-items: center; font-weight: 600; font-size: 11px; cursor: pointer; }
 
   /* Body Container */
   .shell-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
@@ -157,6 +159,7 @@ export function renderWorkspaceShell(opts: {
     <div class="omni-search">
       <span>🔍</span>
       <input type="text" placeholder="Search rooms, intents, packs, or anything..." aria-label="Search">
+      <kbd style="border:1px solid #D1D5DB;background:#fff;border-radius:4px;padding:1px 5px;font-size:10px;color:#6B7280;font-family:inherit;font-weight:500;box-shadow:0 1px 1px rgba(0,0,0,0.05);flex-shrink:0;">⌘K</kbd>
     </div>
 
     <div class="header-metrics">
@@ -246,9 +249,13 @@ export function renderWorkspaceShell(opts: {
           <span style="display:flex;align-items:center;gap:6px;">📊 Vital Dashboard</span>
           <span class="dash-tag">Systems ↗</span>
         </a>
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 4px;font-size:11px;color:#6B7280;">
-          <a href="${esc(home)}setup/rooms" style="color:#6B7280;text-decoration:none;">⚙️ Settings</a>
-          <span>${esc(roleStr)}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 4px 0;font-size:11.5px;color:#4B5563;">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+            <div style="width:20px;height:20px;border-radius:50%;background:#0F5C57;color:#fff;display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials)}</div>
+            <span style="font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:115px;" title="${esc(emailStr)}">${esc(emailStr.split('@')[0] ?? emailStr)}</span>
+            <span style="font-size:9.5px;background:#E5E7EB;color:#4B5563;padding:1px 4px;border-radius:4px;font-weight:600;">${esc(roleStr)}</span>
+          </div>
+          <a href="${esc(home)}setup/rooms" style="color:#6B7280;text-decoration:none;font-size:13px;padding:2px;" title="Room Settings &amp; Provisioning">⚙️</a>
         </div>
         <!-- Hidden console nav for accessibility & test suites -->
         <nav aria-label="Console" style="display:none;">${consoleNav}</nav>

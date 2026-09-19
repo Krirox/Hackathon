@@ -1,4 +1,4 @@
-import { T, eq, TEN, NOW, fresh, sor, base, rejects, withHarness } from './helpers.ts';
+import { T, eq, TEN, NOW, fresh, sor, base, rejects, withHarness, withVmRoot } from './helpers.ts';
 import { createHmacSurface, statementHashOf } from '../src/talk/surface.ts';
 import { createServer, type Server } from 'node:http';
 import { JcodeRunner } from '../src/jcode/runner.ts';
@@ -416,7 +416,10 @@ T('F25: laneModelFn rejects unapproved model before any network call', async () 
 
 T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures are non-fatal', async () => {
   const relay = await fakeRelay();
-  try {
+  // Non-baseline adapter: dispatch provisions a real team-VM workspace.
+  // Keep it inside a temp root, never the production default.
+  await withVmRoot(async () => {
+    try {
     const { db, ledger, coord } = await fresh();
     const clm = await ledger.append({
       tenant: TEN,
@@ -504,9 +507,10 @@ T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures 
       'terminal event carries terminal state:',
     );
     eq(worker.status().counters.buzzRelayFailures, 0, 'no relay failures on success:');
-  } finally {
-    await relay.close();
-  }
+    } finally {
+      await relay.close();
+    }
+  });
 });
 
 T('F25: worker skips Buzz posting for test-baseline adapters', async () => {

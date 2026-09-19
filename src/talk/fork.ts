@@ -61,11 +61,11 @@ export class TimeTravelForkEngine {
     let originalDecisionId = targetIdentifier.decisionId ?? `dec_${randomUUID().slice(0, 8)}`;
 
     // Try finding decision in ledger
-    let originalModel = 'claude-3-haiku';
-    let originalTemp = 0.7;
-    let originalTokens = 1240;
+    const originalModel = 'claude-3-haiku';
+    const originalTemp = 0.7;
+    const originalTokens = 1240;
     let originalRec = 'Apply 50% partial hedge on counterparty drift';
-    let originalConf = 0.74;
+    const originalConf = 0.74;
     let originalReasoning = 'Assumed moderate counterparty volatility based on standard liquidity window.';
 
     let claimIds: string[] = [];

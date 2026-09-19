@@ -1,6 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
-import { describeCardReadOnly } from '../compiler/registry.ts';
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -14,7 +13,7 @@ export async function renderCompilerView(
   db: AsyncDb,
   comp: OrganizationalCompiler,
   tenant: string,
-  opts: CompilerViewOptions = {},
+  _opts: CompilerViewOptions = {},
 ): Promise<string> {
   const cards = await comp.list(tenant, {}).catch(() => []);
 
@@ -65,11 +64,12 @@ export async function renderCompilerView(
     </svg>`;
 
   const renderCardItem = (card: typeof allCards[0]) => {
-    const badgeIcon = card.ready
-      ? '<span style="color:#059669;font-size:12px;">✔</span>'
-      : card.warning
-      ? '<span style="color:#D97706;font-size:12px;">?</span>'
-      : '';
+    let badgeIcon = '';
+    if (card.ready) {
+      badgeIcon = '<span style="color:#059669;font-size:12px;">✔</span>';
+    } else if (card.warning) {
+      badgeIcon = '<span style="color:#D97706;font-size:12px;">?</span>';
+    }
     const alertBox = card.alert
       ? `<div style="font-size:10px;color:#DC2626;background:#FEE2E2;padding:2px 6px;border-radius:4px;margin-top:6px;font-weight:600;">${esc(card.alert)}</div>`
       : '';

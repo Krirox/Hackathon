@@ -376,8 +376,8 @@ export async function renderBuzzRoom(
   const linkify = (text: string) => {
     let out = esc(text);
     out = out.replace(/(BUZ-\d+)/g, '<a href="#" style="color:#0F5C57;text-decoration:underline;">$1</a>');
-    out = out.replace(/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g, '<span style="background:#E0F2FE;padding:1px 4px;border-radius:4px;">@$1</span>');
-    out = out.replace(/\[([^\]]+)\]/g, '<code style="background:#F4F7F5;padding:1px 4px;border-radius:4px;">$1</code>');
+    out = out.replace(/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g, '<span style="background:#E8F5FA;color:#1264A3;font-weight:600;padding:2px 6px;border-radius:4px;display:inline-block;">@$1</span>');
+    out = out.replace(/\[([^\]]+)\]/g, '<code style="background:#F1F5F9;border:1px solid #E2E8F0;color:#0F172A;padding:1px 5px;border-radius:4px;font-family:monospace;font-size:12px;">$1</code>');
     return out;
   };
   const pendingHtml = pendingForRoom
@@ -458,8 +458,8 @@ export async function renderBuzzRoom(
       const picker = ['✅', '🚀', '❤️'];
       const reactionForms = stored
         .map((r) => {
-          const mine = r.me ? 'background:#E8F5E9;border-color:#007A5A;' : 'background:#F8F8F8;border-color:#DDDDDD;';
-          return `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:16px;padding:2px 8px;font-size:12px;cursor:pointer;color:#1D1C1D;${mine}">${esc(r.emoji)} ${r.count}</button></form>`;
+          const mine = r.me ? 'background:#E8F5FA;border-color:#1D9BD1;color:#1264A3;' : 'background:#F8FAFC;border-color:#E2E8F0;color:#1D1C1D;';
+          return `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:12px;padding:2px 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all .1s;${mine}">${esc(r.emoji)} <span style="font-weight:600;">${r.count}</span></button></form>`;
         })
         .join('');
       const addPickers = picker
@@ -502,46 +502,67 @@ export async function renderBuzzRoom(
             })()
           : '';
       const replies = byRoot.get(m.id) ?? [];
-      const visibleReplies = replies.slice(0, 3);
-      const hiddenCount = replies.length - visibleReplies.length;
-      const replyHtml =
-        replies.length === 0
-          ? ''
-          : `<div style="margin-top:8px;border-top:1px solid #F3F4F6;padding-top:8px;">
-  ${visibleReplies
-    .map((r) => {
-      const rw = displayName(r.author, config.agentName);
-      return `<div style="display:flex;gap:8px;padding:6px 0 6px 28px;border-left:2px solid #E5E7EB;margin-left:4px;">
-    <div style="width:24px;height:24px;border-radius:999px;background:${avatarColor(rw)};display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials(rw))}</div>
-    <div style="flex:1;"><span style="font-weight:600;font-size:12px;">${esc(rw)}</span> <span style="font-size:11px;color:#6B7280;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 500))}</div></div>
-  </div>`;
-    })
-    .join('')}
-  ${hiddenCount > 0 ? `<details style="margin:6px 0 0 28px;"><summary style="font-size:11px;color:#0F5C57;cursor:pointer;">Show ${hiddenCount} more repl${hiddenCount === 1 ? 'y' : 'ies'}</summary>${replies
-    .slice(3)
-    .map((r) => {
-      const rw = displayName(r.author, config.agentName);
-      return `<div style="display:flex;gap:8px;padding:6px 0 6px 28px;border-left:2px solid #E5E7EB;margin-left:4px;">
-    <div style="width:24px;height:24px;border-radius:999px;background:${avatarColor(rw)};display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials(rw))}</div>
-    <div style="flex:1;"><span style="font-weight:600;font-size:12px;">${esc(rw)}</span> <span style="font-size:11px;color:#6B7280;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 500))}</div></div>
-  </div>`;
-    })
-    .join('')}</details>` : ''}
-</div>`;
-      return `<li id="msg-${esc(m.id)}" onmouseover="this.style.background='#F8F8F8'" onmouseout="this.style.background='#fff'" style="display:flex;gap:10px;padding:8px 8px;margin:0 -8px;border-radius:8px;list-style:none;background:#fff;">
-  <div style="width:36px;height:36px;border-radius:6px;background:${avatarColor(who)};display:grid;place-items:center;font-size:12px;font-weight:700;color:#1D1C1D;flex-shrink:0;">${esc(initials(who))}</div>
+      const replyThreadHtml =
+        replies.length > 0
+          ? `<div style="margin-top:6px;">
+  <details style="margin:2px 0 0 0;" open>
+    <summary style="font-size:12px;font-weight:600;color:#1264A3;cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;">
+      <span>💬</span> <span>${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}</span>
+      <span style="font-weight:normal;color:#6B7280;font-size:11px;">· Last reply ${esc(fmtClock(replies[replies.length - 1]!.createdAt))}</span>
+    </summary>
+    <div style="margin-top:6px;padding-left:10px;border-left:2px solid #E5E7EB;">
+      ${replies
+        .map((r) => {
+          const rw = displayName(r.author, config.agentName);
+          return `<div style="display:flex;gap:8px;padding:4px 0;">
+        <div style="width:22px;height:22px;border-radius:50%;background:${avatarColor(rw)};display:grid;place-items:center;font-size:9px;font-weight:700;flex-shrink:0;">${esc(initials(rw))}</div>
+        <div style="flex:1;"><span style="font-weight:600;font-size:12px;">${esc(rw)}</span> <span style="font-size:11px;color:#6B7280;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12.5px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 500))}</div></div>
+      </div>`;
+        })
+        .join('')}
+      <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:6px;">
+        <input type="hidden" name="csrf" value="${esc(csrf)}">
+        <input type="hidden" name="parentId" value="${esc(m.id)}">
+        <input type="text" name="content" placeholder="Reply in thread…" style="flex:1;border:1px solid #D1D5DB;border-radius:6px;padding:5px 8px;font-size:12px;" maxlength="500">
+        <button type="submit" style="border:1px solid #D1D5DB;background:#fff;color:#1D1C1D;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer;">Reply</button>
+      </form>
+    </div>
+  </details>
+</div>`
+          : `<details style="margin-top:4px;">
+  <summary style="font-size:11px;color:#6B7280;cursor:pointer;list-style:none;opacity:0.75;" title="Reply to message">Reply</summary>
+  <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:6px;">
+    <input type="hidden" name="csrf" value="${esc(csrf)}">
+    <input type="hidden" name="parentId" value="${esc(m.id)}">
+    <input type="text" name="content" placeholder="Reply in thread…" style="flex:1;border:1px solid #D1D5DB;border-radius:6px;padding:5px 8px;font-size:12px;" maxlength="500">
+    <button type="submit" style="border:1px solid #D1D5DB;background:#fff;color:#1D1C1D;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;cursor:pointer;">Reply</button>
+  </form>
+</details>`;
+
+      const isAgent = who.toLowerCase().includes('agent') || who === config.agentName || who.toLowerCase() === 'bumble' || who.toLowerCase() === 'system';
+      const avatarHtml = isAgent
+        ? `<div style="width:36px;height:36px;border-radius:8px;background:#E0F2FE;color:#0369A1;display:grid;place-items:center;font-size:18px;flex-shrink:0;">🤖</div>`
+        : `<div style="width:36px;height:36px;border-radius:50%;background:${avatarColor(who)};display:grid;place-items:center;font-size:12px;font-weight:700;color:#1D1C1D;flex-shrink:0;">${esc(initials(who))}</div>`;
+      const agentBadge = isAgent
+        ? `<span style="background:#E5E7EB;color:#374151;font-size:9.5px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase;margin-left:4px;">BOT</span>`
+        : '';
+      const rowStyle = isAgent
+        ? 'background:#F9FDFB;border-left:3px solid #10B981;border-radius:6px;padding:8px 10px;margin:0 -8px;'
+        : 'background:#fff;border-radius:6px;padding:8px 8px;margin:0 -8px;';
+
+      return `<li id="msg-${esc(m.id)}" onmouseover="if(!${isAgent})this.style.background='#F8F8F8'" onmouseout="if(!${isAgent})this.style.background='#fff'" style="display:flex;gap:10px;list-style:none;transition:background .15s;${rowStyle}">
+  ${avatarHtml}
   <div style="flex:1;min-width:0;">
-    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;"><span style="font-weight:700;font-size:14px;color:#1D1C1D;">${esc(who)}</span><span style="font-size:11.5px;color:#868686;">${esc(time)}</span>${m.requestId ? `<span style="font-size:11px;color:#868686;">· ${esc(m.requestId.slice(0, 10))}</span>` : ''}</div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <span style="font-weight:700;font-size:14px;color:#111827;">${esc(who)}</span>
+      ${agentBadge}
+      <span style="font-size:11.5px;color:#6B7280;margin-left:2px;">${esc(time)}</span>
+      ${m.requestId ? `<span style="font-size:11px;color:#9CA3AF;">· ${esc(m.requestId.slice(0, 10))}</span>` : ''}
+    </div>
     <div style="margin-top:2px;">${bubble}</div>
     ${reviewActions}
     ${reactions}
-    ${replyHtml}
-    <form id="reply-${esc(m.id)}" method="post" action="${esc(home)}console/buzz/${esc(scope)}/reply" style="display:flex;gap:6px;margin-top:6px;">
-      <input type="hidden" name="csrf" value="${esc(csrf)}">
-      <input type="hidden" name="parentId" value="${esc(m.id)}">
-      <input type="text" name="content" placeholder="Reply in thread…" style="flex:1;border:1px solid #DDDDDD;border-radius:6px;padding:6px 10px;font-size:12.5px;" maxlength="500">
-      <button type="submit" style="border:1px solid #DDDDDD;background:#fff;color:#1D1C1D;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;">Reply</button>
-    </form>
+    ${replyThreadHtml}
   </div>
 </li>`;
     })
@@ -580,7 +601,11 @@ export async function renderBuzzRoom(
         <span style="font-size:13px;">${esc(health.badge)}</span>
         <span style="font-size:12px;color:#6B7280;"><code>${esc(config.agentName)}</code> · ${autonomyBadge(config.autonomy)}</span>
       </div>
-      <div style="font-size:12px;color:#6B7280;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(config.mission)}">${esc(config.mission)} · <span style="color:#374151;font-weight:500;">${esc(gauge.headerString)}</span>${config.active ? '' : ' · <strong style="color:#DC2626;">Room is currently disabled / dormant</strong>'}</div>
+      <div style="font-size:12px;color:#6B7280;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:8px;" title="${esc(config.mission)}">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(config.mission)}</span>
+        <span style="background:#F3F4F6;color:#374151;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;flex-shrink:0;">${esc(gauge.headerString)}</span>
+        ${config.active ? '' : '<span style="color:#DC2626;font-weight:600;font-size:11px;flex-shrink:0;">Dormant</span>'}
+      </div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
       <button type="button" onclick="window.openBuzzDrawer('${esc(home)}console/compiler?drawer=1', 'Compiler Board — Why Not Trusted Yet')" style="border:1px solid #D1D5DB;background:#fff;border-radius:6px;font-size:12px;font-weight:500;padding:5px 10px;cursor:pointer;color:#374151;display:inline-flex;align-items:center;gap:4px;" title="View Kanban Compiler Board">📊 Compiler</button>
@@ -605,12 +630,18 @@ export async function renderBuzzRoom(
 
   <!-- Agent Working Presence Bar (Matching Image 1 bottom) -->
   <div style="display:flex;align-items:center;gap:8px;padding:6px 20px;background:#FAFAF9;border-top:1px solid #F3F4F6;font-size:12px;color:#4B5563;flex-shrink:0;">
-    <span style="width:8px;height:8px;border-radius:999px;background:${config.active ? '#2BAC76' : '#9CA3AF'};display:inline-block;"></span>
-    <span><strong>${esc(config.agentName)}</strong> · ${autonomyBadge(config.autonomy)} · ${esc(gauge.headerString)}</span>
+    <span style="width:8px;height:8px;border-radius:50%;background:${config.active ? '#10B981' : '#9CA3AF'};box-shadow:0 0 0 2px rgba(16,185,129,0.25);animation:buzzPulse 2s infinite;display:inline-block;"></span>
+    <span><strong>${esc(config.agentName)}</strong>: Working · ${autonomyBadge(config.autonomy)} · <span style="color:#6B7280;">${esc(gauge.headerString)}</span></span>
   </div>
+  <style>
+    @keyframes buzzPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.85); }
+    }
+  </style>
 
   <!-- Slack Composer Card (Matching Image 1) -->
-  <div style="padding:12px 20px 16px;background:#fff;border-top:1px solid #E5E7EB;flex-shrink:0;">
+  <div style="padding:10px 20px 14px;background:#fff;border-top:1px solid #E5E7EB;flex-shrink:0;">
     <span style="display:none">Send a command</span>
     <form method="post" action="${esc(home)}console/buzz/${esc(scope)}/command" style="display:flex;flex-direction:column;gap:6px;">
       <input type="hidden" name="csrf" value="${esc(csrf)}">

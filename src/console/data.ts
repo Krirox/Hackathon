@@ -1,4 +1,3 @@
-import type { AsyncDb } from '../core/db.ts';
 import type { ErasureReceiptVerification } from '../core/erasure.ts';
 
 /**
@@ -51,7 +50,7 @@ ${errorHtml}
     The supported disaster-recovery path is a point-in-time copy of the database file (with artifact
     store) taken by your platform operator — restoring is a file restore, verified by the
     backup/restore drill, <em>not</em> an in-app import. The export below is a portable evidence
-    record and is explicitly <strong>not</strong> a backup and cannot be restored by import.
+    record and is explicitly <strong>not a backup</strong> and cannot be restored by import.
   </p>
   <p class="sub">
     To confirm current operational health, run <code>vital status --readiness</code> (or see the

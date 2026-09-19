@@ -78,7 +78,12 @@ export class RoomBudgetTracker {
     const isBreached = percentage >= 100;
     const bar = renderProgressBar(percentage, 8);
 
-    const badge = isBreached ? STATUS_BADGES.halted : isWarning ? STATUS_BADGES.degraded : STATUS_BADGES.healthy;
+    let badge = STATUS_BADGES.healthy;
+    if (isBreached) {
+      badge = STATUS_BADGES.halted;
+    } else if (isWarning) {
+      badge = STATUS_BADGES.degraded;
+    }
     const headerString = `${badge} #${room.name} ${bar} $${dollarsSpent.toFixed(0)} / $${config.budgetCeilingDollars.toFixed(0)} · ${formatTokenRate(tokensPerHour)}`;
 
     return {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 
@@ -34,9 +35,17 @@ export interface VmSnapshot {
   at: string;
 }
 
-function vmRoot(scope: string): string {
-  const base = process.env.VITAL_VM_ROOT ?? '/var/vital/sandboxes';
+export function vmRootFor(scope: string, env: NodeJS.ProcessEnv = process.env): string {
+  // VITAL_VM_ROOT wins everywhere (tests isolate here). Prod default is the
+  // EFS access-point path; on Windows there is no /var, so fall back to the
+  // OS temp dir instead of spraying drive-root `\var\` junk (found live).
+  const base =
+    env.VITAL_VM_ROOT ?? (process.platform === 'win32' ? join(tmpdir(), 'vital-sandboxes') : '/var/vital/sandboxes');
   return join(base, `team-${scope}`);
+}
+
+function vmRoot(scope: string): string {
+  return vmRootFor(scope);
 }
 
 function vmSocketPath(vmId: string): string {

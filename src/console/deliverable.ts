@@ -132,7 +132,7 @@ export async function renderDeliverableSection(
 </section>`;
     }
     const defaultSchema = reqRow?.deliverable || 'feature-plan.v1';
-    let referencedClaims: string[] = [];
+    let referencedClaims: string[];
     try {
       const cRefs = reqRow?.claim_refs ? JSON.parse(reqRow.claim_refs) : [];
       const chainRefs = reqRow?.chain_claims ? JSON.parse(reqRow.chain_claims) : [];
@@ -236,7 +236,7 @@ ${operatorFields(opts, version.id, 'request-changes')}
           chain_claims?: string;
         }
       | undefined;
-    let referencedClaims: string[] = [];
+    let referencedClaims: string[];
     try {
       const cRefs = reqRow?.claim_refs ? JSON.parse(reqRow.claim_refs) : [];
       const chainRefs = reqRow?.chain_claims ? JSON.parse(reqRow.chain_claims) : [];

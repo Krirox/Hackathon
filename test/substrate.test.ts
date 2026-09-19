@@ -1,7 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base, withHarness, rejects } from './helpers.ts';
+import { T, eq, TEN, NOW, DAY_LATER, fresh, sor, base, withHarness, withVmRoot, rejects } from './helpers.ts';
 import {
   Scheduler,
   claimOutbox,
@@ -16,6 +16,7 @@ import { decideEgress, hostMatches } from '../src/substrate/egress.ts';
 import { createContentScreen, denylistBackend } from '../src/substrate/screen.ts';
 import { mintScopeToken, verifyScopeToken } from '../src/substrate/identity.ts';
 import { JcodeAdapter, LocalEchoAdapter, selectAdapter } from '../src/substrate/harness.ts';
+import { ApplicationWorker } from '../src/substrate/worker.ts';
 import { startEgressProxy, type EgressAudit } from '../src/substrate/egress-proxy.ts';
 import { setKill } from '../src/gov/trust.ts';
 import { createServer, request as httpRequest } from 'node:http';
@@ -248,6 +249,101 @@ T('adapters refuse unadmitted and ungrounded work alike', async () => {
     code = (e as Error).message;
   }
   eq(code.includes('NOT_ADMITTED'), true);
+});
+
+T('worker team-VM: jcode dispatch provisions a scope workspace and snapshots the real artifact', async () => {
+  await withVmRoot(async (root) => {
+    await withHarness(async (h) => {
+      const { db, ledger, coord } = await fresh();
+      const clm = await ledger.append({
+        tenant: TEN,
+        subject: 'release',
+        kind: 'OBSERVATION',
+        statement: 'flag spec frozen',
+        confidence: 1,
+        observedAt: NOW,
+        validFrom: NOW,
+        owner: 'sync:gh',
+        scope: 'engineering',
+        authorType: 'system',
+        provenance: sor(),
+      });
+      const { request } = await coord.submit(
+        base({ id: 'vm1', goal: 'implement the flag', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+      );
+      const worker = new ApplicationWorker(db, ledger, coord, {
+        tenant: TEN,
+        adapter: new JcodeAdapter(db, ledger, coord, { socketPath: h.path }),
+        dispatchRequests: true,
+        relayOutbox: false,
+        enableLearningLoop: false,
+        sweepIntervalMs: 99_999,
+      });
+      const res = await worker.tick(NOW);
+      eq(res.requestsCompleted, 1, 'the jcode run completed through dispatch:');
+      // The session opened inside the provisioned workspace, not cwd.
+      const created = h.requestsOf('create_session');
+      eq(created.length, 1, 'one session per dispatch:');
+      const workDir = String((created[0] as unknown as Record<string, unknown>).working_dir ?? '');
+      eq(workDir.startsWith(root), true, `session working dir is the team VM (${workDir}):`);
+      eq(existsSync(workDir), true, 'the workspace exists after a good run:');
+      // The snapshot names the request and the real artifact — never a stub.
+      const snap = (await db
+        .prepare(`SELECT detail FROM audit_log WHERE tenant = ? AND action = 'VM_SNAPSHOT' ORDER BY seq DESC LIMIT 1`)
+        .get(TEN)) as { detail: string } | undefined;
+      eq(!!snap, true, 'a snapshot was recorded:');
+      eq(snap!.detail.includes(request.id), true, 'the snapshot names the request:');
+      eq(snap!.detail.includes('snap_'), false, 'the snapshot points at the real artifact ref:');
+    });
+  });
+});
+
+T('worker team-VM: an adapter throw destroys the workspace instead of keeping taint', async () => {
+  await withVmRoot(async (root) => {
+    const { db, ledger, coord } = await fresh();
+    const clm = await ledger.append({
+      tenant: TEN,
+      subject: 'release',
+      kind: 'OBSERVATION',
+      statement: 'flag spec frozen',
+      confidence: 1,
+      observedAt: NOW,
+      validFrom: NOW,
+      owner: 'sync:gh',
+      scope: 'engineering',
+      authorType: 'system',
+      provenance: sor(),
+    });
+    await coord.submit(
+      base({ id: 'vm2', goal: 'implement the flag', claimRefs: [clm.id], bid: { dollars: 5, tokens: 20_000 } }),
+    );
+    const worker = new ApplicationWorker(db, ledger, coord, {
+      tenant: TEN,
+      adapter: {
+        name: 'boom-model',
+        category: 'model',
+        isTestBaseline: false,
+        async run() {
+          throw new Error('daemon gone');
+        },
+      },
+      dispatchRequests: true,
+      relayOutbox: false,
+      enableLearningLoop: false,
+      sweepIntervalMs: 99_999,
+    });
+    const res = await worker.tick(NOW);
+    eq(res.requestsFailed, 1, 'the throw failed the request:');
+    const meta = (await db
+      .prepare('SELECT value FROM meta WHERE key = ?')
+      .get(`vm:team:${TEN}:engineering`)) as { value: string } | undefined;
+    eq(meta, undefined, 'no VM row survives a throw:');
+    eq(existsSync(join(root, 'team-engineering')), false, 'the workspace dir is torn down:');
+    const destroyed = (await db
+      .prepare(`SELECT detail FROM audit_log WHERE tenant = ? AND action = 'VM_DESTROYED' ORDER BY seq DESC LIMIT 1`)
+      .get(TEN)) as { detail: string } | undefined;
+    eq(!!destroyed && destroyed.detail.includes('daemon gone'), true, 'the teardown names the cause:');
+  });
 });
 
 T('model selection below the tier picks the right harness, never a guess', async () => {

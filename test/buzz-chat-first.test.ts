@@ -1,4 +1,4 @@
-import { T, eq, TEN, NOW, fresh, sor, base } from './helpers.ts';
+import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
@@ -10,7 +10,7 @@ const MARKETING_USER = { email: 'growth.marketing@acme.test', password: 'the-con
 
 async function setupTestApp() {
   const ctx = await fresh();
-  const { db, ledger, coord } = ctx;
+  const { db } = ctx;
   const comp = new OrganizationalCompiler(db);
   await installAuthSchema(db, NOW);
   await signupTenant(

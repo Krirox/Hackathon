@@ -131,7 +131,12 @@ export class AmbientMorningBriefingSynthesizer {
       }
     }
 
-    const overallHealth: 'green' | 'yellow' | 'red' = anyRed ? 'red' : anyYellow ? 'yellow' : 'green';
+    let overallHealth: 'green' | 'yellow' | 'red' = 'green';
+    if (anyRed) {
+      overallHealth = 'red';
+    } else if (anyYellow) {
+      overallHealth = 'yellow';
+    }
 
     // 4. Compose transcript
     const approvalText =

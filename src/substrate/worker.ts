@@ -487,34 +487,70 @@ export class ApplicationWorker {
             } else {
               const boundSkillCardId = routeDecision.tier === 'WORKFLOW' ? (candidateCard?.id ?? null) : null;
               // Team microVM: one isolated workspace per scope, many jcode
-              // sessions multiplex inside. Snapshot on completion, destroy on
-              // kill/error. Test-baseline adapters skip VM lifecycle.
+              // sessions multiplex inside. COMPLETED runs snapshot the workspace
+              // against the real artifact ref; FAILED/DENIED runs and adapter
+              // throws destroy it — a tainted workspace must never become the
+              // resume state for the next provision. Budget-exhausted runs leave
+              // the workspace untouched. Test-baseline adapters skip the VM
+              // lifecycle entirely.
               const needsVm = !this.adapter.isTestBaseline;
               let vm: { workingDir: string } | null = null;
               if (needsVm) {
                 const { provisionTeamVm } = await import('./vm.ts');
                 vm = await provisionTeamVm(this.db, this.tenant, targetScope, nowIso);
               }
-              const outcome = await this.adapter.run(this.tenant, reqId, {
-                command,
-                claimRefs: groundedClaimRefs,
-                onBehalfOf,
-                maxDollars: bid.dollars ?? 1,
-                maxTokens: bid.tokens ?? 10_000,
-                ...(vm ? { workingDir: vm.workingDir } : {}),
-                ...(approvedSpec && approvalDecision
-                  ? { approvedDecisionId: approvalDecision.id, specFingerprint: approvedSpec.fingerprint }
-                  : {}),
-                taskType,
-                tier: routeDecision.tier,
-                intent,
-                skillCardId: boundSkillCardId,
-                routerConfidence: routeDecision.shadow ? 0.5 : 0.9,
-              });
+              let outcome;
+              try {
+                outcome = await this.adapter.run(this.tenant, reqId, {
+                  command,
+                  claimRefs: groundedClaimRefs,
+                  onBehalfOf,
+                  maxDollars: bid.dollars ?? 1,
+                  maxTokens: bid.tokens ?? 10_000,
+                  ...(vm ? { workingDir: vm.workingDir } : {}),
+                  ...(approvedSpec && approvalDecision
+                    ? { approvedDecisionId: approvalDecision.id, specFingerprint: approvedSpec.fingerprint }
+                    : {}),
+                  taskType,
+                  tier: routeDecision.tier,
+                  intent,
+                  skillCardId: boundSkillCardId,
+                  routerConfidence: routeDecision.shadow ? 0.5 : 0.9,
+                });
+              } catch (err) {
+                if (needsVm && vm) {
+                  const { destroyTeamVm } = await import('./vm.ts');
+                  await destroyTeamVm(
+                    this.db,
+                    this.tenant,
+                    targetScope,
+                    `adapter throw: ${String(err).slice(0, 160)}`,
+                    nowIso,
+                  );
+                }
+                throw err;
+              }
               if (needsVm && vm) {
-                const { snapshotTeamVm } = await import('./vm.ts');
-                const art = (outcome as { artifactRef?: string }).artifactRef ?? null;
-                await snapshotTeamVm(this.db, this.tenant, targetScope, reqId, art, nowIso);
+                if (outcome.status === 'COMPLETED') {
+                  const { snapshotTeamVm } = await import('./vm.ts');
+                  await snapshotTeamVm(
+                    this.db,
+                    this.tenant,
+                    targetScope,
+                    reqId,
+                    outcome.artifactRef ?? null,
+                    nowIso,
+                  );
+                } else if (outcome.status === 'FAILED' || outcome.status === 'DENIED') {
+                  const { destroyTeamVm } = await import('./vm.ts');
+                  await destroyTeamVm(
+                    this.db,
+                    this.tenant,
+                    targetScope,
+                    `${outcome.status}: ${(outcome.refusalReason ?? 'no reason given').slice(0, 160)}`,
+                    nowIso,
+                  );
+                }
               }
 
               // F25: Post terminal Buzz summary. Skip test-baseline adapters

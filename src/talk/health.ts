@@ -4,7 +4,7 @@ import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import { listStops } from '../gov/trust.ts';
-import { normalizeScope, roomForScope, loadRoomConfig, type RoomConfig } from './rooms.ts';
+import { CANONICAL_ROOMS, normalizeScope, roomForScope, loadRoomConfig } from './rooms.ts';
 import { type BuzzSurface, type BuzzNostrEvent } from './buzz.ts';
 
 export type RoomHealthStatus = 'healthy' | 'degraded' | 'halted' | 'idle';
@@ -122,7 +122,6 @@ export class ScopeHealthEvaluator {
     }
 
     // 4. Pending approvals check
-    let pendingApprovals = 0;
     const pRow = (await this.db
       .prepare(
         `SELECT COUNT(*) as n FROM requests
@@ -130,7 +129,7 @@ export class ScopeHealthEvaluator {
          AND ${jsonNumber(this.db.engine, 'bid_json', 'humanMinutes')} > 0`,
       )
       .get(this.tenant, scope)) as { n: number } | undefined;
-    pendingApprovals = Number(pRow?.n ?? 0);
+    const pendingApprovals = Number(pRow?.n ?? 0);
     if (pendingApprovals > 0) {
       reasons.push(`${pendingApprovals} workflow request(s) awaiting human approval`);
     }
@@ -158,7 +157,6 @@ export class ScopeHealthEvaluator {
     }
 
     // 6. Contradictions check
-    let contradictions = 0;
     const contraRow = (await this.db
       .prepare(
         `SELECT COUNT(*) as n FROM claims c
@@ -166,7 +164,7 @@ export class ScopeHealthEvaluator {
          WHERE c.tenant = ? AND c.scope = ? AND l.link = 'contradicts' AND c.status = 'ACCEPTED'`,
       )
       .get(this.tenant, scope)) as { n: number } | undefined;
-    contradictions = Number(contraRow?.n ?? 0);
+    const contradictions = Number(contraRow?.n ?? 0);
     if (contradictions > 0) {
       reasons.push(`${contradictions} open epistemic contradiction(s) in scope`);
     }
@@ -222,25 +220,10 @@ export class ScopeHealthEvaluator {
       .prepare(`SELECT key FROM meta WHERE key LIKE 'room:config:${this.tenant}:%'`)
       .all()) as { key: string }[];
 
-    // Ensure all 12 canonical scopes are evaluated
+    // Ensure all canonical scopes are evaluated
     const scopesToEval = new Set<string>();
-    for (const r of roomForScope('core').channel
-      ? [
-          'core',
-          'facts',
-          'research',
-          'risk',
-          'product',
-          'legal',
-          'finance',
-          'infra',
-          'business',
-          'data',
-          'exec',
-          'experimental',
-        ]
-      : []) {
-      scopesToEval.add(r);
+    for (const r of CANONICAL_ROOMS) {
+      scopesToEval.add(r.scope);
     }
     for (const r of configs) {
       const parts = r.key.split(':');

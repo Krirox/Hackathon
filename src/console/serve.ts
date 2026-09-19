@@ -199,7 +199,7 @@ import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
-import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
+import { loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
 import { renderCompilerView } from './compiler-view.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
 import { executeRoomCommand } from '../talk/commands.ts';
@@ -433,7 +433,17 @@ async function wrapInWorkspaceShell(
   const avail: Record<string, boolean> = { requests: true, claims: true, rooms: true, humanWork: true, buzz: isAdmin, settings: isAdmin, learning: isAdmin, audit: isAdmin, data: isAdmin };
   const nav = (await import('./render.ts')).renderConsoleNav((await import('./render.ts')).buildConsoleNav(home, avail), navKey);
   const cluster = (await import('./render.ts')).renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-  const shell = renderWorkspaceShell({ rooms, activeScope, home, consoleNav: nav, accountCluster: cluster, innerHtml });
+  const shell = renderWorkspaceShell({
+    rooms,
+    activeScope,
+    home,
+    consoleNav: nav,
+    accountCluster: cluster,
+    innerHtml,
+    userEmail: auth.user.email,
+    userRole: auth.user.role,
+    tenant,
+  });
   return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
 }
 
@@ -1620,7 +1630,7 @@ async function triggerMentionHandoffs(
         opts.at,
         `Handoff to @${targetRoomDef.agentName} in #${targetRoomDef.name}: chain ${handoff.chainId}`,
       );
-    } catch (err) {
+    } catch {
       // Non-fatal if swarm dispatch refused or already admitted
       // console.error('HANDOFF ERROR:', err);
     }
@@ -2807,7 +2817,7 @@ export function startConsoleServer(
             home,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'digest'));
+          res.end(html);
           return;
         }
         // FINAL-004: human surface for learning review (labeling + card gaps).
