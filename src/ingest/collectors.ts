@@ -1061,3 +1061,96 @@ export function serperSearchCollector(
     },
   };
 }
+
+export interface StripeInvoice {
+  id: string;
+  customer?: string | null;
+  amount_due: number;
+  amount_paid: number;
+  currency: string;
+  status: string;
+  created: number;
+  subscription?: string | null;
+}
+
+export type StripeFetch = (
+  url: string,
+  init: { method: string; headers: Record<string, string> },
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+}>;
+
+/**
+ * Stripe invoice and billing collector for finance-agent.
+ * Key travels in Authorization header only (never written to ledger or artifacts).
+ * Ingests live invoice status, subscription revenue, and billing discrepancies.
+ */
+export function stripeInvoicesCollector(
+  opts: {
+    apiKey: string;
+    fetchFn?: StripeFetch;
+    limit?: number;
+    sourceTier?: SourceTier;
+  },
+): Collector {
+  const name = 'stripe:invoices';
+  return {
+    name,
+    sourceTier: opts.sourceTier ?? 'PRIMARY',
+    extractor: 'stripe-invoices',
+    extractorVersion: '1.0.0',
+    async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
+      if (!opts.apiKey) {
+        throw new Error('[ingest:STRIPE_KEY] Stripe API key missing — set STRIPE_SECRET_KEY, never hardcode it');
+      }
+      const fetchFn = opts.fetchFn ?? ((url: string, init: { method: string; headers: Record<string, string> }) => fetch(url, init));
+      const limit = opts.limit ?? 100;
+      const url = `https://api.stripe.com/v1/invoices?limit=${limit}`;
+      const res = await fetchFn(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${opts.apiKey}`,
+          Accept: 'application/json',
+        },
+      });
+      if (!res.ok) throw new Error(`[ingest:STRIPE_FETCH] Stripe API returned status ${res.status}`);
+      const body = (await res.json()) as { data?: StripeInvoice[] };
+      const invoices = body.data ?? [];
+
+      const out: RawEvent[] = [];
+      for (const inv of invoices) {
+        const rev = `${inv.status}:${inv.amount_due}:${inv.amount_paid}`;
+        const occurredAt = inv.created ? new Date(inv.created * 1000).toISOString() : now;
+        const cur = (inv.currency ?? 'usd').toUpperCase();
+        const due = (inv.amount_due / 100).toFixed(2);
+        const summary = `Stripe invoice ${inv.id}: ${cur} ${due} (${inv.status})`;
+
+        out.push({
+          source: name,
+          uri: `https://dashboard.stripe.com/invoices/${inv.id}`,
+          fingerprint: fingerprintOf(`${inv.id}:${rev}`),
+          eventId: inv.id,
+          revision: rev,
+          occurredAt,
+          summary,
+          payload: {
+            id: inv.id,
+            customer: inv.customer ?? null,
+            amountDueCents: inv.amount_due,
+            amountPaidCents: inv.amount_paid,
+            currency: inv.currency,
+            status: inv.status,
+            subscription: inv.subscription ?? null,
+          },
+        });
+      }
+
+      await stageToInbox(db, tenant, name, out, now);
+      await cursorSet(db, tenant, name, now);
+      return out;
+    },
+  };
+}
+

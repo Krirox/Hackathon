@@ -3,7 +3,7 @@ import { startConsoleServer } from '../src/console/serve.ts';
 import { installAuthSchema, signupTenant, inviteUser, listUsers } from '../src/core/auth.ts';
 import { describeStops } from '../src/gov/trust.ts';
 import { mintReviewToken, verifyReviewToken, reviewSecretFromEnv } from '../src/talk/review-card.ts';
-import { CANONICAL_ROOMS } from '../src/talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig } from '../src/talk/rooms.ts';
 
 /**
  * These tests exist because every route under `/api/buzz` was reachable with no
@@ -300,6 +300,57 @@ T('a member reads rooms and chats, but governance commands stay admin-only', asy
       body: `csrf=${owner.csrf}&command=${encodeURIComponent('/halt reason="drill"')}`,
     });
     eq(halt2.status, 303, 'owner can still /halt:');
+
+    // FULL GOVERNANCE COVERAGE: the other two org-acting commands are gated
+    // the same way — /resume of a kill switch and policy rewrites.
+    const haltAgain = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: owner.headers,
+      body: `csrf=${owner.csrf}&command=${encodeURIComponent('/halt reason="for recover test"')}`,
+    });
+    eq(haltAgain.status, 303, 'owner re-halts for the recover test:');
+
+    // Snapshot the room policy before the member attempts a rewrite.
+    const cfgBefore = await loadRoomConfig(db, TEN, 'general');
+
+    const recover = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', 'x-vital-csrf': csrf },
+      body: `csrf=${csrf}&command=${encodeURIComponent('/recover general reason="member resume attempt"')}`,
+    });
+    eq(recover.status, 403, 'member cannot /recover:');
+
+    const policySet = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', 'x-vital-csrf': csrf },
+      body: `csrf=${csrf}&command=${encodeURIComponent('/policy set autonomy=autonomous spend_limit=99999')}`,
+    });
+    eq(policySet.status, 403, 'member cannot /policy set:');
+
+    // The refusals changed nothing: the room is still halted and the policy
+    // ceiling is untouched. A gate that rejects but lets state drift would
+    // only be a slower breach. (Kill state lives in meta — see setKill.)
+    const killRow = await db
+      .prepare("SELECT COUNT(*) AS n FROM meta WHERE key = ?")
+      .get(`kill:${TEN}:general:*`);
+    eq((killRow as { n: number }).n > 0, true, 'room remains halted after member attempts:');
+
+    const cfg = await loadRoomConfig(db, TEN, 'general');
+    eq(cfg.autonomy === cfgBefore.autonomy, true, 'autonomy unchanged after member /policy attempt:');
+    eq(cfg.budgetCeilingDollars === cfgBefore.budgetCeilingDollars, true, 'budget ceiling unchanged after member /policy attempt:');
+
+    // And the owner CAN complete the recover — proving the member refusal was
+    // the role gate, not a broken command path.
+    const recover2 = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: owner.headers,
+      body: `csrf=${owner.csrf}&command=${encodeURIComponent('/recover general reason="drill complete"')}`,
+    });
+    eq(recover2.status, 303, 'owner can still /recover:');
 
     // Governance actions are audited with the real actor.
     const halted = await db

@@ -4,7 +4,7 @@ import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { User } from '../core/auth.ts';
-import { fileDiffCollector, gitHubReleasesCollector } from '../ingest/collectors.ts';
+import { fileDiffCollector, gitHubReleasesCollector, stripeInvoicesCollector } from '../ingest/collectors.ts';
 import {
   getIntegrationHealth,
   testFileDirectory,
@@ -36,7 +36,7 @@ export type ChecklistStatus = 'done' | 'pending' | 'blocked';
 
 export interface ActivationConfig {
   scope: string;
-  sourceKind: 'files' | 'github';
+  sourceKind: 'files' | 'github' | 'stripe';
   sourcePath: string;
   artifactDir: string;
   accountableOwnerId: string;
@@ -427,6 +427,23 @@ export async function runConfiguredIngestion(
 ): Promise<{ processed: number; failed: number; claimIds: string[]; errors: string[] }> {
   mkdirSync(config.artifactDir, { recursive: true });
   const gh = parseGitHubRepo(config.sourcePath);
+  if (config.sourceKind === 'stripe' || config.sourcePath.startsWith('stripe:')) {
+    const apiKey = process.env.STRIPE_SECRET_KEY || process.env.STRIPE_API_KEY || '';
+    const collector = stripeInvoicesCollector({ apiKey });
+    const result = await runIngestionWorker(db, ledger, collector, {
+      tenant,
+      scope: config.scope || 'finance',
+      artifactDir: config.artifactDir,
+      maxReceipts: 50,
+      signal,
+    });
+    return {
+      processed: result.processed,
+      failed: result.failed,
+      claimIds: result.claimIds,
+      errors: result.errors,
+    };
+  }
   if (config.sourceKind === 'github' || gh) {
     const [owner, repo] = gh ?? config.sourcePath.split('/');
     const token = process.env.GITHUB_TOKEN;
