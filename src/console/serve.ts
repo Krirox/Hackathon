@@ -1630,6 +1630,7 @@ async function triggerMentionHandoffs(
         tenant: opts.tenant,
         originScope: opts.originScope,
         originAgent: opts.authorName,
+        originKind: 'human',
         dispatchText,
         threadRoot: opts.threadRoot ?? undefined,
       });
@@ -1642,9 +1643,30 @@ async function triggerMentionHandoffs(
         opts.at,
         `Handoff to @${targetRoomDef.agentName} in #${targetRoomDef.name}: chain ${handoff.chainId}`,
       );
-    } catch {
-      // Non-fatal if swarm dispatch refused or already admitted
-      // console.error('HANDOFF ERROR:', err);
+    } catch (e) {
+      // Budget death, refusal, self-delegation: never a silent no-op — the
+      // sender gets a visible notice and the audit log records the refusal
+      // (budget death must terminate loudly, never continue silently).
+      const reason = (e as Error).message.slice(0, 200);
+      const { createLocalReply } = await import('./buzz.ts');
+      await createLocalReply(
+        opts.db,
+        opts.tenant,
+        opts.originScope,
+        opts.threadRoot ?? null,
+        targetRoomDef.agentName,
+        `⚠️ Dispatch refused: ${reason}`,
+        opts.at,
+      );
+      await auditConsole(
+        opts.db,
+        opts.tenant,
+        `user:${opts.authorName}`,
+        'buzz.dispatch_refused',
+        `agent:${targetRoomDef.agentName}`,
+        opts.at,
+        reason,
+      );
     }
   }
 }
@@ -2903,33 +2925,15 @@ export function startConsoleServer(
         }
         // ------------------------------------------------------------ Workspace (internal: buzz)
         // The human-facing room console: roster + per-room thread view.
-        // Authenticated, admin-gated pages over the same evaluators the APIs
-        // expose — the first UI that consumes any of it.
+        // Chat is open to every tenant role (the room-agent model: humans talk
+        // to their own agent); governance surfaces elsewhere stay admin-gated.
         if (method === 'GET' && path === '/console/buzz') {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (activationDenied(res, auth, false)) return;
-          const detailOpts = {
-            tenant,
-            actor: by(auth.user),
-            csrf: auth.session.csrfToken,
-            canApprove: false,
-            requiredRole: approverMin,
-            operatorMode: 'session' as const,
-            home,
-          };
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              detailDocument(
-                'Workspace',
-                '<p class="sub">The workspace requires the admin or owner role.</p>',
-                detailOpts,
-              ),
-            );
-            return;
-          }
+          // Chat is open to every tenant role; governance surfaces elsewhere
+          // (team, learning, policy) keep their admin gates.
           const surface = await maybeBuzzSurface(db, tenant);
           try {
             const roster = await buildBuzzRoster(db, tenant, surface);
@@ -2957,17 +2961,6 @@ export function startConsoleServer(
             operatorMode: 'session' as const,
             home,
           };
-          if (!atLeast(auth.user.role, 'admin')) {
-            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(
-              detailDocument(
-                'Room',
-                '<p class="sub">The workspace requires the admin or owner role.</p>',
-                detailOpts,
-              ),
-            );
-            return;
-          }
           const scope = decodeURIComponent(buzzRoom[1]!);
           const surface = await maybeBuzzSurface(db, tenant);
           const notice = url.searchParams.get('notice') ?? undefined;
@@ -3003,9 +2996,6 @@ export function startConsoleServer(
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (activationDenied(res, auth, false)) return;
-          if (!atLeast(auth.user.role, 'admin')) {
-            return json(res, 403, { ok: false, error: 'admin role required' });
-          }
           const call = await parseCall(req);
           if (!csrfOk(auth.session, call.csrf)) {
             return json(res, 403, { ok: false, error: 'bad CSRF token' });
@@ -3014,6 +3004,14 @@ export function startConsoleServer(
           const command = String(call.fields.command ?? '').trim();
           const back = `${home}console/buzz/${encodeURIComponent(scope)}`;
           if (!command) return redirect(res, back);
+          // Chat flows through this endpoint, so it is open to every tenant
+          // role — but slash commands that act on the org (halt, recover,
+          // policy changes) are governance, and stay admin+.
+          const GOVERNANCE_COMMANDS = new Set(['halt', 'recover', 'policy']);
+          const firstWord = command.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '';
+          if (GOVERNANCE_COMMANDS.has(firstWord) && !atLeast(auth.user.role, 'admin')) {
+            return json(res, 403, { ok: false, error: `${firstWord} requires the admin or owner role` });
+          }
           const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
           const result = await executeRoomCommand(command, {
             db,

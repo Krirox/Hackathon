@@ -1,7 +1,20 @@
 # Incomplete & Orphaned Feature Audit
 
+> **SUPERSEDED IN PART — 2026-09-19.** This audit predates the auth/console
+> wave that landed the same week. Its F01 conclusion ("console does not
+> establish individual identity, permissions, or tenant-bound access") and the
+>"reads remain open" claim are no longer true: `src/core/auth.ts` now provides
+> signup→claim, DB-backed sessions with revocation, roles (owner/admin/member),
+> CSRF on every POST, lockout, and tenant-scoped session re-checks on every
+> route, tested over HTTP (`test/console.test.ts`, `test/buzz-security.test.ts`).
+> The F02/F03 approval→execution handoff gap (ACCEPTED vs ADMITTED) is closed in
+> `src/jcode/runner.ts` (accepts ADMITTED/ACCEPTED/IN_FLIGHT and claims
+> execution). Items marked done in `TODO.md` V2.1.1 supersede this document's
+> findings; the remainder (composition, cost accounting, deploy drills) is
+> still accurate and tracked there.
+
 **Project:** Vital  
-**Audit date:** 2026-09-17  
+**Original audit date:** 2026-09-17  
 **Disposition:** Internal prototype with substantial library foundations; not a production-complete agent runtime.  
 **Product completeness:** **40/100**  
 **Production readiness:** **25/100**

@@ -336,7 +336,9 @@ T('Phase 5: In-Room Slash Commands execute /halt, /recover, /status, /cost, /pol
 
 // ------------------------------------------------------------------ Feature 1: Swarms
 T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', async () => {
-  const { db, ledger, coord } = await fresh();
+  // Three handoffs (agent, human, self-refused) × $50 swarm bid: raise the
+  // org daily ceiling so the budget-death path isn't what this test exercises.
+  const { db, ledger, coord } = await fresh({ maxDailyDollars: 500 });
   const relay = await fakeRelay();
 
   try {
@@ -377,6 +379,40 @@ T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', a
     eq(handoff.targetScope, 'finance');
     eq(Boolean(handoff.downstreamRequestId), true);
     eq(handoff.events.length, 2);
+
+    // The onBehalfOf principal reflects who SPOKE the mention (agent here),
+    // and a human mention must not be attributed to an agent identity.
+    const downstream = await db.prepare('SELECT on_behalf_of FROM requests WHERE id = ?').get(handoff.downstreamRequestId) as
+      | { on_behalf_of: string }
+      | undefined;
+    eq(downstream?.on_behalf_of, 'agent:market-agent', 'agent mention attributes to the agent:');
+
+    const humanHandoff = await swarm.executeHandoff({
+      tenant: TEN,
+      originScope: 'research',
+      originAgent: 'ada',
+      originKind: 'human',
+      dispatchText: `@finance-agent second opinion on [${marketClaim.id}]`,
+    });
+    const humanDownstream = await db.prepare('SELECT on_behalf_of FROM requests WHERE id = ?').get(humanHandoff.downstreamRequestId) as
+      | { on_behalf_of: string }
+      | undefined;
+    eq(humanDownstream?.on_behalf_of, 'human:ada', 'human mention attributes to the human:');
+
+    // Self-delegation (mentioning your own room's agent) is refused loudly,
+    // not silently swallowed by the coordinator's guard.
+    let selfRefused = '';
+    try {
+      await swarm.executeHandoff({
+        tenant: TEN,
+        originScope: 'finance',
+        originAgent: 'finance-agent',
+        dispatchText: `@finance-agent check your own books [${marketClaim.id}]`,
+      });
+    } catch (e) {
+      selfRefused = (e as Error).message;
+    }
+    eq(selfRefused.includes('self-delegation refused'), true, 'self-mention is refused with a reason:');
 
     // Step 2: Finance agent completes churn modeling with high risk (18.4% churn)
     const outcome = await swarm.handleAssessmentOutcome({

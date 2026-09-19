@@ -117,6 +117,8 @@ export class InterAgentSwarmCoordinator {
     tenant: string;
     originScope: string;
     originAgent?: string;
+    /** Who spoke the mention: 'human' (console author) or 'agent' (room agent). */
+    originKind?: 'human' | 'agent';
     dispatchText: string;
     threadRoot?: string;
   }): Promise<{ chainId: string; downstreamRequestId: string; targetScope: string; events: SwarmDeliberationEvent[] }> {
@@ -193,12 +195,22 @@ export class InterAgentSwarmCoordinator {
         humanMinutes: 0,
         maxRounds: 2,
       },
-      onBehalfOf: `agent:${originAgent}`,
+      onBehalfOf: `${input.originKind === 'human' ? 'human' : 'agent'}:${originAgent}`,
       now: at,
     });
 
     if (!proposal.admitted) {
       throw new Error(`[swarm] coordination proposal refused: ${proposal.reason}`);
+    }
+
+    // Loop prevention is structural (§6.3): a mention that resolves to the
+    // origin room's own agent would self-delegate. Refuse loudly here — the
+    // coordinator would refuse it downstream, but the caller needs to know
+    // WHY (and a silent no-op reads as "handled" in chat).
+    if (normalizeScope(dispatch.targetScope) === originScope) {
+      throw new Error(
+        `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent — speak in the target room instead`,
+      );
     }
 
     const downstreamRequestId = proposal.request.id;

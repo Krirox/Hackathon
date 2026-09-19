@@ -656,7 +656,7 @@ and rooms, not substrate.
 
 ## 23. Elevator versions
 
-**30 seconds (buyer).** Your people and agents already talk in Buzz and code in jcode, on your own servers. What's missing is a memory that doesn't lie. What's missing is a memory that doesn't lie. When you ship something, we turn it into a launch, support readiness and a sales message with evidence attached, get your team's approval in the room you're already in, execute it, and measure what happened. Then we compile the procedure — but only after it passes cross-team and cross-model transfer tests. And every decision's exact basis stays signed and replayable.
+**30 seconds (buyer).** Your people and agents already talk in Buzz and code in jcode, on your own servers. What's missing is a memory that doesn't lie. When you ship something, we turn it into a launch, support readiness and a sales message with evidence attached, get your team's approval in the room you're already in, execute it, and measure what happened. Then we compile the procedure — but only after it passes cross-team and cross-model transfer tests. And every decision's exact basis stays signed and replayable.
 
 **2 minutes (investor).** Agentic AI is large and growing — Gartner expects 40% of enterprise apps embedding task-specific agents by 2026, up from under 5% — but pilots die on unclear ROI and weak risk controls, and capital is concentrating in vertical agents. The market's missing layer isn't more agents; it's **grounded state, budgeted attention, and safely compiled procedures**. The 2026 open stack finally gives us the body: Buzz provides signed human+agent identities, chat and git on a self-sovereign protocol; QM proved the scoped-agent shape and we absorb its best leaf modules under MIT; jcode provides Rust-native coding swarms driven over a versioned harness API. We build the four things none of them have — a typed bi-temporal Reality Ledger, a Watch Contract compiler with an adversarial integrity gate, a Skill Card registry with transfer testing and decay, and an eval-and-attribution spine — delivered as a QM deployment layer rather than a competing platform. We enter through one measurable loop and accumulate the only asset that compounds: a versioned corpus of claims, decisions, outcomes and proven-safe procedures, portable across harnesses and deployable on the customer's own boxes. Our honest risk is that procedural memory doesn't transfer well, which current research confirms — that's precisely why our compiler ships with quarantine and decay instead of pretending the problem is solved.
 
@@ -667,8 +667,7 @@ and rooms, not substrate.
 ## 24. Verified build state (v2, 2026-09-09)
 
 **Typecheck: 0 errors. Tests: <!-- vital:testcount -->765/765 green<!-- /vital:testcount -->** (real sockets, real sqlite;
-eslint, prettier, provenance-guard, and audit gates green; 20 commits on
-main). Every behaviour below is proven by a named test — `[x]` in TODO.md
+eslint, prettier, provenance-guard, and audit gates green). Every behaviour below is proven by a named test — `[x]` in TODO.md
 means verified by a passing test or run, never "written".
 
 > **Correction history, kept visible per this document's own thesis.** This
