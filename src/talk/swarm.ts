@@ -160,9 +160,9 @@ export class InterAgentSwarmCoordinator {
       : parsed;
 
     // Loop prevention is structural (§6.3): a mention that resolves to the
-    // origin room's own agent would self-delegate. Refuse loudly here — the
-    // coordinator would refuse it downstream, but the caller needs to know
-    // WHY (and a silent no-op reads as "handled" in chat).
+    // origin room's own agent would self-delegate. Refuse loudly BEFORE any
+    // submit — the coordinator would refuse it downstream, but the caller
+    // needs to know WHY (and a silent no-op reads as "handled" in chat).
     if (normalizeScope(dispatch.targetScope) === originScope) {
       throw new Error(
         `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent — speak in the target room instead`,

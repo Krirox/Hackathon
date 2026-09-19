@@ -1,6 +1,6 @@
 import { T, eq, TEN, NOW, fresh, sor, base } from './helpers.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
-import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
+import { installAuthSchema, signupTenant, inviteUser, listUsers } from '../src/core/auth.ts';
 import { describeStops } from '../src/gov/trust.ts';
 import { mintReviewToken, verifyReviewToken, reviewSecretFromEnv } from '../src/talk/review-card.ts';
 import { CANONICAL_ROOMS } from '../src/talk/rooms.ts';
@@ -200,6 +200,112 @@ T('an authenticated admin can still administer rooms (no over-correction)', asyn
       body: JSON.stringify({ scope: 'risk', mission: 'no csrf' }),
     });
     eq(noCsrf.status, 403, 'a mutation without CSRF is refused:');
+  } finally {
+    await server.close();
+  }
+});
+
+T('a member reads rooms and chats, but governance commands stay admin-only', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const url = `http://127.0.0.1:${server.port}`;
+  try {
+    // The owner invites a member with a temporary password.
+    const owner = await ownerSession(server.port);
+    const usersBefore = await listUsers(db, TEN);
+    const ownerUser = usersBefore.find((u) => u.role === 'owner')!;
+    await inviteUser(
+      db,
+      TEN,
+      { email: 'maya@acme.test', name: 'Maya Chen', role: 'member', team: 'engineering', password: 'temp-pass-123456' },
+      { userId: ownerUser.id, role: ownerUser.role },
+      NOW,
+    );
+
+    // The member signs in with the temporary password...
+    const pre = await fetch(`${url}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const loginRes = await fetch(`${url}/login`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&email=maya%40acme.test&password=temp-pass-123456`,
+      redirect: 'manual',
+    });
+    const tempCookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+
+    // ...is forced through the password change, which revokes the session...
+    const cpPage = await fetch(`${url}/change-password`, { headers: { cookie: tempCookie }, redirect: 'manual' });
+    const cpHtml = await cpPage.text();
+    eq(cpPage.status, 200, 'member lands on the forced password-change page:');
+    const cpCsrf = cpHtml.match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const cpRes = await fetch(`${url}/change-password`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie: tempCookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `csrf=${cpCsrf}&password=mayas-real-password-9`,
+    });
+    eq(cpRes.status, 303, 'password change accepted:');
+
+    // ...then signs in for real.
+    const pre2 = await fetch(`${url}/login`, { redirect: 'manual' });
+    const pre2Cookie = (pre2.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const pre2Token = (await pre2.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const login2 = await fetch(`${url}/login`, {
+      method: 'POST',
+      headers: { cookie: pre2Cookie },
+      body: `csrf=${pre2Token}&email=maya%40acme.test&password=mayas-real-password-9`,
+      redirect: 'manual',
+    });
+    const cookie = (login2.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const home = await (await fetch(`${url}/`, { headers: { cookie }, redirect: 'manual' })).text();
+    const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+
+    // READ: the member sees the room roster and the room itself.
+    const roster = await fetch(`${url}/console/buzz`, { headers: { cookie }, redirect: 'manual' });
+    eq(roster.status, 200, 'member can read the room roster:');
+    const rosterHtml = await roster.text();
+    eq(rosterHtml.includes('general'), true, 'roster lists the general room:');
+
+    const room = await fetch(`${url}/console/buzz/general`, { headers: { cookie }, redirect: 'manual' });
+    eq(room.status, 200, 'member can read a room:');
+    const roomHtml = await room.text();
+    eq(roomHtml.includes('name="csrf"'), true, 'room renders the composer:');
+
+    // CHAT: the member posts a message and it lands in the room.
+    const chat = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', 'x-vital-csrf': csrf },
+      body: `csrf=${csrf}&command=hello from the member account`,
+    });
+    eq(chat.status, 303, 'member can chat:');
+    const afterHtml = await (await fetch(`${url}/console/buzz/general`, { headers: { cookie } })).text();
+    eq(afterHtml.includes('hello from the member account'), true, 'the message renders in the room:');
+
+    // GOVERNANCE: /halt is refused for a member — the kill switch stays admin+.
+    const halt = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', 'x-vital-csrf': csrf },
+      body: `csrf=${csrf}&command=${encodeURIComponent('/halt reason="member overreach"')}`,
+    });
+    eq(halt.status, 403, 'member cannot /halt:');
+
+    // The owner still can — the gate is a privilege check, not a breakage.
+    const halt2 = await fetch(`${url}/console/buzz/general/command`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: owner.headers,
+      body: `csrf=${owner.csrf}&command=${encodeURIComponent('/halt reason="drill"')}`,
+    });
+    eq(halt2.status, 303, 'owner can still /halt:');
+
+    // Governance actions are audited with the real actor.
+    const halted = await db
+      .prepare("SELECT actor FROM audit_log WHERE tenant = ? AND action = 'buzz.command' ORDER BY at DESC LIMIT 1")
+      .get(TEN);
+    eq(String((halted as { actor?: string } | undefined)?.actor ?? '').includes('owner'), true, 'halt audited under the owner:');
   } finally {
     await server.close();
   }

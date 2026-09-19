@@ -56,7 +56,7 @@ We have established the clean two-surface architecture with full visual fidelity
 |  # engineering                     | Click       |    [ Chat → ] or any room --------------+
 |  # finance                         | Go to Chat  |                                         |
 |                                    | or Room     |                                         |
-j|  Chat Stream & Composer            |             |  Main Area: Kanban Board & Trust Gates  |
+|  Chat Stream & Composer            |             |  Main Area: Kanban Board & Trust Gates  |
 +------------------------------------+             +-----------------------------------------+
 ```
 

@@ -18,6 +18,17 @@ function fmtHumanMin(spent: number, cap: number): string {
   return '—';
 }
 
+export type DashboardTab =
+  | 'compiler'
+  | 'ledger'
+  | 'coordination'
+  | 'router'
+  | 'governance'
+  | 'world'
+  | 'economics'
+  | 'evals'
+  | 'feed';
+
 export interface OperationsDashboardOptions {
   tenant: string;
   home: string;
@@ -27,6 +38,7 @@ export interface OperationsDashboardOptions {
   issues?: IssueRow[];
   csrfToken: string;
   activeDepartment: DashboardDepartment;
+  activeTab?: DashboardTab;
   evaluations: RoomHealthEvaluation[];
   metrics: ShellMetrics;
   /** Real per-room recency (minutes since last buzz message); null = no messages. */
@@ -35,6 +47,12 @@ export interface OperationsDashboardOptions {
   compilerRightPanelHtml: string;
   compilerMetricsHtml: string;
   realityHtml: string;
+  journeyHtml?: string;
+  readinessHtml?: string;
+  searchHtml?: string;
+  activationHtml?: string;
+  reviewHtml?: string;
+  reportBodyHtml?: string;
   consoleNav?: string;
   accountCluster?: string;
 }
@@ -49,6 +67,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     issues = [],
     csrfToken,
     activeDepartment,
+    activeTab = 'compiler',
     evaluations,
     metrics,
     recencyByScope,
@@ -56,6 +75,12 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     compilerRightPanelHtml,
     compilerMetricsHtml,
     realityHtml,
+    journeyHtml,
+    readinessHtml,
+    searchHtml,
+    activationHtml,
+    reviewHtml,
+    reportBodyHtml,
     consoleNav,
     accountCluster,
   } = opts;
@@ -75,6 +100,291 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     ? `${metrics.escalationsUsed}/${metrics.escalationsCap}`
     : `${metrics.escalationsUsed}`;
   const humanMinStr = fmtHumanMin(metrics.humanMinutesToday, metrics.humanMinutesCap);
+  // Real configured daily ceiling (room policy the coordinator enforces).
+  // An unconfigured ceiling renders as an em dash — never an invented limit.
+  const budgetStr = metrics.dailyBudgetCeiling > 0
+    ? `$${metrics.dailyBudgetCeiling.toFixed(0)} / day limit`
+    : '—';
+
+  const issueStateChip = (state: string): string => {
+    if (state === 'DONE') return 'background:#DCFCE7;color:#166534;';
+    if (state === 'IN PROGRESS') return 'background:#FEF3C7;color:#92400E;';
+    if (state === 'TO DO') return 'background:#DBEAFE;color:#1E40AF;';
+    return 'background:#F1F5F9;color:#475569;';
+  };
+  const issuePriorityColor = (priority: string): string => {
+    if (priority === 'Urgent') return '#DC2626';
+    if (priority === 'High') return '#EA580C';
+    return '#64748B';
+  };
+
+  const issuesSidebarHtml = parseTeam(userTeam) === 'engineering'
+    ? `\
+      <div class="issues-sidebar-section" style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
+        <div class="rooms-header" style="padding:4px 12px 6px;border-bottom:none;">
+          <div class="rooms-title" style="color:#0F5C57;font-size:11.5px;">
+            <span>📋 Issues</span>
+            <span class="rooms-badge" style="background:#E6F0EE;color:#0F5C57;">${esc(String(issues.length))}</span>
+          </div>
+          <a href="/console/issues" id="sidebar-issues-dashboard-link" style="font-size:10.5px;font-weight:600;color:#0F5C57;text-decoration:none;padding:1px 6px;border-radius:4px;background:#E6F0EE;" title="#dashboard — Open Engineering Issues Board">Board →</a>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;padding:2px 8px;max-height:220px;overflow-y:auto;">
+          ${
+            issues.length === 0
+              ? `<a href="/console/issues" class="room-entry" style="font-size:11px;color:#6B7280;padding:6px 8px;background:#F9FAFB;border-radius:6px;display:block;">
+            <div style="font-weight:500;color:#111827;">#dashboard</div>
+            <div style="font-size:10px;color:#9CA3AF;margin-top:2px;">No open issues · click to open board</div>
+          </a>`
+              : issues
+                  .slice(0, 8)
+                  .map(
+                    (iss) => `
+          <a href="/console/issues" class="room-entry" title="${esc(iss.title)} (${esc(iss.state)})" style="padding:5px 8px;background:#FFFFFF;border:1px solid #F1F5F9;border-radius:6px;">
+            <div class="room-entry-top">
+              <span class="room-name" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:105px;">${esc(iss.title)}</span>
+              <span style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;${issueStateChip(iss.state)}">${esc(iss.state)}</span>
+            </div>
+            <div class="room-entry-sub" style="font-size:9px;margin-top:2px;">
+              <span style="color:${issuePriorityColor(iss.priority)};font-weight:500;">
+                ${esc(iss.priority)}
+              </span>
+              <span style="color:#94A3B8;">#${esc(iss.id.slice(0, 5))}</span>
+            </div>
+          </a>`,
+                  )
+                  .join('\n')
+          }
+        </div>
+      </div>`
+    : '';
+
+  let tabMainHtml: string;
+  if (activeTab === 'ledger') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Reality Claims Ledger</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Bi-temporal append-only truth store · Grounded facts, measurements, and verified claims.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${searchHtml ?? ''}
+      </div>
+      <div style="margin-top:20px;">
+        ${reportBodyHtml ?? realityHtml}
+      </div>`;
+  } else if (activeTab === 'coordination') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Coordination &amp; Approvals</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Human-in-the-loop decision queue, cross-room swarm delegations, and request handoffs.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${reviewHtml ?? ''}
+      </div>
+      <div style="margin-top:20px;">
+        ${reportBodyHtml ?? realityHtml}
+      </div>`;
+  } else if (activeTab === 'governance') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Governance &amp; Policy Control Plane</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">RACI autonomy controls, Ed25519 cryptographic operator authority, and emergency kill-switches.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${activationHtml ?? ''}
+      </div>
+      <div style="margin-bottom:20px;">
+        ${readinessHtml ?? ''}
+      </div>
+      <div style="display:none;">${realityHtml}</div>`;
+  } else if (activeTab === 'world') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">World Model State</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">External environment grounding, source tier verification, and subject entity mapping.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${readinessHtml ?? ''}
+      </div>
+      <div style="margin-top:20px;">
+        ${reportBodyHtml ?? realityHtml}
+      </div>`;
+  } else if (activeTab === 'economics') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Economics &amp; Spend</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Departmental token burn rates, daily dollar allowances, and attention quotas.</p>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:16px;margin-bottom:24px;">
+        <div style="background:#fff;border:1px solid #E5E7EB;border-radius:8px;padding:16px;">
+          <div style="font-size:11px;color:#6B7280;font-weight:600;text-transform:uppercase;">Spend Today</div>
+          <div style="font-size:24px;font-weight:700;color:#111827;margin-top:4px;">${esc(dollarsStr)}</div>
+        </div>
+        <div style="background:#fff;border:1px solid #E5E7EB;border-radius:8px;padding:16px;">
+          <div style="font-size:11px;color:#6B7280;font-weight:600;text-transform:uppercase;">Escalations Used</div>
+          <div style="font-size:24px;font-weight:700;color:#111827;margin-top:4px;">${esc(escalationsStr)}</div>
+        </div>
+        <div style="background:#fff;border:1px solid #E5E7EB;border-radius:8px;padding:16px;">
+          <div style="font-size:11px;color:#6B7280;font-weight:600;text-transform:uppercase;">Human Minutes</div>
+          <div style="font-size:24px;font-weight:700;color:#111827;margin-top:4px;">${esc(humanMinStr)}</div>
+        </div>
+      </div>
+      <div style="display:none;">${realityHtml}</div>`;
+  } else if (activeTab === 'feed') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Activity Feed &amp; Milestones</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Chronological system milestones, tenant activation events, and audit stream.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${journeyHtml ?? ''}
+      </div>
+      <div style="margin-top:20px;">
+        ${reportBodyHtml ?? realityHtml}
+      </div>`;
+  } else if (activeTab === 'evals') {
+    tabMainHtml = `\
+      <div class="compiler-header">
+        <h1 class="compiler-title">Evaluations &amp; Learning</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Model regression suites, cross-role transfer benchmarks, and EWMA drift monitors.</p>
+      </div>
+      <div style="margin-bottom:20px;">
+        ${compilerMetricsHtml}
+      </div>
+      <div style="margin-bottom:20px;">
+        ${compilerBoardHtml}
+      </div>
+      <div style="display:none;">${realityHtml}</div>`;
+  } else {
+    tabMainHtml = `\
+      <!-- Compiler Kanban View (Default) -->
+      <div class="compiler-header">
+        <h1 class="compiler-title">Compiler</h1>
+        <p style="font-size:12px;color:#6B7280;margin:2px 0 0;">Skill card autonomous progression, shadow evaluations, and trust verification.</p>
+      </div>
+
+      <!-- Main Kanban Columns & Demoted Area -->
+      <div style="margin-bottom:20px;">
+        ${compilerBoardHtml}
+      </div>
+
+      <!-- Bottom Metrics Strip -->
+      <div style="margin-bottom:28px;">
+        ${compilerMetricsHtml}
+      </div>
+
+      <!-- Reality Health & Governance Details -->
+      <div style="margin-top:24px;border-top:1px solid #E5E7EB;padding-top:20px;">
+        ${realityHtml}
+      </div>`;
+  }
+
+  let tabRightHtml: string;
+  if (activeTab === 'ledger') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Ledger Invariants</h2>
+        <div style="font-size:11.5px;color:#374151;display:flex;flex-direction:column;gap:10px;">
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">I1/I2 Grounded Truth</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">No generated facts. Only ground tier (SYSTEM_OF_RECORD / MEASURED) can assert FACT.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">I4 Contradiction Alarm</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Contradicting claims open an automated dispute review ticket.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">I5 Bi-temporal Validity</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Stale claims past valid_until are automatically excluded from RAG context.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">I7 Append-Only</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Rows in SQLite are never UPDATEd; updates supersede via bi-temporal links.</div>
+          </div>
+        </div>
+      </div>`;
+  } else if (activeTab === 'coordination') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Coordination Telemetry</h2>
+        <div style="font-size:11.5px;color:#374151;display:flex;flex-direction:column;gap:10px;">
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">Attention Budget</strong>
+            <div style="color:#111827;font-size:14px;font-weight:700;margin-top:2px;">${esc(escalationsStr)} escalations</div>
+            <div style="color:#6B7280;font-size:10.5px;margin-top:2px;">Daily operator intervention cap.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">Human Operator Time</strong>
+            <div style="color:#111827;font-size:14px;font-weight:700;margin-top:2px;">${esc(humanMinStr)}</div>
+            <div style="color:#6B7280;font-size:10.5px;margin-top:2px;">Recorded operator attention today.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">Operator Authority</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Decisions signed via Ed25519 cryptographic signatures.</div>
+          </div>
+        </div>
+      </div>`;
+  } else if (activeTab === 'governance') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Safety &amp; Compliance</h2>
+        <div style="font-size:11.5px;color:#374151;display:flex;flex-direction:column;gap:10px;">
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#059669;">✔ Kill-Switch Guard</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Instant global freeze across all rooms and swarms.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">RACI Matrix</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">4-tier authorization: autonomous, approval, human-command, denied.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">GDPR Article 17</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Cryptographic erasure preserving ledger integrity.</div>
+          </div>
+        </div>
+      </div>`;
+  } else if (activeTab === 'world') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Source Tiers</h2>
+        <div style="font-size:11.5px;color:#374151;display:flex;flex-direction:column;gap:10px;">
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">SYSTEM_OF_RECORD</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Authoritative upstream API (Stripe, GitHub, Linear).</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">MEASURED</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Direct sensory and probe measurements.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#6B7280;">INFERRED</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Derived reasoning — provisional until corroborated.</div>
+          </div>
+        </div>
+      </div>`;
+  } else if (activeTab === 'economics') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Budget Guards</h2>
+        <div style="font-size:11.5px;color:#374151;display:flex;flex-direction:column;gap:10px;">
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">Hard Spend Ceiling</strong>
+            <div style="color:#6B7280;margin-top:2px;font-size:10.5px;">Requests bidding above daily limit are rejected with BUDGET_EXHAUSTED.</div>
+          </div>
+          <div style="background:#F9FAFB;padding:8px 10px;border-radius:6px;border:1px solid #E5E7EB;">
+            <strong style="color:#0F5C57;">Daily Budget Allowance</strong>
+            <div style="color:#111827;font-size:13px;font-weight:700;margin-top:2px;">${esc(budgetStr)}</div>
+          </div>
+        </div>
+      </div>`;
+  } else if (activeTab === 'feed') {
+    tabRightHtml = `\
+      <div>
+        <h2 style="font-size:14px;font-weight:700;margin:0 0 12px 0;color:#111827;">Audit Stream</h2>
+        <div style="font-size:11.5px;color:#374151;">Immutable append-only SQLite log recording tenant events and milestone achievements.</div>
+      </div>`;
+  } else {
+    tabRightHtml = compilerRightPanelHtml;
+  }
 
   // Real canonical rooms + real evaluated health. Statuses are never invented:
   // unevaluated rooms show "—" (unknown), recency comes from buzz_messages.
@@ -454,7 +764,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     <!-- 1. Left Icon Rail -->
     <nav class="icon-rail" aria-label="Operations Navigation">
       <!-- Feed -->
-      <a href="${esc(home)}console#feed" class="rail-item" title="Activity Feed">
+      <a href="${esc(home)}console/dashboard?tab=feed" class="rail-item ${activeTab === 'feed' ? 'active' : ''}" title="Activity Feed">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"></path>
           <line x1="3" y1="6" x2="21" y2="6"></line>
@@ -472,7 +782,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Ledger -->
-      <a href="${esc(home)}console/claims" class="rail-item" title="Reality Claims Ledger">
+      <a href="${esc(home)}console/dashboard?tab=ledger" class="rail-item ${activeTab === 'ledger' ? 'active' : ''}" title="Reality Claims Ledger">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
           <polyline points="14 2 14 8 20 8"></polyline>
@@ -484,7 +794,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Coordination -->
-      <a href="${esc(home)}console/requests" class="rail-item" title="Coordination &amp; Approvals">
+      <a href="${esc(home)}console/dashboard?tab=coordination" class="rail-item ${activeTab === 'coordination' ? 'active' : ''}" title="Coordination &amp; Approvals">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="18" cy="5" r="3"></circle>
           <circle cx="6" cy="12" r="3"></circle>
@@ -496,7 +806,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Router -->
-      <a href="${esc(home)}console/compiler" class="rail-item" title="Execution Router">
+      <a href="${esc(home)}console/dashboard?tab=router" class="rail-item ${activeTab === 'router' ? 'active' : ''}" title="Execution Router">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="16 3 21 3 21 8"></polyline>
           <line x1="4" y1="20" x2="21" y2="3"></line>
@@ -507,8 +817,8 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
         <span>Router</span>
       </a>
 
-      <!-- Compiler (Active view) -->
-      <a href="${esc(home)}console/dashboard" id="vital-dashboard-btn" class="rail-item active" title="Operations Compiler Dashboard">
+      <!-- Compiler (Active view by default) -->
+      <a href="${esc(home)}console/dashboard?tab=compiler" id="vital-dashboard-btn" class="rail-item ${activeTab === 'compiler' ? 'active' : ''}" title="Operations Compiler Dashboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -517,7 +827,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Governance -->
-      <a href="${esc(home)}console/requests" class="rail-item" title="Governance &amp; Policy">
+      <a href="${esc(home)}console/dashboard?tab=governance" class="rail-item ${activeTab === 'governance' ? 'active' : ''}" title="Governance &amp; Policy">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
         </svg>
@@ -525,7 +835,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- World -->
-      <a href="${esc(home)}console/claims" class="rail-item" title="World Model State">
+      <a href="${esc(home)}console/dashboard?tab=world" class="rail-item ${activeTab === 'world' ? 'active' : ''}" title="World Model State">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"></circle>
           <line x1="2" y1="12" x2="22" y2="12"></line>
@@ -535,7 +845,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Economics -->
-      <a href="${esc(home)}console/dashboard?scope=finance" class="rail-item" title="Economics &amp; Spend">
+      <a href="${esc(home)}console/dashboard?tab=economics" class="rail-item ${activeTab === 'economics' ? 'active' : ''}" title="Economics &amp; Spend">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
           <line x1="1" y1="10" x2="23" y2="10"></line>
@@ -544,7 +854,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </a>
 
       <!-- Evals -->
-      <a href="${esc(home)}console/learning" class="rail-item" title="Evaluations &amp; Learning">
+      <a href="${esc(home)}console/dashboard?tab=evals" class="rail-item ${activeTab === 'evals' ? 'active' : ''}" title="Evaluations &amp; Learning">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 11l3 3L22 4"></path>
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
@@ -587,87 +897,21 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       </div>
 
       <!-- Engineering Issues Section (Visible to engineers only) -->
-      ${
-        parseTeam(userTeam) === 'engineering'
-          ? `
-      <div class="issues-sidebar-section" style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
-        <div class="rooms-header" style="padding:4px 12px 6px;border-bottom:none;">
-          <div class="rooms-title" style="color:#0F5C57;font-size:11.5px;">
-            <span>📋 Issues</span>
-            <span class="rooms-badge" style="background:#E6F0EE;color:#0F5C57;">${esc(String(issues.length))}</span>
-          </div>
-          <a href="/console/issues" id="sidebar-issues-dashboard-link" style="font-size:10.5px;font-weight:600;color:#0F5C57;text-decoration:none;padding:1px 6px;border-radius:4px;background:#E6F0EE;" title="#dashboard — Open Engineering Issues Board">Board →</a>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:3px;padding:2px 8px;max-height:220px;overflow-y:auto;">
-          ${
-            issues.length === 0
-              ? `<a href="/console/issues" class="room-entry" style="font-size:11px;color:#6B7280;padding:6px 8px;background:#F9FAFB;border-radius:6px;display:block;">
-            <div style="font-weight:500;color:#111827;">#dashboard</div>
-            <div style="font-size:10px;color:#9CA3AF;margin-top:2px;">No open issues · click to open board</div>
-          </a>`
-              : issues
-                  .slice(0, 8)
-                  .map(
-                    (iss) => `
-          <a href="/console/issues" class="room-entry" title="${esc(iss.title)} (${esc(iss.state)})" style="padding:5px 8px;background:#FFFFFF;border:1px solid #F1F5F9;border-radius:6px;">
-            <div class="room-entry-top">
-              <span class="room-name" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:105px;">${esc(iss.title)}</span>
-              <span style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;${
-                iss.state === 'DONE'
-                  ? 'background:#DCFCE7;color:#166534;'
-                  : iss.state === 'IN PROGRESS'
-                    ? 'background:#FEF3C7;color:#92400E;'
-                    : iss.state === 'TO DO'
-                      ? 'background:#DBEAFE;color:#1E40AF;'
-                      : 'background:#F1F5F9;color:#475569;'
-              }">${esc(iss.state)}</span>
-            </div>
-            <div class="room-entry-sub" style="font-size:9px;margin-top:2px;">
-              <span style="color:${iss.priority === 'Urgent' ? '#DC2626' : iss.priority === 'High' ? '#EA580C' : '#64748B'};font-weight:500;">
-                ${esc(iss.priority)}
-              </span>
-              <span style="color:#94A3B8;">#${esc(iss.id.slice(0, 5))}</span>
-            </div>
-          </a>`,
-                  )
-                  .join('\n')
-          }
-        </div>
-      </div>`
-          : ''
-      }
+      ${issuesSidebarHtml}
     </aside>
 
-    <!-- 3. Main Center Viewport: Compiler Kanban & Reality Ledger -->
+    <!-- 3. Main Center Viewport: Selected Tab View -->
     <main id="main" class="main-viewport">
       <!-- Department Filter Tabs -->
       ${deptTabs}
       ${deptBanner}
 
-      <!-- Compiler Kanban View -->
-      <div class="compiler-header">
-        <h1 class="compiler-title">Compiler</h1>
-      </div>
-
-      <!-- Main Kanban Columns & Demoted Area -->
-      <div style="margin-bottom:20px;">
-        ${compilerBoardHtml}
-      </div>
-
-      <!-- Bottom Metrics Strip (promoted 2/12 16.7%, transfer survival 0.87, median rollback time 3.2h) -->
-      <div style="margin-bottom:28px;">
-        ${compilerMetricsHtml}
-      </div>
-
-      <!-- Reality Health & Governance Details -->
-      <div style="margin-top:24px;border-top:1px solid #E5E7EB;padding-top:20px;">
-        ${realityHtml}
-      </div>
+      ${tabMainHtml}
     </main>
 
-    <!-- 4. Right Sidebar: Why Not Trusted Yet -->
-    <aside class="right-sidebar" aria-label="Trust Gates">
-      ${compilerRightPanelHtml}
+    <!-- 4. Right Sidebar: Contextual to Selected Tab -->
+    <aside class="right-sidebar" aria-label="Tab Details">
+      ${tabRightHtml}
     </aside>
   </div>
 </body>

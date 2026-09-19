@@ -1227,3 +1227,107 @@ T(
     eq((await ledger.duePredictions(TEN, DAY_LATER)).length, 0, 'resolved prediction leaves due queue:');
   },
 );
+
+// ------------------------------------------------------------- ADR 0006 sidecar
+T('ADR 0006: similar_to link + demoteSimilar marks the cited claim provisional', async () => {
+  const { db, ledger } = await fresh();
+  const a = await ledger.append({
+    tenant: TEN,
+    subject: 'competitor_pricing',
+    kind: 'OBSERVATION',
+    statement: 'Competitor slashed enterprise pricing by twenty percent on Q3 renewals for large accounts',
+    confidence: 1,
+    provenance: sor(),
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:ana',
+    scope: 'research',
+    authorType: 'system',
+  });
+  const b = await ledger.append({
+    tenant: TEN,
+    subject: 'competitor_pricing',
+    kind: 'OBSERVATION',
+    statement: 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts',
+    confidence: 1,
+    provenance: sor(),
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:ana',
+    scope: 'research',
+    authorType: 'system',
+  });
+
+  await ledger.link(TEN, b.id, a.id, 'similar_to', { demoteSimilar: true });
+
+  const linked = await db
+    .prepare("SELECT 1 AS x FROM claim_links WHERE from_id = ? AND to_id = ? AND link = 'similar_to'")
+    .get(b.id, a.id);
+  eq(Boolean(linked), true, 'similar_to link recorded:');
+
+  const demoted = await ledger.get(TEN, a.id);
+  eq(demoted?.provisional, true, 'cited claim is provisional:');
+
+  // I6: provisional claims are excluded from high-tier reasoning context.
+  const ctx = await ledger.contextFor(TEN, [a.id], NOW);
+  eq(ctx.length, 0, 'provisional claim never reaches reasoning context:');
+
+  // Plain similar_to (no demote) must NOT touch status — search hint only.
+  const c = await ledger.append({
+    tenant: TEN,
+    subject: 'competitor_pricing',
+    kind: 'OBSERVATION',
+    statement: 'Rival firm discounted enterprise tier heavily for Q3 renewals on major deals',
+    confidence: 1,
+    provenance: sor(),
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:ana',
+    scope: 'research',
+    authorType: 'system',
+  });
+  await ledger.link(TEN, c.id, a.id, 'similar_to');
+  const untouched = await ledger.get(TEN, a.id);
+  eq(untouched?.provisional, true, 'no further change without demoteSimilar:');
+});
+
+T('ADR 0006: findNearDuplicate detects paraphrase, passes novelty, skips short input', async () => {
+  const { db, ledger } = await fresh();
+  const { findNearDuplicate, similarity, SIMILARITY_THRESHOLD } = await import('../src/ledger/similar.ts');
+
+  // Unit: identical text scores 1, unrelated text scores ~0
+  eq(similarity('the quick brown fox jumps over the lazy dog', 'the quick brown fox jumps over the lazy dog'), 1);
+  eq(similarity('quarterly revenue increased strongly', 'database migration finished successfully') < 0.2, true);
+
+  const base = await ledger.append({
+    tenant: TEN,
+    subject: 'market_signal',
+    kind: 'OBSERVATION',
+    statement: 'Competitor slashed enterprise pricing by twenty percent on Q3 renewals for large accounts',
+    confidence: 1,
+    provenance: sor(),
+    observedAt: NOW,
+    validFrom: NOW,
+    owner: 'human:ana',
+    scope: 'research',
+    authorType: 'system',
+  });
+
+  // Paraphrase clears the threshold
+  const dup = await findNearDuplicate(db, TEN, 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts');
+  eq(dup.hit !== null, true, 'paraphrase detected:');
+  eq(dup.hit?.claimId, base.id);
+
+  // Unrelated statement is novel
+  const novel = await findNearDuplicate(db, TEN, 'The design team shipped the new onboarding flow documentation today');
+  eq(novel.hit, null, 'unrelated statement is novel:');
+
+  // Very short input is skipped outright (never demote on thin evidence)
+  const short = await findNearDuplicate(db, TEN, 'pricing cut');
+  eq(short.skipped, 'too-short');
+
+  // Threshold is respected: a partial overlap below it does not match
+  eq(SIMILARITY_THRESHOLD, 0.6);
+  const partial = await findNearDuplicate(db, TEN, 'Completely different topic about database migrations and indexes');
+  eq(partial.hit, null, 'below-threshold overlap does not match:');
+});

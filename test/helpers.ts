@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb, migrate } from '../src/core/db.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
-import { createCoordinator, type SchedulerLimits } from '../src/coord/coordinator.ts';
+import { createCoordinator, DEFAULT_LIMITS, type SchedulerLimits } from '../src/coord/coordinator.ts';
 import { CognitiveRouter, DEFAULT_ROUTER_CONFIG, type RouterConfig } from '../src/router/router.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
 import { FakeHarness } from './fake-harness.ts';
@@ -120,13 +120,14 @@ export const TEN = 'acme';
 export const NOW = '2026-09-09T12:00:00.000Z';
 export const DAY_LATER = '2026-09-10T12:00:00.000Z';
 
-export async function fresh(limits?: SchedulerLimits, routerOver?: Partial<RouterConfig>) {
+export async function fresh(limits?: Partial<SchedulerLimits>, routerOver?: Partial<RouterConfig>) {
   const db = openDb(':memory:');
   await migrate(db);
+  const effectiveLimits = limits ? { ...DEFAULT_LIMITS, ...limits } : DEFAULT_LIMITS;
   return {
     db,
     ledger: createLedger(db),
-    coord: createCoordinator(db, limits),
+    coord: createCoordinator(db, effectiveLimits),
     // Isolated config per test: setControlRate/rng/registerTaskType must
     // never leak across tests through the shared default object.
     router: new CognitiveRouter(db, {

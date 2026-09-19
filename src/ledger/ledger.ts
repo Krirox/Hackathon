@@ -148,7 +148,7 @@ export interface Ledger {
   get(tenant: string, id: string): Promise<Claim | null>;
   search(tenant: string, opts?: LedgerSearchOptions): Promise<Claim[]>;
   bySubject(tenant: string, subject: string, opts?: { includeStale?: boolean }): Promise<Claim[]>;
-  link(tenant: string, fromId: string, toId: string, link: LinkType): Promise<void>;
+  link(tenant: string, fromId: string, toId: string, link: LinkType, opts?: { demoteSimilar?: boolean }): Promise<void>;
   contradictions(tenant: string, claimId: string): Promise<Claim[]>;
   /** Claims eligible to be placed in a high-tier reasoning context. */
   contextFor(tenant: string, ids: string[], now: string): Promise<Claim[]>;
@@ -483,7 +483,13 @@ export function createLedger(db: AsyncDb): Ledger {
     return r ? rowToClaim(r) : null;
   }
 
-  async function link(tenant: string, fromId: string, toId: string, type: LinkType): Promise<void> {
+  async function link(
+    tenant: string,
+    fromId: string,
+    toId: string,
+    type: LinkType,
+    opts: { demoteSimilar?: boolean } = {},
+  ): Promise<void> {
     const a = await get(tenant, fromId);
     const b = await get(tenant, toId);
     if (!a || !b) throw new LedgerError('MISSING_CLAIM', `link between unknown claims ${fromId}/${toId}`);
@@ -506,6 +512,24 @@ export function createLedger(db: AsyncDb): Ledger {
             .run(cid, tenant);
         }
         await audit(tenant, 'ledger', 'CONTRADICTION_OPEN', `${fromId}<>${toId}`, 'resolution ticket required');
+      }
+      // ADR 0006 — a similarity hit may demote the CITED claim to
+      // provisional (never suppress it, never merge it). Provisional claims
+      // are excluded from high-tier reasoning context (I6), so the human
+      // review the link requests is enforced by construction.
+      if (type === 'similar_to' && opts.demoteSimilar === true) {
+        await db
+          .prepare(
+            "UPDATE claims SET provisional = 1 WHERE id = ? AND tenant = ? AND status IN ('CANDIDATE', 'VERIFIED')",
+          )
+          .run(toId, tenant);
+        await audit(
+          tenant,
+          'ledger',
+          'SIMILAR_DEMOTE',
+          toId,
+          `similar_to ${fromId}: marked provisional pending review (ADR 0006)`,
+        );
       }
       await audit(tenant, 'ledger', 'CLAIM_LINK', `${fromId}->${toId}`, type);
     });

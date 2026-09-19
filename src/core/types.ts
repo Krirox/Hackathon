@@ -67,7 +67,7 @@ export const TIER_RANK: Record<SourceTier, number> = {
 export const CLAIM_STATUSES = ['CANDIDATE', 'VERIFIED', 'DISPUTED', 'SUPERSEDED', 'STALE', 'RETIRED'] as const;
 export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 
-export const LINK_TYPES = ['supports', 'contradicts', 'supersedes', 'derived_from'] as const;
+export const LINK_TYPES = ['supports', 'contradicts', 'supersedes', 'derived_from', 'similar_to'] as const;
 export type LinkType = (typeof LINK_TYPES)[number];
 
 export interface Provenance {

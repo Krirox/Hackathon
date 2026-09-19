@@ -342,6 +342,8 @@ export interface Coordinator {
     human: string,
     decidedAt: string,
   ): Promise<{ seconds: number }>;
+  /** The configured scheduler limits this coordinator enforces (read-only view for surfaces like the dashboard budget card). */
+  readonly limits: SchedulerLimits;
   /** Latency distribution over recorded approvals — the curation-cost kill-metric's clock. */
   approvalLatencyStats(tenant: string): Promise<ApprovalLatencyStats>;
   /**
@@ -1457,6 +1459,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
   }
 
   return {
+    limits,
     submit,
     get: load,
     async list(tenant, opts = {}) {

@@ -47,29 +47,123 @@ export interface BusinessStatusReport {
   };
 }
 
+export interface DomainSpecialist {
+  domain: string;
+  scope: string;
+  roomName: string;
+  agentName: string;
+  description: string;
+}
+
+export const DOMAIN_SPECIALISTS: Record<string, DomainSpecialist> = {
+  finance: {
+    domain: 'Finance & Billing',
+    scope: 'finance',
+    roomName: 'finance',
+    agentName: 'finance-agent',
+    description: 'financial accounting, Stripe billing, spend limits, and churn forecasts',
+  },
+  engineering: {
+    domain: 'Engineering & Infrastructure',
+    scope: 'infra',
+    roomName: 'ops',
+    agentName: 'ops-agent',
+    description: 'deployments, infrastructure, microVM runtimes, builds, and code repositories',
+  },
+  compliance: {
+    domain: 'Legal & Compliance',
+    scope: 'legal',
+    roomName: 'compliance',
+    agentName: 'compliance-agent',
+    description: 'regulatory compliance, audit trails, privacy policies, and EU AI Act checks',
+  },
+  risk: {
+    domain: 'Risk & Hedging',
+    scope: 'risk',
+    roomName: 'risk-monitor',
+    agentName: 'risk-agent',
+    description: 'counterparty credit exposure, hedging needs, and procedure drift monitoring',
+  },
+  product: {
+    domain: 'Product & User Feedback',
+    scope: 'product',
+    roomName: 'user-feedback',
+    agentName: 'feedback-agent',
+    description: 'user feedback clustering, bug sentiment, and feature request synthesis',
+  },
+  market: {
+    domain: 'Market & Competitor Intel',
+    scope: 'research',
+    roomName: 'market-intel',
+    agentName: 'market-agent',
+    description: 'competitor pricing, market signals, industry trends, and deep research',
+  },
+  growth: {
+    domain: 'Growth & Marketing',
+    scope: 'growth',
+    roomName: 'growth',
+    agentName: 'growth-agent',
+    description: 'retention campaigns, counter-promotions, and customer acquisition',
+  },
+};
+
+export function classifyDomain(query: string): DomainSpecialist | null {
+  const q = query.toLowerCase();
+  if (/\b(?:legal|compliance|regulatory|gdpr|audit|privacy|policy|policies|eu ai act|terms|contract)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.compliance ?? null;
+  }
+  if (/\b(?:finance|billing|stripe|quickbooks|invoice|revenue|spend|budget|churn|payment|cost-per-signal|price|pricing)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.finance ?? null;
+  }
+  if (/\b(?:deploy|deployment|server|microvm|docker|kubernetes|infra|pipeline|build|commit|branch|pr|pull request|issue|bug|code|git|repo|crash|logs?)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.engineering ?? null;
+  }
+  if (/\b(?:risk|exposure|counterparty|hedge|hedging|drift|volatility)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.risk ?? null;
+  }
+  if (/\b(?:feedback|complaint|nps|feature request|sentiment|user reported)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.product ?? null;
+  }
+  if (/\b(?:competitor|market intel|industry trend|market research)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.market ?? null;
+  }
+  if (/\b(?:campaign|retention|acquisition|marketing promo|growth)\b/i.test(q)) {
+    return DOMAIN_SPECIALISTS.growth ?? null;
+  }
+  return null;
+}
+
+const BROAD_STATUS_PATTERNS = [
+  /what('s| is) going on/i,
+  /current(ly)? in the business/i,
+  /business (status|health|state|overview|update)/i,
+  /how is (the )?business/i,
+  /status of (our|the) (business|company|releases|system)/i,
+  /summarize (the )?(business|system|status|company)/i,
+  /what('s| is) (our|the) (status|progress|spend|budget)/i,
+  /what are we working on/i,
+  /executive (summary|briefing|report)/i,
+  /tell me about (the )?business/i,
+  /give me a briefing/i,
+  /daily briefing/i,
+  /overview/i,
+];
+
+export function isBroadStatusInquiry(query: string): boolean {
+  const q = query.toLowerCase().trim();
+  return BROAD_STATUS_PATTERNS.some((re) => re.test(q));
+}
+
 export function isBusinessIntelligenceInquiry(query: string, scope = 'general'): boolean {
   const q = query.toLowerCase().trim();
   if (q.includes('@general-agent') || q.includes('@reality-agent') || q.includes('@agent')) {
     return true;
   }
-  // If in #general or #exec, questions about status, business, or progress trigger RAG
-  const patterns = [
-    /what('s| is) going on/i,
-    /current(ly)? in the business/i,
-    /business (status|health|state|overview|update)/i,
-    /how is (the )?business/i,
-    /status of (our|the) (business|company|releases|system)/i,
-    /summarize (the )?(business|system|status|company)/i,
-    /what('s| is) (our|the) (status|progress|spend|budget)/i,
-    /what are we working on/i,
-    /executive (summary|briefing|report)/i,
-    /tell me about (the )?business/i,
-  ];
-  if (patterns.some((re) => re.test(q))) return true;
+  if (isBroadStatusInquiry(q)) return true;
   if (
     (scope === 'general' || scope === 'exec') &&
     q.endsWith('?') &&
-    (q.includes('status') || q.includes('doing') || q.includes('going') || q.includes('health'))
+    (q.includes('status') || q.includes('doing') || q.includes('going') || q.includes('health') || q.includes('what') || q.includes('how') || q.includes('who'))
   ) {
     return true;
   }
@@ -256,4 +350,229 @@ export async function queryBusinessState(
   }
 
   return lines.join('\n');
+}
+
+export async function answerGeneralQuestion(
+  db: AsyncDb,
+  tenant: string,
+  rawQuery: string,
+  _at: string = new Date().toISOString(),
+): Promise<{ text: string; matchedClaimsCount: number; specialist: DomainSpecialist | null }> {
+  // Clean query: strip @mentions, punctuation
+  const cleanQuery = rawQuery
+    .replace(/@([a-zA-Z0-9_-]+)/g, ' ')
+    .replace(/[?!,.:;()"]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Extract query keywords (words >= 3 chars, ignoring common stopwords)
+  const stopWords = new Set([
+    'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'any', 'can',
+    'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
+    'how', 'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy',
+    'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use', 'what', 'when',
+    'where', 'which', 'why', 'with', 'tell', 'about', 'does', 'should',
+    'would', 'could', 'some', 'them', 'then', 'there', 'they', 'this', 'that'
+  ]);
+
+  const tokens = cleanQuery
+    .toLowerCase()
+    .split(' ')
+    .filter((w) => w.length >= 3 && !stopWords.has(w));
+
+  // 1. Search claims in Reality Ledger
+  interface ClaimRow {
+    id: string;
+    subject: string;
+    kind: string;
+    statement: string;
+    confidence: number;
+    scope: string;
+    source_uri: string;
+    created_at: string;
+  }
+
+  let matchingClaims: Array<{ claim: ClaimRow; score: number }> = [];
+  try {
+    const claims = (await db
+      .prepare(
+        `SELECT id, subject, kind, statement, confidence, scope, source_uri, created_at
+         FROM claims
+         WHERE tenant = ?
+         ORDER BY seq DESC
+         LIMIT 100`,
+      )
+      .all(tenant)) as unknown as ClaimRow[];
+
+    for (const c of claims) {
+      const stmtNorm = c.statement.toLowerCase();
+      const subjNorm = c.subject.toLowerCase();
+      const scopeNorm = c.scope.toLowerCase();
+
+      let matchCount = 0;
+      for (const token of tokens) {
+        if (stmtNorm.includes(token) || subjNorm.includes(token) || scopeNorm.includes(token)) {
+          matchCount++;
+        }
+      }
+      if (matchCount > 0) {
+        matchingClaims.push({ claim: c, score: matchCount + c.confidence });
+      }
+    }
+    matchingClaims.sort((a, b) => b.score - a.score);
+  } catch {
+    matchingClaims = [];
+  }
+
+  // 2. Search issues board if relevant
+  interface IssueRow {
+    id: string;
+    title: string;
+    description: string;
+    state: string;
+    priority: string;
+  }
+  let matchingIssues: IssueRow[] = [];
+  try {
+    const issues = (await db
+      .prepare(
+        `SELECT id, title, description, state, priority
+         FROM issues
+         WHERE tenant = ?
+         ORDER BY updated_at DESC
+         LIMIT 40`,
+      )
+      .all(tenant)) as unknown as IssueRow[];
+
+    for (const iss of issues) {
+      const text = `${iss.title} ${iss.description}`.toLowerCase();
+      if (tokens.some((t) => text.includes(t))) {
+        matchingIssues.push(iss);
+      }
+    }
+  } catch {
+    matchingIssues = [];
+  }
+
+  // 3. Search active requests if relevant
+  interface RequestRow {
+    id: string;
+    scope: string;
+    status: string;
+    goal: string;
+  }
+  let matchingRequests: RequestRow[] = [];
+  try {
+    const reqs = (await db
+      .prepare(
+        `SELECT id, scope, status, goal
+         FROM requests
+         WHERE tenant = ? AND status IN ('PENDING', 'RUNNING', 'WAITING')
+         ORDER BY created_at DESC
+         LIMIT 20`,
+      )
+      .all(tenant)) as unknown as RequestRow[];
+
+    for (const r of reqs) {
+      const text = `${r.scope} ${r.goal}`.toLowerCase();
+      if (tokens.some((t) => text.includes(t))) {
+        matchingRequests.push(r);
+      }
+    }
+  } catch {
+    matchingRequests = [];
+  }
+
+  const specialist = classifyDomain(rawQuery);
+
+  // If evidence found in ledger, issues, or requests:
+  if (matchingClaims.length > 0 || matchingIssues.length > 0 || matchingRequests.length > 0) {
+    const lines: string[] = [];
+    lines.push(`🤖 **general-agent**: Here is what the Reality Ledger confirms regarding your inquiry:`);
+    lines.push('');
+
+    if (matchingClaims.length > 0) {
+      lines.push(`**Reality Ledger Verified Claims:**`);
+      for (const { claim } of matchingClaims.slice(0, 3)) {
+        lines.push(
+          `• **[${claim.scope}]** "${claim.statement}"\n  *(Claim: \`[${claim.id}]\`, Confidence: ${(claim.confidence * 100).toFixed(0)}/100, Source: \`${claim.source_uri}\`)*`,
+        );
+      }
+      lines.push('');
+    }
+
+    if (matchingIssues.length > 0) {
+      lines.push(`**Engineering Issues:**`);
+      for (const iss of matchingIssues.slice(0, 2)) {
+        lines.push(
+          `• Issue \`#${iss.id.slice(0, 7)}\`: **${iss.title}** (${iss.state} · Priority: ${iss.priority})`,
+        );
+      }
+      lines.push('');
+    }
+
+    if (matchingRequests.length > 0) {
+      lines.push(`**Active Swarm Requests:**`);
+      for (const req of matchingRequests.slice(0, 2)) {
+        lines.push(`• Request \`[${req.id.slice(0, 8)}]\`: **${req.goal}** (Status: ${req.status})`);
+      }
+      lines.push('');
+    }
+
+    if (specialist) {
+      lines.push(
+        `💡 *Need deeper domain action?* Ask **@${specialist.agentName}** in **#${specialist.roomName}** for ${specialist.description}.`,
+      );
+    }
+
+    return {
+      text: lines.join('\n').trim(),
+      matchedClaimsCount: matchingClaims.length,
+      specialist,
+    };
+  }
+
+  // If NO evidence found:
+  if (specialist) {
+    const text = [
+      `🤖 **general-agent**: I searched the Reality Ledger, but found no verified claims matching **"${cleanQuery}"**.`,
+      '',
+      `Since this inquiry involves **${specialist.domain}**, I recommend consulting **@${specialist.agentName}** in **#${specialist.roomName}**.`,
+      `*Specialist Scope:* ${specialist.description}.`,
+      '',
+      `💡 *Tip:* You can mention \`@${specialist.agentName} ${cleanQuery}\` to dispatch directly to their room, or use \`/setup\` to ingest external sources into the ledger.`,
+    ].join('\n');
+
+    return {
+      text,
+      matchedClaimsCount: 0,
+      specialist,
+    };
+  }
+
+  const text = [
+    `🤖 **general-agent**: I searched the Reality Ledger for **"${cleanQuery}"**, but found no verified claims, recorded decisions, or active requests matching that topic.`,
+    '',
+    `💡 *Tip:* Use \`/setup\` to ingest documents or sync GitHub repositories into the Reality Ledger, or consult a specialized agent (such as \`@ops-agent\` for infra, \`@finance-agent\` for billing, or \`@compliance-agent\` for legal).`,
+  ].join('\n');
+
+  return {
+    text,
+    matchedClaimsCount: 0,
+    specialist: null,
+  };
+}
+
+export async function handleGeneralAgentQuery(
+  db: AsyncDb,
+  tenant: string,
+  query: string,
+  at: string = new Date().toISOString(),
+): Promise<{ text: string; isBriefing: boolean; specialist: DomainSpecialist | null }> {
+  if (isBroadStatusInquiry(query)) {
+    const text = await queryBusinessState(db, tenant, query, at);
+    return { text, isBriefing: true, specialist: null };
+  }
+  const answer = await answerGeneralQuestion(db, tenant, query, at);
+  return { text: answer.text, isBriefing: false, specialist: answer.specialist };
 }

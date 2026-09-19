@@ -17,6 +17,7 @@ import {
 import { join } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
+import { findNearDuplicate } from '../ledger/similar.ts';
 import type { SourceTier } from '../core/types.ts';
 
 /**
@@ -686,6 +687,39 @@ export async function ingestEvents(
       await metaSet(db, identityKey, c.id);
       return c.id;
     });
+    // ADR 0006 sidecar: a near-duplicate of an existing claim is ingested
+    // (append-only — nothing is suppressed) but the PRIOR claim it resembles
+    // is demoted to provisional with a similar_to link, forcing human review
+    // of which statement actually represents the event. The similarity score
+    // is a search candidate, never a truth assertion.
+    try {
+      const dup = await findNearDuplicate(db, tenant, e.summary, { excludeIds: [claimId] });
+      if (dup.hit) {
+        await ledger.link(tenant, claimId, dup.hit.claimId, 'similar_to', { demoteSimilar: true });
+        await db
+          .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+          .run(
+            tenant,
+            'ingest',
+            'SIMILAR_DEMOTE',
+            dup.hit.claimId,
+            `near-duplicate of new claim ${claimId} (score ${dup.hit.score.toFixed(2)}) — provisional pending review`,
+            opts.now,
+          );
+      }
+    } catch (err) {
+      // Similarity is advisory: a detector failure must never fail ingestion.
+      // The claim stands as appended; review happens without the hint. But the
+      // skip is recorded — a sidecar that fails silently is a sidecar nobody
+      // knows is missing ("terminate loudly, never continue silently").
+      try {
+        await db
+          .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+          .run(tenant, 'ingest', 'SIMILAR_SKIP', claimId, `detector error: ${String(err).slice(0, 200)}`, opts.now);
+      } catch {
+        // audit itself unavailable — nothing left to degrade into
+      }
+    }
     ids.push(claimId);
   }
   return ids;

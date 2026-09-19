@@ -3153,10 +3153,12 @@ export function startConsoleServer(
             });
 
             let targetId = newId;
-            const { isBusinessIntelligenceInquiry, queryBusinessState } = await import('../talk/rag-analyst.ts');
+            const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import(
+              '../talk/rag-analyst.ts'
+            );
             if (isBusinessIntelligenceInquiry(command, scope)) {
-              const replyText = await queryBusinessState(db, tenant, command, at);
-              const agentId = await createLocalReply(db, tenant, scope, newId, 'general-agent', replyText, at);
+              const res = await handleGeneralAgentQuery(db, tenant, command, at);
+              const agentId = await createLocalReply(db, tenant, scope, newId, 'general-agent', res.text, at);
               targetId = agentId;
             }
 
@@ -3220,16 +3222,18 @@ export function startConsoleServer(
           });
 
           let targetReplyId = newId;
-          const { isBusinessIntelligenceInquiry, queryBusinessState } = await import('../talk/rag-analyst.ts');
+          const { isBusinessIntelligenceInquiry, handleGeneralAgentQuery } = await import(
+            '../talk/rag-analyst.ts'
+          );
           if (isBusinessIntelligenceInquiry(content, scope)) {
-            const replyText = await queryBusinessState(db, tenant, content, at);
+            const res = await handleGeneralAgentQuery(db, tenant, content, at);
             const agentId = await createLocalReply(
               db,
               tenant,
               scope,
               parentId ?? newId,
               'general-agent',
-              replyText,
+              res.text,
               at,
             );
             targetReplyId = agentId;
@@ -4316,11 +4320,16 @@ export function startConsoleServer(
           ].includes(rawScope)
             ? (rawScope as DashboardDepartment)
             : 'all';
+          const rawTab = (url.searchParams.get('tab') ?? 'compiler').toLowerCase();
+          const validTabs = ['compiler', 'ledger', 'coordination', 'router', 'governance', 'world', 'economics', 'evals', 'feed'] as const;
+          const activeTab = validTabs.includes(rawTab as any) ? (rawTab as typeof validTabs[number]) : 'compiler';
           const deptEvaluations = await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll();
 
           const compilerParts = await renderCompilerParts(db, comp, tenant);
           const shellWs = await import('./workspace-shell.ts');
-          const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
+          const shellMetrics = await shellWs.computeShellMetrics(db, tenant, {
+            dailyBudgetDollars: coord.limits.maxDailyDollars,
+          });
           const recencyByScope = await shellWs.computeRoomRecency(
             db,
             tenant,
@@ -4380,6 +4389,7 @@ export function startConsoleServer(
             issues: dashboardIssues,
             csrfToken: auth.session.csrfToken,
             activeDepartment,
+            activeTab,
             evaluations: deptEvaluations,
             metrics: shellMetrics,
             recencyByScope,
@@ -4387,6 +4397,12 @@ export function startConsoleServer(
             compilerRightPanelHtml: compilerParts.rightPanelHtml,
             compilerMetricsHtml: compilerParts.metricsHtml,
             realityHtml: realitySection,
+            journeyHtml: journey,
+            readinessHtml: readiness,
+            searchHtml: searchHtml,
+            activationHtml: activation,
+            reviewHtml: review,
+            reportBodyHtml: reportBody,
             consoleNav,
             accountCluster,
           });

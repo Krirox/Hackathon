@@ -415,10 +415,10 @@ export function parseGitHubRepoPath(raw: string): { owner: string; repo: string 
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/^git@github\.com:/i, '')
     .replace(/\.git$/i, '')
-    .replace(/^\/+|\/+$/g, '');
   const parts = clean.split('/');
-  if (parts.length === 2 && parts[0].length > 0 && parts[1].length > 0) {
-    return { owner: parts[0], repo: parts[1] };
+  const [owner, repo] = parts;
+  if (parts.length === 2 && owner && repo) {
+    return { owner, repo };
   }
   return null;
 }
@@ -587,7 +587,7 @@ export async function syncGitHubProject(
           .filter(Boolean)
       : [];
 
-    let state: IssueState = 'BACKLOG';
+    let state: IssueState;
     if (rawState === 'closed') {
       state = 'DONE';
     } else {
@@ -631,7 +631,9 @@ export async function syncGitHubProject(
     const desc = body ? body : `Imported from GitHub #${gh.number}: ${gh.html_url ?? ''}`;
     const createdAt = gh.created_at ? new Date(String(gh.created_at)).toISOString() : now;
     const updatedAt = gh.updated_at ? new Date(String(gh.updated_at)).toISOString() : now;
-    const progress = state === 'DONE' ? 100 : state === 'IN PROGRESS' ? 50 : 0;
+    let progress = 0;
+    if (state === 'DONE') progress = 100;
+    else if (state === 'IN PROGRESS') progress = 50;
     const ghUser = gh.user as Record<string, unknown> | undefined;
     const createdBy = opts?.userEmail || (ghUser?.login ? `${ghUser.login}@github.com` : 'github-sync');
 
@@ -1427,10 +1429,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     var desc = String(issue.description || '');
     var m = desc.match(/(?:key|issue):[ \t]*([a-zA-Z0-9_-]+)/i);
     if (m && m[1]) return m[1];
-    var ghNumberMatch = desc.match(/(?:github\s*#|gh\s*#)(\d+)/i);
+    var ghNumberMatch = desc.match(/(?:github\\s*#|gh\\s*#)(\\d+)/i);
     if (ghNumberMatch && ghNumberMatch[1]) return 'GH-' + ghNumberMatch[1];
     var idStr = String(issue.id || '');
-    var ghIdMatch = idStr.match(/^iss_gh_(\d+)/);
+    var ghIdMatch = idStr.match(/^iss_gh_(\\d+)/);
     if (ghIdMatch && ghIdMatch[1]) return 'GH-' + ghIdMatch[1].slice(-4);
     var title = String(issue.title || '');
     var titleMatch = title.match(/^([A-Z]{2,5}-[0-9]+)/);
@@ -1543,7 +1545,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
   function extractRepoClient(issue) {
     var m = String(issue.description || '').match(/(?:repo|repository):[ \t]*([a-zA-Z0-9_.-]+)/i);
     if (m) return m[1];
-    var ghRepoMatch = String(issue.description || '').match(/github\.com\/[a-zA-Z0-9_.-]+\/([a-zA-Z0-9_.-]+)/i);
+    var ghRepoMatch = String(issue.description || '').match(/github\\.com\\/[a-zA-Z0-9_.-]+\\/([a-zA-Z0-9_.-]+)/i);
     if (ghRepoMatch && ghRepoMatch[1]) return ghRepoMatch[1];
     if (issue.id && String(issue.id).indexOf('iss_gh_') === 0) return 'github';
     var titleLower = String(issue.title || '').toLowerCase();

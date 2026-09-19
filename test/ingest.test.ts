@@ -1206,3 +1206,96 @@ T('FLOW-016: parseActivationConfigInput preserves GitHub repo and sets sourceKin
   eq(config.sourcePath, 'facebook/react');
   eq(config.scope, 'backend');
 });
+
+// ------------------------------------------------------- ADR 0006 sidecar (ingest path)
+T('ADR 0006: ingest appends near-duplicate but demotes the PRIOR claim to provisional', async () => {
+  const { db, ledger } = await fresh();
+  const { stageToInbox } = await import('../src/ingest/collectors.ts');
+
+  const probe = {
+    name: 'dup-probe',
+    sourceTier: 'SINGLE_SOURCE' as const,
+    extractor: 'test',
+    extractorVersion: '1.0.0',
+    poll: () => [],
+  };
+
+  // Event 1: the original signal.
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:1',
+      uri: 'https://example.test/pricing/1',
+      fingerprint: 'fp-original-1',
+      eventId: 'e1',
+      revision: 'r1',
+      occurredAt: NOW,
+      summary: 'Competitor slashed enterprise pricing by twenty percent on Q3 renewals for large accounts',
+      payload: { note: 'original' },
+    },
+  ], NOW);
+  const first = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
+  eq(first.claimIds.length, 1, 'first event ingested:');
+
+  // Event 2: same fact, reworded — different identity (not exact dedupe) but a
+  // near-duplicate by shingle similarity.
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:2',
+      uri: 'https://example.test/pricing/2',
+      fingerprint: 'fp-paraphrase-2',
+      eventId: 'e2',
+      revision: 'r2',
+      occurredAt: NOW,
+      summary: 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts',
+      payload: { note: 'paraphrase' },
+    },
+  ], NOW);
+  const second = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
+  eq(second.claimIds.length, 1, 'near-duplicate is still appended (append-only, never suppressed):');
+
+  const priorId = first.claimIds[0]!;
+  const dupId = second.claimIds[0]!;
+
+  // The PRIOR claim — the one that already represents the event — is demoted.
+  const prior = await ledger.get(TEN, priorId);
+  eq(prior?.provisional, true, 'prior claim demoted to provisional:');
+
+  // The link points dup → prior as a search hint, not a truth assertion.
+  const link = await db
+    .prepare("SELECT 1 AS x FROM claim_links WHERE from_id = ? AND to_id = ? AND link = 'similar_to'")
+    .get(dupId, priorId);
+  eq(Boolean(link), true, 'similar_to link recorded dup → prior:');
+
+  // Audited, so the demotion is never a silent mutation of company reality.
+  const audit = await db
+    .prepare("SELECT detail FROM audit_log WHERE tenant = ? AND action = 'SIMILAR_DEMOTE' AND target = ?")
+    .get(TEN, priorId);
+  eq(typeof (audit as { detail?: string } | undefined)?.detail, 'string', 'demotion audited:');
+
+  // I6: the demoted claim can no longer reach high-tier reasoning context.
+  const ctx = await ledger.contextFor(TEN, [priorId], NOW);
+  eq(ctx.length, 0, 'demoted claim excluded from reasoning context:');
+
+  // Unrelated follow-up signal: no demotion, no link.
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:3',
+      uri: 'https://example.test/other/3',
+      fingerprint: 'fp-other-3',
+      eventId: 'e3',
+      revision: 'r3',
+      occurredAt: NOW,
+      summary: 'The design team shipped the new onboarding flow documentation today',
+      payload: { note: 'unrelated' },
+    },
+  ], NOW);
+  const third = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
+  eq(third.claimIds.length, 1);
+  // One demotion event, two audit rows by design: ledger.link() audits the
+  // status change, the sidecar audits the detection (with the score). Assert
+  // on distinct demoted claims so novel signals can't hide a second demotion.
+  const demotes = await db
+    .prepare("SELECT COUNT(DISTINCT target) AS n FROM audit_log WHERE tenant = ? AND action = 'SIMILAR_DEMOTE'")
+    .get(TEN);
+  eq((demotes as { n: number }).n, 1, 'exactly one demotion — novel signals untouched:');
+});

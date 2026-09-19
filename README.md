@@ -539,7 +539,7 @@ npm install
 # Verify TypeScript type safety (must be 0 errors)
 npm run typecheck
 
-# Run the complete test suite (<!-- vital:testcount -->770/770 tests green<!-- /vital:testcount -->)
+# Run the complete test suite (<!-- vital:testcount -->779/779 tests green<!-- /vital:testcount -->)
 npm test
 ```
 
@@ -686,7 +686,7 @@ Vital's performance is falsifiable and measurable against pre-registered commitm
 
 ## Current State
 
-<!-- vital:testcount -->770/770 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
+<!-- vital:testcount -->779/779 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
 
 - **Verified subsystems:** Reality Ledger (Invariants I1–I7), Context Bundles, Replay, Attention Coordinator, Cognitive Router, Organizational Compiler with Transfer Testing, R/A/I Matrix, Honeytasks, Emergency Stops, World Sense Funnel, Adversarial Integrity Gate, Ship-to-Result Wedge, Churn & Feature Loops, Agentic Deep Research, Talk Surface Cryptographic Binding, jcode Harness-API Protocol v1, Authenticated Web Console (Signup, Login, CSRF, RBAC, Review Queue, Rooms Setup, Team Roster, Audit Log, Learning Board, GDPR Erasure), and Marketing Site.
 - **Upstream absorption:** Narrowed, provenance-pinned leaf modules from QM (`governor.ts`, `ship-gate.ts`, `command-policy.ts`, `crypto.ts`, `objects.ts`, `errors.ts`, `safe-regex.ts`) verified by `scripts/verify-provenance.mjs`.

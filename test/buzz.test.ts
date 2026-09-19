@@ -1,4 +1,5 @@
 import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
+import { DEFAULT_LIMITS } from '../src/coord/coordinator.ts';
 import {
   CANONICAL_ROOMS,
   agentForScope,
@@ -338,7 +339,7 @@ T('Phase 5: In-Room Slash Commands execute /halt, /recover, /status, /cost, /pol
 T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', async () => {
   // Three handoffs (agent, human, self-refused) × $50 swarm bid: raise the
   // org daily ceiling so the budget-death path isn't what this test exercises.
-  const { db, ledger, coord } = await fresh({ maxDailyDollars: 500 });
+  const { db, ledger, coord } = await fresh({ ...DEFAULT_LIMITS, maxDailyDollars: 500 });
   const relay = await fakeRelay();
 
   try {

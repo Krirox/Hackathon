@@ -43,6 +43,8 @@ export interface ShellMetrics {
   /** Human minutes spent today / delegated ceiling (ceiling <= 0 renders as spent, no invented cap). */
   humanMinutesToday: number;
   humanMinutesCap: number;
+  /** Org-wide daily dollar ceiling the coordinator enforces (<= 0 renders as em dash — never an invented limit). */
+  dailyBudgetCeiling: number;
 }
 
 const DASH = '—';
@@ -572,7 +574,7 @@ import type { AsyncDb } from '../core/db.ts';
 export async function computeShellMetrics(
   db: AsyncDb,
   tenant: string,
-  caps: { escalationsPerDay?: number; humanMinutesPerDay?: number } = {},
+  caps: { escalationsPerDay?: number; humanMinutesPerDay?: number; dailyBudgetDollars?: number } = {},
   now: () => string = () => new Date().toISOString(),
 ): Promise<ShellMetrics> {
   const at = now();
@@ -617,6 +619,7 @@ export async function computeShellMetrics(
     escalationsCap: caps.escalationsPerDay ?? 0,
     humanMinutesToday,
     humanMinutesCap: caps.humanMinutesPerDay ?? 0,
+    dailyBudgetCeiling: caps.dailyBudgetDollars ?? 0,
   };
 }
 
