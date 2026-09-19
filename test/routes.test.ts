@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { T, eq, throws, fresh, TEN, NOW } from './helpers.ts';
 import { installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
@@ -16,6 +19,7 @@ import { requestsRoutes, REQUESTS_CAPABILITIES } from '../src/console/routes/req
 import { listsRoutes, LISTS_CAPABILITIES } from '../src/console/routes/lists.ts';
 import { learningRoutes, LEARNING_CAPABILITIES } from '../src/console/routes/learning.ts';
 import { agentTasksRoutes, AGENT_TASKS_CAPABILITIES } from '../src/console/routes/agent-tasks.ts';
+import { reviewRoutes, REVIEW_CAPABILITIES } from '../src/console/routes/review.ts';
 import type { Role } from '../src/core/auth.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
@@ -955,6 +959,23 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
       'gov/trust': 1,
     },
   },
+  // The code-review index. One statement of its own (`coding/review` reading the
+  // review documents); the other 88 belong to the shell, which is the honest
+  // picture of a console page today.
+  {
+    url: '/console/review',
+    pattern: '/console/review',
+    dispatch: 'table',
+    total: 99,
+    modules: {
+      'talk/health': 53,
+      'console/shell-metrics': 16,
+      'talk/rooms': 14,
+      'core/auth': 4,
+      'coding/review': 1,
+      'gov/trust': 1,
+    },
+  },
 ];
 
 T('every budgeted page is attributed to the mechanism that really serves it', () => {
@@ -966,6 +987,7 @@ T('every budgeted page is attributed to the mechanism that really serves it', ()
     ...Object.keys(COMPLIANCE_CAPABILITIES),
     ...Object.keys(REQUESTS_CAPABILITIES),
     ...Object.keys(LISTS_CAPABILITIES),
+    ...Object.keys(REVIEW_CAPABILITIES),
   ]);
   const wrong = PAGE_SQL_BUDGETS.filter((p) => (p.dispatch === 'table') !== migrated.has(`GET ${p.pattern}`)).map(
     (p) => `${p.url} is marked ${p.dispatch}`,
@@ -1148,6 +1170,89 @@ T('the compliance domain is complete, and erasure checks its token', async () =>
   }
 });
 
+T('the code-review index lists what was opened, and refuses what cannot be read', async () => {
+  // The bug this pins: `/console/review/:missionId` was a real page with no
+  // inbound link. A review is keyed by mission id, nothing listed the keys, and
+  // the only way in was to already know the id. An index is the fix, so there
+  // are two properties worth holding: the list is the tenant's real reviews, and
+  // opening one is refused when the working tree is not on this host — a
+  // document that could never render is worse than a refusal at the ask.
+  const routes = reviewRoutes();
+  validateRoutes(routes);
+  const byId = new Map(routeManifest(routes).map((m) => [`${m.method} ${m.pattern}`, m]));
+  for (const [id, want] of Object.entries(REVIEW_CAPABILITIES)) {
+    eq(byId.get(id)?.capability, want.capability, `${id} capability:`);
+    eq(byId.get(id)?.surface, want.surface, `${id} surface:`);
+    eq((byId.get(id)?.note ?? '').length > 0, true, `${id} has a stated reason:`);
+  }
+
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
+  const repo = mkdtempSync(join(tmpdir(), 'vital-review-index-'));
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    // Anonymous gets the login form with a way back, like every console page.
+    const anon = await fetch(`${base}/console/review`, { redirect: 'manual' });
+    eq(anon.status, 303, 'anonymous review index redirects instead of answering 401:');
+
+    const cookie = await login(base);
+    const empty = await fetch(`${base}/console/review`, { headers: { cookie } });
+    eq(empty.status, 200);
+    const emptyBody = await empty.text();
+    eq(emptyBody.includes('Code review'), true, 'the index renders:');
+    eq(emptyBody.includes('No code reviews opened yet'), true, 'the empty state explains itself:');
+    eq(emptyBody.includes('Approvals'), true, 'the index carries the console rail:');
+
+    // A mutating route must reject a missing token before it does anything.
+    const noToken = await fetch(`${base}/console/review`, {
+      method: 'POST',
+      headers: { cookie },
+      body: 'action=open&missionId=M-1&workdir=/tmp',
+      redirect: 'manual',
+    });
+    eq(noToken.status, 403, 'opening a review without a CSRF token is refused:');
+
+    const csrf = await freshToken(base, cookie);
+    eq(typeof csrf, 'string', 'a token is available from a page render:');
+
+    // A directory that is not here: refused, with the reason, and nothing stored.
+    const missing = await fetch(`${base}/console/review`, {
+      method: 'POST',
+      headers: { cookie },
+      body: `csrf=${csrf}&action=open&missionId=M-1&workdir=${encodeURIComponent('/nonexistent/definitely-not-here')}`,
+      redirect: 'manual',
+    });
+    eq(missing.status, 303);
+    eq((missing.headers.get('location') ?? '').includes('notice='), true, 'the refusal carries a reason:');
+    const stillEmpty = await fetch(`${base}/console/review`, { headers: { cookie } });
+    eq((await stillEmpty.text()).includes('No code reviews opened yet'), true, 'a refused open stores nothing:');
+
+    // A real directory: opened, recorded, and listed with its own status.
+    const opened = await fetch(`${base}/console/review`, {
+      method: 'POST',
+      headers: { cookie },
+      body: `csrf=${csrf}&action=open&missionId=M-1&baseline=HEAD&workdir=${encodeURIComponent(repo)}`,
+      redirect: 'manual',
+    });
+    eq(opened.status, 303);
+    eq(opened.headers.get('location'), '/console/review/M-1', 'a successful open lands on the review:');
+    const listed = await fetch(`${base}/console/review`, { headers: { cookie } });
+    const listedBody = await listed.text();
+    eq(listedBody.includes('/console/review/M-1'), true, 'the opened review is linked from the index:');
+    eq(listedBody.includes('READY_FOR_REVIEW'), true, 'the status is the review\u2019s own, as a badge:');
+    eq(listedBody.includes('Open reviews · 1'), true, 'the index counts what it lists:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('the migration boundary is explicit, not implied', () => {
   // Everything not in these tables is still served by the legacy chain, so it
   // has no declared capability yet. This assertion is the burn-down list: as
@@ -1160,6 +1265,7 @@ T('the migration boundary is explicit, not implied', () => {
       ...Object.keys(REQUESTS_CAPABILITIES),
       ...Object.keys(LISTS_CAPABILITIES),
       ...Object.keys(LEARNING_CAPABILITIES),
+      ...Object.keys(REVIEW_CAPABILITIES),
     ].map((id) => `${id.split(' ')[0]} ${id.split(' ')[1]}`),
   );
   // The whole compliance domain now declares its capability, surface and body
@@ -1180,7 +1286,13 @@ T('the migration boundary is explicit, not implied', () => {
   eq(migrated.has('GET /console/learning/compile'), true, 'compile form migrated:');
   eq(migrated.has('POST /console/learning/compile'), true, 'compilation migrated:');
   eq(migrated.has('POST /console/learning/cards/:id/transfer-test'), true, 'transfer dispatch migrated:');
-  eq(migrated.size, 16, 'migrated route count (update deliberately):');
+  // The code-review index — the two verbs that list reviews and open one. The
+  // per-mission review page itself is still legacy and is named below, so
+  // "code review is on the table" cannot be read as "the whole review surface is".
+  eq(migrated.has('GET /console/review'), true, 'review index migrated:');
+  eq(migrated.has('POST /console/review'), true, 'review open migrated:');
+  eq(migrated.size, 18, 'migrated route count (update deliberately):');
+  eq(migrated.has('GET /console/review/:missionId'), false, 'the per-mission review page is still legacy:');
   eq(migrated.has('GET /console/learning'), false, 'the learning read page is still legacy:');
   eq(migrated.has('GET /console/learning/:id'), false, 'the card page is still legacy:');
   eq(migrated.has('POST /console/learning/label'), false, 'the label write is still legacy:');

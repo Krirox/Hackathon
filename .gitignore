@@ -10,3 +10,6 @@ data/artifacts/
 data/snapshots/
 .terraform/
 tmp/
+# Transient run output (server logs, test logs) — a tracked log is a conflict on
+# every run, and one of them lived in the tree root.
+tmp-*.log

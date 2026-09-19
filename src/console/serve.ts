@@ -2235,7 +2235,15 @@ export function startConsoleServer(
           error: result.error ?? 'push failed with no reason given',
           at: at2,
         });
-        await auditConsole(db, tenant, actor, 'github.push_failed', target, at2, `${kind}: ${result.error ?? 'no reason'}`.slice(0, 200));
+        await auditConsole(
+          db,
+          tenant,
+          actor,
+          'github.push_failed',
+          target,
+          at2,
+          `${kind}: ${result.error ?? 'no reason'}`.slice(0, 200),
+        );
       })
       .catch(async (e: unknown) => {
         await markGitHubSyncError(db, tenant, {
@@ -2244,7 +2252,15 @@ export function startConsoleServer(
           error: (e as Error).message,
           at: at2,
         });
-        await auditConsole(db, tenant, actor, 'github.push_failed', target, at2, `${kind}: ${(e as Error).message}`.slice(0, 200));
+        await auditConsole(
+          db,
+          tenant,
+          actor,
+          'github.push_failed',
+          target,
+          at2,
+          `${kind}: ${(e as Error).message}`.slice(0, 200),
+        );
       });
   };
 
@@ -2369,7 +2385,13 @@ export function startConsoleServer(
     // only for what it uses; the server satisfies all of them, and because a
     // handler's parameter is contravariant a narrow handler slots into this
     // wider list without a cast.
-    type ConsoleRouteEnv = ObservabilityEnv & ComplianceEnv & RequestsEnv & ListsEnv & LearningEnv & ReviewEnv & AgentTasksEnv;
+    type ConsoleRouteEnv = ObservabilityEnv &
+      ComplianceEnv &
+      RequestsEnv &
+      ListsEnv &
+      LearningEnv &
+      ReviewEnv &
+      AgentTasksEnv;
     /** Shelled console page: the chrome stays here, the page body comes from the domain. */
     const shellPage: ListsEnv['shellPage'] = async (auth, page) => {
       const opts = {

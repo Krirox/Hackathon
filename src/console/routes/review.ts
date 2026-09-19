@@ -65,16 +65,16 @@ function errorPath(base: string, message: string): string {
  * colour is a second channel rather than the only one — a reader who cannot
  * distinguish the tints still reads "REJECTED_ALL".
  */
+const STATUS_TONE: Record<string, 'good' | 'warn' | 'risk'> = {
+  COMPLETED: 'good',
+  CHANGES_ACCEPTED: 'warn',
+  CHANGES_REQUESTED: 'warn',
+  AGENT_FIX: 'warn',
+  REJECTED_ALL: 'risk',
+};
+
 function statusBadge(status: string): string {
-  const tone =
-    status === 'COMPLETED'
-      ? 'good'
-      : status === 'REJECTED_ALL'
-        ? 'risk'
-        : status === 'CHANGES_REQUESTED' || status === 'CHANGES_ACCEPTED' || status === 'AGENT_FIX'
-          ? 'warn'
-          : 'info';
-  return `<span class="v-badge v-badge-${tone}">${esc(status)}</span>`;
+  return `<span class="v-badge v-badge-${STATUS_TONE[status] ?? 'info'}">${esc(status)}</span>`;
 }
 
 function sinceLabel(at: string, now: string): string {
@@ -143,6 +143,12 @@ ${rows}
 </div>`;
 }
 
+/** The manifest the route-table test pins, so a capability change is a test edit. */
+export const REVIEW_CAPABILITIES: Record<string, { capability: string; surface: string }> = {
+  'GET /console/review': { capability: 'session', surface: 'html' },
+  'POST /console/review': { capability: 'session', surface: 'html' },
+};
+
 export function reviewRoutes(): RouteDef<ReviewEnv>[] {
   return [
     {
@@ -172,9 +178,7 @@ export function reviewRoutes(): RouteDef<ReviewEnv>[] {
           },
         );
         ctx.res.writeHead(200, { 'content-type': HTML, ...NO_STORE });
-        ctx.res.end(
-          await ctx.env.shellPage(auth, { title: 'Code review', navKey: 'review', hideHeader: true, body }),
-        );
+        ctx.res.end(await ctx.env.shellPage(auth, { title: 'Code review', navKey: 'review', hideHeader: true, body }));
       },
     },
     {
@@ -186,7 +190,9 @@ export function reviewRoutes(): RouteDef<ReviewEnv>[] {
       body: 'csrf',
       note: 'Open (or re-open) a code review for a mission id against a git baseline in a working directory on this host.',
       async handler(ctx) {
-        const auth = requireAuth(ctx);
+        // No session read here beyond the capability check the dispatcher did:
+        // opening a review writes an audit row under the module's own actor, so
+        // there is nothing on this path that needs the identity.
         const fields = ctx.call?.fields ?? {};
         if (fields.action !== 'open') {
           return redirect(ctx.res, errorPath('/console/review', `Unknown action "${fields.action ?? ''}".`));
@@ -200,7 +206,10 @@ export function reviewRoutes(): RouteDef<ReviewEnv>[] {
         // be read would create a document that renders as an error forever, and a
         // permanent error page is worse than a refusal at the moment of asking.
         if (!existsSync(workdir)) {
-          return redirect(ctx.res, errorPath('/console/review', `Working directory not readable on this host: ${workdir}`));
+          return redirect(
+            ctx.res,
+            errorPath('/console/review', `Working directory not readable on this host: ${workdir}`),
+          );
         }
         try {
           // `openReview` writes its own REVIEW_READY audit entry, so there is no

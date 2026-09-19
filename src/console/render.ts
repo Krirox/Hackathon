@@ -90,7 +90,12 @@ export function lineChart(points: CostPoint[], target: number, w = 560, h = 220)
     ${segments.join('')}${dots}${labels}</svg>`;
 }
 
-const TIER_COLORS = { REFLEX: 'var(--v-accent)', WORKFLOW: 'var(--v-accent-2)', MODEL: 'var(--v-pred)', HUMAN: 'var(--v-faint)' } as const;
+const TIER_COLORS = {
+  REFLEX: 'var(--v-accent)',
+  WORKFLOW: 'var(--v-accent-2)',
+  MODEL: 'var(--v-pred)',
+  HUMAN: 'var(--v-faint)',
+} as const;
 
 /** Stacked percentage area over weekly buckets. */
 export function tierStack(buckets: TierBucket[], w = 360, h = 220): string {
