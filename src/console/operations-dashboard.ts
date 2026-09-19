@@ -914,6 +914,48 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       ${tabRightHtml}
     </aside>
   </div>
+  ${parseTeam(userTeam) === 'engineering' ? `<script>
+  (function(){
+    var watermark = new Date().toISOString();
+    var issuesSection = document.querySelector('.issues-sidebar-section');
+    if(!issuesSection) return;
+    function escH(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function stateChip(s){ if(s==='DONE') return 'background:#DCFCE7;color:#166534;'; if(s==='IN PROGRESS') return 'background:#FEF3C7;color:#92400E;'; if(s==='TO DO') return 'background:#DBEAFE;color:#1E40AF;'; return 'background:#F1F5F9;color:#475569;'; }
+    function prioColor(p){ if(p==='Urgent') return '#DC2626'; if(p==='High') return '#EA580C'; return '#64748B'; }
+    function renderList(issues){
+      var badge = issuesSection.querySelector('.rooms-badge');
+      if(badge) badge.textContent = String(issues.length);
+      var container = issuesSection.querySelector('div[style*="max-height:220px"]');
+      if(!container) return;
+      if(issues.length===0){
+        container.innerHTML = '<a href="/console/issues" class="room-entry" style="font-size:11px;color:#6B7280;padding:6px 8px;background:#F9FAFB;border-radius:6px;display:block;"><div style="font-weight:500;color:#111827;">#dashboard</div><div style="font-size:10px;color:#9CA3AF;margin-top:2px;">No open issues \\u00b7 click to open board</div></a>';
+        return;
+      }
+      container.innerHTML = issues.slice(0,8).map(function(iss){
+        return '<a href="/console/issues" class="room-entry" title="'+escH(iss.title)+' ('+escH(iss.state)+')" style="padding:5px 8px;background:#FFFFFF;border:1px solid #F1F5F9;border-radius:6px;">'
+          +'<div class="room-entry-top"><span class="room-name" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:105px;">'+escH(iss.title)+'</span><span style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;'+stateChip(iss.state)+'">'+escH(iss.state)+'</span></div>'
+          +'<div class="room-entry-sub" style="font-size:9px;margin-top:2px;"><span style="color:'+prioColor(iss.priority)+';font-weight:500;">'+escH(iss.priority)+'</span><span style="color:#94A3B8;">#'+escH(String(iss.id).slice(0,5))+'</span></div>'
+          +'</a>';
+      }).join('');
+    }
+    function tick(){
+      fetch('/console/issues/sync?since='+encodeURIComponent(watermark), { headers:{ 'accept':'application/json' } })
+        .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+        .then(function(data){
+          if(!data||!data.ok||!data.snapshot) return;
+          watermark = data.snapshot.serverTime || watermark;
+          if(Array.isArray(data.snapshot.issues) && data.snapshot.issues.length>=0){
+            if(!window.__dashIssues) window.__dashIssues = ${JSON.stringify(issues)}.slice();
+            var map={}; window.__dashIssues.forEach(function(i){ map[i.id]=i; });
+            data.snapshot.issues.forEach(function(i){ map[i.id]=i; });
+            window.__dashIssues = Object.values(map).sort(function(a,b){ return (b.updatedAt||'').localeCompare(a.updatedAt||''); });
+            renderList(window.__dashIssues);
+          }
+        }).catch(function(){});
+    }
+    setInterval(tick, 4000);
+  })();
+  </script>` : ''}
 </body>
 </html>`;
 }

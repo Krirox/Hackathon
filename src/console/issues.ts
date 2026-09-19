@@ -690,6 +690,175 @@ export async function syncGitHubProject(
   return { ok: true, syncedCount: synced };
 }
 
+// ------------------------------------------------------------------ bidirectional push: local board -> GitHub ---
+
+function githubHeaders(token: string | null): Record<string, string> {
+  const h: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'Vital-Console',
+    'Content-Type': 'application/json',
+  };
+  if (token?.trim()) h.Authorization = `Bearer ${token.trim()}`;
+  return h;
+}
+
+function issueToGitHubLabels(issue: { priority: IssuePriority; labels: string[]; state: IssueState }): string[] {
+  const out = [...issue.labels];
+  const prioLabel = issue.priority !== 'No priority' ? issue.priority.toLowerCase() : null;
+  if (prioLabel && !out.some((l) => l.toLowerCase() === prioLabel)) out.push(issue.priority);
+  if (issue.state === 'IN PROGRESS' && !out.some((l) => l.toLowerCase().includes('progress'))) out.push('in progress');
+  if (issue.state === 'TO DO' && !out.some((l) => l.toLowerCase().includes('todo'))) out.push('todo');
+  return out.slice(0, 10);
+}
+
+function issueStateToGitHubState(state: IssueState): 'open' | 'closed' {
+  return state === 'DONE' ? 'closed' : 'open';
+}
+
+export async function pushCreateToGitHub(
+  db: AsyncDb,
+  tenant: string,
+  issue: IssueRow,
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ ok: boolean; ghNumber?: number; error?: string }> {
+  const cfg = await getGitHubSyncConfig(db, tenant);
+  if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
+  if (!cfg.token?.trim()) return { ok: false, error: 'no token — push requires a PAT for private repos and write access' };
+  const parsed = parseGitHubRepoPath(cfg.repo);
+  if (!parsed) return { ok: false, error: 'invalid repo path' };
+  const fetchFn = opts?.fetchFn ?? fetch;
+  try {
+    const res = await fetchFn(`https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues`, {
+      method: 'POST',
+      headers: githubHeaders(cfg.token),
+      body: JSON.stringify({
+        title: issue.title,
+        body: issue.description || `Created from Vital board — ${issue.id}`,
+        labels: issueToGitHubLabels(issue),
+      }),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { ok: false, error: `GitHub create failed ${res.status}: ${t.slice(0, 200)}` };
+    }
+    const data = (await res.json()) as { number?: number };
+    return { ok: true, ghNumber: data.number };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export async function pushUpdateToGitHub(
+  db: AsyncDb,
+  tenant: string,
+  issue: IssueRow,
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ ok: boolean; error?: string }> {
+  const cfg = await getGitHubSyncConfig(db, tenant);
+  if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
+  if (!cfg.token?.trim()) return { ok: false, error: 'no token' };
+  const parsed = parseGitHubRepoPath(cfg.repo);
+  if (!parsed) return { ok: false, error: 'invalid repo path' };
+  const m = issue.id.match(/^iss_gh_(\d+)$/);
+  if (!m) {
+    const created = await pushCreateToGitHub(db, tenant, issue, opts);
+    return created;
+  }
+  const ghNumber = m[1];
+  const fetchFn = opts?.fetchFn ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues/${encodeURIComponent(ghNumber)}`,
+      {
+        method: 'PATCH',
+        headers: githubHeaders(cfg.token),
+        body: JSON.stringify({
+          title: issue.title,
+          body: issue.description,
+          state: issueStateToGitHubState(issue.state),
+          labels: issueToGitHubLabels(issue),
+        }),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { ok: false, error: `GitHub update failed ${res.status}: ${t.slice(0, 200)}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export async function pushDeleteToGitHub(
+  db: AsyncDb,
+  tenant: string,
+  issueId: string,
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ ok: boolean; error?: string }> {
+  const cfg = await getGitHubSyncConfig(db, tenant);
+  if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
+  if (!cfg.token?.trim()) return { ok: false, error: 'no token' };
+  const parsed = parseGitHubRepoPath(cfg.repo);
+  if (!parsed) return { ok: false, error: 'invalid repo path' };
+  const m = issueId.match(/^iss_gh_(\d+)$/);
+  if (!m) return { ok: true };
+  const ghNumber = m[1]!;
+  const fetchFn = opts?.fetchFn ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues/${encodeURIComponent(ghNumber)}`,
+      {
+        method: 'PATCH',
+        headers: githubHeaders(cfg.token),
+        body: JSON.stringify({ state: 'closed' }),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { ok: false, error: `GitHub close failed ${res.status}: ${t.slice(0, 200)}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export async function pushCommentToGitHub(
+  db: AsyncDb,
+  tenant: string,
+  issueId: string,
+  content: string,
+  opts?: { fetchFn?: typeof fetch },
+): Promise<{ ok: boolean; error?: string }> {
+  const cfg = await getGitHubSyncConfig(db, tenant);
+  if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
+  if (!cfg.token?.trim()) return { ok: false, error: 'no token' };
+  const parsed = parseGitHubRepoPath(cfg.repo);
+  if (!parsed) return { ok: false, error: 'invalid repo path' };
+  const m = issueId.match(/^iss_gh_(\d+)$/);
+  if (!m) return { ok: true };
+  const ghNumber = m[1]!;
+  const fetchFn = opts?.fetchFn ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues/${encodeURIComponent(ghNumber)}/comments`,
+      {
+        method: 'POST',
+        headers: githubHeaders(cfg.token),
+        body: JSON.stringify({ body: content }),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { ok: false, error: `GitHub comment failed ${res.status}: ${t.slice(0, 200)}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 // ------------------------------------------------------------------ rendering ---
 
 const PRIORITY_CLASS: Record<IssuePriority, string> = {

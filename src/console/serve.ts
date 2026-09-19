@@ -215,11 +215,20 @@ import {
   addComment,
   createIssue,
   deleteIssue,
+  getGitHubSyncConfig,
   getIssue,
   listComments,
   listIssues,
   moveIssue,
+  parseGitHubRepoPath,
+  authorizeGitHubRepo,
+  pushCommentToGitHub,
+  pushCreateToGitHub,
+  pushDeleteToGitHub,
+  pushUpdateToGitHub,
   renderIssuesBoard,
+  saveGitHubSyncConfig,
+  syncGitHubProject,
   syncIssues,
   updateIssue,
   type IssuePriority,
@@ -3445,6 +3454,7 @@ export function startConsoleServer(
                 at,
                 issue.title.slice(0, 120),
               );
+              pushCreateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
               return json(res, 200, { ok: true, issue });
             }
             if (action === 'move') {
@@ -3473,6 +3483,7 @@ export function startConsoleServer(
                 at,
                 `state=${issue.state}`,
               );
+              pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
               return json(res, 200, { ok: true, issue });
             }
             if (action === 'update') {
@@ -3511,6 +3522,7 @@ export function startConsoleServer(
                 at,
                 issue.title.slice(0, 120),
               );
+              pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
               return json(res, 200, { ok: true, issue });
             }
             if (action === 'delete') {
@@ -3518,6 +3530,7 @@ export function startConsoleServer(
               const gone = await deleteIssue(db, tenant, id);
               if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
               await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
+              pushDeleteToGitHub(db, tenant, id, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
               return json(res, 200, { ok: true });
             }
             if (action === 'comment') {
@@ -3533,12 +3546,71 @@ export function startConsoleServer(
                 at,
                 comment.content.slice(0, 120),
               );
+              pushCommentToGitHub(db, tenant, id, comment.content, { fetchFn: opts.fetchFn ?? fetch }).catch(() => {});
               return json(res, 200, { ok: true, comment });
             }
           } catch (e) {
             const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
             const stale = (e as Error).message.includes('STALE_WRITE');
             return json(res, stale ? 409 : 400, { ok: false, error: msg });
+          }
+        }
+        // ------------------------------------------------------------ GitHub Project Sync (bidirectional)
+        {
+          const issuesGhConfig = path === '/console/issues/github/config' && method === 'GET';
+          const issuesGhAuth = path === '/console/issues/github/authorize' && method === 'POST';
+          const issuesGhSync = path === '/console/issues/github/sync' && method === 'POST';
+          const issuesGhWebhook = path === '/console/issues/github/webhook' && method === 'POST';
+          if (issuesGhConfig || issuesGhAuth || issuesGhSync || issuesGhWebhook) {
+            const auth = await sessionOf();
+            // webhook is allowed anonymous if repo linked (GitHub itself calls it); otherwise require engineer session
+            if (!issuesGhWebhook) {
+              if (!auth) return redirectLogin();
+              if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+              if (activationDenied(res, auth, false)) return;
+              if (!engineerOnly(auth)) return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
+            }
+            if (issuesGhConfig) {
+              const a = await sessionOf();
+              if (!a) return redirectLogin();
+              if (!engineerOnly(a)) return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
+              const config = await getGitHubSyncConfig(db, tenant);
+              return json(res, 200, {
+                ok: true,
+                config: config
+                  ? { repo: config.repo, status: config.status, lastSyncedAt: config.lastSyncedAt, syncedCount: config.syncedCount, hasToken: !!config.token }
+                  : null,
+              });
+            }
+            if (issuesGhWebhook) {
+              const cfg = await getGitHubSyncConfig(db, tenant);
+              if (!cfg || !cfg.repo) return json(res, 400, { ok: false, error: 'no repo linked for tenant' });
+              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: opts.fetchFn ?? fetch });
+              return json(res, 200, { ok: syncRes.ok, syncedCount: syncRes.syncedCount, error: syncRes.error });
+            }
+            let call: Call | null = null;
+            try { call = await parseCall(req); } catch (e) { return json(res, 400, { ok: false, error: (e as Error).message }); }
+            if (!auth || !csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+            const serverFetchFn = opts.fetchFn ?? fetch;
+            const at2 = now();
+            if (issuesGhAuth) {
+              const repoRaw = String(call.fields.repo ?? '').trim();
+              const tokenRaw = typeof call.fields.token === 'string' ? call.fields.token.trim() : null;
+              const parsed = parseGitHubRepoPath(repoRaw);
+              if (!parsed) return json(res, 400, { ok: false, error: 'Invalid repository. Please enter owner/repo or a GitHub URL.' });
+              const authRes = await authorizeGitHubRepo(repoRaw, tokenRaw, serverFetchFn);
+              if (!authRes.ok) return json(res, 400, { ok: false, error: authRes.error || 'GitHub authorization failed' });
+              await saveGitHubSyncConfig(db, tenant, authRes.repoFullName, tokenRaw, auth.user.email, at2);
+              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: serverFetchFn, userEmail: auth.user.email });
+              await auditConsole(db, tenant, by(auth.user), 'issues.github_authorize', `repo:${authRes.repoFullName}`, at2, `synced:${syncRes.syncedCount}`);
+              return json(res, 200, { ok: true, repo: authRes.repoFullName, syncedCount: syncRes.syncedCount, error: syncRes.error });
+            }
+            if (issuesGhSync) {
+              const syncRes = await syncGitHubProject(db, tenant, { fetchFn: serverFetchFn, userEmail: auth!.user.email });
+              if (!syncRes.ok) return json(res, 400, { ok: false, error: syncRes.error || 'Sync failed' });
+              await auditConsole(db, tenant, by(auth!.user), 'issues.github_sync', `synced:${syncRes.syncedCount}`, at2);
+              return json(res, 200, { ok: true, syncedCount: syncRes.syncedCount });
+            }
           }
         }
 
