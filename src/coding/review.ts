@@ -12,7 +12,9 @@ export type ReviewStatus =
   | 'SNAPSHOTTING' | 'COMPLETED' | 'REJECTED_ALL';
 
 const TRANSITIONS: Record<ReviewStatus, ReviewStatus[]> = {
-  READY_FOR_REVIEW: ['HUMAN_REVIEW'],
+  // CHANGES_REQUESTED directly from READY_FOR_REVIEW: the first
+  // send-to-agent on a fresh review must not silently no-op.
+  READY_FOR_REVIEW: ['HUMAN_REVIEW', 'CHANGES_REQUESTED'],
   HUMAN_REVIEW: ['CHANGES_ACCEPTED', 'CHANGES_REQUESTED', 'REJECTED_ALL'],
   CHANGES_REQUESTED: ['AGENT_FIX', 'HUMAN_REVIEW'],
   AGENT_FIX: ['READY_FOR_REVIEW'],
@@ -120,6 +122,14 @@ export async function recordIteration(db: AsyncDb, tenant: string, missionId: st
   if (!doc) throw new Error('review not found');
   doc.iterations.push({ n: doc.iterations.length + 1, label, at: new Date().toISOString(), ...stats });
   return save(db, doc);
+}
+export async function setSnapshotId(db: AsyncDb, tenant: string, missionId: string, snapshotId: string): Promise<CodeReviewDoc> {
+  const doc = await getReview(db, tenant, missionId);
+  if (!doc) throw new Error('review not found');
+  doc.snapshotId = snapshotId;
+  await save(db, doc);
+  await emit(db, tenant, 'REVIEW_SNAPSHOT_BOUND', missionId, snapshotId);
+  return doc;
 }
 export async function recordVerification(db: AsyncDb, tenant: string, missionId: string, v: Omit<VerificationResult, 'at'>): Promise<CodeReviewDoc> {
   const doc = await getReview(db, tenant, missionId);

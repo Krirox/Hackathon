@@ -1,14 +1,18 @@
 import type { AsyncDb } from '../core/db.ts';
+import { spawnSync } from 'node:child_process';
+import { existsSync, unlinkSync } from 'node:fs';
+import { basename, resolve, sep } from 'node:path';
 import {
-  computeReviewFromGit, diffFile, applyHunkDecisions, gitShow, readTree, writeFileSafe,
+  computeReviewFromGit, applyHunkDecisions, gitShow, readTree, writeFileSafe,
   languageForPath, secretScan, type ChangedFile,
 } from '../coding/diff.ts';
 import { highlightLine } from '../coding/highlight.ts';
 import {
   getReview, openReview, transitionReview, setHunkDecision, setFileDecision,
   addComment, sendCommentToAgent, recordHumanEdit, recordIteration, recordVerification,
-  reviewSummary, type CodeReviewDoc,
+  setSnapshotId, reviewSummary, type CodeReviewDoc,
 } from '../coding/review.ts';
+import { createSnapshot } from '../coding/snapshot.ts';
 import { getMission } from '../coding/mission.ts';
 
 export const esc = (s: string): string =>
@@ -62,7 +66,7 @@ function gotoHunk(d){const hs=[...document.querySelectorAll('.hunk')];if(!hs.len
 </script></body></html>`;
 }
 
-export interface ReviewQuery { q?: string; file?: string; mode?: string; ctx?: string; edit?: string; hunk?: string }
+export interface ReviewQuery { q?: string; file?: string; mode?: string; ctx?: string; edit?: string; hunk?: string; notice?: string }
 
 function loadFiles(doc: CodeReviewDoc): ChangedFile[] {
   const files = computeReviewFromGit(doc.workdir, doc.baselineRev);
@@ -137,6 +141,7 @@ export async function renderReviewPage(db: AsyncDb, tenant: string, missionId: s
   const files = loadFiles(doc);
   const secretHits = scanReviewFiles(doc.workdir, files);
   const s = reviewSummary(files, doc);
+  const noticeHtml = q.notice ? `<div class="card" style="border-color:var(--teal)"><b>${esc(q.notice)}</b></div>` : '';
   const groups = new Map<string, ChangedFile[]>();
   for (const f of files) {
     if (q.q && !f.path.toLowerCase().includes(q.q.toLowerCase())) continue;
@@ -189,7 +194,7 @@ ${selHits.length > 0 ? `<div class="bad" style="margin-top:6px">⚠ SECRET SCAN:
 <div class="card"><h3>Snapshot</h3><p class="mut">${doc.snapshotId ? `✓ ${esc(doc.snapshotId)} VERIFIED` : 'Not yet created — created only after review + verification.'}</p>
 ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="create-snapshot"><button class="btn pri" type="submit">Create Verified Snapshot</button></form>` : `<a class="btn" href="?file=${sel?.id ?? ''}">New task from snapshot</a>`}</div>`;
   const dirty = `<span id="dirty" class="bad" style="display:none">● Unsaved changes</span>`;
-  const body = `<div class="top"><b>VITAL</b><span style="font-family:var(--mono)">${esc(doc.missionId)}</span><b class="ok">✓ READY FOR REVIEW</b> ${dirty}
+  const body = `${noticeHtml}<div class="top"><b>VITAL</b><span style="font-family:var(--mono)">${esc(doc.missionId)}</span><b class="ok">✓ READY FOR REVIEW</b> ${dirty}
 <div class="meter"><span>Files <b>${s.files}</b></span><span class="ok">+${s.insertions}</span><span class="bad">−${s.deletions}</span><span>Tests ${s.testsFailed ? `<span class="bad">${s.testsPassed}/${s.testsPassed + s.testsFailed} FAILED</span>` : `${s.testsPassed} passed`}</span><span>Human edits ${s.humanEdits}</span>${secretHits.size > 0 ? `<span class="bad">⚠ secrets in ${secretHits.size} file(s)</span>` : ''}<span>Status ${esc(doc.status)}</span></div>
 <div><form method="post" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="accept-all"><button class="btn pri" type="submit">Accept All</button></form>
 <form method="post" style="display:inline" onsubmit="return confirm('Reject ALL agent changes and restore baseline?')"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="reject-all"><input type="hidden" name="confirm" value="1"><button class="btn dan" type="submit">Reject All</button></form>
@@ -200,4 +205,136 @@ ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value=
   return shell(`Review ${doc.missionId}`, body);
 }
 
-// __ACTIONS__
+// ── Actions: every POST button on the review page lands here. ──
+// The handler owns the full mutation set: open, per-hunk/per-file and bulk
+// accept/reject, human edit of the agent's working tree, comments (incl.
+// send-to-agent), test runs via `npm test` in the reviewed repo, and the
+// final VERIFIED snapshot. Workdir containment is enforced by writeFileSafe;
+// verification and snapshot are refused while secrets scan hits remain.
+
+export interface ReviewActionResult { redirect: string }
+
+export async function handleReviewAction(
+  db: AsyncDb, tenant: string, missionId: string, fields: Record<string, string>, actor: string,
+): Promise<ReviewActionResult> {
+  const base = `/console/review/${encodeURIComponent(missionId)}`;
+  const at = (s: string) => `${base}?notice=${encodeURIComponent(s)}`;
+  const action = (fields.action ?? '').trim();
+  if (action === '') throw new Error('missing action');
+
+  if (action === 'open') {
+    const workdir = (fields.workdir ?? '').trim();
+    const baseline = ((fields.baseline ?? '').trim() || 'HEAD');
+    if (workdir.length === 0) throw new Error('working directory is required');
+    // Resolve and contain: the review reads (git, files) and later writes
+    // inside this path — it must exist and must not traverse upward.
+    const root = resolve(workdir);
+    if (root === resolve('/') || !existsSync(root)) throw new Error(`workdir not found: ${workdir}`);
+    if (await getReview(db, tenant, missionId)) throw new Error('review already open for this mission');
+    await openReview(db, tenant, missionId, baseline, root);
+    return { redirect: base };
+  }
+
+  const doc = await getReview(db, tenant, missionId);
+  if (!doc) throw new Error('no review open for this mission');
+
+  switch (action) {
+    case 'hunk-accept':
+    case 'hunk-reject': {
+      const hunk = (fields.hunk ?? '').trim();
+      if (!hunk) throw new Error('missing hunk');
+      await setHunkDecision(db, tenant, missionId, hunk, action === 'hunk-accept' ? 'accepted' : 'rejected');
+      return { redirect: at(action === 'hunk-accept' ? 'Hunk accepted.' : 'Hunk rejected — file will be restored on save.') };
+    }
+    case 'file-accept':
+    case 'file-reject': {
+      const file = (fields.file ?? '').trim();
+      if (!file) throw new Error('missing file');
+      await setFileDecision(db, tenant, missionId, file, action === 'file-accept' ? 'accepted' : 'rejected');
+      return { redirect: at(action === 'file-accept' ? 'File accepted.' : 'File rejected.') };
+    }
+    case 'accept-all': {
+      const files = loadFiles(doc);
+      for (const f of files) {
+        await setFileDecision(db, tenant, missionId, f.id, 'accepted');
+        for (const h of f.hunks) await setHunkDecision(db, tenant, missionId, h.id, 'accepted');
+      }
+      return { redirect: at('All changes accepted.') };
+    }
+    case 'reject-all': {
+      if ((fields.confirm ?? '') !== '1') throw new Error('reject-all requires explicit confirm=1');
+      // Rewind through the diff engine itself: every hunk rejected means the
+      // working tree gets the baseline content back (added files are removed,
+      // deleted files restored, modified files reverted). No bare `git
+      // restore`/`clean` — that would sweep up human untracked files too.
+      const files = loadFiles(doc);
+      for (const f of files) {
+        await setFileDecision(db, tenant, missionId, f.id, 'rejected');
+        for (const h of f.hunks) await setHunkDecision(db, tenant, missionId, h.id, 'rejected');
+        const original = gitShow(doc.workdir, doc.baselineRev, f.oldPath ?? f.path);
+        const cur = readTree(doc.workdir, [f.path]).get(f.path) ?? null;
+        const restored = applyHunkDecisions(original, cur, f.hunks.map((h) => ({ ...h, decision: 'rejected' as const })));
+        if (restored === null) {
+          const full = resolve(doc.workdir, f.path);
+          if (full.startsWith(resolve(doc.workdir) + sep) && existsSync(full)) unlinkSync(full);
+        } else {
+          writeFileSafe(doc.workdir, f.path, restored);
+        }
+      }
+      await recordIteration(db, tenant, missionId, 'reject-all — baseline restored', { files: files.length, insertions: 0, deletions: 0 });
+      return { redirect: at('All agent changes rejected — working tree restored to baseline.') };
+    }
+    case 'save-edit': {
+      const file = (fields.file ?? '').trim();
+      if (!file) throw new Error('missing file');
+      const content = fields.content ?? '';
+      writeFileSafe(doc.workdir, file, content);
+      await recordHumanEdit(db, tenant, missionId, file, actor, `saved ${Buffer.byteLength(content, 'utf8')}B`);
+      return { redirect: at('Edit saved to working tree.') };
+    }
+    case 'comment': {
+      const body = (fields.body ?? '').trim();
+      if (!body) throw new Error('comment body required');
+      const lineRaw = (fields.line ?? '').trim();
+      const line = lineRaw !== '' && /^\d+$/.test(lineRaw) ? Number(lineRaw) : null;
+      const filePath = (fields.filePath ?? '').trim();
+      await addComment(db, tenant, missionId, { file: filePath, line, hunkId: null, author: actor, body });
+      return { redirect: at('Comment added.') };
+    }
+    case 'send-to-agent': {
+      const commentId = (fields.comment ?? '').trim();
+      if (!commentId) throw new Error('missing comment');
+      await sendCommentToAgent(db, tenant, missionId, commentId); // flips status → CHANGES_REQUESTED
+      return { redirect: at('Fix requested from comment.') };
+    }
+    case 'run-tests': {
+      // Refuse to bless a tree that still scans dirty — review gate, not a
+      // formality: secrets must be resolved before verification means anything.
+      const hits = scanReviewFiles(doc.workdir, loadFiles(doc));
+      if (hits.size > 0) throw new Error(`resolve secret scan findings first: ${[...hits.keys()].join(', ')}`);
+      const r = spawnSync('npm', ['test'], { cwd: doc.workdir, encoding: 'utf8', timeout: 10 * 60_000, env: { ...process.env, CI: '1' } });
+      const passed = Number((r.stdout.match(/^# pass (\d+)/m) ?? [])[1] ?? 0);
+      const failed = Number((r.stdout.match(/^# fail (\d+)/m) ?? [])[1] ?? 0) + (r.status === 0 ? 0 : 1);
+      await recordVerification(db, tenant, missionId, { suite: 'npm test', passed, failed, output: `${r.stdout.slice(-4000)}\n${r.stderr.slice(-1000)}`, ok: r.status === 0 });
+      if (r.status !== 0) return { redirect: at(`Tests FAILED (${failed} failed) — see verification panel.`) };
+      return { redirect: at(`Tests passed (${passed} passed).`) };
+    }
+    case 'create-snapshot': {
+      // Same gate as run-tests, plus a recorded verification run.
+      const hits = scanReviewFiles(doc.workdir, loadFiles(doc));
+      if (hits.size > 0) throw new Error(`resolve secret scan findings first: ${[...hits.keys()].join(', ')}`);
+      if (doc.verification.length === 0) throw new Error('run tests before creating a snapshot');
+      const last = doc.verification[doc.verification.length - 1]!;
+      if (!last.ok) throw new Error('last verification failed — snapshot refused');
+      const snap = await createSnapshot(db, tenant, {
+        missionId, groupId: 'review', projectId: missionId, repo: basename(doc.workdir), branch: 'review',
+        commit: doc.baselineRev, parentId: null, type: 'VERIFIED',
+        runtime: {}, docker: [], toolchains: {}, workspaceContent: 'review-gated',
+      });
+      await setSnapshotId(db, tenant, missionId, snap.id);
+      return { redirect: at(`Snapshot ${snap.id} created (VERIFYING).`) };
+    }
+    default:
+      throw new Error(`unknown review action: ${action}`);
+  }
+}

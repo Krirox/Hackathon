@@ -205,6 +205,7 @@ import {
 } from '../gov/trust.ts';
 import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
+import { renderReviewPage } from './code-review.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
@@ -3242,6 +3243,45 @@ export function startConsoleServer(
           await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
           return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
         }
+        // ------------------------------------------------------------ Code review (per-mission human gate)
+        // GET  /console/review/:missionId — diff review page
+        // POST /console/review/:missionId — review actions (accept/reject/edit/comment/verify/snapshot)
+        const reviewMatch = path.match(/^\/console\/review\/([^/]+)$/);
+        if (reviewMatch && (method === 'GET' || method === 'POST')) {
+          const auth = await sessionOf();
+          if (!auth) return method === 'GET' ? redirectLogin() : json(res, 401, { ok: false, error: 'session required' });
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          const missionId = decodeURIComponent(reviewMatch[1]!);
+          if (method === 'GET') {
+            const html = await renderReviewPage(db, tenant, missionId, {
+              q: url.searchParams.get('q') ?? undefined,
+              file: url.searchParams.get('file') ?? undefined,
+              mode: url.searchParams.get('mode') ?? undefined,
+              notice: url.searchParams.get('notice') ?? undefined,
+            }, auth.session.csrfToken, by(auth.user));
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(html);
+            return;
+          }
+          // POST: parse, CSRF-gate, dispatch, redirect back to the page.
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          try {
+            const { handleReviewAction } = await import('./code-review.ts');
+            const result = await handleReviewAction(db, tenant, missionId, call.fields, by(auth.user));
+            await auditConsole(db, tenant, by(auth.user), 'review.action', `mission:${missionId}`, at, String(call.fields.action ?? ''));
+            return redirect(res, result.redirect);
+          } catch (e) {
+            await auditConsole(db, tenant, by(auth.user), 'review.action_failed', `mission:${missionId}`, at, String((e as Error).message).slice(0, 200));
+            return redirect(res, `/console/review/${encodeURIComponent(missionId)}?notice=${encodeURIComponent((e as Error).message.slice(0, 200))}`);
+          }
+        }
+
         // ------------------------------------------------------------ Issues (engineers team only)
         // The engineering Issues board: kanban over the `issues` table with
         // live delta sync. Every route below gates on `isEngineer(auth.user)`

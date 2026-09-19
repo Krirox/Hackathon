@@ -15,8 +15,9 @@ import { launchFargate } from '../src/coding/fargate-runtime.ts';
 import { mergeGroups } from '../src/coding/merge.ts';
 import { FsSnapshotStore, persistSnapshotLayers } from '../src/coding/snapshot-store.ts';
 import { gitStatus, writeFileSafe, secretScan, sha } from '../src/coding/diff.ts';
-import { openReview } from '../src/coding/review.ts';
-import { renderReviewPage } from '../src/console/code-review.ts';
+import { openReview, getReview } from '../src/coding/review.ts';
+import { renderReviewPage, handleReviewAction } from '../src/console/code-review.ts';
+import { listSnapshots } from '../src/coding/snapshot.ts';
 
 async function mem() { const db = openDb(':memory:'); await migrate(db); return db; }
 
@@ -187,5 +188,61 @@ T('coding-agent: review diff — rename parsed dest←old, writeFileSafe contain
   const htmlSel = await renderReviewPage(db, 't', 'M-SEC', { file: secretId }, 'csrf-token', 'human');
   assert.ok(htmlSel.includes('SECRET SCAN'), 'per-file scan findings surfaced on selected file');
   assert.ok(htmlSel.includes('possible Stripe'), 'finding label rendered');
+  await db.close();
+});
+
+T('coding-agent: review actions — full gate journey from open to verified snapshot', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'vital-actions-'));
+  const g = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+  g('init', '-q');
+  g('config', 'user.email', 't@vital.test');
+  g('config', 'user.name', 'T');
+  writeFileSync(join(repo, 'svc.ts'), 'export const v = 1;\n');
+  g('add', '.');
+  g('commit', '-qm', 'base');
+  const baseline = g('rev-parse', 'HEAD').trim();
+  // The agent's change: modify svc.ts, add feature.ts.
+  writeFileSync(join(repo, 'svc.ts'), 'export const v = 2;\n');
+  writeFileSync(join(repo, 'feature.ts'), 'export const feature = true;\n');
+  const db = await mem();
+  const act = (fields: Record<string, string>) => handleReviewAction(db, 't', 'M-ACT', fields, 'human');
+
+  // Open through the action (not the helper) — including its validations.
+  await assert.rejects(() => act({ action: 'open', workdir: join(repo, 'nope') }), /not found/);
+  await act({ action: 'open', workdir: repo, baseline });
+  await assert.rejects(() => act({ action: 'open', workdir: repo }), /already open/);
+
+  // Comment, then send it to the agent → review flips to CHANGES_REQUESTED.
+  await act({ action: 'comment', filePath: 'svc.ts', line: '1', body: 'bump looks fine but explain' });
+  const doc1 = (await getReview(db, 't', 'M-ACT'))!;
+  assert.equal(doc1.comments.length, 1);
+  await act({ action: 'send-to-agent', comment: doc1.comments[0]!.id });
+  assert.equal((await getReview(db, 't', 'M-ACT'))!.status, 'CHANGES_REQUESTED');
+
+  // Human edit lands in the working tree and is recorded.
+  await act({ action: 'save-edit', file: 'feature.ts', content: 'export const feature = true; // human-approved\n' });
+  assert.ok((await getReview(db, 't', 'M-ACT'))!.humanEdits.length === 1);
+
+  // Accept all hunks/files.
+  await act({ action: 'accept-all' });
+  const docAcc = (await getReview(db, 't', 'M-ACT'))!;
+  assert.ok(Object.values(docAcc.hunkDecisions).every((d) => d === 'accepted'));
+
+  // Snapshot is refused before tests ran, and run-tests would fail on this
+  // non-project dir — record a verification directly, then snapshot.
+  await assert.rejects(() => act({ action: 'create-snapshot' }), /run tests before/);
+  const { recordVerification } = await import('../src/coding/review.ts');
+  await recordVerification(db, 't', 'M-ACT', { suite: 'simulated', passed: 5, failed: 0, output: 'ok', ok: true });
+  await act({ action: 'create-snapshot' });
+  const docSnap = (await getReview(db, 't', 'M-ACT'))!;
+  assert.ok(docSnap.snapshotId, 'snapshot bound to review');
+  const snaps = await listSnapshots(db, 't');
+  assert.ok(snaps.some((x) => x.id === docSnap.snapshotId && x.type === 'VERIFIED'));
+
+  // reject-all: rewind both files to baseline content (added file removed).
+  await act({ action: 'reject-all', confirm: '1' });
+  const { readFileSync } = await import('node:fs');
+  assert.equal(readFileSync(join(repo, 'svc.ts'), 'utf8'), 'export const v = 1;\n', 'modified file reverted');
+  assert.equal(existsSync(join(repo, 'feature.ts')), false, 'added file removed');
   await db.close();
 });
