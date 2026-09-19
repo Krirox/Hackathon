@@ -27,6 +27,7 @@ import { renderReview, REVIEW_SCRIPT } from '../src/console/review.ts';
 import { buildWorkspaceView, loadWorkspaceOverlay } from '../src/console/release-workspace.ts';
 import { fanOutWorkflow } from '../src/wedge/ship.ts';
 import { persistDeliverableVersion } from '../src/wedge/deliverable-artifact.ts';
+import { buildTenantJourney } from '../src/console/journey.ts';
 import { runInNewContext } from 'node:vm';
 import { parseExecutionSpec } from '../src/coord/execution-spec.ts';
 import { recordTrustOutcome, recordWorkerHeartbeat, setKill } from '../src/gov/trust.ts';
@@ -1609,6 +1610,182 @@ T('FLOW-012: setup page saves config, ingests first source, and starts release w
     eq(workflow.status, 303);
     const complete = await buildActivationState(db, ledger, coord, TEN, NOW, [owner.owner]);
     eq(complete.releaseWorkflowId !== null, true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-012: first-run journey shows honest empty state before any stage completes', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const session = await ownerSession(server.port);
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/`, { headers: session.headers })).text();
+    eq(html.includes('id="tenant-journey"'), true, 'dashboard renders the journey section:');
+    eq(html.includes('not yet'), true, 'unreached stages say so plainly:');
+    eq(html.includes('Journey closed'), false, 'no completion is claimed before it exists:');
+
+    const journey = await buildTenantJourney(db, TEN, NOW);
+    // CLI signup path: stage 1 is real via the users table fallback.
+    eq(journey.stages[0]!.at !== null, true, 'signup milestone is durable:');
+    for (const stage of journey.stages.slice(1)) {
+      eq(stage.at, null, `${stage.id} shows not-done for a fresh tenant:`);
+    }
+    eq(journey.currentIndex, 1);
+    eq(journey.completedAt, null);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('FLOW-012: the six-stage journey closes — signup, setup, source, approval, deliverable, outcome', async () => {
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  const owner = await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    NOW,
+  );
+  const sourceDir = join(tmpdir(), `vital-journey-${Date.now()}`);
+  const artifactDir = join(tmpdir(), `vital-journey-art-${Date.now()}`);
+  mkdirSync(sourceDir, { recursive: true });
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(join(sourceDir, 'release.md'), '# v0.1\nJourney release notes');
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const session = await ownerSession(server.port);
+    const journeyAt = async () => buildTenantJourney(db, TEN, NOW);
+
+    eq((await journeyAt()).currentIndex, 1, 'starts at setup:');
+
+    // Stage 2 — setup
+    await fetch(`${base_}/setup`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        accountableOwnerId: owner.owner.id,
+        scope: 'engineering',
+        sourcePath: sourceDir,
+        artifactDir,
+        approverRole: 'member',
+        dailyBudgetDollars: '100',
+        humanMinutesBudget: '60',
+      }),
+    });
+    eq((await journeyAt()).currentIndex, 2, 'setup recorded → next is first source:');
+
+    // Stage 3 — first source receipt
+    await fetch(`${base_}/setup/ingest`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf }),
+    });
+    eq((await journeyAt()).currentIndex, 3, 'ingested evidence recorded → next is approval:');
+
+    // Stage 4 — first release workflow + human approval
+    const startRelease = await fetch(`${base_}/setup/start-release`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({ csrf: session.csrf }),
+      redirect: 'manual',
+    });
+    eq(startRelease.status, 303);
+    const runId = (startRelease.headers.get('location') ?? '').split('/').pop()!;
+    eq(runId.length > 0, true, 'workflow started:');
+
+    const view = await buildWorkspaceView(db, ledger, coord, comp, TEN, runId);
+    const admitted = view?.legs.find((l) => l.requestId && l.requestState === 'ADMITTED');
+    eq(admitted?.requestId !== undefined, true, 'fan-out admitted a reviewable leg:');
+
+    // Human curation — the governed CANDIDATE → VERIFIED promotion that makes
+    // ingested evidence approvable. This is a real journey step, not a test fix.
+    const claimRow = (await db
+      .prepare(
+        "SELECT id FROM claims WHERE tenant = ? AND extractor = 'file-diff' ORDER BY created_at ASC LIMIT 1",
+      )
+      .get(TEN)) as { id: string } | undefined;
+    eq(claimRow !== undefined, true, 'ingested claim exists:');
+    const verify = await fetch(`${base_}/api/claims/${encodeURIComponent(claimRow!.id)}/verify`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    eq(((await verify.json()) as { ok: boolean }).ok, true, 'claim verified by human:');
+
+    const approve = await fetch(`${base_}/api/requests/${encodeURIComponent(admitted!.requestId!)}/approve`, {
+      method: 'POST',
+      headers: { ...session.headers, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    const approveBody = (await approve.json()) as { ok: boolean; error?: string; state?: string };
+    eq(approveBody.ok, true, `approval accepted: ${JSON.stringify(approveBody)}`);
+    eq((await journeyAt()).currentIndex, 4, 'approval recorded → next is deliverable:');
+
+    // Stage 5 — versioned deliverable from the admitted request
+    const version = await persistDeliverableVersion(db, ledger, {
+      tenant: TEN,
+      requestId: admitted!.requestId!,
+      deliverableSchema: 'launch-copy.v1',
+      content: `Launch draft citing [claim:${claimRow!.id}]`,
+      claimIds: [claimRow!.id],
+      createdBy: 'human:owner',
+      now: NOW,
+    });
+    eq(version.id.startsWith('dlvver_'), true);
+    eq((await journeyAt()).currentIndex, 5, 'deliverable recorded → next is measured outcome:');
+
+    // Stage 6 — preregister, then capture the measured outcome
+    const prereg = await fetch(`${base_}/console/workflows/${encodeURIComponent(runId)}/preregister`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        metric: 'ship_to_launch_hours',
+        threshold: '24',
+        baseline: '48h pre-pilot average',
+        comparisonBasis: 'holdout segment',
+        windowStart: '2026-09-01',
+        windowEnd: '2026-10-01',
+      }),
+      redirect: 'manual',
+    });
+    eq(prereg.status, 303);
+
+    const measured = await buildWorkspaceView(db, ledger, coord, comp, TEN, runId);
+    eq(measured?.canCaptureOutcome, true, 'outcome capture enabled:');
+    const outcome = await fetch(`${base_}/console/workflows/${encodeURIComponent(runId)}/outcome`, {
+      method: 'POST',
+      headers: { cookie: session.cookie },
+      body: new URLSearchParams({
+        csrf: session.csrf,
+        decisionId: measured!.replay[0]!.decisionId,
+        metric: 'ship_to_launch_hours',
+        actual: '12',
+        basis: 'pilot holdout measurement',
+      }),
+      redirect: 'manual',
+    });
+    eq(outcome.status, 303);
+
+    const closed = await journeyAt();
+    eq(closed.currentIndex, null, 'journey closed:');
+    eq(closed.completedAt !== null, true, 'completion timestamp is the outcome record:');
+
+    // After full activation `/` redirects to chat by design; the dashboard
+    // (and the closed journey) lives at /console/dashboard.
+    const html = await (await fetch(`${base_}/console/dashboard`, { headers: session.headers })).text();
+    eq(html.includes('Journey closed'), true, 'dashboard announces the closed loop:');
+    eq(html.includes('up next'), false, 'no stage is left pending:');
   } finally {
     await server.close();
     await db.close();

@@ -133,7 +133,7 @@ export async function renderRoomsSetupPage(
               </label>
               <select name="autonomy_${esc(cfg.scope)}" style="width:100%;background:#FFFFFF;color:#0A0F14;border:1px solid #B7B7B1;border-radius:4px;padding:8px;font-size:13px;box-sizing:border-box;">
                 <option value="autonomous" ${cfg.autonomy === 'autonomous' ? 'selected' : ''}>Autonomous — Agents execute end-to-end without pausing.</option>
-                <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default) — Routine work is autonomous; yellow review gates (🟡) trigger on high spend (> $250), sensitive actions, or low confidence.</option>
+                <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default) — Routine work is autonomous; yellow review gates (🟡) trigger on budget pressure, sensitive actions, or low confidence.</option>
                 <option value="supervised" ${cfg.autonomy === 'supervised' ? 'selected' : ''}>Supervised — Every state change requires explicit human sign-off (coord.settle).</option>
               </select>
             </div>

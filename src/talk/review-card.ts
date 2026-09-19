@@ -99,8 +99,10 @@ export function renderReviewCard(opts: ReviewCardOptions): string {
   const declineUrl = `${baseUrl}/api/buzz/webhook?action=decline&token=${declineToken}`;
 
   const actionClass = opts.actionClass ?? 'MUTATE';
-  const confidence = opts.confidence !== undefined ? opts.confidence.toFixed(2) : '0.78';
-  const spend = opts.bidDollars !== undefined ? `$${opts.bidDollars.toFixed(2)}` : '$0.00';
+  // Unknown means "unknown": a fabricated 0.78 confidence or $0.00 spend on
+  // a human-approval card would manufacture certainty the caller never had.
+  const confidence = opts.confidence !== undefined ? opts.confidence.toFixed(2) : 'unknown';
+  const spend = opts.bidDollars !== undefined ? `$${opts.bidDollars.toFixed(2)}` : 'unknown';
   const tokens = opts.bidTokens !== undefined ? `${opts.bidTokens.toLocaleString()} tokens` : '';
   const costLine = tokens ? `${spend} (${tokens})` : spend;
 

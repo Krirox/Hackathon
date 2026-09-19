@@ -145,7 +145,7 @@ export const CANONICAL_ROOMS: readonly CanonicalRoomDefinition[] = [
     channel: 'chan-finance',
     agentName: 'finance-agent',
     duties: 'Churn metric aggregation; Stripe/QuickBooks sync; cost-per-signal accounting.',
-    triggers: 'Spend requests exceeding scope limit (>$500); ledger reconciliation.',
+    triggers: 'Spend requests exceeding scope limit (> 500 USD); ledger reconciliation.',
     healthMetric: 'Cost-per-signal within budget gate',
     defaultMission:
       'Reconcile billing statements, compute churn probabilities, track cost-per-signal, and gate financial disbursements.',

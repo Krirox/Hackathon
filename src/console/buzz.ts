@@ -192,102 +192,8 @@ export async function createLocalReply(
   return id;
 }
 
-const BUZZ_ENGINEERING_SEED_MESSAGES: BuzzThreadMessage[] = [
-  {
-    id: 'seed_eng_1',
-    author: 'Elena Torres',
-    content: 'Honestly? Move it to Flutter now. One codebase, both platforms, and we stop maintaining two of everything. Cheap to switch today, expensive in a month.',
-    createdAt: 1726743720,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_2',
-    author: 'Alex Rivera',
-    content: '@Bumble New direction, team — we\'re moving the prototype to Flutter. Can you and the others re-plan the port and start scaffolding?',
-    createdAt: 1726743735,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_3',
-    author: 'Bumble',
-    content: '🐝 On it — mapping the current React views to Flutter widgets now. Handing the state layer to @Fizz .',
-    createdAt: 1726743750,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_4',
-    author: 'Fizz',
-    content: 'Got the state layer — porting the game loop to Flutter, keeping the tuned physics. @Honey , UI shell?',
-    createdAt: 1726743765,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_5',
-    author: 'Honey',
-    content: 'Building the Flutter widget tree from the existing designs — same look, one codebase. 🍯',
-    createdAt: 1726743780,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_6',
-    author: 'Alex Rivera',
-    content: 'Nice. Take it through one implementation pass. Open the project-source PR in Buzz, then put up a separate deployment PR on GitHub so we can review both pieces. @Bumble',
-    createdAt: 1726743795,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_7',
-    author: 'Bumble',
-    content: 'Source PR is open in Buzz: [Buzz · PR] Port Flight Path mobile prototype to Flutter. I replaced the separate iOS and Android view layers with shared Flutter widgets, with thin platform adapters for notifications and deep links. @Fizz , can you handle deployment?',
-    createdAt: 1726743810,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_8',
-    author: 'Fizz',
-    content: 'Deployment PR is up on GitHub: https://github.com/honeycomb-studios/deployments/pull/482. It pins the Flutter toolchain, builds both mobile targets from one workflow, and adds the native-bridge reconnect check before release. @Honey , can you review both PRs?',
-    createdAt: 1726743825,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_9',
-    author: 'Honey',
-    content: 'Reviewed both — the Buzz source PR keeps the platform boundary clean, and the GitHub deployment PR preserves the release checks. @Alex Rivera , could you take the human review?',
-    createdAt: 1726743840,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-  {
-    id: 'seed_eng_10',
-    author: 'Alex Rivera',
-    content: 'Yep, reviewing both now. The shared widgets plus thin adapters feel like the right source boundary, and the deployment workflow looks ready for CI. Nice work, team. 🐝',
-    createdAt: 1726743855,
-    isReviewCard: false,
-    requestId: null,
-    threadRoot: null,
-  },
-];
-
 /** Local stand-in when the relay is not configured: recent audit + approvals. */
 async function localRoomActivity(db: AsyncDb, tenant: string, scope: string): Promise<BuzzThreadMessage[]> {
-  const isInfra = normalizeScope(scope) === 'infra';
   const localMsgs = (await db
     .prepare('SELECT id, author, content, parent_id, created_at FROM buzz_messages WHERE tenant = ? AND scope = ? ORDER BY created_at ASC LIMIT 50')
     .all(tenant, normalizeScope(scope))) as {
@@ -306,9 +212,6 @@ async function localRoomActivity(db: AsyncDb, tenant: string, scope: string): Pr
     requestId: null,
     threadRoot: r.parent_id ? String(r.parent_id) : null,
   }));
-  if (isInfra) {
-    return [...BUZZ_ENGINEERING_SEED_MESSAGES, ...mappedLocal];
-  }
   if (mappedLocal.length > 0) {
     return mappedLocal;
   }
@@ -758,10 +661,10 @@ export async function renderBuzzRoom(
     </div>
   </header>
 
-  <!-- Floating '28 new messages' pill -->
+  <!-- Floating scroll-to-latest pill -->
   <div style="display:flex;justify-content:center;margin:6px 0 -8px;position:relative;z-index:5;">
     <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:20px;padding:3px 12px;font-size:11px;font-weight:600;color:#64748B;box-shadow:0 1px 3px rgba(0,0,0,0.04);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
-      <span>↑</span> <span>28 new messages</span>
+      <span>↑</span> <span>Jump to latest</span>
     </div>
   </div>
 

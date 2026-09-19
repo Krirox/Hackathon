@@ -122,6 +122,16 @@ export async function recordFirstReviewAt(db: AsyncDb, tenant: string, at: strin
   if (!existing) await metaSet(db, firstReviewKey(tenant), at);
 }
 
+/** First human approval across the whole tenant (null before the first one). */
+export async function firstReviewAt(db: AsyncDb, tenant: string): Promise<string | null> {
+  return metaGet(db, firstReviewKey(tenant));
+}
+
+/** When this tenant's journey began — signup or the web claim of an unprovisioned console. */
+export async function signupAt(db: AsyncDb, tenant: string): Promise<string | null> {
+  return metaGet(db, signupKey(tenant));
+}
+
 export function parseGitHubRepo(path: string): [string, string] | null {
   let clean = path.trim();
   if (clean.startsWith('github:')) clean = clean.slice(7);

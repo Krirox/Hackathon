@@ -461,10 +461,10 @@ export function renderWorkspaceShell(opts: {
         <div class="buzz-group-heading">Direct messages</div>
         <div class="buzz-room-list">
           <a href="${esc(home)}console/buzz/general" class="buzz-room-link">
-            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#D1D5DB;display:inline-grid;place-items:center;font-size:9px;">👤</span>Jordan Brooks</span>
+            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#D1D5DB;display:inline-grid;place-items:center;font-size:9px;">👤</span>Samira Vance</span>
           </a>
           <a href="${esc(home)}console/buzz/general" class="buzz-room-link">
-            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#FBCFE8;display:inline-grid;place-items:center;font-size:9px;color:#9D174D;">MC</span>Maya Chen</span>
+            <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#FBCFE8;display:inline-grid;place-items:center;font-size:9px;color:#9D174D;">ML</span>Morgan Lee</span>
             <span style="background:#0F172A;color:#fff;font-size:9.5px;padding:0 5px;border-radius:10px;font-weight:700;">1</span>
           </a>
           <a href="${esc(home)}console/buzz/general" class="buzz-room-link">

@@ -49,6 +49,7 @@ import './learning.test.ts';
 import './e2e-gates.test.ts';
 import './buzz.test.ts';
 import './buzz-chat-first.test.ts';
+import './fabrication-guard.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

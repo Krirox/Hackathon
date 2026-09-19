@@ -158,6 +158,7 @@ import {
   retryWorkflow,
 } from './release-workspace.ts';
 import { deliverableDetailPage } from './deliverable.ts';
+import { buildTenantJourney, renderJourneyMilestone } from './journey.ts';
 import {
   approveDeliverableVersion,
   loadDeliverableVersion,
@@ -199,15 +200,16 @@ import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
-import { loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
-import { renderCompilerView } from './compiler-view.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
+import { renderCompilerView, renderCompilerParts } from './compiler-view.ts';
+import { renderOperationsDashboard } from './operations-dashboard.ts';
 import { ScopeHealthEvaluator } from '../talk/health.ts';
 import { executeRoomCommand } from '../talk/commands.ts';
 import { TimeTravelForkEngine } from '../talk/fork.ts';
 import { AmbientMorningBriefingSynthesizer } from '../talk/huddle.ts';
 import { RoomBudgetTracker } from '../talk/budget-gauge.ts';
 import { LiveCanvasSynchronizer } from '../talk/canvas.ts';
-import { renderDepartmentTabs, renderDepartmentBanner, type DashboardDepartment } from './dashboard-views.ts';
+import { type DashboardDepartment } from './dashboard-views.ts';
 
 /**
  * Console serve mode (TODO V2.1 + V2.1.1): the read-model report plus working
@@ -3878,6 +3880,7 @@ export function startConsoleServer(
           const fallbackMode = operatorSecret ? 'secret' : 'session';
           const readiness = await renderSystemReadiness(at);
           const activation = renderActivationPanel(activationState, auth.session.csrfToken, home);
+          const journey = renderJourneyMilestone(await buildTenantJourney(db, tenant, at), home);
           const review = await renderReview(coord, ledger, {
             tenant,
             actor: by(auth.user),
@@ -3893,24 +3896,34 @@ export function startConsoleServer(
             ? (rawScope as DashboardDepartment)
             : 'all';
           const deptEvaluations = await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll();
-          const deptTabs = renderDepartmentTabs(activeDepartment, home);
-          const deptBanner = renderDepartmentBanner({
-            activeScope: activeDepartment,
-            home,
-            userRole: auth.user.role,
-            evaluations: deptEvaluations,
-          });
 
-          const html = report.replace(
-            '<h1>Reality health</h1>',
-            () => `${deptTabs}${deptBanner}${readiness}${searchHtml}${activation}${review}<h1>Reality health</h1>`,
+          const compilerParts = await renderCompilerParts(db, comp, tenant);
+          const shellWs = await import('./workspace-shell.ts');
+          const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
+          const recencyByScope = await shellWs.computeRoomRecency(
+            db,
+            tenant,
+            CANONICAL_ROOMS.map((r) => r.scope),
           );
-          // The CSRF token rides in the page so same-origin form posts and
-          // same-origin fetches can both present it.
-          const withCsrf = html.replace(
-            '</head>',
-            () => `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head>`,
-          );
+
+          const bodyStart = report.indexOf('<body>');
+          const bodyEnd = report.lastIndexOf('</body>');
+          const reportBody = bodyStart !== -1 && bodyEnd !== -1
+            ? report.slice(bodyStart + 6, bodyEnd)
+            : report;
+
+          const realitySection = `
+            <div id="reality-overview" style="margin-top:10px;">
+              ${journey}
+              ${readiness}
+              ${searchHtml}
+              ${activation}
+              ${review}
+              <div style="margin-top:20px;padding-top:16px;">
+                ${reportBody}
+              </div>
+            </div>`;
+
           const isAdmin = atLeast(auth.user.role, 'admin');
           const consoleNav = renderConsoleNav(
             buildConsoleNav(home, {
@@ -3926,43 +3939,29 @@ export function startConsoleServer(
             }),
           );
           const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-          const skip = `<a class="skip-link" href="#main">Skip to main content</a>`;
-          // Chat-centric shell: every console page lives inside Workspace
-          const shellRooms = (await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll()).map((h) => ({
-            scope: h.scope,
-            roomName: h.roomName,
-            badge: h.badge,
-            pending: h.pendingApprovals,
-          }));
-          const inner = withCsrf.slice(withCsrf.indexOf('<body>') + 6, withCsrf.indexOf('</body>'));
-          const shellWs = await import('./workspace-shell.ts');
-          const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
-          const shellRecency = await shellWs.computeRoomRecency(
-            db,
+
+          const fullDashboard = renderOperationsDashboard({
             tenant,
-            shellRooms.map((r) => r.scope),
-          );
-          const shelled =
-            skip +
-            renderWorkspaceShell({
-              rooms: shellRooms,
-              home,
-              consoleNav,
-              accountCluster,
-              innerHtml: inner,
-              userEmail: auth.user.email,
-              userRole: auth.user.role,
-              tenant,
-              metrics: shellMetrics,
-              roomRecency: shellRecency,
-            });
-          const withUser = withCsrf.slice(0, withCsrf.indexOf('<body>') + 6) + shelled + withCsrf.slice(withCsrf.indexOf('</body>'));
-          // FLOW-010: the browser cookie tracks the slid DB row — every
-          // verified page view re-arms both the idle window (DB) and the
-          // cookie Max-Age, so idle and absolute lifetimes stay aligned.
+            home,
+            userEmail: auth.user.email,
+            userRole: auth.user.role,
+            csrfToken: auth.session.csrfToken,
+            activeDepartment,
+            evaluations: deptEvaluations,
+            metrics: shellMetrics,
+            recencyByScope,
+            compilerBoardHtml: compilerParts.boardHtml,
+            compilerRightPanelHtml: compilerParts.rightPanelHtml,
+            compilerMetricsHtml: compilerParts.metricsHtml,
+            realityHtml: realitySection,
+            consoleNav,
+            accountCluster,
+          });
+
+          // FLOW-010: the browser cookie tracks the slid DB row
           const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': refreshed });
-          res.end(withUser);
+          res.end(fullDashboard);
           return;
         }
 

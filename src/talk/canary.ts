@@ -26,13 +26,13 @@ const FINANCE_CANARY: CanaryDefinition = {
   anomalyType: 'reconciliation_discrepancy',
   syntheticPayload:
     'BILLING_SYNC_PROBE: Stripe invoice in_99182 ($4,850.00) differs from Ledger entry ($4,725.50) — variance +$124.50.',
-  detectionExpectation: 'Agent must identify $124.50 reconciliation mismatch and open contradiction gate.',
+  detectionExpectation: 'PROBE: Agent must identify $124.50 reconciliation mismatch and open contradiction gate.',
 };
 
 const RISK_CANARY: CanaryDefinition = {
   scope: 'risk',
   anomalyType: 'counterparty_exposure_spike',
-  syntheticPayload: 'RISK_TICK_PROBE: Synthetic counterparty "Apex Prime" variance jumped +35.4% in 5 minutes.',
+  syntheticPayload: 'RISK_TICK_PROBE: Synthetic counterparty "Vanguard Risk Index" variance jumped +35.4% in 5 minutes.',
   detectionExpectation: 'Agent must flag exposure ceiling breach and recommend hedge rebalance.',
 };
 
