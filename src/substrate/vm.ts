@@ -5,31 +5,43 @@ import { join } from 'node:path';
 import type { AsyncDb } from '../core/db.ts';
 
 /**
- * Team microVMs: one Firecracker-style isolated workspace per team scope,
- * many jcode sessions multiplexed inside via the same JCODE_API_SOCKET.
+ * Team workspaces: one directory-isolated workspace per team scope, many
+ * jcode sessions multiplexed inside via the same JCODE_API_SOCKET.
+ *
+ * What this IS: a per-scope durable working directory (`team-<scope>`),
+ * rebuildable in spirit from a snapshot artifact, destroyed on kill switch /
+ * turn error / explicit teardown. Snapshots persist through the artifact
+ * store when the caller supplies a real artifact ref.
+ *
+ * What this is NOT (stated plainly, AUDIT.md F27 pattern — infrastructure
+ * must not imply isolation it does not provide): there is no Firecracker, no
+ * jailer, no VM boundary. The old header claimed a "Firecracker-style"
+ * backend "selected when VITAL_VM_BACKEND=firecracker" — no such code path
+ * exists. This is process-level directory isolation only; hard isolation is
+ * deployment work (EFS access points / a real microVM) and is not claimed
+ * until it exists.
  *
  * Lifecycle per queue: provision on first dispatch for a scope, reuse across
- * requests in that scope (snapshot = workspace dir + manifest), destroy on
- * kill switch / turn error / explicit teardown. Snapshots persist to the
- * artifact store so the next provision resumes from the last good state.
- *
- * Local/dev implementation uses a directory VM (EFS access-point path in
- * prod: /var/vital/sandboxes/team-<scope>). The Firecracker jailer path is
- * selected when VITAL_VM_BACKEND=firecracker and /usr/bin/jailer exists;
- * otherwise directory isolation + sandbox manifest verification apply.
+ * requests in that scope, destroy on kill switch / turn error / teardown.
  */
 
 export interface TeamVm {
   vmId: string;
   scope: string;
   workingDir: string;
+  /**
+   * Socket path ONLY when JCODE_API_SOCKET is configured. Empty string means
+   * "not configured" — sessions resolve their own transport. The old code
+   * minted `/run/jcode-<vmid>.sock` for VMs that never listen on it.
+   */
   socketPath: string;
+  /** Artifact ref of the last good snapshot, or null when none was persisted. */
   snapshotRef: string | null;
   provisionedAt: string;
 }
 
 export interface VmSnapshot {
-  snapshotRef: string;
+  snapshotRef: string | null;
   scope: string;
   requestId: string;
   at: string;
@@ -46,10 +58,6 @@ export function vmRootFor(scope: string, env: NodeJS.ProcessEnv = process.env): 
 
 function vmRoot(scope: string): string {
   return vmRootFor(scope);
-}
-
-function vmSocketPath(vmId: string): string {
-  return process.env.JCODE_API_SOCKET ?? `/run/jcode-${vmId.slice(0, 8)}.sock`;
 }
 
 export async function provisionTeamVm(
@@ -78,7 +86,7 @@ export async function provisionTeamVm(
     vmId,
     scope,
     workingDir,
-    socketPath: vmSocketPath(vmId),
+    socketPath: process.env.JCODE_API_SOCKET ?? '',
     snapshotRef: null,
     provisionedAt: at,
   };
@@ -87,7 +95,7 @@ export async function provisionTeamVm(
     .run(`vm:team:${tenant}:${scope}`, JSON.stringify(vm));
   await db
     .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
-    .run(tenant, 'system', 'VM_PROVISIONED', `vm:${vmId}`, `scope=${scope} dir=${workingDir}`, at);
+    .run(tenant, 'system', 'VM_PROVISIONED', `vm:${vmId}`, `scope=${scope} dir=${workingDir} isolation=directory`, at);
   return vm;
 }
 
@@ -103,7 +111,13 @@ export async function snapshotTeamVm(
   const row = (await db.prepare(`SELECT value FROM meta WHERE key = ?`).get(`vm:team:${tenant}:${scope}`)) as
     | { value: string }
     | undefined;
-  const snapshotRef = artifactRef ?? `snap_${Date.now().toString(36)}`;
+
+  // No artifact ref means NO snapshot was persisted. Recording an invented
+  // `snap_<timestamp>` ref (the old behavior) put a durable-looking pointer
+  // to nothing into the audit log.
+  const snapshotRef = artifactRef ?? null;
+  const refDetail = snapshotRef ?? 'none (no artifact store ref returned)';
+
   if (row) {
     try {
       const vm = JSON.parse(String(row.value)) as TeamVm;
@@ -117,7 +131,7 @@ export async function snapshotTeamVm(
   }
   await db
     .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
-    .run(tenant, 'system', 'VM_SNAPSHOT', `vm:team:${scope}`, `request=${requestId} ref=${snapshotRef}`, at);
+    .run(tenant, 'system', 'VM_SNAPSHOT', `vm:team:${scope}`, `request=${requestId} ref=${refDetail}`, at);
   return { snapshotRef, scope, requestId, at };
 }
 

@@ -1,6 +1,5 @@
 import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
-import { openDb } from '../src/core/db.ts';
 import { migrate } from '../src/core/db.ts';
 
 T('FLOW-001: 100 real claims from ≥3 systems populate the ledger', async () => {
@@ -14,26 +13,22 @@ T('FLOW-001: 100 real claims from ≥3 systems populate the ledger', async () =>
     { name: 'linear2', owner: 'sync:linear2' },
   ];
 
-  let claimCount = 0;
   for (const system of systems) {
     for (let i = 0; i < 34; i++) {
-      const observedAt = NOW;
-      const validFrom = NOW;
       await ledger.append({
         tenant: TEN,
         subject: `launch_${system.name}_${i}`,
         kind: 'FACT',
         statement: `shipped feature ${i} from ${system.name}`,
         confidence: 1,
-        observedAt: observedAt,
-        validFrom: validFrom,
+        observedAt: NOW,
+        validFrom: NOW,
         owner: system.owner,
         scope: 'marketing',
         authorType: 'system',
         provenance: { ...sor(`https://${system.name}.example.com/bug/${i}`), retrievedAt: NOW },
         validUntil: null,
       });
-      claimCount++;
     }
   }
 

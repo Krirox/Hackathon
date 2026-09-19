@@ -40,9 +40,9 @@ export async function resolveDispatchTarget(
   token: string,
 ): Promise<{ agentName: string; targetScope: string; targetRoom: string } | null> {
   const t = token.trim().toLowerCase();
-  if (t === 'eng' || t === 'eng-agent' || t === 'engineering') {
+  if (t === 'eng' || t === 'eng-agent' || t === 'engineering' || t === 'coding' || t === 'coding-agent' || t === 'coder') {
     const infra = CANONICAL_ROOMS.find((r) => r.scope === 'infra')!;
-    return { agentName: 'eng-agent', targetScope: infra.scope, targetRoom: infra.name };
+    return { agentName: 'ops-agent', targetScope: infra.scope, targetRoom: infra.name };
   }
   return resolveRoomByToken(db, tenant, t);
 }
@@ -61,7 +61,8 @@ export function parseCrossRoomDispatch(text: string): CrossRoomDispatch | null {
       r.id.toLowerCase() === targetToken ||
       r.scope.toLowerCase() === targetToken ||
       r.name.toLowerCase() === targetToken ||
-      ((targetToken === 'marketing' || targetToken === 'marketing-agent' || targetToken === 'business-agent') && r.scope === 'business'),
+      ((targetToken === 'marketing' || targetToken === 'marketing-agent' || targetToken === 'business-agent') && r.scope === 'business') ||
+      ((targetToken === 'eng' || targetToken === 'eng-agent' || targetToken === 'engineering' || targetToken === 'coding' || targetToken === 'coding-agent' || targetToken === 'coder') && r.scope === 'infra'),
   );
   if (!targetRoomDef) return null;
 

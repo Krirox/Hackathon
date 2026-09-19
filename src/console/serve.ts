@@ -207,6 +207,7 @@ import { TimeTravelForkEngine } from '../talk/fork.ts';
 import { AmbientMorningBriefingSynthesizer } from '../talk/huddle.ts';
 import { RoomBudgetTracker } from '../talk/budget-gauge.ts';
 import { LiveCanvasSynchronizer } from '../talk/canvas.ts';
+import { renderDepartmentTabs, renderDepartmentBanner, type DashboardDepartment } from './dashboard-views.ts';
 
 /**
  * Console serve mode (TODO V2.1 + V2.1.1): the read-model report plus working
@@ -433,6 +434,13 @@ async function wrapInWorkspaceShell(
   const avail: Record<string, boolean> = { requests: true, claims: true, rooms: true, humanWork: true, buzz: isAdmin, settings: isAdmin, learning: isAdmin, audit: isAdmin, data: isAdmin };
   const nav = (await import('./render.ts')).renderConsoleNav((await import('./render.ts')).buildConsoleNav(home, avail), navKey);
   const cluster = (await import('./render.ts')).renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+  const shellWs = await import('./workspace-shell.ts');
+  const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
+  const shellRecency = await shellWs.computeRoomRecency(
+    db,
+    tenant,
+    rooms.map((r) => r.scope),
+  );
   const shell = renderWorkspaceShell({
     rooms,
     activeScope,
@@ -443,6 +451,8 @@ async function wrapInWorkspaceShell(
     userEmail: auth.user.email,
     userRole: auth.user.role,
     tenant,
+    metrics: shellMetrics,
+    roomRecency: shellRecency,
   });
   return html.slice(0, html.indexOf('<body>') + 6) + shell + html.slice(html.indexOf('</body>'));
 }
@@ -2525,13 +2535,13 @@ export function startConsoleServer(
           const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
           const factors = await listMfaFactors(db, auth.user.id);
           const recoveryCount = await countLiveRecoveryCodes(db, auth.user.id);
+          const raw = accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, {
+            emailVerified: verified,
+            mfa: { enabled: factors.length > 0, factors, recoveryCount },
+          });
+          const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(
-            accountPage(auth.session.csrfToken, auth.user, undefined, undefined, home, {
-              emailVerified: verified,
-              mfa: { enabled: factors.length > 0, factors, recoveryCount },
-            }),
-          );
+          res.end(shelled);
           return;
         }
         // FLOW-007: email-verification lifecycle over HTTP. The request route
@@ -2557,21 +2567,21 @@ export function startConsoleServer(
             });
           }
           const verified = await isEmailVerified(db, auth.user.tenant, auth.user.id);
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(
-            accountPage(
-              auth.session.csrfToken,
-              auth.user,
-              undefined,
-              hasMailerConfigured()
-                ? 'Verification link sent to your inbox. Confirm within 24 hours.'
-                : 'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
-              home,
-              {
-                emailVerified: verified,
-              },
-            ),
+          const raw = accountPage(
+            auth.session.csrfToken,
+            auth.user,
+            undefined,
+            hasMailerConfigured()
+              ? 'Verification link sent to your inbox. Confirm within 24 hours.'
+              : 'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
+            home,
+            {
+              emailVerified: verified,
+            },
           );
+          const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, auth, 'account');
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(shelled);
           return;
         }
         if (path === '/verify-email' && method === 'GET') {
@@ -3027,8 +3037,17 @@ export function startConsoleServer(
               threadRoot: null,
               at,
             });
+
+            let targetId = newId;
+            const { isBusinessIntelligenceInquiry, queryBusinessState } = await import('../talk/rag-analyst.ts');
+            if (isBusinessIntelligenceInquiry(command, scope)) {
+              const replyText = await queryBusinessState(db, tenant, command, at);
+              const agentId = await createLocalReply(db, tenant, scope, newId, 'general-agent', replyText, at);
+              targetId = agentId;
+            }
+
             await auditConsole(db, tenant, by(auth.user), 'buzz.chat', `room:${scope}`, at, command.slice(0, 200));
-            return redirect(res, `${back}#msg-${encodeURIComponent(newId)}`);
+            return redirect(res, `${back}#msg-${encodeURIComponent(targetId)}`);
           }
           await auditConsole(db, tenant, by(auth.user), 'buzz.command', `room:${scope}`, at, command.slice(0, 200));
           const notice = `Command ${result.command} executed.`;
@@ -3076,8 +3095,17 @@ export function startConsoleServer(
             threadRoot: parentId,
             at,
           });
+
+          let targetReplyId = newId;
+          const { isBusinessIntelligenceInquiry, queryBusinessState } = await import('../talk/rag-analyst.ts');
+          if (isBusinessIntelligenceInquiry(content, scope)) {
+            const replyText = await queryBusinessState(db, tenant, content, at);
+            const agentId = await createLocalReply(db, tenant, scope, parentId ?? newId, 'general-agent', replyText, at);
+            targetReplyId = agentId;
+          }
+
           await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
-          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(newId)}`);
+          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
         }
         const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
         if (method === 'GET' && learningCard) {
@@ -3798,7 +3826,7 @@ export function startConsoleServer(
 
           return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
         }
-        if (method === 'GET' && (path === home || path === '/console/dashboard')) {
+        if (method === 'GET' && (path === home || path === '/console' || path === '/console/' || path === '/console/dashboard')) {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
           if (accessState === 'recovery') {
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -3816,14 +3844,15 @@ export function startConsoleServer(
           });
 
           if (
-            path === home &&
+            (path === home || path === '/console' || path === '/console/') &&
             path !== '/console/dashboard' &&
             url.searchParams.get('view') !== 'dashboard' &&
             !activationState.showPanel &&
             !activationState.sampleActive
           ) {
             const defRoom = await defaultRoomForUser(db, tenant, auth.user);
-            const loc = `${home}console/buzz/${encodeURIComponent(defRoom)}`;
+            const prefix = home.endsWith('/') ? home : `${home}/`;
+            const loc = `${prefix}console/buzz/${encodeURIComponent(defRoom)}`;
             const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
             res.writeHead(302, {
               location: loc,
@@ -3859,15 +3888,28 @@ export function startConsoleServer(
             page: reviewPage,
             home,
           });
+          const rawScope = (url.searchParams.get('scope') ?? 'all').toLowerCase();
+          const activeDepartment: DashboardDepartment = ['all', 'legal', 'marketing', 'finance', 'engineering'].includes(rawScope)
+            ? (rawScope as DashboardDepartment)
+            : 'all';
+          const deptEvaluations = await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll();
+          const deptTabs = renderDepartmentTabs(activeDepartment, home);
+          const deptBanner = renderDepartmentBanner({
+            activeScope: activeDepartment,
+            home,
+            userRole: auth.user.role,
+            evaluations: deptEvaluations,
+          });
+
           const html = report.replace(
             '<h1>Reality health</h1>',
-            `${readiness}${searchHtml}${activation}${review}<h1>Reality health</h1>`,
+            () => `${deptTabs}${deptBanner}${readiness}${searchHtml}${activation}${review}<h1>Reality health</h1>`,
           );
           // The CSRF token rides in the page so same-origin form posts and
           // same-origin fetches can both present it.
           const withCsrf = html.replace(
             '</head>',
-            `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head>`,
+            () => `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}"></head>`,
           );
           const isAdmin = atLeast(auth.user.role, 'admin');
           const consoleNav = renderConsoleNav(
@@ -3893,7 +3935,27 @@ export function startConsoleServer(
             pending: h.pendingApprovals,
           }));
           const inner = withCsrf.slice(withCsrf.indexOf('<body>') + 6, withCsrf.indexOf('</body>'));
-          const shelled = skip + renderWorkspaceShell({ rooms: shellRooms, home, consoleNav, accountCluster, innerHtml: inner });
+          const shellWs = await import('./workspace-shell.ts');
+          const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
+          const shellRecency = await shellWs.computeRoomRecency(
+            db,
+            tenant,
+            shellRooms.map((r) => r.scope),
+          );
+          const shelled =
+            skip +
+            renderWorkspaceShell({
+              rooms: shellRooms,
+              home,
+              consoleNav,
+              accountCluster,
+              innerHtml: inner,
+              userEmail: auth.user.email,
+              userRole: auth.user.role,
+              tenant,
+              metrics: shellMetrics,
+              roomRecency: shellRecency,
+            });
           const withUser = withCsrf.slice(0, withCsrf.indexOf('<body>') + 6) + shelled + withCsrf.slice(withCsrf.indexOf('</body>'));
           // FLOW-010: the browser cookie tracks the slid DB row — every
           // verified page view re-arms both the idle window (DB) and the
@@ -3977,7 +4039,7 @@ export function startConsoleServer(
           const config = await loadActivationConfig(db, tenant);
           if (!config) return redirect(res, '/setup');
           const users = await listUsers(db, tenant);
-          const test = testConfiguredSource(config);
+          const test = await testConfiguredSource(config);
           const preview =
             test.preview && test.preview.samples.length > 0
               ? ` Preview: ${test.preview.samples.map((s) => s.name).join(', ')}.`
@@ -4274,7 +4336,25 @@ export function startConsoleServer(
             pending: h.pendingApprovals,
           }));
           const teamInner = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
-          const teamShelled = renderWorkspaceShell({ rooms: teamRooms, home, consoleNav: teamNav, accountCluster: teamCluster, innerHtml: teamInner });
+          const shellWs = await import('./workspace-shell.ts');
+          const teamMetrics = await shellWs.computeShellMetrics(db, tenant);
+          const teamRecency = await shellWs.computeRoomRecency(
+            db,
+            tenant,
+            teamRooms.map((r) => r.scope),
+          );
+          const teamShelled = renderWorkspaceShell({
+            rooms: teamRooms,
+            home,
+            consoleNav: teamNav,
+            accountCluster: teamCluster,
+            innerHtml: teamInner,
+            userEmail: auth.user.email,
+            userRole: auth.user.role,
+            tenant,
+            metrics: teamMetrics,
+            roomRecency: teamRecency,
+          });
           const teamWithShell = html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(teamWithShell);

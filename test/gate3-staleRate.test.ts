@@ -1,5 +1,4 @@
 import { T, eq, TEN, NOW, fresh } from './helpers.ts';
-import { createLedger } from '../src/ledger/ledger.ts';
 
 T('FLOW-003: staleFactRate computable and < 2%', async () => {
   const { ledger } = await fresh();

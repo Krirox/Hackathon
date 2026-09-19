@@ -30,9 +30,11 @@ import {
   pollCollectorWithHealth,
   setCollectorDisabled,
   testFileDirectory,
+  testGitHubRepo,
 } from '../src/ingest/health.ts';
 import { runIngestionWorker } from '../src/ingest/worker.ts';
 import { createHmacSurface, statementHashOf, verifyClaimEnvelope } from '../src/talk/surface.ts';
+import { parseGitHubRepo, parseActivationConfigInput } from '../src/console/activation.ts';
 
 console.log('\n\x1b[1mIngestion — read-only collectors\x1b[0m');
 
@@ -1117,4 +1119,84 @@ T('FLOW-016: directory open and file read failures return sanitized structured c
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+T('FLOW-016: parseGitHubRepo parses owner/repo and handles prefixes/suffixes', async () => {
+  eq(parseGitHubRepo('facebook/react'), ['facebook', 'react']);
+  eq(parseGitHubRepo('github:facebook/react:releases'), ['facebook', 'react']);
+  eq(parseGitHubRepo('  vercel/next.js  '), ['vercel', 'next.js']);
+  eq(parseGitHubRepo('not-a-repo'), null);
+  eq(parseGitHubRepo('/path/to/changelog'), null);
+});
+
+T('FLOW-016: testGitHubRepo tests API connectivity with status code mapping', async () => {
+  // 200 OK with release preview
+  const mockOkFetch = async () =>
+    new Response(
+      JSON.stringify([
+        { tag_name: 'v1.0.0', name: 'Release 1.0', published_at: '2026-01-01T00:00:00Z' },
+        { tag_name: 'v0.9.0', name: 'Beta 0.9', published_at: '2025-12-01T00:00:00Z' },
+      ]),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  const okResult = await testGitHubRepo('testowner', 'testrepo', 'fake-token', mockOkFetch as unknown as typeof fetch);
+  eq(okResult.ok, true);
+  eq(okResult.code, 'REACHABLE');
+  eq(okResult.preview?.count, 2);
+  eq(okResult.preview?.samples[0]?.name, 'v1.0.0');
+
+  // 404 NOT_FOUND
+  const mock404Fetch = async () => new Response('Not Found', { status: 404 });
+  const notFound = await testGitHubRepo('testowner', 'missing', undefined, mock404Fetch as unknown as typeof fetch);
+  eq(notFound.ok, false);
+  eq(notFound.code, 'NOT_FOUND');
+
+  // 403 RATE_OR_AUTH
+  const mock403Fetch = async () => new Response('Forbidden', { status: 403 });
+  const rateLimit = await testGitHubRepo('testowner', 'testrepo', undefined, mock403Fetch as unknown as typeof fetch);
+  eq(rateLimit.ok, false);
+  eq(rateLimit.code, 'RATE_OR_AUTH');
+
+  // Network error
+  const mockFailFetch = async () => {
+    throw new Error('connect ECONNREFUSED');
+  };
+  const unreachable = await testGitHubRepo('testowner', 'testrepo', undefined, mockFailFetch as unknown as typeof fetch);
+  eq(unreachable.ok, false);
+  eq(unreachable.code, 'NETWORK_ERROR');
+});
+
+T('FLOW-016: parseActivationConfigInput preserves GitHub repo and sets sourceKind to github', async () => {
+  const users = [
+    {
+      id: 'usr-1',
+      tenant: 'corp',
+      email: 'lead@corp.test',
+      name: 'Team Lead',
+      displayName: 'Team Lead',
+      role: 'owner' as const,
+      mustChangePassword: false,
+      disabled: false,
+      createdAt: NOW,
+      lastLoginAt: null,
+    },
+  ];
+
+  const config = parseActivationConfigInput(
+    {
+      scope: 'backend',
+      sourcePath: 'facebook/react',
+      artifactDir: 'data/artifacts',
+      accountableOwnerId: 'usr-1',
+      approverRole: 'owner',
+      humanMinutesBudget: '60',
+    },
+    users,
+    NOW,
+    'corp',
+  );
+
+  eq(config.sourceKind, 'github');
+  eq(config.sourcePath, 'facebook/react');
+  eq(config.scope, 'backend');
 });

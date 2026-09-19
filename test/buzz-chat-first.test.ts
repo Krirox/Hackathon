@@ -1,7 +1,9 @@
-import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
+import { T, eq, TEN, NOW, fresh, sor, withVmRoot } from './helpers.ts';
+import { existsSync } from 'node:fs';
 import { startConsoleServer } from '../src/console/serve.ts';
 import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 import { OrganizationalCompiler } from '../src/compiler/compiler.ts';
+import { ApplicationWorker } from '../src/substrate/worker.ts';
 
 console.log('\n\x1b[1mBuzz Chat-First & Drawer Integration Test Suite\x1b[0m');
 
@@ -223,6 +225,260 @@ T('Cross-room mention in command box dispatches handoff to target room agent', a
 
     const dispatchAction = auditRows.find((r) => r.action === 'buzz.dispatch');
     eq(Boolean(dispatchAction), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('Tagging @coding-agent dispatches downstream task, provisions team microVM, multiplexes agents and saves snapshot', async () => {
+  await withVmRoot(async (root) => {
+    const { db, ledger, coord, comp } = await setupTestApp();
+    const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+    try {
+      const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+      const rootRes = await fetch(`http://127.0.0.1:${server.port}/`, {
+        headers: { cookie },
+        redirect: 'manual',
+      });
+      const csrf = (await rootRes.text()).match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+
+      // 1. Post cross-room mention tagging @coding-agent from #general
+      const postRes = await fetch(`http://127.0.0.1:${server.port}/console/buzz/general/command`, {
+        method: 'POST',
+        headers: {
+          cookie,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: `csrf=${csrf}&command=${encodeURIComponent('@coding-agent implement auth session rotation in microVM')}`,
+        redirect: 'manual',
+      });
+      eq([302, 303].includes(postRes.status), true);
+
+      // Verify request created in target_scope = 'infra'
+      const pending = (await coord.list(TEN, { state: 'ADMITTED' })).filter((r) => r.targetScope === 'infra');
+      eq(pending.length > 0, true, 'coordination request admitted for infra scope');
+      const codingReq = pending[0]!;
+
+      // 2. Run ApplicationWorker with real VM lifecycle (non-baseline adapter)
+      let executedWorkingDir = '';
+      const worker = new ApplicationWorker(db, ledger, coord, {
+        tenant: TEN,
+        adapter: {
+          name: 'claude-code',
+          category: 'model',
+          isTestBaseline: false,
+          async run(_t, _reqId, opts) {
+            executedWorkingDir = opts.workingDir ?? '';
+            return {
+              status: 'COMPLETED',
+              adapter: 'claude-code',
+              requestId: _reqId,
+              transcript: 'done',
+              permissions: [],
+              tools: ['bash', 'file_write'],
+              usage: { input: 150, output: 250 },
+              costDollars: 0.05,
+              artifactRef: 'art_session_rot_v1',
+              isTestBaseline: false,
+            };
+          },
+        },
+        dispatchRequests: true,
+        relayOutbox: false,
+        enableLearningLoop: false,
+        sweepIntervalMs: 99_999,
+      });
+
+      const tickRes = await worker.tick(NOW);
+      eq(tickRes.requestsCompleted, 1, 'worker completed the coding task');
+      eq(executedWorkingDir.startsWith(root), true, 'executed inside team microVM root');
+      eq(existsSync(executedWorkingDir), true, 'microVM working directory was created on disk');
+
+      // 3. Verify snapshot was recorded
+      const snapRow = (await db
+        .prepare(`SELECT detail FROM audit_log WHERE tenant = ? AND action = 'VM_SNAPSHOT' ORDER BY seq DESC LIMIT 1`)
+        .get(TEN)) as { detail: string } | undefined;
+      eq(Boolean(snapRow && snapRow.detail.includes('art_session_rot_v1')), true, 'VM snapshot saved with artifact ref');
+
+      // 4. Multiplexing: another agent (@ops-agent) runs in same scope -> reuses same microVM
+      let secondWorkingDir = '';
+      await coord.submit({
+        tenant: TEN,
+        messageClass: 'REQUEST',
+        originScope: 'business',
+        targetScope: 'infra',
+        goal: 'verify relay logs',
+        claimRefs: codingReq.claimRefs,
+        deliverableSchema: 'ops.audit',
+        bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
+        onBehalfOf: 'agent:ops-agent',
+        now: NOW,
+      });
+
+      const secondWorker = new ApplicationWorker(db, ledger, coord, {
+        tenant: TEN,
+        adapter: {
+          name: 'claude-code',
+          category: 'model',
+          isTestBaseline: false,
+          async run(_t, _reqId, opts) {
+            secondWorkingDir = opts.workingDir ?? '';
+            return {
+              status: 'COMPLETED',
+              adapter: 'claude-code',
+              requestId: _reqId,
+              transcript: 'done',
+              permissions: [],
+              tools: ['bash'],
+              usage: { input: 100, output: 100 },
+              costDollars: 0.02,
+              artifactRef: 'art_relay_v1',
+              isTestBaseline: false,
+            };
+          },
+        },
+        dispatchRequests: true,
+        relayOutbox: false,
+        enableLearningLoop: false,
+        sweepIntervalMs: 99_999,
+      });
+
+      await secondWorker.tick(NOW);
+      eq(secondWorkingDir, executedWorkingDir, 'second agent multiplexes inside the exact same team microVM');
+
+      // 5. On fatal error or throw, team microVM is destroyed to prevent taint
+      await coord.submit({
+        tenant: TEN,
+        messageClass: 'REQUEST',
+        originScope: 'business',
+        targetScope: 'infra',
+        goal: 'tainted job',
+        claimRefs: codingReq.claimRefs,
+        deliverableSchema: 'ops.audit',
+        bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
+        onBehalfOf: 'agent:ops-agent',
+        now: NOW,
+      });
+
+      const failingWorker = new ApplicationWorker(db, ledger, coord, {
+        tenant: TEN,
+        adapter: {
+          name: 'claude-code',
+          category: 'model',
+          isTestBaseline: false,
+          async run() {
+            throw new Error('sandbox corrupted');
+          },
+        },
+        dispatchRequests: true,
+        relayOutbox: false,
+        enableLearningLoop: false,
+        sweepIntervalMs: 99_999,
+      });
+
+      const failTick = await failingWorker.tick(NOW);
+      eq(failTick.requestsFailed, 1, 'failing task recorded failure');
+      eq(existsSync(executedWorkingDir), false, 'corrupted team microVM destroyed on disk');
+      const metaAfterFail = await db
+        .prepare('SELECT value FROM meta WHERE key = ?')
+        .get(`vm:team:${TEN}:infra`);
+      eq(metaAfterFail, undefined, 'VM meta registration deleted after teardown');
+    } finally {
+      await server.close();
+      await db.close();
+    }
+  });
+});
+
+T('Inquiry in #general triggers Reality Ledger RAG and synthesizes grounded business briefing', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  // Insert a sample claim into Reality Ledger
+  await db
+    .prepare(
+      `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor, extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, created_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run('clm_test_1', TEN, 'Billing Reconciliation', 'OBSERVATION', 'Q3 statements reconciled with 0 discrepancies found.', 1.0, 'https://finance.acme/q3', 'PRIMARY', 'file-diff', '1.0', NOW, NOW, NOW, 'ACTIVE', 'agent:finance', 'finance', NOW, 1);
+
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+    const roomUrl = `http://127.0.0.1:${server.port}/console/buzz/general`;
+    const getRes = await fetch(roomUrl, { headers: { cookie } });
+    const csrf = (await getRes.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+
+    // Post business inquiry
+    const postRes = await fetch(`${roomUrl}/command`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        csrf,
+        command: 'What is going on currently in the business?',
+      }).toString(),
+      redirect: 'manual',
+    });
+    eq(postRes.status, 303, 'inquiry posted successfully');
+
+    // Fetch updated room history
+    const afterRes = await fetch(roomUrl, { headers: { cookie } });
+    const afterHtml = await afterRes.text();
+
+    eq(afterHtml.includes('general-agent'), true, 'general-agent replied in the thread');
+    eq(afterHtml.includes('Vital Business Intelligence Briefing'), true, 'briefing heading rendered');
+    eq(afterHtml.includes('Grounded in Reality Ledger'), true, 'grounded in reality ledger stated');
+    eq(afterHtml.includes('Billing Reconciliation'), true, 'cited real claim from Reality Ledger');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('/console/dashboard renders role-based departmental views (legal, finance)', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+
+    // 1. Legal view
+    const legalRes = await fetch(`http://127.0.0.1:${server.port}/console/dashboard?scope=legal`, {
+      headers: { cookie },
+    });
+    eq(legalRes.status, 200, 'legal dashboard returned 200');
+    const legalHtml = await legalRes.text();
+    eq(legalHtml.includes('Legal &amp; Compliance Portal'), true, 'renders legal & compliance portal');
+    eq(legalHtml.includes('Data &amp; GDPR Portability'), true, 'renders GDPR link');
+
+    // 2. Finance view
+    const finRes = await fetch(`http://127.0.0.1:${server.port}/console/dashboard?scope=finance`, {
+      headers: { cookie },
+    });
+    eq(finRes.status, 200, 'finance dashboard returned 200');
+    const finHtml = await finRes.text();
+    eq(finHtml.includes('Financial Operations &amp; Budget Ledger'), true, 'renders finance operations portal');
+    eq(finHtml.includes('Token Burn Rate'), true, 'renders token burn rate telemetry');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('/account renders within workspace shell with 13-room sidebar and security settings', async () => {
+  const { db, ledger, coord, comp } = await setupTestApp();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+    const accountRes = await fetch(`http://127.0.0.1:${server.port}/account`, {
+      headers: { cookie },
+    });
+    eq(accountRes.status, 200, 'account page returns 200');
+    const accountHtml = await accountRes.text();
+
+    eq(accountHtml.includes('Account and security'), true, 'renders account heading');
+    eq(accountHtml.includes('Change password'), true, 'renders change password');
+    eq(accountHtml.includes('Two-factor authentication'), true, 'renders MFA section');
+    eq(accountHtml.includes('vital-dashboard-btn'), true, 'embedded within workspace shell');
+    eq(accountHtml.includes('#general'), true, 'includes canonical rooms in sidebar');
   } finally {
     await server.close();
     await db.close();

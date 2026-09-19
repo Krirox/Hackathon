@@ -4,10 +4,11 @@ import type { AsyncDb } from '../core/db.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { User } from '../core/auth.ts';
-import { fileDiffCollector } from '../ingest/collectors.ts';
+import { fileDiffCollector, gitHubReleasesCollector } from '../ingest/collectors.ts';
 import {
   getIntegrationHealth,
   testFileDirectory,
+  testGitHubRepo,
   type IntegrationHealth,
   type IntegrationState,
 } from '../ingest/health.ts';
@@ -35,7 +36,7 @@ export type ChecklistStatus = 'done' | 'pending' | 'blocked';
 
 export interface ActivationConfig {
   scope: string;
-  sourceKind: 'files';
+  sourceKind: 'files' | 'github';
   sourcePath: string;
   artifactDir: string;
   accountableOwnerId: string;
@@ -121,7 +122,17 @@ export async function recordFirstReviewAt(db: AsyncDb, tenant: string, at: strin
   if (!existing) await metaSet(db, firstReviewKey(tenant), at);
 }
 
+export function parseGitHubRepo(path: string): [string, string] | null {
+  let clean = path.trim();
+  if (clean.startsWith('github:')) clean = clean.slice(7);
+  if (clean.endsWith(':releases')) clean = clean.slice(0, -9);
+  const match = clean.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
+  return match ? [match[1]!, match[2]!] : null;
+}
+
 export function collectorName(sourcePath: string): string {
+  const gh = parseGitHubRepo(sourcePath);
+  if (gh) return `github:${gh[0]}/${gh[1]}:releases`;
   return `files:${resolve(sourcePath)}`;
 }
 
@@ -129,7 +140,7 @@ async function ingestClaimCount(db: AsyncDb, tenant: string): Promise<number> {
   const row = (await db
     .prepare(
       `SELECT COUNT(*) AS n FROM claims
-       WHERE tenant = ? AND scope <> ? AND extractor = 'file-diff'`,
+       WHERE tenant = ? AND scope <> ? AND extractor IN ('file-diff', 'github-releases')`,
     )
     .get(tenant, SAMPLE_SCOPE)) as { n: number };
   return Number(row.n);
@@ -368,10 +379,13 @@ export function parseActivationConfigInput(
     throw new Error('human minutes budget must be a positive number');
   const owner = users.find((u) => u.id === accountableOwnerId && !u.disabled);
   if (!owner) throw new Error('choose an active accountable human');
+  const gh = parseGitHubRepo(sourcePath);
+  const sourceKind: 'files' | 'github' = gh || fields.sourceKind === 'github' ? 'github' : 'files';
+  const finalSourcePath = gh ? `${gh[0]}/${gh[1]}` : resolve(sourcePath);
   return {
     scope,
-    sourceKind: 'files',
-    sourcePath: resolve(sourcePath),
+    sourceKind,
+    sourcePath: finalSourcePath,
     artifactDir: resolve(artifactDir),
     accountableOwnerId: owner.id,
     approverRole,
@@ -381,7 +395,12 @@ export function parseActivationConfigInput(
   };
 }
 
-export function testConfiguredSource(config: ActivationConfig) {
+export async function testConfiguredSource(config: ActivationConfig) {
+  const gh = parseGitHubRepo(config.sourcePath);
+  if (config.sourceKind === 'github' || gh) {
+    const [owner, repo] = gh ?? config.sourcePath.split('/');
+    return testGitHubRepo(owner!, repo!, process.env.GITHUB_TOKEN);
+  }
   return testFileDirectory(config.sourcePath, {
     maxEntries: 500,
     maxFileBytes: 1_000_000,
@@ -397,6 +416,33 @@ export async function runConfiguredIngestion(
   signal?: AbortSignal,
 ): Promise<{ processed: number; failed: number; claimIds: string[]; errors: string[] }> {
   mkdirSync(config.artifactDir, { recursive: true });
+  const gh = parseGitHubRepo(config.sourcePath);
+  if (config.sourceKind === 'github' || gh) {
+    const [owner, repo] = gh ?? config.sourcePath.split('/');
+    const token = process.env.GITHUB_TOKEN;
+    const collector = gitHubReleasesCollector(owner!, repo!, (url) =>
+      fetch(url, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Vital-Ingest/1.0',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      }),
+    );
+    const result = await runIngestionWorker(db, ledger, collector, {
+      tenant,
+      scope: config.scope,
+      artifactDir: config.artifactDir,
+      maxReceipts: 50,
+      signal,
+    });
+    return {
+      processed: result.processed,
+      failed: result.failed,
+      claimIds: result.claimIds,
+      errors: result.errors,
+    };
+  }
   const collector = fileDiffCollector(collectorName(config.sourcePath), config.sourcePath, 'SINGLE_SOURCE', {
     maxEntries: 500,
     maxFileBytes: 1_000_000,
@@ -641,8 +687,8 @@ ${healthCard}
 <label>Owner <select name="accountableOwnerId" required>${ownerOptions}</select></label></section>
 <section id="scope"><h2>Scope</h2>
 <label>Release scope <input name="scope" required value="${esc(config?.scope ?? 'engineering')}" placeholder="engineering"></label></section>
-<section id="source"><h2>Source directory</h2>
-<label>Directory to watch <input name="sourcePath" required value="${esc(config?.sourcePath ?? '')}" placeholder="/path/to/changelog"></label>
+<section id="source"><h2>Evidence source</h2>
+<label>Source directory or GitHub repository (e.g. <code>owner/repo</code> or <code>/path/to/changelog</code>) <input name="sourcePath" required value="${esc(config?.sourcePath ?? '')}" placeholder="owner/repo or /path/to/changelog"></label>
 <label>Artifact store <input name="artifactDir" value="${esc(config?.artifactDir ?? defaultArtifactDir(users[0]?.tenant ?? 'tenant'))}"></label></section>
 <section id="policy"><h2>Approval policy</h2>
 <label>Minimum approver role

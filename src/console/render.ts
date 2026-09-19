@@ -18,7 +18,7 @@ const HYPO = '#B45309';
 const PRED = '#4338CA';
 const RISK = '#B91C1C';
 
-const esc = (s: string): string =>
+export const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** Seconds → human duration: sub-minute stays seconds, minutes, then hours. */

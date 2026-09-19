@@ -1,6 +1,4 @@
 import { T, eq, TEN, NOW, fresh, sor } from './helpers.ts';
-import { createLedger } from '../src/ledger/ledger.ts';
-import { migrate, openDb } from '../src/core/db.ts';
 
 T('FLOW-002: 100% of FACT claims have resolvable ground provenance', async () => {
   const { ledger } = await fresh();
@@ -11,7 +9,6 @@ T('FLOW-002: 100% of FACT claims have resolvable ground provenance', async () =>
     { name: 'linear2', owner: 'sync:linear2' },
   ];
 
-  let claimCount = 0;
   for (const system of systems) {
     for (let i = 0; i < 34; i++) {
       await ledger.append({
@@ -28,7 +25,6 @@ T('FLOW-002: 100% of FACT claims have resolvable ground provenance', async () =>
         provenance: { ...sor(`https://${system.name}.example.com/bug/${i}`), retrievedAt: NOW },
         validUntil: null,
       });
-      claimCount++;
     }
   }
 

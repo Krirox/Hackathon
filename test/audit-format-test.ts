@@ -1,5 +1,4 @@
-import { T, eq, fresh } from './helpers.ts';
-import { createLedger } from '../src/ledger/ledger.ts';
+import { T, fresh } from './helpers.ts';
 
 T('check audit detail format', async () => {
   const { ledger } = await fresh();

@@ -3,6 +3,7 @@ import { startConsoleServer } from '../src/console/serve.ts';
 import { installAuthSchema, signupTenant } from '../src/core/auth.ts';
 import { describeStops } from '../src/gov/trust.ts';
 import { mintReviewToken, verifyReviewToken, reviewSecretFromEnv } from '../src/talk/review-card.ts';
+import { CANONICAL_ROOMS } from '../src/talk/rooms.ts';
 
 /**
  * These tests exist because every route under `/api/buzz` was reachable with no
@@ -182,7 +183,7 @@ T('an authenticated admin can still administer rooms (no over-correction)', asyn
     const rooms = await fetch(`${url}/api/buzz/rooms`, { headers: session.headers });
     eq(rooms.status, 200, 'an admin session can read the roster:');
     const body = (await rooms.json()) as { ok: boolean; rooms: unknown[] };
-    eq(body.rooms.length, 12, 'the roster has all 12 rooms:');
+    eq(body.rooms.length, CANONICAL_ROOMS.length, 'the roster has every canonical room:');
 
     const configure = await fetch(`${url}/api/buzz/rooms/configure`, {
       method: 'POST',

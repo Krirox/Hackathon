@@ -406,31 +406,36 @@ T('Feature 1: Cross-Room Agent Handoffs & Deliberations (Inter-Agent Swarms)', a
 });
 
 // ------------------------------------------------------------------ Feature 2: Canvases
-T('Feature 2: Live Epistemic Canvases render specialized real-time documents', async () => {
+T('Feature 2: Live Epistemic Canvases render real reads with honest empty states', async () => {
   const { db, ledger } = await fresh();
   const canvasSync = new LiveCanvasSynchronizer({ db, tenant: TEN, ledger });
 
-  // 1. #risk-monitor canvas
+  // 1. #risk-monitor canvas — empty ledger renders an honest empty state,
+  // never an invented counterparty table (the old fabricated rows).
   const riskCanvas = await canvasSync.generateCanvas('risk');
   eq(riskCanvas.channel, 'chan-risk-monitor');
-  eq(riskCanvas.markdown.includes('Counterparty Credit Exposure'), true);
-  eq(riskCanvas.markdown.includes('Apex Clearing Corp'), true);
-  eq(riskCanvas.markdown.includes('EWMA Drift Trajectory'), true);
+  eq(riskCanvas.markdown.includes('Exposure Observations'), true);
+  eq(riskCanvas.markdown.includes('Apex Clearing Corp'), false, 'no fabricated counterparties');
+  eq(riskCanvas.markdown.includes('No exposure observations recorded'), true);
+  eq(riskCanvas.markdown.includes('Procedure Cards & Measured Drift'), true);
 
-  // 2. #reality-core canvas
+  // 2. #reality-core canvas — derivation graph reflects claim_links only.
   const coreCanvas = await canvasSync.generateCanvas('core');
   eq(coreCanvas.channel, 'chan-reality-core');
-  eq(coreCanvas.markdown.includes('Grounded Epistemic DAG'), true);
-  eq(coreCanvas.markdown.includes('Canonical Reality Ledger State'), true);
+  eq(coreCanvas.markdown.includes('Derivation Graph (claim_links)'), true);
+  eq(coreCanvas.markdown.includes('no claims recorded yet'), true);
 
-  // 3. #finance canvas
+  // 3. #finance canvas — real spend, and cost-per-signal is explicitly not
+  // fabricated.
   const financeCanvas = await canvasSync.generateCanvas('finance');
-  eq(financeCanvas.markdown.includes('Cost-Per-Signal'), true);
+  eq(financeCanvas.markdown.includes('not computed'), true, 'cost-per-signal is not invented');
   eq(financeCanvas.markdown.includes('Dynamic Budget Gas Gauge'), true);
 
-  // 4. #compliance canvas
+  // 4. #compliance canvas — no fake hash-chain verdict.
   const complianceCanvas = await canvasSync.generateCanvas('legal');
-  eq(complianceCanvas.markdown.includes('EU AI Act & Regulatory Registry'), true);
+  eq(complianceCanvas.markdown.includes('Policy Posture'), true);
+  eq(complianceCanvas.markdown.includes('🟢 VERIFIED'), false, 'no unverifiable hash-chain claim');
+  eq(complianceCanvas.markdown.includes('no automated chain verifier'), true);
 });
 
 // ------------------------------------------------------------------ Feature 3: Canaries
@@ -467,18 +472,38 @@ T('Feature 3: Automated Honeytask Canaries award calibrated badge or freeze trus
 });
 
 // ------------------------------------------------------------------ Feature 4: Huddles
-T('Feature 4: Ambient Morning Voice Briefing synthesizes 60-second WAV audio', async () => {
+T('Feature 4: Morning briefing reports real counts and never fabricates activity', async () => {
   const { db } = await fresh();
-  const huddle = new AmbientMorningBriefingSynthesizer(db, TEN);
+  // Pin the clock to NOW so the inserted request (created_at = NOW) lands
+  // inside the briefing window.
+  const huddle = new AmbientMorningBriefingSynthesizer(db, TEN, undefined, () => NOW);
 
   const briefing = await huddle.synthesizeBriefing({ durationSeconds: 60 });
   eq(briefing.durationSeconds, 60);
   eq(briefing.stats.roomsCovered, CANONICAL_ROOMS.length);
-  eq(briefing.transcript.includes('Overnight'), true);
-  eq(briefing.transcript.includes(`${CANONICAL_ROOMS.length} rooms`), true);
+  // Empty tenant: zero checks ran, and the transcript says so — never a
+  // fabricated baseline (the old floor of 142 checks).
+  eq(briefing.stats.totalChecks, 0);
+  eq(briefing.transcript.includes('No requests ran'), true);
+  eq(briefing.transcript.includes('142'), false);
+  eq(briefing.transcript.includes('auto-recovered'), false);
   eq(Boolean(briefing.audioWavBase64), true);
 
-  // Validate audio buffer structure
+  // With real requests in the window, the counts reflect them exactly.
+  await db
+    .prepare(
+      `INSERT INTO requests (id, tenant, message_class, target_scope, origin_scope, goal, state, spent_dollars, spent_tokens, spent_json, bid_json, claim_refs, deliverable, on_behalf_of, hop_chain, chain_claims, idem_key, stop_condition, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      'req_overnight_1', TEN, 'REQUEST', 'risk', 'core', 'overnight check', 'COMPLETED',
+      0, 0, '{}', '{}', '[]', 'none', 'agent:risk', '[]', '[]', 'idem_ov1', 'never', NOW, NOW,
+    );
+  const withData = await huddle.synthesizeBriefing({ durationSeconds: 60 });
+  eq(withData.stats.totalChecks, 1);
+  eq(withData.transcript.includes('1 requests ran'), true);
+
+  // Audio buffer structure: a valid WAV container (placeholder tones, not speech)
   const wav = generateVoiceAudioWav(5); // 5 sec test
   eq(wav.subarray(0, 4).toString(), 'RIFF');
   eq(wav.subarray(8, 12).toString(), 'WAVE');
@@ -487,7 +512,7 @@ T('Feature 4: Ambient Morning Voice Briefing synthesizes 60-second WAV audio', a
 
   // Test retrieval
   const latest = await huddle.getLatestBriefing();
-  eq(latest?.id, briefing.id);
+  eq(latest?.id, withData.id);
 });
 
 // ------------------------------------------------------------------ Feature 5: Gas Gauges
@@ -555,7 +580,7 @@ T('Feature 5: Ambient Budget Gas Gauges and 80% threshold warnings', async () =>
 });
 
 // ------------------------------------------------------------------ Feature 6: Time-Travel Forking
-T('Feature 6: In-Room Time-Travel Forking clones context into #sandbox and diffs outcomes', async () => {
+T('Feature 6: Time-travel fork fails closed without a real model run and uses recorded data only', async () => {
   const { db, ledger, coord } = await fresh();
   const forkEngine = new TimeTravelForkEngine(db, ledger, coord);
 
@@ -593,16 +618,27 @@ T('Feature 6: In-Room Time-Travel Forking clones context into #sandbox and diffs
     autonomy: 'approval',
   });
 
-  // Fork the decision with Claude 3.5 Sonnet at temp 0.2
-  const diff = await forkEngine.forkRun(TEN, { decisionId: dec.id }, { model: 'claude-3-5-sonnet', temperature: 0.2 });
+  // No model credentials are configured in the test env: the fork MUST fail
+  // closed instead of returning a fabricated counterfactual (the old
+  // behavior invented both sides of the diff from hardcoded strings).
+  let failed = false;
+  try {
+    await forkEngine.forkRun(TEN, { decisionId: dec.id }, { model: 'claude-3-5-sonnet', temperature: 0.2 });
+  } catch (e) {
+    failed = true;
+    const msg = String((e as Error).message);
+    eq(msg.includes('MODEL_RUN_FAILED') || msg.includes('UNAPPROVED_MODEL') || msg.includes('MISSING_API_KEY'), true, `fork error names the real cause: ${msg}`);
+  }
+  eq(failed, true, 'fork without a runnable model fails closed');
 
-  eq(diff.originalDecisionId, dec.id);
-  eq(diff.originalParams.recommendation, 'Apply 50% partial hedge on counterparty drift');
-  eq(diff.forkedParams.model, 'claude-3-5-sonnet');
-  eq(diff.forkedParams.temperature, 0.2);
-  eq(diff.forkedParams.recommendation.includes('100% full hedge'), true);
-  eq(diff.sideBySideMarkdown.includes('IN-ROOM TIME-TRAVEL FORK COMPLETED'), true);
-  eq(diff.sideBySideMarkdown.includes('#sandbox'), true);
+  // Unknown targets are refused, not silently given invented identities.
+  let unknownFailed = false;
+  try {
+    await forkEngine.forkRun(TEN, {}, {});
+  } catch {
+    unknownFailed = true;
+  }
+  eq(unknownFailed, true, 'fork without a resolvable target is refused');
 });
 
 // ------------------------------------------------------------------ Phase 6: Setup Wizard

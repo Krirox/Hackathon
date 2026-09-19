@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
-import { injectHoneytask, resolveHoneytask, recordTrustOutcome } from '../gov/trust.ts';
+import { injectHoneytask, resolveHoneytask } from '../gov/trust.ts';
 import { type BuzzSurface } from './buzz.ts';
-import { roomForScope, normalizeScope, loadRoomConfig, saveRoomConfig } from './rooms.ts';
+import { roomForScope, normalizeScope, saveRoomConfig } from './rooms.ts';
 import { enqueueOutbox } from '../substrate/scheduler.ts';
 
 export interface CanaryDefinition {
@@ -65,6 +65,9 @@ export interface ActiveCanary {
   slaSeconds: number;
   resolved: boolean;
   detected?: boolean;
+  /** Who resolved the canary and what they said — recorded when supplied. */
+  detectedBy?: string;
+  responseText?: string;
 }
 
 export class AutomatedHoneytaskCanary {
@@ -157,6 +160,8 @@ export class AutomatedHoneytaskCanary {
     const room = roomForScope(canary.scope);
     const withinSla = Date.parse(at) <= Date.parse(canary.slaDeadline);
     const success = detected && withinSla;
+    canary.detectedBy = opts.detectedBy;
+    canary.responseText = opts.responseText;
 
     // Resolve honeytask in trust ledger
     await resolveHoneytask(this.db, tenant, canary.honeytaskId, {
@@ -233,7 +238,10 @@ export class AutomatedHoneytaskCanary {
           onBehalfOf: 'system:trust_calibration',
           now: at,
         });
-      } catch {}
+      } catch {
+        // A failed retraining ticket is surfaced by the outbox alert above;
+        // it must not mask the calibration-failure result.
+      }
     }
 
     const message = `🟡 **TRUST CALIBRATION FAILED**: Synthetic anomaly \`${canary.anomalyType}\` went undetected past SLA. Autonomy frozen. Room status degraded to 🟡. Retraining ticket scheduled.`;

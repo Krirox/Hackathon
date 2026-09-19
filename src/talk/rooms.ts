@@ -323,7 +323,7 @@ export function normalizeScope(raw: string): string {
   if (clean.startsWith('scope:')) clean = clean.slice(6);
   if (clean.startsWith('chan-')) clean = clean.slice(5);
   if (clean === 'marketing' || clean === 'marketing-agent') return 'business';
-  if (clean === 'eng' || clean === 'eng-agent' || clean === 'engineering') return 'infra';
+  if (clean === 'eng' || clean === 'eng-agent' || clean === 'engineering' || clean === 'coding' || clean === 'coding-agent' || clean === 'coder') return 'infra';
   // Also map room IDs, channels, and names to scopes
   const match = CANONICAL_ROOMS.find(
     (r) => r.id === clean || r.name === clean || r.scope === clean || r.channel === clean || r.channel === raw,

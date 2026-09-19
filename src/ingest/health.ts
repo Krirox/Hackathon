@@ -8,6 +8,7 @@ import {
   type Collector,
   type FilePollLimits,
   type RawEvent,
+  type FetchFn,
 } from './collectors.ts';
 
 /**
@@ -415,6 +416,55 @@ export function testFileDirectory(
     detail: `${samples.length} file${samples.length === 1 ? '' : 's'} readable — sync to stage events`,
     preview: { count: samples.length, samples: samples.slice(0, 5) },
   };
+}
+
+/** Test connection to a GitHub repository releases feed without staging events. */
+export async function testGitHubRepo(
+  owner: string,
+  repo: string,
+  token?: string,
+  fetchFn?: FetchFn,
+): Promise<ConnectionTestResult> {
+  const url = `https://api.github.com/repos/${owner}/${repo}/releases?per_page=5`;
+  const fn: FetchFn =
+    fetchFn ??
+    ((u: string) =>
+      fetch(u, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Vital-Ingest/1.0',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      }));
+  try {
+    const res = await fn(url);
+    if (!res.ok) {
+      if (res.status === 404) {
+        return { ok: false, code: 'NOT_FOUND', detail: `GitHub repository ${owner}/${repo} was not found or is private` };
+      }
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, code: 'RATE_OR_AUTH', detail: `GitHub API returned ${res.status} (rate limit or token required)` };
+      }
+      return { ok: false, code: 'PROVIDER_ERROR', detail: `GitHub API returned HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as Array<{ name?: string; tag_name?: string }>;
+    const samples = (Array.isArray(data) ? data : []).map((r) => ({
+      name: r.tag_name ?? r.name ?? 'release',
+      summary: `Release ${r.tag_name ?? r.name ?? ''}`,
+    }));
+    return {
+      ok: true,
+      code: 'REACHABLE',
+      detail: `Connected to GitHub repository ${owner}/${repo} (${samples.length} recent releases)`,
+      preview: { count: samples.length, samples },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'NETWORK_ERROR',
+      detail: `Failed to connect to GitHub: ${(err as Error).message}`,
+    };
+  }
 }
 
 export function permissionNoteForCollector(collector: Collector): string {

@@ -824,7 +824,7 @@ export interface GitHubRelease {
   body: string | null;
 }
 
-type FetchFn = (url: string) => Promise<{
+export type FetchFn = (url: string) => Promise<{
   ok: boolean;
   status: number;
   json(): Promise<unknown>;

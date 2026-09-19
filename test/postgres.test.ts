@@ -2,7 +2,6 @@ import { openPostgres, toPostgresPlaceholders } from '../src/core/pg.ts';
 import { migrate, nextSeq } from '../src/core/db.ts';
 import { createLedger } from '../src/ledger/ledger.ts';
 import { createCoordinator } from '../src/coord/coordinator.ts';
-import { ScopeHealthEvaluator } from '../src/talk/health.ts';
 import { claimOutbox, settleOutbox, enqueueOutbox } from '../src/substrate/scheduler.ts';
 import { claimInbox, settleInbox, stageToInbox } from '../src/ingest/collectors.ts';
 import { T, eq, NOW, sor, rejects } from './helpers.ts';

@@ -67,8 +67,10 @@ export class RoomBudgetTracker {
       )
       .get(this.tenant, scope, oneHourAgo)) as { hourlyTokens: number } | undefined;
 
-    const hourlyTokens = Number(rateRow?.hourlyTokens ?? 0);
-    const tokensPerHour = Math.max(hourlyTokens, hourlyTokens > 0 ? hourlyTokens : 84_000); // realistic default
+    // Real throughput only. A quiet room reports 0 — inventing a floor
+    // (the old 84k "realistic default") fabricated load that never ran
+    // and would have made budget headroom look consumed when it was not.
+    const tokensPerHour = Number(rateRow?.hourlyTokens ?? 0);
 
     const dollarPct = config.budgetCeilingDollars > 0 ? (dollarsSpent / config.budgetCeilingDollars) * 100 : 0;
     const tokenPct = config.budgetCeilingTokens > 0 ? (tokensSpent / config.budgetCeilingTokens) * 100 : 0;

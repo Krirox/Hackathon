@@ -48,7 +48,6 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
     // Match key="value" or key=value
     const regex = /(\b[a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
     let match: RegExpExecArray | null;
-    const matchedIndices = new Set<number>();
     while ((match = regex.exec(joined)) !== null) {
       const key = match[1]!;
       const val = match[2] ?? match[3] ?? match[4] ?? '';
@@ -315,7 +314,16 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
       try {
         const found = await ctx.ledger.search(ctx.tenant, { q, limit: 5 });
         count = found.length;
-      } catch {}
+      } catch (e) {
+        // Ledger search failure is reported, not hidden: "0 found" would lie.
+        return {
+          handled: true,
+          command: 'ledger',
+          scope,
+          error: `ledger search failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
+          output: `📜 **Ledger Search**: search failed — ${String((e as Error).message ?? e).slice(0, 120)}`,
+        };
+      }
     }
     return {
       handled: true,
@@ -333,7 +341,15 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
       try {
         const list = await ctx.coord.list(ctx.tenant, { state: 'ADMITTED' });
         pendingCount = list.filter((r) => r.bid.humanMinutes > 0).length;
-      } catch {}
+      } catch (e) {
+        return {
+          handled: true,
+          command: 'requests',
+          scope,
+          error: `coordinator read failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
+          output: `📋 **Requests**: coordinator read failed — ${String((e as Error).message ?? e).slice(0, 120)}`,
+        };
+      }
     }
     return {
       handled: true,
