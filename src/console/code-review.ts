@@ -60,6 +60,7 @@ function sync(a,b){a&&b&&a.addEventListener('scroll',()=>{if(lock)return;lock=tr
 sync(L,R);sync(R,L);
 document.querySelectorAll('[data-h]').forEach(el=>{el.addEventListener('mouseenter',()=>{const h=el.getAttribute('data-h');document.querySelectorAll('[data-h="'+h+'"]').forEach(x=>x.style.outline='2px solid #0F5C57');});el.addEventListener('mouseleave',()=>{document.querySelectorAll('.ln').forEach(x=>x.style.outline='');});});
 let dirty=false;document.querySelectorAll('textarea.code').forEach(t=>t.addEventListener('input',()=>{dirty=true;const d=document.getElementById('dirty');if(d)d.style.display='inline';}));
+document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{const m=f.getAttribute('data-confirm');if(typeof window.confirm==='function'&&!window.confirm(m))e.preventDefault();}));
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='f'&&e.shiftKey){e.preventDefault();const s=document.getElementById('fsearch');if(s)s.focus();}});
 function gotoHunk(d){const hs=[...document.querySelectorAll('.hunk')];if(!hs.length)return;let i=hs.findIndex(h=>h.getBoundingClientRect().top>80);if(i<0)i=0;if(d<0)i=Math.max(0,i-2);const t=hs[i];if(t)t.scrollIntoView({block:'start'});}
@@ -197,7 +198,7 @@ ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value=
   const body = `${noticeHtml}<div class="top"><b>VITAL</b><span style="font-family:var(--mono)">${esc(doc.missionId)}</span><b class="ok">✓ READY FOR REVIEW</b> ${dirty}
 <div class="meter"><span>Files <b>${s.files}</b></span><span class="ok">+${s.insertions}</span><span class="bad">−${s.deletions}</span><span>Tests ${s.testsFailed ? `<span class="bad">${s.testsPassed}/${s.testsPassed + s.testsFailed} FAILED</span>` : `${s.testsPassed} passed`}</span><span>Human edits ${s.humanEdits}</span>${secretHits.size > 0 ? `<span class="bad">⚠ secrets in ${secretHits.size} file(s)</span>` : ''}<span>Status ${esc(doc.status)}</span></div>
 <div><form method="post" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="accept-all"><button class="btn pri" type="submit">Accept All</button></form>
-<form method="post" style="display:inline" onsubmit="return confirm('Reject ALL agent changes and restore baseline?')"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="reject-all"><input type="hidden" name="confirm" value="1"><button class="btn dan" type="submit">Reject All</button></form>
+<form method="post" style="display:inline" data-confirm="Reject ALL agent changes and restore baseline?"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="reject-all"><input type="hidden" name="confirm" value="1"><button class="btn dan" type="submit">Reject All</button></form>
 <span class="mut">reviewed by ${esc(user)}</span></div></div>
 <div class="steps" style="padding:8px 20px;border-bottom:1px solid var(--line);background:#fff">${stepHtml}</div>
 <div class="layout"><div class="side-l"><b>CHANGED FILES</b> (${files.length})${sidebar}</div><div class="main">${main}</div><div class="side-r">${right}</div></div>

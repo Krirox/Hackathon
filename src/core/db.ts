@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { MEETING_TABLES_SQL } from '../meetings/db.ts';
 
 /**
  * Storage is deliberately minimal and Postgres-swappable, mirroring QM's own
@@ -374,6 +375,7 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     updated_by TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+  ...MEETING_TABLES_SQL,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */

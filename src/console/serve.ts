@@ -237,6 +237,14 @@ import { AmbientMorningBriefingSynthesizer } from '../talk/huddle.ts';
 import { RoomBudgetTracker } from '../talk/budget-gauge.ts';
 import { LiveCanvasSynchronizer } from '../talk/canvas.ts';
 import { type DashboardDepartment } from './dashboard-views.ts';
+import { MeetingService } from '../meetings/service.ts';
+import { MeetingSignalingHub, createWebSocketUpgradeHandler } from '../meetings/signaling.ts';
+import {
+  renderMeetingRoomView,
+  renderMeetingDetailView,
+  renderMeetingLibraryView,
+} from './meetings.ts';
+import { listTranscriptSegments } from '../meetings/db.ts';
 
 /**
  * Console serve mode (TODO V2.1 + V2.1.1): the read-model report plus working
@@ -409,6 +417,24 @@ function readBody(req: IncomingMessage): Promise<string> {
       body += c.toString();
     });
     req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function readRawBody(req: IncomingMessage, maxBytes = 50 * 1024 * 1024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) {
+        reject(new Error('[console:BODY_TOO_LARGE] body exceeds cap'));
+        req.resume();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -1951,6 +1977,10 @@ export function startConsoleServer(
     await ensureBootstrapOwner(db, tenant, now());
     let boundAddress = `${bindHost}:pending`;
 
+    const meetingService = new MeetingService(db);
+    const signalingHub = new MeetingSignalingHub(db);
+    const wsUpgrade = createWebSocketUpgradeHandler(signalingHub);
+
     const server: Server = createServer((req, res) => {
       const started = Date.now();
       let logPath = 'unmatched';
@@ -1976,9 +2006,18 @@ export function startConsoleServer(
         else if (/^\/api\/claims\/[^/]+\/correct$/.test(path)) logPath = '/api/claims/:id/correct';
         else if (/^\/api\/requests\/[^/]+\/refresh-evidence$/.test(path))
           logPath = '/api/requests/:id/refresh-evidence';
+        else if (/^\/api\/meetings\/[^/]+\/(join|leave|end|recording|transcript|process|rag|delete)$/.test(path))
+          logPath = `/api/meetings/:id/${path.split('/').pop()}`;
+        else if (/^\/api\/meetings\/[^/]+$/.test(path))
+          logPath = '/api/meetings/:id';
         else if (
           [
             home,
+            '/console/meetings',
+            '/console/meetings/room',
+            '/console/meetings/detail',
+            '/api/meetings/create',
+            '/api/meetings/list',
             '/login',
             '/signup',
             '/logout',
@@ -3500,6 +3539,275 @@ export function startConsoleServer(
             const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
             const stale = (e as Error).message.includes('STALE_WRITE');
             return json(res, stale ? 409 : 400, { ok: false, error: msg });
+          }
+        }
+
+        // ------------------------------------------------------------- Meetings ----
+        if (path === '/console/meetings' && method === 'GET') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+
+          const meetings = await meetingService.listMeetings(tenant);
+          const body = renderMeetingLibraryView({ meetings, home });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(
+            await wrapInWorkspaceShell(buzzDocument('Meetings', body), db, tenant, home, auth, 'buzz', 'meetings'),
+          );
+          return;
+        }
+
+        if (path === '/console/meetings/room' && method === 'GET') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+
+          const meetingId = url.searchParams.get('id');
+          if (!meetingId) {
+            res.writeHead(302, { location: `${home}console/meetings` });
+            res.end();
+            return;
+          }
+          const meeting = await meetingService.getMeeting(tenant, meetingId);
+          if (!meeting) {
+            res.writeHead(302, { location: `${home}console/meetings` });
+            res.end();
+            return;
+          }
+
+          const html = renderMeetingRoomView({
+            meeting,
+            currentUserId: auth.user.id,
+            currentUserName: auth.user.name,
+            userRole: auth.user.role,
+            home,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(html);
+          return;
+        }
+
+        if (path === '/console/meetings/detail' && method === 'GET') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+
+          const meetingId = url.searchParams.get('id');
+          if (!meetingId) {
+            res.writeHead(302, { location: `${home}console/meetings` });
+            res.end();
+            return;
+          }
+          const details = await meetingService.getMeetingDetails(tenant, meetingId);
+          if (!details) {
+            res.writeHead(302, { location: `${home}console/meetings` });
+            res.end();
+            return;
+          }
+
+          const body = renderMeetingDetailView({
+            meeting: details.meeting,
+            notes: details.notes,
+            transcript: details.transcript,
+            recording: details.recording,
+            participants: details.participants,
+            home,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(
+            await wrapInWorkspaceShell(buzzDocument(details.meeting.title, body), db, tenant, home, auth, 'buzz', 'meetings'),
+          );
+          return;
+        }
+
+        if (path === '/api/meetings/create' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+          const raw = await readBody(req);
+          let title = 'Untitled Meeting';
+          let scope = 'general';
+          let recordingEnabled = true;
+
+          const ctype = req.headers['content-type'] ?? '';
+          if (ctype.includes('application/json')) {
+            try {
+              const body = JSON.parse(raw);
+              title = body.title || title;
+              scope = body.scope || scope;
+              if (typeof body.recordingEnabled === 'boolean') recordingEnabled = body.recordingEnabled;
+            } catch {}
+          } else {
+            const params = new URLSearchParams(raw);
+            title = params.get('title') || title;
+            scope = params.get('scope') || scope;
+            recordingEnabled = params.get('recordingEnabled') === '1' || params.get('recordingEnabled') === 'true';
+          }
+
+          const meeting = await meetingService.createMeeting(tenant, {
+            title,
+            scope,
+            hostUserId: auth.user.id,
+            hostName: auth.user.name,
+            recordingEnabled,
+          });
+
+          await auditConsole(
+            db,
+            tenant,
+            by(auth.user),
+            'meeting.create',
+            `meeting:${meeting.id}`,
+            at,
+            meeting.title,
+          );
+
+          if (ctype.includes('application/x-www-form-urlencoded')) {
+            res.writeHead(303, { location: `${home}console/meetings/room?id=${encodeURIComponent(meeting.id)}` });
+            res.end();
+            return;
+          }
+          return json(res, 200, { ok: true, meeting });
+        }
+
+        if (path === '/api/meetings/list' && method === 'GET') {
+          const auth = await sessionOf();
+          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+          const scope = url.searchParams.get('scope') || undefined;
+          const status = (url.searchParams.get('status') as any) || undefined;
+          const search = url.searchParams.get('search') || undefined;
+          const meetings = await meetingService.listMeetings(tenant, { scope, status, search });
+          return json(res, 200, { ok: true, meetings });
+        }
+
+        // Meeting-specific routes /api/meetings/:id/...
+        const meetingRouteMatch = path.match(/^\/api\/meetings\/([^/]+)(?:\/([a-zA-Z0-9_-]+))?$/);
+        if (meetingRouteMatch) {
+          const auth = await sessionOf();
+          if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+
+          const meetingId = meetingRouteMatch[1]!;
+          const subAction = meetingRouteMatch[2] || '';
+
+          if (!subAction && method === 'GET') {
+            const details = await meetingService.getMeetingDetails(tenant, meetingId);
+            if (!details) return json(res, 404, { ok: false, error: 'meeting not found' });
+            return json(res, 200, { ok: true, ...details });
+          }
+
+          if (subAction === 'join' && method === 'POST') {
+            const participant = await meetingService.joinMeeting(tenant, meetingId, {
+              id: auth.user.id,
+              name: auth.user.name,
+            });
+            return json(res, 200, { ok: true, participant });
+          }
+
+          if (subAction === 'leave' && method === 'POST') {
+            await meetingService.leaveMeeting(tenant, meetingId, auth.user.id);
+            return json(res, 200, { ok: true });
+          }
+
+          if (subAction === 'end' && method === 'POST') {
+            const meeting = await meetingService.endMeeting(tenant, meetingId, auth.user.id);
+            await auditConsole(
+              db,
+              tenant,
+              by(auth.user),
+              'meeting.end',
+              `meeting:${meetingId}`,
+              at,
+              `duration=${meeting.durationSeconds}s`,
+            );
+            return json(res, 200, { ok: true, meeting });
+          }
+
+          if (subAction === 'recording') {
+            if (method === 'POST') {
+              const rawBytes = await readRawBody(req);
+              const durationSec = Number(url.searchParams.get('durationSeconds') ?? 0);
+              const format = (url.searchParams.get('format') ?? 'webm') as 'webm' | 'wav' | 'mp4';
+              const recording = await meetingService.saveRecording(tenant, meetingId, rawBytes, format, durationSec);
+              return json(res, 200, { ok: true, recording });
+            }
+            if (method === 'GET') {
+              const recording = await (await import('../meetings/db.ts')).getRecordingByMeetingId(db, tenant, meetingId);
+              if (!recording) return json(res, 404, { ok: false, error: 'no recording for this meeting' });
+              res.writeHead(200, {
+                'content-type': `audio/${recording.format}`,
+                'content-length': recording.sizeBytes,
+                'cache-control': 'public, max-age=86400',
+              });
+              res.end(Buffer.from([]));
+              return;
+            }
+          }
+
+          if (subAction === 'transcript') {
+            if (method === 'POST') {
+              const raw = await readBody(req);
+              const body = JSON.parse(raw);
+              const mgr = meetingService.getLiveTranscriptManager(tenant, meetingId);
+              const segment = await mgr.appendSegment({
+                speakerId: body.speakerId || auth.user.id,
+                speakerName: body.speakerName || auth.user.name,
+                startTime: Number(body.startTime || 0),
+                endTime: Number(body.endTime || 0),
+                text: String(body.text || ''),
+                confidence: Number(body.confidence || 0.95),
+              });
+              return json(res, 200, { ok: true, segment });
+            }
+            if (method === 'GET') {
+              const segments = await listTranscriptSegments(db, tenant, meetingId);
+              return json(res, 200, { ok: true, transcript: segments });
+            }
+          }
+
+          if (subAction === 'process' && method === 'POST') {
+            const status = await meetingService.triggerProcessing(tenant, meetingId);
+            return json(res, 200, { ok: true, status });
+          }
+
+          if (subAction === 'rag' && method === 'POST') {
+            const raw = await readBody(req);
+            let question = '';
+            try {
+              question = JSON.parse(raw).question ?? '';
+            } catch {
+              question = new URLSearchParams(raw).get('question') ?? '';
+            }
+            if (!question.trim()) {
+              return json(res, 400, { ok: false, error: 'question required' });
+            }
+            const result = await meetingService.askQuestion(tenant, meetingId, auth.user.id, question.trim());
+            return json(res, 200, {
+              ok: true,
+              answer: result.answer,
+              sources: result.sources,
+              found: result.found,
+            });
+          }
+
+          if (subAction === 'delete' && method === 'POST') {
+            const deleted = await meetingService.deleteMeeting(tenant, meetingId);
+            await auditConsole(
+              db,
+              tenant,
+              by(auth.user),
+              'meeting.delete',
+              `meeting:${meetingId}`,
+              at,
+              `deleted=${deleted}`,
+            );
+            return json(res, 200, { ok: true, deleted });
           }
         }
         const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
@@ -6620,6 +6928,14 @@ export function startConsoleServer(
         sock.on('close', () => open.delete(sock));
       });
       server.once('error', reject);
+      server.on('upgrade', (req, socket, head) => {
+        const u = new URL(req.url ?? '/', 'http://console');
+        if (u.pathname.startsWith('/api/meetings/signal')) {
+          wsUpgrade(req, socket, head);
+        } else {
+          socket.destroy();
+        }
+      });
       server.listen(opts.port ?? 0, bindHost, () => {
         const addr = server.address();
         if (!addr || typeof addr === 'string') return reject(new Error('[console:UNBOUND] server did not bind'));

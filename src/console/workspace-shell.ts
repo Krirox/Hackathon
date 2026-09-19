@@ -450,6 +450,10 @@ export function renderWorkspaceShell(opts: {
         <span>🤖</span>
         <span>Agents</span>
       </a>
+      <a href="/console/meetings" class="buzz-top-link ${activeScope === 'meetings' ? 'active' : ''}" title="WebRTC Meeting Intelligence">
+        <span>📹</span>
+        <span>Meetings</span>
+      </a>
     </div>
 
     <!-- Categorized Channels / Rooms -->
