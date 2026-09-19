@@ -1,4 +1,5 @@
-# Vital — Grounding, Reflex & Governance Layer for Production AI Agents
+# Vital
+# Grounding, Reflex & Governance Layer for Production AI Agents
 
 > **The Deepest Principle:** *Model output can never mint a FACT.*
 
