@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { AsyncDb } from './db.ts';
@@ -536,7 +536,9 @@ async function sharedArtifactRefs(db: AsyncDb, tenant: string, refs: string[]): 
 function verifyArtifactRef(ref: string, artifactDir: string): string {
   if (!/^[0-9a-f]{64}$/.test(ref)) throw new Error(`[erasure:UNSAFE_ARTIFACT] refusing ref "${ref}"`);
   const full = resolve(artifactDir, ref);
-  if (full !== artifactDir && !full.startsWith(artifactDir + (artifactDir.endsWith('\\') ? '' : '\\'))) {
+  // Platform-correct separator: the old hardcoded '\\' failed on POSIX,
+  // misclassifying every exclusive artifact as an escape attempt.
+  if (full !== artifactDir && !full.startsWith(artifactDir + (artifactDir.endsWith(sep) ? '' : sep))) {
     throw new Error(`[erasure:UNSAFE_ARTIFACT] ref "${ref}" escapes "${artifactDir}"`);
   }
   return full;

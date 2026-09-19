@@ -7,5 +7,6 @@ dist/
 .env
 var/
 data/artifacts/
+data/snapshots/
 .terraform/
 tmp/

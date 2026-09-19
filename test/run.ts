@@ -52,6 +52,7 @@ import './buzz-chat-first.test.ts';
 import './fabrication-guard.test.ts';
 import './buzz-avatars.test.ts';
 import './issues-panel.test.ts';
+import './coding-agent.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

@@ -5713,8 +5713,16 @@ export function startConsoleServer(
           return;
         }
 
-        if (method === 'GET' && path === '/api/metrics') {
+        // Live event stream (SSE): replays + tails audit_log for Mission Control.
+        if (method === 'GET' && path === '/api/events') {
           const auth = await sessionOf();
+          if (!auth) return sessionExpiredApi();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          const { handleEventStream } = await import('./events.ts');
+          handleEventStream(req, res, db, tenant);
+          return;
+        }
+        if (method === 'GET' && path === '/api/metrics') {          const auth = await sessionOf();
           if (!auth) return sessionExpiredApi();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           // FLOW-023: readiness is the authenticated worker/integration

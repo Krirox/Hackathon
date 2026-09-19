@@ -6,7 +6,7 @@ Phase-divided build checklist. Companion to `idea.md` (the spec). Where they dis
 
 ```
 typecheck  0 errors (re-verified 2026-09-17)
-tests      <!-- vital:testcount -->779/779 GREEN<!-- /vital:testcount --> (2026-09-17, incl. 34 auth/console + 7 erasure tests:
+tests      <!-- vital:testcount -->783/783 GREEN<!-- /vital:testcount --> (2026-09-17, incl. 34 auth/console + 7 erasure tests:
            signup-claim flow, login+pre-session CSRF, lockout, rate limit, tenant isolation,
            provision/unprovisioned boot, HTTP invite/disable + role gate, opt-in site serving;
            full Db→AsyncDb port; suite runs SERIALLY — T() chained,
