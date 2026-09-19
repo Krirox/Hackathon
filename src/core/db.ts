@@ -364,6 +364,16 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS ix_issue_comments_issue ON issue_comments(tenant, issue_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS github_project_sync (
+    tenant TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    token TEXT,
+    last_synced_at TEXT,
+    synced_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'unlinked',
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */

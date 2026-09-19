@@ -395,6 +395,299 @@ export async function listComments(db: AsyncDb, tenant: string, issueId: string)
   return rows.map(rowToComment);
 }
 
+// ------------------------------------------------------------------ GitHub project sync ---
+
+export interface GitHubSyncConfig {
+  tenant: string;
+  repo: string;
+  token: string | null;
+  lastSyncedAt: string | null;
+  syncedCount: number;
+  status: 'linked' | 'unlinked' | 'error';
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export function parseGitHubRepoPath(raw: string): { owner: string; repo: string } | null {
+  if (!raw) return null;
+  const clean = raw
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '');
+  const parts = clean.split('/');
+  if (parts.length === 2 && parts[0].length > 0 && parts[1].length > 0) {
+    return { owner: parts[0], repo: parts[1] };
+  }
+  return null;
+}
+
+export async function getGitHubSyncConfig(db: AsyncDb, tenant: string): Promise<GitHubSyncConfig | null> {
+  const row = (await db
+    .prepare(
+      'SELECT tenant, repo, token, last_synced_at, synced_count, status, updated_by, updated_at FROM github_project_sync WHERE tenant = ?',
+    )
+    .get(tenant)) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    tenant: String(row.tenant),
+    repo: String(row.repo),
+    token: row.token ? String(row.token) : null,
+    lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
+    syncedCount: Number(row.synced_count ?? 0),
+    status: (row.status as 'linked' | 'unlinked' | 'error') || 'unlinked',
+    updatedBy: String(row.updated_by),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export async function saveGitHubSyncConfig(
+  db: AsyncDb,
+  tenant: string,
+  repo: string,
+  token: string | null,
+  updatedBy: string,
+  now = new Date().toISOString(),
+): Promise<GitHubSyncConfig> {
+  const existing = await getGitHubSyncConfig(db, tenant);
+  const effectiveToken =
+    token !== undefined && token !== null && token.trim() !== '' ? token.trim() : (existing?.token ?? null);
+
+  await db
+    .prepare(
+      `INSERT INTO github_project_sync (tenant, repo, token, last_synced_at, synced_count, status, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'linked', ?, ?)
+       ON CONFLICT(tenant) DO UPDATE SET
+         repo = excluded.repo,
+         token = excluded.token,
+         status = 'linked',
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`,
+    )
+    .run(tenant, repo.trim(), effectiveToken, existing?.lastSyncedAt ?? null, existing?.syncedCount ?? 0, updatedBy, now);
+
+  return (await getGitHubSyncConfig(db, tenant))!;
+}
+
+export async function authorizeGitHubRepo(
+  repoPath: string,
+  token?: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ ok: boolean; repoFullName: string; error?: string }> {
+  const parsed = parseGitHubRepoPath(repoPath);
+  if (!parsed) {
+    return {
+      ok: false,
+      repoFullName: repoPath,
+      error: 'Invalid repository format. Please enter "owner/repo" or a GitHub repository URL.',
+    };
+  }
+  try {
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Vital-Console',
+    };
+    if (token && token.trim()) {
+      headers.Authorization = `Bearer ${token.trim()}`;
+    }
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`,
+      { method: 'GET', headers },
+    );
+    if (!res.ok) {
+      if (res.status === 401) {
+        return {
+          ok: false,
+          repoFullName: `${parsed.owner}/${parsed.repo}`,
+          error: 'GitHub authorization failed: bad or expired token (401)',
+        };
+      }
+      if (res.status === 404) {
+        return {
+          ok: false,
+          repoFullName: `${parsed.owner}/${parsed.repo}`,
+          error: 'Repository not found or private (404). If private, provide a Personal Access Token.',
+        };
+      }
+      return {
+        ok: false,
+        repoFullName: `${parsed.owner}/${parsed.repo}`,
+        error: `GitHub API error: ${res.status} ${res.statusText || ''}`.trim(),
+      };
+    }
+    const data = (await res.json()) as { full_name?: string };
+    return { ok: true, repoFullName: data.full_name || `${parsed.owner}/${parsed.repo}` };
+  } catch (e) {
+    return {
+      ok: false,
+      repoFullName: `${parsed.owner}/${parsed.repo}`,
+      error: (e as Error).message || 'Connection error contacting GitHub',
+    };
+  }
+}
+
+export async function syncGitHubProject(
+  db: AsyncDb,
+  tenant: string,
+  opts?: { fetchFn?: typeof fetch; userEmail?: string },
+): Promise<{ ok: boolean; syncedCount: number; error?: string }> {
+  const cfg = await getGitHubSyncConfig(db, tenant);
+  if (!cfg || !cfg.repo) {
+    return { ok: false, syncedCount: 0, error: 'No GitHub repository configured for this project' };
+  }
+  const parsed = parseGitHubRepoPath(cfg.repo);
+  if (!parsed) {
+    return { ok: false, syncedCount: 0, error: 'Configured repository path is invalid' };
+  }
+
+  const fetchFn = opts?.fetchFn ?? fetch;
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'Vital-Console',
+  };
+  if (cfg.token?.trim()) {
+    headers.Authorization = `Bearer ${cfg.token.trim()}`;
+  }
+
+  const now = new Date().toISOString();
+  let ghIssues: unknown[];
+  try {
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues?state=all&per_page=100`,
+      { method: 'GET', headers },
+    );
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+      return { ok: false, syncedCount: 0, error: `GitHub API error (${res.status}): ${errText.slice(0, 100)}` };
+    }
+    ghIssues = (await res.json()) as unknown[];
+  } catch (err) {
+    await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+    return { ok: false, syncedCount: 0, error: (err as Error).message };
+  }
+
+  if (!Array.isArray(ghIssues)) {
+    return { ok: false, syncedCount: 0, error: 'Unexpected response from GitHub API' };
+  }
+
+  const issuesOnly = (ghIssues as Record<string, unknown>[]).filter((i) => !i.pull_request);
+  let synced = 0;
+
+  for (const gh of issuesOnly) {
+    const ghId = String(gh.id ?? '');
+    if (!ghId) continue;
+    const issueId = `iss_gh_${ghId}`;
+    const rawState = String(gh.state ?? 'open').toLowerCase();
+
+    const ghLabelNames: string[] = Array.isArray(gh.labels)
+      ? (gh.labels as unknown[])
+          .map((l) => (typeof l === 'string' ? l : String((l as Record<string, unknown>)?.name ?? '')))
+          .filter(Boolean)
+      : [];
+
+    let state: IssueState = 'BACKLOG';
+    if (rawState === 'closed') {
+      state = 'DONE';
+    } else {
+      const lowerLabels = ghLabelNames.map((l) => l.toLowerCase());
+      if (lowerLabels.some((l) => l.includes('progress') || l.includes('doing') || l.includes('wip'))) {
+        state = 'IN PROGRESS';
+      } else if (
+        lowerLabels.some((l) => l.includes('todo') || l.includes('to do') || l.includes('ready') || l.includes('planned'))
+      ) {
+        state = 'TO DO';
+      } else {
+        state = 'BACKLOG';
+      }
+    }
+
+    let priority: IssuePriority = 'No priority';
+    const lowerLabels = ghLabelNames.map((l) => l.toLowerCase());
+    if (lowerLabels.some((l) => l.includes('urgent') || l.includes('critical') || l.includes('p0'))) {
+      priority = 'Urgent';
+    } else if (lowerLabels.some((l) => l.includes('high') || l.includes('p1'))) {
+      priority = 'High';
+    } else if (lowerLabels.some((l) => l.includes('medium') || l.includes('p2'))) {
+      priority = 'Medium';
+    } else if (lowerLabels.some((l) => l.includes('low') || l.includes('p3'))) {
+      priority = 'Low';
+    }
+
+    const matchedLabels: string[] = [];
+    for (const name of ghLabelNames) {
+      const match = ISSUE_LABELS.find((il) => il.toLowerCase() === name.toLowerCase());
+      if (match && !matchedLabels.includes(match)) {
+        matchedLabels.push(match);
+      }
+    }
+    if (matchedLabels.length === 0 && ghLabelNames.length > 0) {
+      matchedLabels.push(...normalizeLabels(ghLabelNames));
+    }
+
+    const title = String(gh.title ?? `Issue #${gh.number}`).trim().slice(0, 300);
+    const body = String(gh.body ?? '').trim().slice(0, 4000);
+    const desc = body ? body : `Imported from GitHub #${gh.number}: ${gh.html_url ?? ''}`;
+    const createdAt = gh.created_at ? new Date(String(gh.created_at)).toISOString() : now;
+    const updatedAt = gh.updated_at ? new Date(String(gh.updated_at)).toISOString() : now;
+    const progress = state === 'DONE' ? 100 : state === 'IN PROGRESS' ? 50 : 0;
+    const ghUser = gh.user as Record<string, unknown> | undefined;
+    const createdBy = opts?.userEmail || (ghUser?.login ? `${ghUser.login}@github.com` : 'github-sync');
+
+    const existing = (await db
+      .prepare('SELECT id, position FROM issues WHERE tenant = ? AND id = ?')
+      .get(tenant, issueId)) as { id: string; position: number } | undefined;
+
+    if (existing) {
+      await db
+        .prepare(
+          `UPDATE issues
+           SET title = ?, description = ?, state = ?, priority = ?, labels_json = ?, progress = ?, updated_at = ?
+           WHERE tenant = ? AND id = ?`,
+        )
+        .run(title, desc, state, priority, JSON.stringify(matchedLabels), progress, updatedAt, tenant, issueId);
+    } else {
+      const minRow = (await db
+        .prepare('SELECT MIN(position) AS m FROM issues WHERE tenant = ? AND state = ?')
+        .get(tenant, state)) as { m: number | null } | undefined;
+      const min = Number(minRow?.m ?? 0);
+      const position = Number.isFinite(min) ? min - 1 : -1;
+
+      await db
+        .prepare(
+          `INSERT INTO issues (id, tenant, title, description, state, priority, labels_json, assignee_email, created_by, progress, position, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          issueId,
+          tenant,
+          title,
+          desc,
+          state,
+          priority,
+          JSON.stringify(matchedLabels),
+          createdBy,
+          progress,
+          position,
+          createdAt,
+          updatedAt,
+        );
+    }
+    synced++;
+  }
+
+  await db
+    .prepare(
+      `UPDATE github_project_sync
+       SET last_synced_at = ?, synced_count = ?, status = 'linked', updated_at = ?
+       WHERE tenant = ?`,
+    )
+    .run(now, synced, now, tenant);
+
+  return { ok: true, syncedCount: synced };
+}
+
 // ------------------------------------------------------------------ rendering ---
 
 const PRIORITY_CLASS: Record<IssuePriority, string> = {
@@ -471,9 +764,12 @@ function extractAttachments(issue: { description?: string }): number {
   return 0;
 }
 
-function extractRepo(issue: { description?: string; title?: string }): string | null {
-  const m = String(issue.description || '').match(/(?:repo|repository):\s*([a-zA-Z0-9_-]+)/i);
+function extractRepo(issue: { id?: string; description?: string; title?: string }): string | null {
+  const m = String(issue.description || '').match(/(?:repo|repository):\s*([a-zA-Z0-9_.-]+)/i);
   if (m && m[1]) return m[1];
+  const ghRepoMatch = String(issue.description || '').match(/github\.com\/[a-zA-Z0-9_.-]+\/([a-zA-Z0-9_.-]+)/i);
+  if (ghRepoMatch && ghRepoMatch[1]) return ghRepoMatch[1];
+  if (issue.id && issue.id.startsWith('iss_gh_')) return 'github';
   const titleLower = String(issue.title || '').toLowerCase();
   if (titleLower.includes('cluster') || titleLower.includes('sales planning') || titleLower.includes('freelynk')) {
     return 'freelynk';
@@ -567,6 +863,10 @@ function issueCard(issue: IssueRow, comments: IssueCommentRow[]): string {
 function formatIssueKey(issue: { id: string; title: string; description?: string }): string {
   const m = String(issue.description || '').match(/(?:key|issue):\s*([a-zA-Z0-9_-]+)/i);
   if (m && m[1]) return m[1];
+  const ghNumberMatch = String(issue.description || '').match(/(?:github\s*#|gh\s*#)(\d+)/i);
+  if (ghNumberMatch && ghNumberMatch[1]) return `GH-${ghNumberMatch[1]}`;
+  const ghIdMatch = issue.id.match(/^iss_gh_(\d+)/);
+  if (ghIdMatch && ghIdMatch[1]) return `GH-${ghIdMatch[1].slice(-4)}`;
   const titleMatch = issue.title.match(/^([A-Z]{2,5}-\d+)\b/);
   if (titleMatch && titleMatch[1]) return titleMatch[1];
   const idNum = issue.id.match(/\d+/);
@@ -741,6 +1041,7 @@ export interface IssuesBoardOptions {
   /** Viewers besides the current user, for the assignee picker. */
   engineers: { email: string; name: string }[];
   currentEmail: string;
+  syncConfig?: GitHubSyncConfig | null;
 }
 
 /**
@@ -748,7 +1049,7 @@ export interface IssuesBoardOptions {
  * Supports both Board (Kanban) and List (Table) views with instant live search.
  */
 export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions): string {
-  const { csrf, home, engineers, currentEmail } = opts;
+  const { csrf, home, engineers, currentEmail, syncConfig } = opts;
   const byState = new Map<IssueState, IssueRow[]>();
   for (const s of ISSUE_STATES) byState.set(s, []);
   for (const issue of data.issues) byState.get(issue.state)?.push(issue);
@@ -925,6 +1226,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       <option value="">All assignees</option>
       ${engineerOptions}
     </select>
+    <button type="button" id="iss-gh-sync-btn" class="iss-btn iss-btn-ghost" title="${syncConfig?.repo ? `GitHub Sync: ${esc(syncConfig.repo)}` : 'Sync GitHub Project'}">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px;margin-right:2px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Sync GitHub${syncConfig?.status === 'linked' ? ' ✓' : ''}
+    </button>
     <button type="button" id="iss-new" class="iss-btn iss-btn-primary">+ New issue</button>
   </div>
 
@@ -979,6 +1284,44 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
       <div class="iss-dialog-actions">
         <button type="button" class="iss-btn iss-btn-ghost" id="iss-cancel">Cancel</button>
         <button type="submit" class="iss-btn iss-btn-primary">Create issue</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- GitHub Sync dialog -->
+  <div class="iss-dialog-backdrop" id="iss-gh-dialog">
+    <form class="iss-dialog" id="iss-gh-form">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" style="color:#0f172a;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <h3 style="margin:0;font-size:16px;">Sync GitHub Project</h3>
+      </div>
+      <p style="font-size:12.5px;color:#64748b;margin:4px 0 14px;line-height:1.4;">
+        Connect your GitHub repository to synchronize issues with this board. Authorize with your repository name and personal access or OAuth token.
+      </p>
+      <div id="iss-gh-connected-box" style="${syncConfig?.repo ? '' : 'display:none;'}background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#334155;">
+        <div style="font-weight:600;display:flex;align-items:center;gap:6px;">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;"></span>
+          Linked: <span id="iss-gh-linked-repo">${esc(syncConfig?.repo ?? '')}</span>
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-top:3px;" id="iss-gh-sync-meta">
+          ${syncConfig?.lastSyncedAt ? `Last synced: ${esc(syncConfig.lastSyncedAt.slice(0, 16).replace('T', ' '))} (${syncConfig.syncedCount} issues)` : ''}
+        </div>
+      </div>
+      <div class="iss-field">
+        <label for="iss-gh-repo">Repository Path or URL</label>
+        <input id="iss-gh-repo" name="repo" required value="${esc(syncConfig?.repo ?? '')}" placeholder="octocat/Hello-World or https://github.com/owner/repo">
+      </div>
+      <div class="iss-field">
+        <label for="iss-gh-token">Personal Access Token <span style="font-weight:normal;color:#64748b;">(optional for public, required for private)</span></label>
+        <input type="password" id="iss-gh-token" name="token" placeholder="${syncConfig?.token ? '•••••••••••••••• (leave blank to keep current)' : 'ghp_... or github_pat_...'}">
+      </div>
+      <div id="iss-gh-error" style="display:none;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px 10px;font-size:12px;margin-top:6px;"></div>
+      <div class="iss-dialog-actions" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;">
+        <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-cancel">Cancel</button>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="iss-btn iss-btn-ghost" id="iss-gh-quick-sync" style="${syncConfig?.repo ? '' : 'display:none;'}">Sync Now ⟳</button>
+          <button type="submit" class="iss-btn iss-btn-primary" id="iss-gh-submit">Authorize &amp; Sync</button>
+        </div>
       </div>
     </form>
   </div>
@@ -1084,13 +1427,17 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     var desc = String(issue.description || '');
     var m = desc.match(/(?:key|issue):[ \t]*([a-zA-Z0-9_-]+)/i);
     if (m && m[1]) return m[1];
+    var ghNumberMatch = desc.match(/(?:github\s*#|gh\s*#)(\d+)/i);
+    if (ghNumberMatch && ghNumberMatch[1]) return 'GH-' + ghNumberMatch[1];
+    var idStr = String(issue.id || '');
+    var ghIdMatch = idStr.match(/^iss_gh_(\d+)/);
+    if (ghIdMatch && ghIdMatch[1]) return 'GH-' + ghIdMatch[1].slice(-4);
     var title = String(issue.title || '');
     var titleMatch = title.match(/^([A-Z]{2,5}-[0-9]+)/);
     if (titleMatch && titleMatch[1]) return titleMatch[1];
-    var idNum = String(issue.id || '').match(/[0-9]+/);
+    var idNum = idStr.match(/[0-9]+/);
     if (idNum && idNum[0]) return 'CRM-' + idNum[0];
     var hash = 0;
-    var idStr = String(issue.id || '');
     for (var i = 0; i < idStr.length; i++) hash = (hash * 31 + idStr.charCodeAt(i)) & 0x7fff;
     return 'CRM-' + ((hash % 90) + 10);
   }
@@ -1138,9 +1485,9 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
     return '<span class="iss-row-signal" title="Priority: ' + escHtml(priority) + '">' +
       '<svg width="14" height="14" viewBox="0 0 16 16">' +
-        '<rect x="2" y="10" width="2.5" height="4" rx="0.5" fill="' + (pLevel >= 1 ? color : '#CBD5E1') + '"/>' +
-        '<rect x="6.5" y="6" width="2.5" height="8" rx="0.5" fill="' + (pLevel >= 2 ? color : '#CBD5E1') + '"/>' +
-        '<rect x="11" y="2" width="2.5" height="12" rx="0.5" fill="' + (pLevel >= 3 ? color : '#CBD5E1') + '"/>' +
+        '<rect x="2" y="11" width="2" height="3" rx="0.5" fill="' + (pLevel >= 1 ? color : '#E2E8F0') + '" />' +
+        '<rect x="6" y="8" width="2" height="6" rx="0.5" fill="' + (pLevel >= 2 ? color : '#E2E8F0') + '" />' +
+        '<rect x="10" y="5" width="2" height="9" rx="0.5" fill="' + (pLevel >= 3 ? color : '#E2E8F0') + '" />' +
       '</svg>' +
     '</span>';
   }
@@ -1155,14 +1502,50 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     '</span>';
   }
 
+  function renderListRow(issue) {
+    var key = formatIssueKeyClient(issue);
+    var subtasks = extractSubtasksClient(issue);
+    var estimate = extractEstimateClient(issue);
+    var dueDate = extractDueDateClient(issue);
+    var milestone = extractMilestoneClient(issue);
+    var signalSvg = prioritySignalSvgClient(issue.priority);
+
+    var assignees = (issue.assigneeEmail || '').split(/[,;]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    var avatars = assignees.map(function (email) {
+      var p = getAvatarPaletteClient(email);
+      return '<span class="iss-avatar" style="background:' + p.bg + ';color:' + p.text + ';" title="' + escHtml(email) + '">' + escHtml(initialsOf(email)) + '</span>';
+    }).join('');
+
+    var labels = (issue.labels || []).map(function (l) {
+      return '<span class="' + (LABEL_CLASS[l] || 'iss-pill iss-label-other') + '">' + escHtml(l) + '</span>';
+    }).join('');
+
+    var metaBadges = '';
+    if (subtasks) metaBadges += '<span class="iss-row-meta-badge iss-subtasks-badge" title="Subtasks: ' + escHtml(subtasks) + '"><svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h12zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2H2z"/><path d="M10.97 4.97a.75.75 0 0 1 1.071 1.05l-3.992 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.235.235 0 0 1 .02-.022z"/></svg>' + escHtml(subtasks) + '</span>';
+    if (estimate) metaBadges += '<span class="iss-row-meta-badge iss-estimate-badge" title="Estimate: ' + escHtml(estimate) + '"><svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>' + escHtml(estimate) + '</span>';
+    if (dueDate) metaBadges += '<span class="iss-row-meta-badge iss-due-badge" title="Due: ' + escHtml(dueDate) + '"><svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5zM1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4H1z"/></svg>' + escHtml(dueDate) + '</span>';
+    if (milestone) metaBadges += '<span class="iss-row-meta-badge iss-milestone-badge" title="Milestone: ' + escHtml(milestone) + '"><svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8.2 1.3c-.4-.4-1-.4-1.4 0L1.3 6.8c-.4.4-.4 1 0 1.4l5.5 5.5c.4.4 1 .4 1.4 0l5.5-5.5c.4-.4.4-1 0-1.4L8.2 1.3zM7.5 2.7l4.8 4.8-4.8 4.8L2.7 7.5l4.8-4.8z"/></svg>' + escHtml(milestone) + '</span>';
+
+    return '<div class="iss-list-row" data-id="' + escHtml(issue.id) + '" data-assignee="' + escHtml(issue.assigneeEmail || '') + '" tabindex="0" role="row">' +
+      '<div class="iss-row-col iss-row-key">' + signalSvg + '<span class="iss-key-badge">' + escHtml(key) + '</span></div>' +
+      '<div class="iss-row-col iss-row-title">' + escHtml(issue.title) + metaBadges + '</div>' +
+      '<div class="iss-row-col iss-row-labels">' + labels + '</div>' +
+      '<div class="iss-row-col iss-row-assignee">' + avatars + '</div>' +
+      '<div class="iss-row-col iss-row-created">' + escHtml(formatShortDateClient(issue.createdAt)) + '</div>' +
+    '</div>';
+  }
+
   function extractAttachmentsClient(issue) {
     var m = String(issue.description || '').match(/(?:attachments|attach|files):[ \t]*([0-9]+)/i);
     return m ? parseInt(m[1], 10) : 0;
   }
 
   function extractRepoClient(issue) {
-    var m = String(issue.description || '').match(/(?:repo|repository):[ \t]*([a-zA-Z0-9_-]+)/i);
+    var m = String(issue.description || '').match(/(?:repo|repository):[ \t]*([a-zA-Z0-9_.-]+)/i);
     if (m) return m[1];
+    var ghRepoMatch = String(issue.description || '').match(/github\.com\/[a-zA-Z0-9_.-]+\/([a-zA-Z0-9_.-]+)/i);
+    if (ghRepoMatch && ghRepoMatch[1]) return ghRepoMatch[1];
+    if (issue.id && String(issue.id).indexOf('iss_gh_') === 0) return 'github';
     var titleLower = String(issue.title || '').toLowerCase();
     if (titleLower.indexOf('cluster') !== -1 || titleLower.indexOf('sales planning') !== -1 || titleLower.indexOf('freelynk') !== -1) {
       return 'freelynk';
@@ -1592,6 +1975,135 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     });
   }
 
+  // ---- GitHub sync dialog ----
+  var ghDialog = document.getElementById('iss-gh-dialog');
+  var ghBtn = document.getElementById('iss-gh-sync-btn');
+  var ghCancel = document.getElementById('iss-gh-cancel');
+  var ghForm = document.getElementById('iss-gh-form');
+  var ghSubmit = document.getElementById('iss-gh-submit');
+  var ghQuickSync = document.getElementById('iss-gh-quick-sync');
+  var ghError = document.getElementById('iss-gh-error');
+  var ghConnectedBox = document.getElementById('iss-gh-connected-box');
+  var ghLinkedRepo = document.getElementById('iss-gh-linked-repo');
+  var ghSyncMeta = document.getElementById('iss-gh-sync-meta');
+  var ghRepoInput = document.getElementById('iss-gh-repo');
+
+  function openGitHubDialog() {
+    if (!ghDialog) return;
+    if (ghError) ghError.style.display = 'none';
+    ghDialog.classList.add('iss-open');
+    fetch(home + 'console/issues/github/config', { headers: { accept: 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.ok && data.config && data.config.repo) {
+          if (ghConnectedBox) ghConnectedBox.style.display = 'block';
+          if (ghLinkedRepo) ghLinkedRepo.textContent = data.config.repo;
+          if (ghRepoInput && !ghRepoInput.value) ghRepoInput.value = data.config.repo;
+          var metaText = 'Status: ' + data.config.status;
+          if (data.config.lastSyncedAt) {
+            metaText += ' • Last synced: ' + String(data.config.lastSyncedAt).slice(0, 16).replace('T', ' ') + ' (' + (data.config.syncedCount || 0) + ' issues)';
+          }
+          if (ghSyncMeta) ghSyncMeta.textContent = metaText;
+          if (ghQuickSync) ghQuickSync.style.display = 'inline-block';
+        }
+      })
+      .catch(function () {});
+  }
+
+  function closeGitHubDialog() {
+    if (ghDialog) ghDialog.classList.remove('iss-open');
+  }
+
+  if (ghBtn) ghBtn.addEventListener('click', function (e) { e.preventDefault(); openGitHubDialog(); });
+  if (ghCancel) ghCancel.addEventListener('click', function (e) { e.preventDefault(); closeGitHubDialog(); });
+  if (ghDialog) ghDialog.addEventListener('click', function (e) {
+    if (e.target === ghDialog) closeGitHubDialog();
+  });
+
+  if (ghForm) {
+    ghForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (ghError) ghError.style.display = 'none';
+      var repo = (ghRepoInput && ghRepoInput.value || '').trim();
+      var tokenInput = document.getElementById('iss-gh-token');
+      var token = (tokenInput && tokenInput.value || '').trim();
+      if (!repo) {
+        if (ghError) {
+          ghError.textContent = 'Repository name is required.';
+          ghError.style.display = 'block';
+        }
+        return;
+      }
+      if (ghSubmit) {
+        ghSubmit.disabled = true;
+        ghSubmit.textContent = 'Authorizing & Syncing...';
+      }
+      var body = new URLSearchParams();
+      body.set('csrf', csrf);
+      body.set('repo', repo);
+      if (token) body.set('token', token);
+
+      fetch(home + 'console/issues/github/authorize', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) throw new Error((data && data.error) || 'Authorization failed');
+          closeGitHubDialog();
+          flash('Synced ' + (data.syncedCount || 0) + ' issues from GitHub (' + data.repo + ')');
+          watermark = '';
+          tick();
+        })
+        .catch(function (err) {
+          if (ghError) {
+            ghError.textContent = err.message || 'Authorization failed';
+            ghError.style.display = 'block';
+          }
+        })
+        .finally(function () {
+          if (ghSubmit) {
+            ghSubmit.disabled = false;
+            ghSubmit.textContent = 'Authorize & Sync';
+          }
+        });
+    });
+  }
+
+  if (ghQuickSync) {
+    ghQuickSync.addEventListener('click', function () {
+      ghQuickSync.disabled = true;
+      ghQuickSync.textContent = 'Syncing...';
+      if (ghError) ghError.style.display = 'none';
+      var body = new URLSearchParams();
+      body.set('csrf', csrf);
+      fetch(home + 'console/issues/github/sync', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) throw new Error((data && data.error) || 'Sync failed');
+          closeGitHubDialog();
+          flash('Synced ' + (data.syncedCount || 0) + ' issues from GitHub');
+          watermark = '';
+          tick();
+        })
+        .catch(function (err) {
+          if (ghError) {
+            ghError.textContent = err.message || 'Sync failed';
+            ghError.style.display = 'block';
+          }
+        })
+        .finally(function () {
+          ghQuickSync.disabled = false;
+          ghQuickSync.textContent = 'Sync Now ⟳';
+        });
+    });
+  }
+
   // ---- detail drawer ----
   var detail = document.getElementById('iss-detail');
   function openDetail(id) {
@@ -1622,6 +2134,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
     if (e.key === 'Escape') {
       closeDetail();
       if (dialog) dialog.classList.remove('iss-open');
+      if (ghDialog) ghDialog.classList.remove('iss-open');
     }
     if ((e.key === 'c' || e.key === 'C') && dialog && !dialog.classList.contains('iss-open') && detail && !detail.classList.contains('iss-open')) {
       var tag = (document.activeElement && document.activeElement.tagName) || '';
