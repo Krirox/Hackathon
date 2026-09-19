@@ -67,15 +67,30 @@ T('the pending list cannot lie: a migrated file must be removed from it', () => 
 
 T('the meeting room reads the stage tokens, and the console supplies them', () => {
   // The room is dark in both themes, so its colours are a named group in
-  // theme.ts rather than a local palette. Two halves matter: the page must not
+  // theme.ts rather than a local palette. Two halves matter: the surface must not
   // carry literals, and the served document must actually receive the token
   // block — a `var()` that resolves to nothing renders as transparent, which no
   // type check would catch.
-  const src = readFileSync('src/console/meetings.ts', 'utf8');
-  eq((src.match(HEX) ?? []).length, 0, 'meetings has no colour literals:');
-  eq(src.includes('var(--v-stage-'), true, 'meetings reads stage tokens:');
+  //
+  // The room is a cluster, not one file: the page composes its CSS and markup
+  // from `meeting-room-css` and `meeting-icons`, so measuring only `meetings.ts`
+  // would report a palette that had merely moved as one that had been dropped.
+  const ROOM_FILES = ['src/console/meetings.ts', 'src/console/meeting-room-css.ts', 'src/console/meeting-icons.ts'];
+  const sources = ROOM_FILES.map((file) => ({ file, src: readFileSync(file, 'utf8') }));
+  const withLiterals = sources.filter(({ src }) => (src.match(HEX) ?? []).length > 0).map(({ file }) => file);
+  eq(withLiterals, [], 'the meeting room has no colour literals:');
+  eq(
+    sources.some(({ src }) => src.includes('var(--v-stage-')),
+    true,
+    'the meeting room reads stage tokens:',
+  );
   // The colours it uses must all be declared, or the page silently loses them.
-  const used = [...new Set((src.match(/var\((--v-stage-[a-z0-9-]+)\)/g) ?? []).map((v) => v.slice(4, -1)))];
+  // Union across the cluster, for the same reason the files above are a set.
+  const used = [
+    ...new Set(
+      sources.flatMap(({ src }) => (src.match(/var\((--v-stage-[a-z0-9-]+)\)/g) ?? []).map((v) => v.slice(4, -1))),
+    ),
+  ];
   const sheet = readFileSync(TOKEN_SHEET, 'utf8');
   const undeclared = used.filter((token) => !sheet.includes(`${token}:`));
   eq(undeclared, [], 'every stage token the room uses is declared:');

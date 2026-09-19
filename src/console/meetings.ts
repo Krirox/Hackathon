@@ -284,9 +284,11 @@ export function renderMeetingRoomView(opts: {
         <button type="button" class="modal-close" data-close-modal="leave-modal" aria-label="Close"><span data-icon="close"></span></button>
       </div>
       <div class="modal-body">
-        <p class="modal-copy">${isHost
-    ? 'This ends the meeting for everyone. The recording stops and the summary begins processing.'
-    : 'You can rejoin from the meetings library while the host keeps the meeting open.'}</p>
+        <p class="modal-copy">${
+          isHost
+            ? 'This ends the meeting for everyone. The recording stops and the summary begins processing.'
+            : 'You can rejoin from the meetings library while the host keeps the meeting open.'
+        }</p>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-action="cancel-leave">Stay</button>
@@ -377,9 +379,10 @@ export function renderMeetingDetailView(opts: {
       <section class="intel-card">
         <h2 class="card-heading">Decisions</h2>
         <div class="decisions-list">
-          ${(notes?.decisions || [])
-            .map(
-              (d) => `
+          ${
+            (notes?.decisions || [])
+              .map(
+                (d) => `
             <div class="decision-item">
               <span class="decision-check">✓</span>
               <div class="decision-body">
@@ -388,8 +391,9 @@ export function renderMeetingDetailView(opts: {
               </div>
             </div>
           `,
-            )
-            .join('') || '<span class="text-muted">No explicit decisions recorded in this meeting.</span>'}
+              )
+              .join('') || '<span class="text-muted">No explicit decisions recorded in this meeting.</span>'
+          }
         </div>
       </section>
 
@@ -397,9 +401,10 @@ export function renderMeetingDetailView(opts: {
       <section class="intel-card">
         <h2 class="card-heading">Action Items</h2>
         <div class="actions-list">
-          ${(notes?.actionItems || [])
-            .map(
-              (a) => `
+          ${
+            (notes?.actionItems || [])
+              .map(
+                (a) => `
             <div class="action-item">
               <input type="checkbox" class="action-chk" ${a.completed ? 'checked' : ''}>
               <div class="action-body">
@@ -412,8 +417,9 @@ export function renderMeetingDetailView(opts: {
               </div>
             </div>
           `,
-            )
-            .join('') || '<span class="text-muted">No action items assigned.</span>'}
+              )
+              .join('') || '<span class="text-muted">No action items assigned.</span>'
+          }
         </div>
       </section>
 
@@ -471,17 +477,20 @@ export function renderMeetingDetailView(opts: {
           <input type="text" id="transcript-filter" class="search-filter-input" placeholder="Filter transcript..." oninput="filterTranscript(this.value)">
         </div>
         <div class="full-transcript-stream" id="full-transcript-container">
-          ${transcript
-            .map(
-              (s) => `
+          ${
+            transcript
+              .map(
+                (s) => `
             <div class="transcript-segment-row" id="ts-${formatTimestamp(s.startTime)}" data-start="${s.startTime}" onclick="seekAudio('${formatTimestamp(s.startTime)}')">
               <span class="seg-time">${formatTimestamp(s.startTime)}</span>
               <span class="seg-speaker">${esc(s.speakerName)}</span>
               <span class="seg-text">${esc(s.text)}</span>
             </div>
           `,
-            )
-            .join('') || '<div class="text-muted" style="padding:20px;text-align:center;">No transcript segments available.</div>'}
+              )
+              .join('') ||
+            '<div class="text-muted" style="padding:20px;text-align:center;">No transcript segments available.</div>'
+          }
         </div>
       </section>
     </div>
@@ -740,11 +749,7 @@ function formatMeetingDuration(seconds: number): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-export function renderMeetingLibraryView(opts: {
-  meetings: Meeting[];
-  home: string;
-  csrf?: string;
-}): string {
+export function renderMeetingLibraryView(opts: { meetings: Meeting[]; home: string; csrf?: string }): string {
   const { meetings, home, csrf } = opts;
 
   const activeMeetings = meetings.filter((m) => m.status === 'ACTIVE');
@@ -801,7 +806,9 @@ export function renderMeetingLibraryView(opts: {
       <span class="section-count">${activeMeetings.length} active</span>
     </div>
 
-    ${activeMeetings.length === 0 ? `
+    ${
+      activeMeetings.length === 0
+        ? `
       <div class="no-active-card">
         <div class="no-active-content">
           <span class="no-active-icon">🎙️</span>
@@ -812,9 +819,12 @@ export function renderMeetingLibraryView(opts: {
         </div>
         <button type="button" class="btn-start-quick" onclick="openNewMeetingModal()">Start Call Now →</button>
       </div>
-    ` : `
+    `
+        : `
       <div class="meetings-grid active-grid">
-        ${activeMeetings.map((m) => `
+        ${activeMeetings
+          .map(
+            (m) => `
           <div class="meeting-card card-active" data-status="active" data-title="${esc(m.title)}" data-host="${esc(m.hostName)}" data-scope="${esc(m.scope)}">
             <div class="mcard-top">
               <span class="badge-live-pulse"><span class="pulse-dot"></span> LIVE NOW</span>
@@ -840,9 +850,12 @@ export function renderMeetingLibraryView(opts: {
               </a>
             </div>
           </div>
-        `).join('')}
+        `,
+          )
+          .join('')}
       </div>
-    `}
+    `
+    }
   </div>
 
   <!-- Past Meetings Section -->
@@ -855,13 +868,18 @@ export function renderMeetingLibraryView(opts: {
       <span class="section-count">${pastMeetings.length} recorded</span>
     </div>
 
-    ${pastMeetings.length === 0 ? `
+    ${
+      pastMeetings.length === 0
+        ? `
       <div class="empty-past-card">
         <p>No completed meetings yet. Concluded meetings with summaries and recordings will appear here.</p>
       </div>
-    ` : `
+    `
+        : `
       <div class="meetings-grid past-grid">
-        ${pastMeetings.map((m) => `
+        ${pastMeetings
+          .map(
+            (m) => `
           <div class="meeting-card card-past" data-status="past" data-title="${esc(m.title)}" data-host="${esc(m.hostName)}" data-scope="${esc(m.scope)}">
             <div class="mcard-top">
               <span class="badge-ended">ENDED</span>
@@ -888,9 +906,12 @@ export function renderMeetingLibraryView(opts: {
               </a>
             </div>
           </div>
-        `).join('')}
+        `,
+          )
+          .join('')}
       </div>
-    `}
+    `
+    }
   </div>
 
   <!-- Centered New Meeting Modal -->
@@ -1021,14 +1042,18 @@ export function renderMeetingLibraryView(opts: {
 </script>
 
 <style>
-/* Modern Meeting Intelligence Library Styling */
+/* Meeting Intelligence library — styled on the Console design system (--v-*
+   tokens) so it reads as a native console page in BOTH themes. It previously
+   shipped a fixed light palette (--v-stage-white / ink-strong backgrounds with
+   dark stage text), which painted a bright island inside the dark Console
+   shell. Every rule below now speaks in theme-adaptive console tokens. */
 .meeting-library-view {
-  padding: 28px 36px;
-  background: var(--v-stage-ink-strong);
+  padding: 22px 26px;
+  background: transparent;
   min-height: 100%;
   overflow-y: auto;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
-  color: var(--v-stage-line);
+  font-family: var(--font-body);
+  color: var(--v-ink);
   box-sizing: border-box;
 }
 
@@ -1036,6 +1061,8 @@ export function renderMeetingLibraryView(opts: {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
   margin-bottom: 24px;
 }
 .library-title-row {
@@ -1045,11 +1072,11 @@ export function renderMeetingLibraryView(opts: {
   margin-bottom: 6px;
 }
 .library-heading {
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 700;
-  color: var(--v-stage-3);
+  letter-spacing: -0.02em;
+  color: var(--v-ink);
   margin: 0;
-  letter-spacing: -0.5px;
 }
 .header-badges {
   display: flex;
@@ -1063,19 +1090,20 @@ export function renderMeetingLibraryView(opts: {
   font-size: 12px;
   font-weight: 600;
   padding: 3px 10px;
-  border-radius: 20px;
-  background: var(--v-stage-ink);
-  color: var(--v-stage-faint);
+  border-radius: var(--radius-pill);
+  background: var(--v-bg-2);
+  color: var(--v-muted);
+  border: 1px solid var(--v-line);
 }
 .stat-pill.live {
-  background: var(--v-stage-good-15);
-  color: var(--v-stage-good-2);
-  border: 1px solid var(--v-stage-good-30);
+  background: var(--v-tint-good-bg);
+  color: var(--v-tint-good-ink);
+  border-color: transparent;
 }
 .pulse-dot {
   width: 8px;
   height: 8px;
-  background: var(--v-stage-good);
+  background: var(--v-fact);
   border-radius: 50%;
   animation: pulseDot 1.5s infinite;
 }
@@ -1083,42 +1111,41 @@ export function renderMeetingLibraryView(opts: {
   display: inline-block;
   width: 6px;
   height: 6px;
-  background: var(--v-stage-good);
+  background: var(--v-fact);
   border-radius: 50%;
   margin-right: 4px;
 }
 @keyframes pulseDot {
-  0% { box-shadow: 0 0 0 0 var(--v-stage-good-70); transform: scale(0.95); }
-  70% { box-shadow: 0 0 0 6px var(--v-stage-good-0); transform: scale(1.1); }
-  100% { box-shadow: 0 0 0 0 var(--v-stage-good-0); transform: scale(0.95); }
+  0% { box-shadow: 0 0 0 0 var(--v-glow-accent); transform: scale(0.95); }
+  70% { box-shadow: 0 0 0 6px transparent; transform: scale(1.1); }
+  100% { box-shadow: 0 0 0 0 transparent; transform: scale(0.95); }
 }
 
 .library-sub {
   font-size: 13.5px;
-  color: var(--v-stage-muted);
+  color: var(--v-muted);
   margin: 0;
 }
 
 /* New Meeting Action Button */
 .btn-new-meeting {
-  background: linear-gradient(135deg, var(--v-stage-accent) 0%, var(--v-stage-accent-2) 100%);
-  color: var(--v-stage-white);
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
   border: none;
   padding: 11px 22px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-weight: 600;
   font-size: 14px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  box-shadow: 0 4px 14px var(--v-stage-teal-35);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: var(--v-card-shadow);
+  transition: filter 0.15s ease, transform 0.1s ease;
 }
 .btn-new-meeting:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 20px var(--v-stage-teal-45);
-  background: linear-gradient(135deg, var(--v-stage-accent-dim-2) 0%, var(--v-stage-accent) 100%);
+  filter: brightness(1.06);
 }
 .btn-sparkle { font-size: 14px; }
 
@@ -1149,46 +1176,49 @@ export function renderMeetingLibraryView(opts: {
 .lib-search-box {
   width: 100%;
   padding: 10px 14px 10px 36px;
-  border: 1px solid var(--v-stage-ink-2);
-  border-radius: 10px;
+  border: 1px solid var(--v-line-strong);
+  border-radius: var(--radius-input);
   font-size: 13.5px;
+  font-family: inherit;
   outline: none;
-  background: var(--v-stage-white);
-  color: var(--v-stage-line);
-  transition: border-color 0.2s, box-shadow 0.2s;
+  background: var(--v-input-bg);
+  color: var(--v-ink);
+  transition: border-color 0.15s, box-shadow 0.15s;
   box-sizing: border-box;
 }
+.lib-search-box::placeholder { color: var(--v-faint); }
 .lib-search-box:focus {
-  border-color: var(--v-stage-accent);
-  box-shadow: 0 0 0 3px var(--v-stage-teal-15);
+  border-color: var(--v-accent);
+  box-shadow: 0 0 0 3px var(--v-accent-dim);
 }
 
 .filter-tabs {
   display: flex;
-  gap: 6px;
-  background: var(--v-stage-ink);
+  gap: 4px;
+  background: var(--v-bg-2);
   padding: 4px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--v-line);
 }
 .filter-tab {
   background: transparent;
   border: none;
   padding: 7px 14px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   font-size: 12.5px;
   font-weight: 500;
-  color: var(--v-stage-muted);
+  font-family: inherit;
+  color: var(--v-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease;
 }
-.filter-tab:hover { color: var(--v-stage-line); }
+.filter-tab:hover { color: var(--v-ink); }
 .filter-tab.active {
-  background: var(--v-stage-white);
-  color: var(--v-stage-3);
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
   font-weight: 600;
-  box-shadow: 0 1px 3px var(--v-stage-shadow-10);
 }
 
 /* Sections */
@@ -1201,7 +1231,7 @@ export function renderMeetingLibraryView(opts: {
   align-items: center;
   margin-bottom: 14px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--v-stage-ink);
+  border-bottom: 1px solid var(--v-line);
 }
 .section-title-cluster {
   display: flex;
@@ -1210,42 +1240,41 @@ export function renderMeetingLibraryView(opts: {
 }
 .section-heading {
   font-size: 16px;
-  font-weight: 700;
-  color: var(--v-stage-3);
+  font-weight: 650;
+  color: var(--v-ink);
   margin: 0;
 }
 .section-count {
   font-size: 12px;
   font-weight: 500;
-  color: var(--v-stage-muted);
+  color: var(--v-muted);
 }
 
 /* Meeting Cards */
 .meetings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 20px;
+  gap: 16px;
 }
 .meeting-card {
-  background: var(--v-stage-white);
-  border: 1px solid var(--v-stage-ink);
-  border-radius: 14px;
+  background: var(--v-bg-1);
+  border: 1px solid var(--v-line);
+  border-radius: var(--radius-card);
   padding: 20px;
-  box-shadow: 0 2px 8px var(--v-stage-shadow);
+  box-shadow: var(--v-card-shadow);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+  transition: transform 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out), border-color 0.2s;
   position: relative;
 }
 .meeting-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px var(--v-stage-shadow-8);
+  box-shadow: var(--v-card-shadow-hover);
+  border-color: var(--v-line-strong);
 }
 .meeting-card.card-active {
-  border: 1.5px solid var(--v-stage-good-40);
-  box-shadow: 0 4px 16px var(--v-stage-good-8);
-  background: linear-gradient(180deg, var(--v-stage-white) 0%, var(--v-stage-good-bg) 100%);
+  border-color: var(--v-fact);
 }
 
 .mcard-top {
@@ -1255,37 +1284,38 @@ export function renderMeetingLibraryView(opts: {
   margin-bottom: 12px;
 }
 .badge-live-pulse {
-  background: var(--v-stage-good-15);
-  color: var(--v-stage-good-2);
+  background: var(--v-tint-good-bg);
+  color: var(--v-tint-good-ink);
   font-weight: 700;
   padding: 3px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--v-stage-good-30);
 }
 .badge-ended {
-  background: var(--v-stage-soft);
-  color: var(--v-stage-muted);
+  background: var(--v-bg-2);
+  color: var(--v-muted);
   font-weight: 600;
   padding: 3px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
+  border: 1px solid var(--v-line);
 }
 .mcard-scope {
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
   font-weight: 600;
-  color: var(--v-stage-accent-dim);
-  background: var(--v-stage-teal-8);
+  color: var(--v-accent);
+  background: var(--v-accent-dim);
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .mcard-title {
-  font-size: 16.5px;
-  font-weight: 700;
-  color: var(--v-stage-3);
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--v-ink);
   margin: 0 0 12px 0;
   line-height: 1.35;
 }
@@ -1294,7 +1324,7 @@ export function renderMeetingLibraryView(opts: {
   flex-direction: column;
   gap: 6px;
   font-size: 12.5px;
-  color: var(--v-stage-faint);
+  color: var(--v-muted);
   margin-bottom: 18px;
 }
 .meta-item {
@@ -1313,54 +1343,54 @@ export function renderMeetingLibraryView(opts: {
   justify-content: flex-end;
   gap: 8px;
   padding-top: 14px;
-  border-top: 1px solid var(--v-stage-soft);
+  border-top: 1px solid var(--v-line);
 }
 .btn-join-room {
-  background: linear-gradient(135deg, var(--v-stage-accent) 0%, var(--v-stage-accent-2) 100%);
-  color: var(--v-stage-white);
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
   text-decoration: none;
   font-weight: 600;
   font-size: 13px;
   padding: 7px 16px;
-  border-radius: 8px;
-  transition: all 0.15s ease;
+  border-radius: var(--radius-md);
+  transition: filter 0.15s ease, transform 0.1s ease;
   display: inline-flex;
   align-items: center;
 }
 .btn-join-room:hover {
-  background: linear-gradient(135deg, var(--v-stage-accent-dim-2) 0%, var(--v-stage-accent) 100%);
+  filter: brightness(1.06);
   transform: translateY(-1px);
 }
 .btn-copy-card-link {
-  background: var(--v-stage-soft);
-  border: 1px solid var(--v-stage-ink-2);
-  color: var(--v-stage-faint);
+  background: var(--v-bg-2);
+  border: 1px solid var(--v-line-strong);
+  color: var(--v-ink-2);
   font-size: 12px;
+  font-family: inherit;
   padding: 6px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-weight: 500;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .btn-copy-card-link:hover {
-  background: var(--v-stage-ink);
-  color: var(--v-stage-line);
+  background: var(--v-bg-3);
+  color: var(--v-ink);
 }
 .btn-view-intel {
-  background: var(--v-stage-ink-strong);
-  border: 1px solid var(--v-stage-ink-2);
-  color: var(--v-stage-3);
+  background: var(--v-accent);
+  border: 1px solid var(--v-accent);
+  color: var(--v-accent-ink);
   text-decoration: none;
   font-weight: 600;
   font-size: 13px;
   padding: 7px 16px;
-  border-radius: 8px;
-  transition: all 0.15s ease;
+  border-radius: var(--radius-md);
+  transition: filter 0.15s ease, transform 0.1s ease;
 }
 .btn-view-intel:hover {
-  background: var(--v-stage-accent-dim);
-  color: var(--v-stage-white);
-  border-color: var(--v-stage-accent-dim);
+  filter: brightness(1.06);
+  transform: translateY(-1px);
 }
 
 /* Empty State Banners */
@@ -1368,9 +1398,11 @@ export function renderMeetingLibraryView(opts: {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: var(--v-stage-white);
-  border: 1px dashed var(--v-stage-ink-2);
-  border-radius: 12px;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: var(--v-bg-1);
+  border: 1px dashed var(--v-line-strong);
+  border-radius: var(--radius-lg);
   padding: 18px 24px;
 }
 .no-active-content {
@@ -1379,25 +1411,26 @@ export function renderMeetingLibraryView(opts: {
   gap: 14px;
 }
 .no-active-icon { font-size: 24px; }
-.no-active-content h4 { margin: 0 0 2px 0; font-size: 14px; font-weight: 600; color: var(--v-stage-3); }
-.no-active-content p { margin: 0; font-size: 12.5px; color: var(--v-stage-muted); }
+.no-active-content h4 { margin: 0 0 2px 0; font-size: 14px; font-weight: 600; color: var(--v-ink); }
+.no-active-content p { margin: 0; font-size: 12.5px; color: var(--v-muted); }
 .btn-start-quick {
-  background: var(--v-stage-accent);
-  color: var(--v-stage-white);
+  background: var(--v-accent);
+  color: var(--v-accent-ink);
   border: none;
+  font-family: inherit;
   padding: 8px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-weight: 600;
   font-size: 13px;
   cursor: pointer;
 }
 .empty-past-card {
-  background: var(--v-stage-white);
-  border: 1px dashed var(--v-stage-ink-2);
-  border-radius: 12px;
+  background: var(--v-bg-1);
+  border: 1px dashed var(--v-line-strong);
+  border-radius: var(--radius-lg);
   padding: 24px;
   text-align: center;
-  color: var(--v-stage-muted);
+  color: var(--v-muted);
   font-size: 13px;
 }
 
@@ -1576,4 +1609,3 @@ export function renderMeetingLibraryView(opts: {
 </style>
 `;
 }
-

@@ -55,11 +55,7 @@ T('a recording with no transcript refuses to fabricate one', async () => {
     true,
     `processing refuses instead of inventing a transcript (${status.error ?? 'no error'}):`,
   );
-  eq(
-    (await listTranscriptSegments(db, TEN, meeting.id)).length,
-    0,
-    'and no transcript segment was written:',
-  );
+  eq((await listTranscriptSegments(db, TEN, meeting.id)).length, 0, 'and no transcript segment was written:');
   // The refusal must not look like success on the record either.
   eq(status.transcript === 'done' && !status.error, false, 'the stage is not marked done:');
 });
@@ -385,7 +381,7 @@ T('rag: answers grounded questions with citations and refuses ungrounded questio
     speakerName: 'Siddharth',
     startTime: 16,
     endTime: 22,
-    text: "Agreed. Krishiv will handle deployment by Friday 2pm.",
+    text: 'Agreed. Krishiv will handle deployment by Friday 2pm.',
     confidence: 0.98,
   });
 
@@ -475,12 +471,9 @@ T('security: tenant isolation blocks cross-tenant meeting queries', async () => 
   eq(crossTenantList.length, 0);
 
   // RAG query from tenant_beta must reject
-  await assert.rejects(
-    async () => {
-      await service.askQuestion('tenant_beta', meetingTenant1.id, 'usr_beta', 'What was discussed?');
-    },
-    /not found/,
-  );
+  await assert.rejects(async () => {
+    await service.askQuestion('tenant_beta', meetingTenant1.id, 'usr_beta', 'What was discussed?');
+  }, /not found/);
 });
 
 // ------------------------------------------------------------- 9. Cascading Deletion ----
@@ -564,7 +557,7 @@ T('end-to-end: create -> join -> audio/transcript -> record -> end -> notes -> r
     speakerName: 'Siddharth',
     startTime: 5,
     endTime: 9,
-    text: "Krishiv will handle deployment by Friday 2pm.",
+    text: 'Krishiv will handle deployment by Friday 2pm.',
   });
   await tr.appendSegment({
     speakerId: 'usr_krishiv',
@@ -705,8 +698,12 @@ function roomFixture(): any {
     startedAt: NOW,
     endedAt: null,
     processingStatus: {
-      recording: 'pending', transcript: 'pending', summary: 'pending',
-      decisions: 'pending', actionItems: 'pending', indexing: 'pending',
+      recording: 'pending',
+      transcript: 'pending',
+      summary: 'pending',
+      decisions: 'pending',
+      actionItems: 'pending',
+      indexing: 'pending',
     },
     createdAt: NOW,
     updatedAt: NOW,
@@ -742,7 +739,10 @@ T('live room ships stage tokens and references the cached client assets', () => 
 
 T('turn configuration flows into the room ICE list', () => {
   const bare = meetingIceServers({});
-  assert.ok(bare.every((s: any) => String(s.urls).startsWith('stun:')), 'no TURN by default:');
+  assert.ok(
+    bare.every((s: any) => String(s.urls).startsWith('stun:')),
+    'no TURN by default:',
+  );
   const withTurn = meetingIceServers({
     VITAL_TURN_URL: 'turn:relay.test:3478',
     VITAL_TURN_USERNAME: 'u',
@@ -757,11 +757,14 @@ T('signaling upgrade refuses unauthenticated sockets and reaps idle peers', asyn
   const hub = new MeetingSignalingHub(db);
   let allow = false;
   const srv = http.createServer((_req, res) => res.end('ok'));
-  srv.on('upgrade', createWebSocketUpgradeHandler(hub, {
-    idleTimeoutMs: 300,
-    resolveIdentity: async () =>
-      allow ? { userId: 'usr_probe', displayName: 'Probe', tenant: TEN, role: 'participant' } : null,
-  }));
+  srv.on(
+    'upgrade',
+    createWebSocketUpgradeHandler(hub, {
+      idleTimeoutMs: 300,
+      resolveIdentity: async () =>
+        allow ? { userId: 'usr_probe', displayName: 'Probe', tenant: TEN, role: 'participant' } : null,
+    }),
+  );
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
   const port = (srv.address() as any).port;
 
@@ -811,10 +814,13 @@ T('signaling drops oversized frames instead of buffering them', async () => {
   const { db } = await fresh();
   const hub = new MeetingSignalingHub(db);
   const srv = http.createServer();
-  srv.on('upgrade', createWebSocketUpgradeHandler(hub, {
-    maxFrameBytes: 1024,
-    resolveIdentity: async () => ({ userId: 'usr_flood', displayName: 'Flood', tenant: TEN, role: 'participant' }),
-  }));
+  srv.on(
+    'upgrade',
+    createWebSocketUpgradeHandler(hub, {
+      maxFrameBytes: 1024,
+      resolveIdentity: async () => ({ userId: 'usr_flood', displayName: 'Flood', tenant: TEN, role: 'participant' }),
+    }),
+  );
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
   const port = (srv.address() as any).port;
 
@@ -941,7 +947,11 @@ T('the live transcript path has no mock default: a missing provider refuses', as
     ]),
   });
   const mgr2 = configured.getLiveTranscriptManager(TEN, meeting.id);
-  const live = await mgr2.processAudioChunk(Buffer.from('bytes'), { speakerId: 'spk_1', speakerName: 'Speaker 1', offsetSec: 0 });
+  const live = await mgr2.processAudioChunk(Buffer.from('bytes'), {
+    speakerId: 'spk_1',
+    speakerName: 'Speaker 1',
+    offsetSec: 0,
+  });
   eq(live?.text, 'real provider output');
   await db.close();
 });

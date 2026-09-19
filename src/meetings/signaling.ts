@@ -522,6 +522,6 @@ export function createWebSocketUpgradeHandler(hub: MeetingSignalingHub, options:
       // Register peer in room (after handlers are attached so a fast
       // disconnect is still reaped correctly).
       void hub.handlePeerJoin(peer);
-    };
+    }
   };
 }
