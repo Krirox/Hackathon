@@ -48,6 +48,24 @@ export class MeetingService {
     this.pipeline = new MeetingProcessingPipeline(db, pipelineOptions);
   }
 
+  async getRecordingBytes(storageRef: string): Promise<Buffer | null> {
+    if (this.storage) {
+      try {
+        return (await this.storage.get(storageRef)) as Buffer | null;
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const fullPath = path.join(process.cwd(), 'var', 'storage', storageRef);
+      return await fs.readFile(fullPath);
+    } catch {
+      return null;
+    }
+  }
+
   async createMeeting(tenant: string, input: CreateMeetingInput): Promise<Meeting> {
     const meetingId = `meet_${randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
@@ -130,6 +148,15 @@ export class MeetingService {
 
   async leaveMeeting(tenant: string, meetingId: string, userId: string): Promise<void> {
     await updateParticipantLeave(this.db, tenant, meetingId, userId);
+    // If all participants have departed, automatically mark meeting as ENDED
+    const participants = await listParticipants(this.db, tenant, meetingId);
+    const activeParticipants = participants.filter((p) => !p.leftAt);
+    if (activeParticipants.length === 0) {
+      const meeting = await getMeetingById(this.db, tenant, meetingId);
+      if (meeting && meeting.status === 'ACTIVE') {
+        await this.endMeeting(tenant, meetingId, userId);
+      }
+    }
   }
 
   async endMeeting(tenant: string, meetingId: string, endedByUserId: string): Promise<Meeting> {
@@ -140,8 +167,9 @@ export class MeetingService {
 
     const now = new Date().toISOString();
     let durationSeconds = meeting.durationSeconds;
-    if (meeting.startedAt) {
-      durationSeconds = Math.max(1, Math.round((Date.parse(now) - Date.parse(meeting.startedAt)) / 1000));
+    const refTime = meeting.startedAt || meeting.createdAt;
+    if (refTime) {
+      durationSeconds = Math.max(1, Math.round((Date.parse(now) - Date.parse(refTime)) / 1000));
     }
 
     await updateMeetingStatus(this.db, tenant, meetingId, 'ENDED', {
@@ -176,9 +204,19 @@ export class MeetingService {
     const sha256 = createHash('sha256').update(recordingBytes).digest('hex');
     const storageRef = `recordings/${tenant}/${meetingId}/${sha256}.${format}`;
 
-    // Store in storage provider if present
+    // Store in storage provider if present, otherwise persist to local disk var/storage
     if (this.storage) {
       await this.storage.put(storageRef, recordingBytes, `audio/${format}`);
+    } else {
+      try {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const fullPath = path.join(process.cwd(), 'var', 'storage', storageRef);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, recordingBytes);
+      } catch (err) {
+        console.error('[meeting-service] Local recording write error:', err);
+      }
     }
 
     const rec: MeetingRecording = {
@@ -252,4 +290,35 @@ export class MeetingService {
   async triggerProcessing(tenant: string, meetingId: string): Promise<MeetingProcessingStatus> {
     return this.pipeline.processMeeting(tenant, meetingId);
   }
+}
+
+export function generateSilentWav(durationSec = 2, sampleRate = 8000): Buffer {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const numSamples = sampleRate * durationSec;
+  const dataSize = numSamples * blockAlign;
+  const buffer = Buffer.alloc(44 + dataSize);
+
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(numChannels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(blockAlign, 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const sample = Math.sin(2 * Math.PI * 440 * t) * 0.2 * Math.exp(-t * 0.3) * 32767;
+    buffer.writeInt16LE(Math.round(sample), 44 + i * 2);
+  }
+  return buffer;
 }

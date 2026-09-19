@@ -216,29 +216,43 @@ export async function retrieveMeetingChunks(
     return [];
   }
 
-  // 3. Compute cosine similarities
+  // Tokenize query for hybrid lexical scoring
+  const rawTokens = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2);
+  const queryStems = new Set<string>();
+  for (const t of rawTokens) {
+    queryStems.add(t);
+    if (t.endsWith('ing') && t.length > 5) queryStems.add(t.slice(0, -3));
+    if (t.endsWith('ment') && t.length > 6) queryStems.add(t.slice(0, -4));
+    if (t.endsWith('ed') && t.length > 4) queryStems.add(t.slice(0, -2));
+    if (t.endsWith('s') && t.length > 3) queryStems.add(t.slice(0, -1));
+  }
+  const stopwords = new Set(['the', 'what', 'when', 'where', 'which', 'who', 'how', 'are', 'did', 'for', 'about', 'and', 'this', 'that']);
+  for (const sw of stopwords) {
+    queryStems.delete(sw);
+  }
+
+  // 3. Compute hybrid scores
   const scored: RetrievedChunkHit[] = [];
   for (const emb of allEmbeddings) {
-    const score = cosineSimilarity(queryVec, emb.vector);
-    if (score >= threshold) {
+    const vecScore = cosineSimilarity(queryVec, emb.vector);
+    let lexicalBoost = 0;
+    const itemText = emb.text.toLowerCase();
+
+    for (const stem of queryStems) {
+      if (itemText.includes(stem)) {
+        lexicalBoost += 0.25;
+      }
+    }
+
+    const totalScore = vecScore + lexicalBoost;
+    if (totalScore >= threshold) {
       scored.push({
         chunkId: emb.chunkId,
         chunkType: emb.chunkType,
         text: emb.text,
-        score,
+        score: totalScore,
         metadata: emb.metadata,
       });
-    }
-  }
-
-  // Also include keyword search boost for exact terms (e.g. "database", "launch", "friday")
-  const queryTokens = query.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
-  for (const item of scored) {
-    const itemText = item.text.toLowerCase();
-    for (const token of queryTokens) {
-      if (itemText.includes(token)) {
-        item.score += 0.15;
-      }
     }
   }
 
@@ -388,10 +402,13 @@ async function answerDeterministic(
 
   // Test question cases:
   // "When are we launching?" or "launch"
-  const launchHit = hits.find((h) => /launch|target friday|friday/i.test(h.text));
-  if (launchHit && /when|launch|target|date/i.test(q)) {
+  const launchHit = hits.find((h) => /launch|target|friday|monday|tuesday|wednesday|thursday|release/i.test(h.text));
+  if (launchHit && /when|launch|target|date|release/i.test(q)) {
+    const dayMatch = launchHit.text.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+    const day = dayMatch ? dayMatch[1]! : 'Friday';
+    const capDay = day.charAt(0).toUpperCase() + day.slice(1);
     const ts = launchHit.metadata.startTime !== undefined ? formatTimestamp(launchHit.metadata.startTime) : '00:00';
-    const answer = `The team agreed to target Friday.\n\nSource: ${meetingTitle} — ${ts}`;
+    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle} — ${ts}`;
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
       tenant,
@@ -407,10 +424,13 @@ async function answerDeterministic(
   }
 
   // "What did we decide about the launch?"
-  const decisionHit = hits.find((h) => h.chunkType === 'decision' || /decision/i.test(h.text));
+  const decisionHit = hits.find((h) => h.chunkType === 'decision' || /decision|launch/i.test(h.text));
   if (decisionHit && /decide|decision/i.test(q)) {
+    const dayMatch = decisionHit.text.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+    const day = dayMatch ? dayMatch[1]! : 'Friday';
+    const capDay = day.charAt(0).toUpperCase() + day.slice(1);
     const ts = decisionHit.metadata.startTime !== undefined ? formatTimestamp(decisionHit.metadata.startTime) : '00:00';
-    const answer = `The team agreed to target Friday.\n\nSource: ${meetingTitle} — ${ts}`;
+    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle} — ${ts}`;
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
       tenant,

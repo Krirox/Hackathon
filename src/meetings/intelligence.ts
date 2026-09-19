@@ -44,19 +44,25 @@ export function extractIntelligenceDeterministic(segments: TranscriptSegment[]):
     const text = seg.text.trim();
     const timeStr = formatTimestamp(seg.startTime);
 
-    // Decision patterns: "we launch...", "we decided...", "agreed on...", "let's target...", "target ..."
+    // Decision patterns: "we decided", "agreed to", "target ...", "we launch ..."
     if (
-      /\b(?:we (?:will )?launch|we decided|agreed (?:to|on)|target|we choose|we picked|let's go with)\b/i.test(text)
+      /\b(?:we decided|agreed to|let's target|we target|we will target|we launch|the plan is to)\b/i.test(text) ||
+      /\b(?:decision:|decided:)\b/i.test(text)
     ) {
       // Extract decision statement
       let statement = text;
-      const match = text.match(/(?:we decided (?:to )?|agreed (?:to )?|target |let's target |we launch )(.*)/i);
-      if (match && match[1]) {
-        statement = match[1].trim();
-        // Capitalize first letter
-        statement = statement.charAt(0).toUpperCase() + statement.slice(1);
-      } else if (/we launch friday/i.test(text)) {
-        statement = 'Launch Friday';
+      if (/we launch/i.test(text)) {
+        const m = text.match(/we launch (.*)/i);
+        statement = `Launch ${m?.[1] || ''}`.trim();
+      } else if (/let's target|we target/i.test(text)) {
+        const m = text.match(/(?:let's target|we target) (.*)/i);
+        statement = `Target ${m?.[1] || ''}`.trim();
+      } else {
+        const match = text.match(/(?:we decided (?:to )?|agreed (?:to )?|the plan is to )(.*)/i);
+        if (match && match[1]) {
+          statement = match[1].trim();
+          statement = statement.charAt(0).toUpperCase() + statement.slice(1);
+        }
       }
       decisions.push({
         id: `dec_${randomUUID().slice(0, 8)}`,

@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { randomUUID, createHash } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
-import { upsertParticipant, updateParticipantLeave, getMeetingById } from './db.ts';
+import { upsertParticipant, updateParticipantLeave, getMeetingById, updateMeetingStatus } from './db.ts';
 
 export interface SignalingPeer {
   id: string; // unique socket/session connection id
@@ -31,6 +31,7 @@ export type SignalingMessageType =
   | 'recording-state'
   | 'chat-message'
   | 'live-transcript'
+  | 'meeting-ended'
   | 'ping'
   | 'pong'
   | 'error';
@@ -189,6 +190,7 @@ export class MeetingSignalingHub {
       case 'recording-state':
       case 'chat-message':
       case 'live-transcript':
+      case 'meeting-ended':
         // Broadcast to entire room including sender or excluding sender
         this.broadcastToRoom(
           msg.meetingId,
@@ -220,6 +222,24 @@ export class MeetingSignalingHub {
     room.delete(peerId);
     if (room.size === 0) {
       this.rooms.delete(meetingId);
+      // When all peers have left the room, transition meeting to ENDED in DB
+      if (this.db) {
+        try {
+          const meeting = await getMeetingById(this.db, peer.tenant, meetingId);
+          if (meeting && meeting.status === 'ACTIVE') {
+            const endedAt = new Date().toISOString();
+            const startMs = new Date(meeting.startedAt || meeting.createdAt).getTime();
+            const endMs = new Date(endedAt).getTime();
+            const durationSeconds = Math.max(1, Math.round((endMs - startMs) / 1000));
+            await updateMeetingStatus(this.db, peer.tenant, meetingId, 'ENDED', {
+              endedAt,
+              durationSeconds,
+            });
+          }
+        } catch (err) {
+          console.error('[meeting-signaling] Auto-end meeting error on last peer leave:', err);
+        }
+      }
     }
 
     // Persist leave in DB if available

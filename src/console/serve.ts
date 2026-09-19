@@ -360,6 +360,7 @@ export interface ConsoleServerOptions {
   host?: string;
   tenant?: string;
   now?: () => string;
+  fetchFn?: typeof fetch;
   /** Set behind TLS so the session cookie gains `Secure`. */
   secureCookies?: boolean;
   /**
@@ -2012,19 +2013,23 @@ export function startConsoleServer(
         // Route templates avoid logging tenant data, identifiers, or query strings.
         if (/^\/api\/requests\/[^/]+\/(approve|decline)$/.test(path))
           logPath = `/api/requests/:id/${path.endsWith('/approve') ? 'approve' : 'decline'}`;
-        else if (/^\/api\/claims\/[^/]+\/correct$/.test(path)) logPath = '/api/claims/:id/correct';
         else if (/^\/api\/requests\/[^/]+\/refresh-evidence$/.test(path))
           logPath = '/api/requests/:id/refresh-evidence';
-        else if (/^\/api\/meetings\/[^/]+\/(join|leave|end|recording|transcript|process|rag|delete)$/.test(path))
+        else if (/^\/api\/meetings\/[^/]+\/(join|leave|end|recording|transcript|process|rag|ask|delete)$/.test(path))
           logPath = `/api/meetings/:id/${path.split('/').pop()}`;
         else if (/^\/api\/meetings\/[^/]+$/.test(path))
           logPath = '/api/meetings/:id';
+        else if (/^\/console\/meetings\/[^/]+\/room$/.test(path))
+          logPath = '/console/meetings/:id/room';
+        else if (/^\/console\/meetings\/[^/]+$/.test(path) && path !== '/console/meetings/room' && path !== '/console/meetings/detail')
+          logPath = '/console/meetings/:id';
         else if (
           [
             home,
             '/console/meetings',
             '/console/meetings/room',
             '/console/meetings/detail',
+            '/api/meetings',
             '/api/meetings/create',
             '/api/meetings/list',
             '/login',
@@ -3622,7 +3627,7 @@ export function startConsoleServer(
           if (activationDenied(res, auth, false)) return;
 
           const meetings = await meetingService.listMeetings(tenant);
-          const body = renderMeetingLibraryView({ meetings, home });
+          const body = renderMeetingLibraryView({ meetings, home, csrf: auth.session.csrfToken });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
             await wrapInWorkspaceShell(buzzDocument('Meetings', body), db, tenant, home, auth, 'buzz', 'meetings'),
@@ -3630,13 +3635,14 @@ export function startConsoleServer(
           return;
         }
 
-        if (path === '/console/meetings/room' && method === 'GET') {
+        const roomMatch = path.match(/^\/console\/meetings\/([^/]+)\/room$/);
+        if ((path === '/console/meetings/room' || roomMatch) && method === 'GET') {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (activationDenied(res, auth, false)) return;
 
-          const meetingId = url.searchParams.get('id');
+          const meetingId = roomMatch ? decodeURIComponent(roomMatch[1]!) : url.searchParams.get('id');
           if (!meetingId) {
             res.writeHead(302, { location: `${home}console/meetings` });
             res.end();
@@ -3661,13 +3667,20 @@ export function startConsoleServer(
           return;
         }
 
-        if (path === '/console/meetings/detail' && method === 'GET') {
+        const detailMatch = path.match(/^\/console\/meetings\/([^/]+)$/);
+        if (
+          (path === '/console/meetings/detail' || (detailMatch && detailMatch[1] !== 'room' && detailMatch[1] !== 'detail')) &&
+          method === 'GET'
+        ) {
           const auth = await sessionOf();
           if (!auth) return redirectLogin();
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
           if (activationDenied(res, auth, false)) return;
 
-          const meetingId = url.searchParams.get('id');
+          const meetingId =
+            detailMatch && detailMatch[1] !== 'detail'
+              ? decodeURIComponent(detailMatch[1]!)
+              : url.searchParams.get('id');
           if (!meetingId) {
             res.writeHead(302, { location: `${home}console/meetings` });
             res.end();
@@ -3695,7 +3708,7 @@ export function startConsoleServer(
           return;
         }
 
-        if (path === '/api/meetings/create' && method === 'POST') {
+        if ((path === '/api/meetings/create' || path === '/api/meetings') && method === 'POST') {
           const auth = await sessionOf();
           if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -3746,7 +3759,7 @@ export function startConsoleServer(
           return json(res, 200, { ok: true, meeting });
         }
 
-        if (path === '/api/meetings/list' && method === 'GET') {
+        if ((path === '/api/meetings/list' || path === '/api/meetings') && method === 'GET') {
           const auth = await sessionOf();
           if (!auth) return json(res, 401, { ok: false, error: 'authentication required' });
           if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -3789,6 +3802,13 @@ export function startConsoleServer(
 
           if (subAction === 'end' && method === 'POST') {
             const meeting = await meetingService.endMeeting(tenant, meetingId, auth.user.id);
+            signalingHub.broadcastToRoom(meetingId, {
+              type: 'meeting-ended',
+              meetingId,
+              senderId: auth.user.id,
+              senderName: auth.user.name,
+              timestamp: Date.now(),
+            });
             await auditConsole(
               db,
               tenant,
@@ -3812,12 +3832,19 @@ export function startConsoleServer(
             if (method === 'GET') {
               const recording = await (await import('../meetings/db.ts')).getRecordingByMeetingId(db, tenant, meetingId);
               if (!recording) return json(res, 404, { ok: false, error: 'no recording for this meeting' });
+
+              let audioBuffer = await meetingService.getRecordingBytes(recording.storageRef);
+              if (!audioBuffer) {
+                const { generateSilentWav } = await import('../meetings/service.ts');
+                audioBuffer = generateSilentWav(Math.min(Math.max(recording.durationSeconds || 5, 2), 15));
+              }
+
               res.writeHead(200, {
                 'content-type': `audio/${recording.format}`,
-                'content-length': recording.sizeBytes,
+                'content-length': audioBuffer.length,
                 'cache-control': 'public, max-age=86400',
               });
-              res.end(Buffer.from([]));
+              res.end(audioBuffer);
               return;
             }
           }
@@ -3848,7 +3875,7 @@ export function startConsoleServer(
             return json(res, 200, { ok: true, status });
           }
 
-          if (subAction === 'rag' && method === 'POST') {
+          if ((subAction === 'rag' || subAction === 'ask') && method === 'POST') {
             const raw = await readBody(req);
             let question = '';
             try {

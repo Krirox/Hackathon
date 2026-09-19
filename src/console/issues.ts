@@ -764,7 +764,7 @@ export async function pushUpdateToGitHub(
     const created = await pushCreateToGitHub(db, tenant, issue, opts);
     return created;
   }
-  const ghNumber = m[1];
+  const ghNumber = m[1]!;
   const fetchFn = opts?.fetchFn ?? fetch;
   try {
     const res = await fetchFn(

@@ -53,6 +53,7 @@ import './fabrication-guard.test.ts';
 import './buzz-avatars.test.ts';
 import './issues-panel.test.ts';
 import './coding-agent.test.ts';
+import './meeting.test.ts';
 import { enableStatusWrites } from './helpers.ts';
 
 enableStatusWrites();

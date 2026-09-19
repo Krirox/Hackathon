@@ -58,7 +58,22 @@ export class DeterministicEmbeddingProvider implements EmbeddingProvider {
       return new Array(this.dimensions).fill(0);
     }
 
-    const words = clean.split(' ').filter((w) => w.length > 1);
+    const rawWords = clean.split(' ').filter((w) => w.length > 1);
+    const words: string[] = [];
+    for (const w of rawWords) {
+      words.push(w);
+      if (w.endsWith('ing') && w.length > 5) {
+        words.push(w.slice(0, -3));
+      } else if (w.endsWith('ment') && w.length > 6) {
+        words.push(w.slice(0, -4));
+      } else if (w.endsWith('ed') && w.length > 4) {
+        words.push(w.slice(0, -2));
+      } else if (w.endsWith('es') && w.length > 4) {
+        words.push(w.slice(0, -2));
+      } else if (w.endsWith('s') && w.length > 3) {
+        words.push(w.slice(0, -1));
+      }
+    }
     const sum = new Array(this.dimensions).fill(0);
 
     // Single words
@@ -68,8 +83,8 @@ export class DeterministicEmbeddingProvider implements EmbeddingProvider {
     }
 
     // Bi-grams for semantic phrase locality
-    for (let i = 0; i < words.length - 1; i++) {
-      const bigram = `${words[i]}_${words[i + 1]}`;
+    for (let i = 0; i < rawWords.length - 1; i++) {
+      const bigram = `${rawWords[i]}_${rawWords[i + 1]}`;
       const v = this.hashToVector(bigram, 1.5);
       for (let j = 0; j < this.dimensions; j++) sum[j] += v[j];
     }
