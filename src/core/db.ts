@@ -334,6 +334,36 @@ export const ADDITIVE_MIGRATIONS: string[] = [
     created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS ix_buzz_messages_scope ON buzz_messages(tenant, scope, created_at)`,
   `CREATE INDEX IF NOT EXISTS ix_buzz_messages_parent ON buzz_messages(tenant, parent_id)`,
+  // Engineering Issues board (image-5): a kanban over real work items, with
+  // comments. Tenant-scoped everywhere; state is the column, position orders
+  // cards within a column. Both engines speak this DDL (TEXT PK + IF NOT
+  // EXISTS, no engine-only syntax).
+  `CREATE TABLE IF NOT EXISTS issues (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'BACKLOG',
+    priority TEXT NOT NULL DEFAULT 'No priority',
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    assignee_email TEXT,
+    created_by TEXT NOT NULL,
+    progress INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS ix_issues_board ON issues(tenant, state, position)`,
+  `CREATE INDEX IF NOT EXISTS ix_issues_updated ON issues(tenant, updated_at)`,
+  `CREATE TABLE IF NOT EXISTS issue_comments (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    issue_id TEXT NOT NULL REFERENCES issues(id),
+    author TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS ix_issue_comments_issue ON issue_comments(tenant, issue_id, created_at)`,
 ];
 
 /** Version stamp, UPSERT form (not INSERT OR IGNORE) so it runs on Postgres unchanged. */

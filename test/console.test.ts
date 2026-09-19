@@ -819,7 +819,9 @@ T('the served console is session-gated: login, then approve through the coordina
     eq(cookie.includes('vital_session='), true);
     // One session for the whole flow — the CSRF token is per-session, so the
     // page and the API call must carry the SAME cookie.
-    const home: string = await (await fetch(`${base_}/?view=dashboard`, { headers: { cookie }, redirect: 'manual' })).text();
+    const home: string = await (
+      await fetch(`${base_}/?view=dashboard`, { headers: { cookie }, redirect: 'manual' })
+    ).text();
     eq(home.includes('Reality health'), true, 'serves the report:');
     const csrf = home.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
     // CSRF required even with a valid session.
@@ -2156,7 +2158,9 @@ T('FLOW-019: console header renders shared nav with account controls', async () 
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const html = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })).text();
+    const html = await (
+      await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })
+    ).text();
     eq(html.includes('<nav aria-label="Console">'), true);
     eq(html.includes('>Reviews</a>'), true);
     eq(html.includes('href="/console/workflows"'), true);
@@ -2467,7 +2471,9 @@ T('FLOW-020: dashboard search exposes matching work with totals, truncation, and
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const found = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=zephyr`, { headers: session.headers })).text();
+    const found = await (
+      await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=zephyr`, { headers: session.headers })
+    ).text();
     eq(found.includes('zephyr launch hyperdrive review'), true);
     eq(found.includes('matching request(s)'), true);
     eq(found.includes('Pending decision'), true);
@@ -2481,7 +2487,9 @@ T('FLOW-020: dashboard search exposes matching work with totals, truncation, and
       await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&q=a&limit=1`, { headers: session.headers })
     ).text();
     eq(truncated.includes('explicit truncation'), true);
-    const invalid = await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&state=BOGUS`, { headers: session.headers });
+    const invalid = await fetch(`http://127.0.0.1:${server.port}/?view=dashboard&state=BOGUS`, {
+      headers: session.headers,
+    });
     eq(invalid.status, 400);
   } finally {
     await server.close();
@@ -3470,7 +3478,9 @@ T('FLOW-019: shared nav supports skip link and roving-tabindex arrow keys', asyn
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const html = await (await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })).text();
+    const html = await (
+      await fetch(`http://127.0.0.1:${server.port}/?view=dashboard`, { headers: session.headers })
+    ).text();
     eq(html.includes('Skip to main content'), true);
     eq(html.includes('data-console-nav-link'), true);
     eq(html.includes('ArrowRight') || html.includes('console-nav-link'), true);

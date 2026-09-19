@@ -1161,7 +1161,12 @@ T('FLOW-016: testGitHubRepo tests API connectivity with status code mapping', as
   const mockFailFetch = async () => {
     throw new Error('connect ECONNREFUSED');
   };
-  const unreachable = await testGitHubRepo('testowner', 'testrepo', undefined, mockFailFetch as unknown as typeof fetch);
+  const unreachable = await testGitHubRepo(
+    'testowner',
+    'testrepo',
+    undefined,
+    mockFailFetch as unknown as typeof fetch,
+  );
   eq(unreachable.ok, false);
   eq(unreachable.code, 'NETWORK_ERROR');
 });
@@ -1175,6 +1180,7 @@ T('FLOW-016: parseActivationConfigInput preserves GitHub repo and sets sourceKin
       name: 'Team Lead',
       displayName: 'Team Lead',
       role: 'owner' as const,
+      team: 'unassigned' as const,
       mustChangePassword: false,
       disabled: false,
       createdAt: NOW,

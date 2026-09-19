@@ -1,7 +1,13 @@
-import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { extname, resolve as resolvePath, sep as pathSep } from 'node:path';
+import { basename, extname, resolve as resolvePath, sep as pathSep } from 'node:path';
 import type { Socket } from 'node:net';
 import type { AsyncDb } from '../core/db.ts';
 import {
@@ -39,13 +45,16 @@ import {
   logout,
   sessionCookie,
   sessionUser,
+  setUserTeam,
   signupTenant,
   tenantAccessState,
   tryPasswordReset,
   atLeast,
   assertAccountActivated,
   grantableRoles,
+  isEngineer,
   parseRole,
+  parseTeam,
   setupSecretOk,
   signupRequiresSetupSecret,
   CLEAR_SESSION_COOKIE,
@@ -199,6 +208,23 @@ import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
+import {
+  ISSUE_PRIORITIES,
+  ISSUE_STATES,
+  addComment,
+  createIssue,
+  deleteIssue,
+  getIssue,
+  listComments,
+  listIssues,
+  moveIssue,
+  renderIssuesBoard,
+  syncIssues,
+  updateIssue,
+  type IssuePriority,
+  type IssueSnapshot,
+  type IssueState,
+} from './issues.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, saveRoomConfig } from '../talk/rooms.ts';
 import { renderCompilerView, renderCompilerParts } from './compiler-view.ts';
@@ -420,9 +446,7 @@ async function wrapInWorkspaceShell(
   activeScope?: string | null,
   isDrawer?: boolean,
 ): Promise<string> {
-  const innerHtml = html.includes('<body>')
-    ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
-    : html;
+  const innerHtml = html.includes('<body>') ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>')) : html;
   if (isDrawer) {
     return innerHtml;
   }
@@ -433,9 +457,26 @@ async function wrapInWorkspaceShell(
     pending: h.pendingApprovals,
   }));
   const isAdmin = (await import('../core/auth.ts')).atLeast(auth.user.role, 'admin');
-  const avail: Record<string, boolean> = { requests: true, claims: true, rooms: true, humanWork: true, buzz: isAdmin, settings: isAdmin, learning: isAdmin, audit: isAdmin, data: isAdmin };
-  const nav = (await import('./render.ts')).renderConsoleNav((await import('./render.ts')).buildConsoleNav(home, avail), navKey);
-  const cluster = (await import('./render.ts')).renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+  const avail: Record<string, boolean> = {
+    requests: true,
+    claims: true,
+    rooms: true,
+    humanWork: true,
+    buzz: isAdmin,
+    settings: isAdmin,
+    learning: isAdmin,
+    audit: isAdmin,
+    data: isAdmin,
+  };
+  const nav = (await import('./render.ts')).renderConsoleNav(
+    (await import('./render.ts')).buildConsoleNav(home, avail),
+    navKey,
+  );
+  const cluster = (await import('./render.ts')).renderAccountCluster(
+    auth.user.email,
+    auth.user.role,
+    auth.session.csrfToken,
+  );
   const shellWs = await import('./workspace-shell.ts');
   const shellMetrics = await shellWs.computeShellMetrics(db, tenant);
   const shellRecency = await shellWs.computeRoomRecency(
@@ -452,6 +493,7 @@ async function wrapInWorkspaceShell(
     innerHtml,
     userEmail: auth.user.email,
     userRole: auth.user.role,
+    userTeam: auth.user.team,
     tenant,
     metrics: shellMetrics,
     roomRecency: shellRecency,
@@ -1095,6 +1137,21 @@ function roleForm(csrf: string, viewer: User, u: User): string {
   </form>`;
 }
 
+const TEAM_OPTIONS = ['unassigned', 'engineering', 'marketing', 'finance', 'legal', 'support', 'operations'] as const;
+
+/** Department picker (admins/owners): which team the member belongs to. */
+function teamForm(csrf: string, viewer: User, u: User): string {
+  if (!atLeast(viewer.role, 'admin') || viewer.mustChangePassword) return `<span class="sub">${esc(u.team)}</span>`;
+  const options = TEAM_OPTIONS.map((t) => `<option value="${t}"${t === u.team ? ' selected' : ''}>${t}</option>`).join(
+    '',
+  );
+  return `<form method="post" action="/team/team" style="display:inline">
+    <input type="hidden" name="csrf" value="${esc(csrf)}">
+    <input type="hidden" name="userId" value="${esc(u.id)}">
+    <select name="team" onchange="this.form.submit()" aria-label="Team for ${esc(u.email)}">${options}</select>
+  </form>`;
+}
+
 function teamPage(
   csrf: string,
   viewer: User,
@@ -1120,6 +1177,7 @@ function teamPage(
       q?: string;
       role?: string;
       status?: string;
+      team?: string;
       page?: number;
       pageSize?: number;
     };
@@ -1170,6 +1228,7 @@ function teamPage(
   const q = (extra?.filter?.q ?? '').trim().toLowerCase();
   const roleFilter = (extra?.filter?.role ?? '').trim().toLowerCase();
   const statusFilter = (extra?.filter?.status ?? '').trim().toLowerCase();
+  const teamFilter = (extra?.filter?.team ?? '').trim().toLowerCase();
 
   let filteredUsers = users;
   if (q) {
@@ -1177,6 +1236,9 @@ function teamPage(
   }
   if (roleFilter) {
     filteredUsers = filteredUsers.filter((u) => u.role.toLowerCase() === roleFilter);
+  }
+  if (teamFilter) {
+    filteredUsers = filteredUsers.filter((u) => u.team.toLowerCase() === teamFilter);
   }
   if (statusFilter) {
     filteredUsers = filteredUsers.filter((u) => {
@@ -1194,6 +1256,7 @@ function teamPage(
     .map((u) => {
       const actions: string[] = [];
       if (canChangeRole(viewer, u)) actions.push(roleForm(csrf, viewer, u));
+      if (!u.disabled) actions.push(teamForm(csrf, viewer, u));
       if (viewer.role === 'owner' && !u.disabled && u.role !== 'owner' && u.id !== viewer.id)
         actions.push(`<form method="post" action="/team/transfer-ownership" style="display:inline">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
@@ -1211,6 +1274,7 @@ function teamPage(
   <td>${esc(u.email)}${u.id === viewer.id ? ' <span class="sub">(you)</span>' : ''}</td>
   <td>${esc(u.name)}</td>
   <td>${esc(u.role)}</td>
+  <td>${esc(u.team)}</td>
   <td>${statusLabel(u)}</td>
   <td>${actions.join(' ')}</td>
 </tr>`;
@@ -1231,6 +1295,10 @@ function teamPage(
     <option value="">All statuses</option>
     <option value="active" ${statusFilter === 'active' ? 'selected' : ''}>active</option>
     <option value="disabled" ${statusFilter === 'disabled' ? 'selected' : ''}>disabled</option>
+  </select>
+  <select name="team" style="padding:8px 10px;font-size:13px">
+    <option value="">All teams</option>
+    ${TEAM_OPTIONS.map((t) => `<option value="${t}"${teamFilter === t ? 'selected' : ''}>${t}</option>`).join('')}
   </select>
   <button type="submit" style="min-height:36px;padding:8px 14px;font-size:13px">Filter roster</button>
   ${q || roleFilter || statusFilter ? '<a href="/team" class="sub" style="margin-left:8px">Clear filters</a>' : ''}
@@ -1253,8 +1321,8 @@ ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
 <h2>${membersHeading}</h2>
 ${filterForm}
 <table style="border-collapse:collapse;min-width:640px">
-  <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th></th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="5" class="sub">No matching team members found.</td></tr>'}</tbody>
+  <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">team</th><th align="left">status</th><th></th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="6" class="sub">No matching team members found.</td></tr>'}</tbody>
 </table>
 ${paginationBar}
 ${
@@ -1279,6 +1347,10 @@ ${
   <label class="sub" for="role">role</label>
   <select id="role" name="role">
     ${roleOptions}
+  </select>
+  <label class="sub" for="team">team (department)</label>
+  <select id="team" name="team">
+    ${TEAM_OPTIONS.map((t) => `<option value="${t}"${t === 'unassigned' ? ' selected' : ''}>${t}</option>`).join('')}
   </select>
   <button type="submit">${esc(accountNotice.button)}</button>
 </form>`
@@ -1570,14 +1642,10 @@ async function auditConsole(
     .run(tenant, actor, action, target, detail ?? null, at);
 }
 
-async function defaultRoomForUser(
-  db: AsyncDb,
-  tenant: string,
-  user: import('../core/auth.ts').User,
-): Promise<string> {
-  const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(`user:defaultRoom:${tenant}:${user.id}`)) as
-    | { value: string }
-    | undefined;
+async function defaultRoomForUser(db: AsyncDb, tenant: string, user: import('../core/auth.ts').User): Promise<string> {
+  const row = (await db
+    .prepare('SELECT value FROM meta WHERE key = ?')
+    .get(`user:defaultRoom:${tenant}:${user.id}`)) as { value: string } | undefined;
   if (row?.value) {
     return normalizeScope(row.value);
   }
@@ -1773,7 +1841,9 @@ export function startConsoleServer(
   // opens the console. `ready`/`unconfigured-optional`/`failing` map to a
   // visible green / grey / red pill so a silent worker or broken source is not
   // a support-call mystery.
-  const computeReadiness = async (at: string): Promise<{ ready: boolean; checks: { name: string; status: string; detail?: string }[] }> =>
+  const computeReadiness = async (
+    at: string,
+  ): Promise<{ ready: boolean; checks: { name: string; status: string; detail?: string }[] }> =>
     checkReadiness(
       [
         {
@@ -1816,7 +1886,8 @@ export function startConsoleServer(
     );
 
   const readinessPill = (status: string): string => {
-    if (status === 'ok') return '<span style="display:inline-block;background:#0F7A3D;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">ok</span>';
+    if (status === 'ok')
+      return '<span style="display:inline-block;background:#0F7A3D;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">ok</span>';
     if (status === 'unconfigured-optional')
       return '<span style="display:inline-block;background:#9CA3AF;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">not configured</span>';
     return '<span style="display:inline-block;background:#B91C1C;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;">needs attention</span>';
@@ -1830,9 +1901,7 @@ export function startConsoleServer(
           `<li style="margin-bottom:6px">${readinessPill(c.status)} <strong>${esc(c.name)}</strong>${c.detail ? ` — <span class="sub">${esc(c.detail)}</span>` : ''}</li>`,
       )
       .join('');
-    const headline = r.ready
-      ? 'System is ready'
-      : 'System needs attention';
+    const headline = r.ready ? 'System is ready' : 'System needs attention';
     return `<section id="system-readiness" style="margin-bottom:24px">
 <h1>${esc(headline)}</h1>
 <ul style="list-style:none;padding:0;margin:8px 0 0 0">${items}</ul>
@@ -1924,6 +1993,14 @@ export function startConsoleServer(
             '/console/data',
             '/console/data/export',
             '/console/data/erase',
+            '/console/issues',
+            '/console/issues/sync',
+            '/console/issues/detail',
+            '/console/issues/create',
+            '/console/issues/move',
+            '/console/issues/update',
+            '/console/issues/delete',
+            '/console/issues/comment',
             '/receipts/erasure',
             '/account/mfa/setup',
             '/account/mfa/enable',
@@ -1936,6 +2013,7 @@ export function startConsoleServer(
             '/team/disable',
             '/team/reactivate',
             '/team/role',
+            '/team/team',
             '/team/transfer-ownership',
             '/team/invitation/resend',
             '/team/invitation/revoke',
@@ -2005,7 +2083,7 @@ export function startConsoleServer(
           const existingAuth = await sessionOf();
           if (existingAuth) {
             const defRoom = await defaultRoomForUser(db, tenant, existingAuth.user);
-            return redirect(res, `${home}console/buzz/${encodeURIComponent(defRoom)}`);
+            return redirect(res, `/console/buzz/${encodeURIComponent(defRoom)}`);
           }
           const csrf = randomBytes(32).toString('hex');
           const next = safeReturnPath(url.searchParams.get('next'));
@@ -2122,7 +2200,7 @@ export function startConsoleServer(
             const cookie = sessionCookie(token, at, secure, session);
             if (user.mustChangePassword) return redirect(res, '/change-password', cookie);
             const defRoom = await defaultRoomForUser(db, tenant, user);
-            return redirect(res, next ?? `${home}console/buzz/${encodeURIComponent(defRoom)}`, cookie);
+            return redirect(res, next ?? `/console/buzz/${encodeURIComponent(defRoom)}`, cookie);
           } catch (e) {
             // One message for every credential failure — no user enumeration —
             // EXCEPT lockout, which the user must see to know it is not their
@@ -2213,7 +2291,9 @@ export function startConsoleServer(
           const sessionCk = sessionCookie(token, at, secure, session);
           const clearMfa = `${MFA_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
           const defRoom = await defaultRoomForUser(db, tenant, user);
-          const target = user.mustChangePassword ? '/change-password' : (next ?? `${home}console/buzz/${encodeURIComponent(defRoom)}`);
+          const target = user.mustChangePassword
+            ? '/change-password'
+            : (next ?? `/console/buzz/${encodeURIComponent(defRoom)}`);
           res.writeHead(303, { location: target, 'set-cookie': [sessionCk, clearMfa] });
           res.end();
           return;
@@ -2744,20 +2824,33 @@ export function startConsoleServer(
           }
           return redirect(res, '/account');
         }
-        if (path === '/logout' && method === 'POST') {
-          const auth = await sessionOf();
-          if (auth) {
-            let call: Call;
-            try {
-              call = await parseCall(req);
-            } catch {
-              return json(res, 400, { ok: false, error: 'malformed body' });
+        if (path === '/logout') {
+          if (method === 'POST') {
+            const auth = await sessionOf();
+            if (auth) {
+              let call: Call;
+              try {
+                call = await parseCall(req);
+              } catch {
+                return json(res, 400, { ok: false, error: 'malformed body' });
+              }
+              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+              const token = cookieValue(req, 'vital_session');
+              if (token) await logout(db, token, at);
             }
-            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            const token = cookieValue(req, 'vital_session');
-            if (token) await logout(db, token, at);
+            return redirect(res, '/login', CLEAR_SESSION_COOKIE);
           }
-          return redirect(res, '/login', CLEAR_SESSION_COOKIE);
+          if (method === 'GET') {
+            const token = cookieValue(req, 'vital_session');
+            if (token) {
+              try {
+                await logout(db, token, at);
+              } catch {
+                /* non-fatal */
+              }
+            }
+            return redirect(res, '/login', CLEAR_SESSION_COOKIE);
+          }
         }
 
         // ------------------------------------------------------- the console
@@ -2875,7 +2968,14 @@ export function startConsoleServer(
             const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
-              await wrapInWorkspaceShell(detailDocument('Learning review', body, detailOpts), db, tenant, home, auth, 'learning'),
+              await wrapInWorkspaceShell(
+                detailDocument('Learning review', body, detailOpts),
+                db,
+                tenant,
+                home,
+                auth,
+                'learning',
+              ),
             );
             return;
           }
@@ -2892,7 +2992,14 @@ export function startConsoleServer(
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
-            await wrapInWorkspaceShell(detailDocument('Learning review', body, detailOpts), db, tenant, home, auth, 'learning'),
+            await wrapInWorkspaceShell(
+              detailDocument('Learning review', body, detailOpts),
+              db,
+              tenant,
+              home,
+              auth,
+              'learning',
+            ),
           );
           return;
         }
@@ -2919,7 +3026,13 @@ export function startConsoleServer(
           };
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
-            await wrapInWorkspaceShell(detailDocument('Compiler — Why Not Trusted Yet', content, detailOpts), db, tenant, home, auth),
+            await wrapInWorkspaceShell(
+              detailDocument('Compiler — Why Not Trusted Yet', content, detailOpts),
+              db,
+              tenant,
+              home,
+              auth,
+            ),
           );
           return;
         }
@@ -2961,6 +3074,7 @@ export function startConsoleServer(
             operatorMode: 'session' as const,
             home,
           };
+
           const scope = decodeURIComponent(buzzRoom[1]!);
           const surface = await maybeBuzzSurface(db, tenant);
           const notice = url.searchParams.get('notice') ?? undefined;
@@ -2980,7 +3094,7 @@ export function startConsoleServer(
             res.end(
               detailDocument(
                 'Room',
-                '<p class="sub">No such room. <a href="' + esc(home) + 'console/buzz">Back to the workspace</a>.</p>',
+                '<p class="sub">No such room. <a href="/console/buzz">Back to the workspace</a>.</p>',
                 detailOpts,
               ),
             );
@@ -3002,7 +3116,7 @@ export function startConsoleServer(
           }
           const scope = decodeURIComponent(buzzRoomCommand[1]!);
           const command = String(call.fields.command ?? '').trim();
-          const back = `${home}console/buzz/${encodeURIComponent(scope)}`;
+          const back = `/console/buzz/${encodeURIComponent(scope)}`;
           if (!command) return redirect(res, back);
           // Chat flows through this endpoint, so it is open to every tenant
           // role — but slash commands that act on the org (halt, recover,
@@ -3062,13 +3176,17 @@ export function startConsoleServer(
           const call = await parseCall(req);
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
           const scope = decodeURIComponent(buzzReact[1]!);
-          const messageId = String(call.fields.messageId ?? '').trim().slice(0, 64);
-          const emoji = String(call.fields.emoji ?? '').trim().slice(0, 8);
-          if (!messageId || !emoji) return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}`);
+          const messageId = String(call.fields.messageId ?? '')
+            .trim()
+            .slice(0, 64);
+          const emoji = String(call.fields.emoji ?? '')
+            .trim()
+            .slice(0, 8);
+          if (!messageId || !emoji) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
           const { toggleReaction } = await import('./buzz.ts');
           await toggleReaction(db, tenant, messageId, emoji, auth.user.id, at);
           await auditConsole(db, tenant, by(auth.user), 'buzz.react', `msg:${messageId}`, at, emoji);
-          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(messageId)}`);
+          return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(messageId)}`);
         }
         const buzzReply = path.match(/^\/console\/buzz\/([^/]+)\/reply$/);
         if (method === 'POST' && buzzReply) {
@@ -3079,9 +3197,14 @@ export function startConsoleServer(
           const call = await parseCall(req);
           if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
           const scope = decodeURIComponent(buzzReply[1]!);
-          const parentId = String(call.fields.parentId ?? '').trim().slice(0, 64) || null;
-          const content = String(call.fields.content ?? '').trim().slice(0, 500);
-          if (!content) return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}`);
+          const parentId =
+            String(call.fields.parentId ?? '')
+              .trim()
+              .slice(0, 64) || null;
+          const content = String(call.fields.content ?? '')
+            .trim()
+            .slice(0, 500);
+          if (!content) return redirect(res, `/console/buzz/${encodeURIComponent(scope)}`);
           const { createLocalReply } = await import('./buzz.ts');
           const byName = auth.user.email.split('@')[0] ?? auth.user.email;
           const newId = await createLocalReply(db, tenant, scope, parentId, byName, content, at);
@@ -3100,12 +3223,240 @@ export function startConsoleServer(
           const { isBusinessIntelligenceInquiry, queryBusinessState } = await import('../talk/rag-analyst.ts');
           if (isBusinessIntelligenceInquiry(content, scope)) {
             const replyText = await queryBusinessState(db, tenant, content, at);
-            const agentId = await createLocalReply(db, tenant, scope, parentId ?? newId, 'general-agent', replyText, at);
+            const agentId = await createLocalReply(
+              db,
+              tenant,
+              scope,
+              parentId ?? newId,
+              'general-agent',
+              replyText,
+              at,
+            );
             targetReplyId = agentId;
           }
 
           await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
-          return redirect(res, `${home}console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
+          return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
+        }
+        // ------------------------------------------------------------ Issues (engineers team only)
+        // The engineering Issues board: kanban over the `issues` table with
+        // live delta sync. Every route below gates on `isEngineer(auth.user)`
+        // — the SESSION user's department, never the request body — so the
+        // board is invisible and unwritable for every other team (owners
+        // included) and for anonymous callers. All mutations audit.
+        const engineerOnly = (auth: { user: User }): boolean => {
+          return isEngineer(auth.user) && !auth.user.disabled;
+        };
+        const engineerList = async (): Promise<{ email: string; name: string }[]> =>
+          (await listUsers(db, tenant))
+            .filter((u) => isEngineer(u) && !u.disabled)
+            .map((u) => ({ email: u.email, name: u.name }));
+        const issueSnapshot = async (since: string | null): Promise<IssueSnapshot> =>
+          since ? syncIssues(db, tenant, since) : listIssues(db, tenant);
+
+        const issuesPage = path === '/console/issues' && method === 'GET';
+        const issuesSync = path === '/console/issues/sync' && method === 'GET';
+        if (issuesPage || issuesSync) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          // Engineers-team gate: owners and every other department are refused.
+          if (!engineerOnly(auth)) {
+            if (issuesSync)
+              return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(
+              page(
+                'Vital Console — Issues',
+                `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
+              ),
+            );
+            return;
+          }
+          const since = issuesSync ? url.searchParams.get('since') : null;
+          const snapshot = await issueSnapshot(since);
+          if (issuesSync) {
+            return json(res, 200, { ok: true, snapshot });
+          }
+          const engineers = await engineerList();
+          const body = renderIssuesBoard(snapshot, {
+            csrf: auth.session.csrfToken,
+            home,
+            engineers,
+            currentEmail: auth.user.email,
+          });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(
+            await wrapInWorkspaceShell(buzzDocument('Issues', body), db, tenant, home, auth, 'buzz', 'dashboard'),
+          );
+          return;
+        }
+        const issuesDetail = path === '/console/issues/detail' && method === 'GET';
+        const issuesMutations: [boolean, string][] = [
+          [path === '/console/issues/create' && method === 'POST', 'create'],
+          [path === '/console/issues/move' && method === 'POST', 'move'],
+          [path === '/console/issues/update' && method === 'POST', 'update'],
+          [path === '/console/issues/delete' && method === 'POST', 'delete'],
+          [path === '/console/issues/comment' && method === 'POST', 'comment'],
+        ];
+        const issuesMutation = issuesMutations.find(([match]) => match);
+        if (issuesDetail || issuesMutation) {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+          if (activationDenied(res, auth, false)) return;
+          if (!engineerOnly(auth))
+            return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
+          let call: Call | null = null;
+          if (issuesMutation) {
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          }
+          const action = issuesMutation?.[1];
+          try {
+            if (issuesDetail) {
+              const id = (url.searchParams.get('id') ?? '').slice(0, 64);
+              const issue = id ? await getIssue(db, tenant, id) : null;
+              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+              const comments = await listComments(db, tenant, issue.id);
+              return json(res, 200, { ok: true, issue, comments });
+            }
+            const fields = call!.fields;
+            if (action === 'create') {
+              const rawLabels = (call!.json?.labels ?? fields.labels) as unknown;
+              let labelList: string[] | undefined;
+              if (Array.isArray(rawLabels)) {
+                labelList = rawLabels.map((l) => String(l));
+              } else if (typeof rawLabels === 'string' && rawLabels.trim()) {
+                labelList = rawLabels.split(/[,;]+/).map((l) => l.trim()).filter(Boolean);
+              }
+              const issue = await createIssue(
+                db,
+                tenant,
+                {
+                  title: String(fields.title ?? ''),
+                  description: String(fields.description ?? ''),
+                  state: ISSUE_STATES.includes(String(fields.state ?? '') as IssueState)
+                    ? (String(fields.state) as IssueState)
+                    : undefined,
+                  priority: ISSUE_PRIORITIES.includes(String(fields.priority ?? '') as IssuePriority)
+                    ? (String(fields.priority) as IssuePriority)
+                    : undefined,
+                  labels: labelList,
+                  assigneeEmail: String(fields.assigneeEmail ?? '') || null,
+                },
+                { userId: auth.user.id, email: auth.user.email },
+                at,
+              );
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'issues.create',
+                `issue:${issue.id}`,
+                at,
+                issue.title.slice(0, 120),
+              );
+              return json(res, 200, { ok: true, issue });
+            }
+            if (action === 'move') {
+              const id = String(fields.issueId ?? '').slice(0, 64);
+              const state = String(fields.state ?? '');
+              if (!ISSUE_STATES.includes(state as IssueState))
+                return json(res, 400, { ok: false, error: 'unknown state' });
+              const issue = await moveIssue(
+                db,
+                tenant,
+                id,
+                {
+                  state: state as IssueState,
+                  beforeId: String(fields.beforeId ?? '') || null,
+                  afterId: String(fields.afterId ?? '') || null,
+                },
+                at,
+              );
+              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'issues.move',
+                `issue:${issue.id}`,
+                at,
+                `state=${issue.state}`,
+              );
+              return json(res, 200, { ok: true, issue });
+            }
+            if (action === 'update') {
+              const id = String(fields.issueId ?? '').slice(0, 64);
+              const progressRaw =
+                fields.progress === undefined || fields.progress === '' ? undefined : Number(fields.progress);
+              const stateRaw =
+                fields.state !== undefined && ISSUE_STATES.includes(String(fields.state) as IssueState)
+                  ? (String(fields.state) as IssueState)
+                  : undefined;
+              const issue = await updateIssue(
+                db,
+                tenant,
+                id,
+                {
+                  title: fields.title === undefined ? undefined : String(fields.title),
+                  description: fields.description === undefined ? undefined : String(fields.description),
+                  state: stateRaw,
+                  priority:
+                    fields.priority === undefined ||
+                    !ISSUE_PRIORITIES.includes(String(fields.priority) as IssuePriority)
+                      ? undefined
+                      : (String(fields.priority) as IssuePriority),
+                  progress: progressRaw !== undefined && Number.isFinite(progressRaw) ? progressRaw : undefined,
+                  expectedUpdatedAt: String(fields.expectedUpdatedAt ?? '') || null,
+                },
+                at,
+              );
+              if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'issues.update',
+                `issue:${issue.id}`,
+                at,
+                issue.title.slice(0, 120),
+              );
+              return json(res, 200, { ok: true, issue });
+            }
+            if (action === 'delete') {
+              const id = String(fields.issueId ?? '').slice(0, 64);
+              const gone = await deleteIssue(db, tenant, id);
+              if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
+              await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
+              return json(res, 200, { ok: true });
+            }
+            if (action === 'comment') {
+              const id = String(fields.issueId ?? '').slice(0, 64);
+              const comment = await addComment(db, tenant, id, auth.user.email, String(fields.content ?? ''), at);
+              if (!comment) return json(res, 404, { ok: false, error: 'no such issue' });
+              await auditConsole(
+                db,
+                tenant,
+                by(auth.user),
+                'issues.comment',
+                `issue:${id}`,
+                at,
+                comment.content.slice(0, 120),
+              );
+              return json(res, 200, { ok: true, comment });
+            }
+          } catch (e) {
+            const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
+            const stale = (e as Error).message.includes('STALE_WRITE');
+            return json(res, stale ? 409 : 400, { ok: false, error: msg });
+          }
         }
         const learningCard = path.match(/^\/console\/learning\/([^/]+)$/);
         if (method === 'GET' && learningCard) {
@@ -3125,7 +3476,16 @@ export function startConsoleServer(
           if (!atLeast(auth.user.role, 'admin')) {
             const body = '<p class="sub">Learning review requires the admin or owner role.</p>';
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(await wrapInWorkspaceShell(detailDocument('Skill card', body, detailOpts), db, tenant, home, auth, 'learning'));
+            res.end(
+              await wrapInWorkspaceShell(
+                detailDocument('Skill card', body, detailOpts),
+                db,
+                tenant,
+                home,
+                auth,
+                'learning',
+              ),
+            );
             return;
           }
           let cardId: string;
@@ -3137,7 +3497,16 @@ export function startConsoleServer(
           const body = await renderLearningCardPage(db, comp, tenant, cardId);
           if (!body) return json(res, 404, { ok: false, error: 'skill card not found' });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(detailDocument('Skill card', body, detailOpts), db, tenant, home, auth, 'learning'));
+          res.end(
+            await wrapInWorkspaceShell(
+              detailDocument('Skill card', body, detailOpts),
+              db,
+              tenant,
+              home,
+              auth,
+              'learning',
+            ),
+          );
           return;
         }
         if (path === '/console/learning/label' && method === 'POST') {
@@ -3200,7 +3569,11 @@ export function startConsoleServer(
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             res.end(
               await wrapInWorkspaceShell(
-                detailDocument('Audit log', '<p class="sub">Audit log requires the admin or owner role.</p>', detailOpts),
+                detailDocument(
+                  'Audit log',
+                  '<p class="sub">Audit log requires the admin or owner role.</p>',
+                  detailOpts,
+                ),
                 db,
                 tenant,
                 home,
@@ -3220,7 +3593,9 @@ export function startConsoleServer(
             offset: Number.isSafeInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0,
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(detailDocument('Audit log', html, detailOpts), db, tenant, home, auth, 'audit'));
+          res.end(
+            await wrapInWorkspaceShell(detailDocument('Audit log', html, detailOpts), db, tenant, home, auth, 'audit'),
+          );
           return;
         }
         if (method === 'GET' && path === '/console/data') {
@@ -3263,7 +3638,14 @@ export function startConsoleServer(
           });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
           res.end(
-            await wrapInWorkspaceShell(detailDocument('Data & retention', html, detailOpts), db, tenant, home, auth, 'data'),
+            await wrapInWorkspaceShell(
+              detailDocument('Data & retention', html, detailOpts),
+              db,
+              tenant,
+              home,
+              auth,
+              'data',
+            ),
           );
           return;
         }
@@ -3354,7 +3736,18 @@ export function startConsoleServer(
             ? listHtml.replace('<h1>Release workflows</h1>', `<h1>Release workflows</h1>${filterNote}`)
             : listHtml;
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'workflows', undefined, url.searchParams.get('drawer') === '1'));
+          res.end(
+            await wrapInWorkspaceShell(
+              html,
+              db,
+              tenant,
+              home,
+              auth,
+              'workflows',
+              undefined,
+              url.searchParams.get('drawer') === '1',
+            ),
+          );
           return;
         }
         const workflowDetail = path.match(/^\/console\/workflows\/([^/]+)$/);
@@ -3537,7 +3930,18 @@ export function startConsoleServer(
                 detailOpts,
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'requests', undefined, url.searchParams.get('drawer') === '1'));
+              res.end(
+                await wrapInWorkspaceShell(
+                  html,
+                  db,
+                  tenant,
+                  home,
+                  auth,
+                  'requests',
+                  undefined,
+                  url.searchParams.get('drawer') === '1',
+                ),
+              );
               return;
             }
             const pageResult = await searchClaims(db, tenant, {
@@ -3589,7 +3993,18 @@ export function startConsoleServer(
               detailOpts,
             );
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(await wrapInWorkspaceShell(html, db, tenant, home, auth, 'claims', undefined, url.searchParams.get('drawer') === '1'));
+            res.end(
+              await wrapInWorkspaceShell(
+                html,
+                db,
+                tenant,
+                home,
+                auth,
+                'claims',
+                undefined,
+                url.searchParams.get('drawer') === '1',
+              ),
+            );
             return;
           } catch (e) {
             return json(res, 400, { ok: false, error: (e as Error).message });
@@ -3826,7 +4241,10 @@ export function startConsoleServer(
 
           return redirect(res, `/console/requests/${encodeURIComponent(id)}`);
         }
-        if (method === 'GET' && (path === home || path === '/console' || path === '/console/' || path === '/console/dashboard')) {
+        if (
+          method === 'GET' &&
+          (path === home || path === '/console' || path === '/console/' || path === '/console/dashboard')
+        ) {
           if (accessState === 'unclaimed') return redirect(res, '/signup');
           if (accessState === 'recovery') {
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -3851,8 +4269,7 @@ export function startConsoleServer(
             !activationState.sampleActive
           ) {
             const defRoom = await defaultRoomForUser(db, tenant, auth.user);
-            const prefix = home.endsWith('/') ? home : `${home}/`;
-            const loc = `${prefix}console/buzz/${encodeURIComponent(defRoom)}`;
+            const loc = `/console/buzz/${encodeURIComponent(defRoom)}`;
             const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
             res.writeHead(302, {
               location: loc,
@@ -3890,7 +4307,13 @@ export function startConsoleServer(
             home,
           });
           const rawScope = (url.searchParams.get('scope') ?? 'all').toLowerCase();
-          const activeDepartment: DashboardDepartment = ['all', 'legal', 'marketing', 'finance', 'engineering'].includes(rawScope)
+          const activeDepartment: DashboardDepartment = [
+            'all',
+            'legal',
+            'marketing',
+            'finance',
+            'engineering',
+          ].includes(rawScope)
             ? (rawScope as DashboardDepartment)
             : 'all';
           const deptEvaluations = await new ScopeHealthEvaluator(db, tenant, {}).evaluateAll();
@@ -3938,11 +4361,23 @@ export function startConsoleServer(
           );
           const accountCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
 
+          let dashboardIssues: import('./issues.ts').IssueRow[] = [];
+          if (isEngineer(auth.user)) {
+            try {
+              const snap = await listIssues(db, tenant);
+              dashboardIssues = snap.issues;
+            } catch {
+              dashboardIssues = [];
+            }
+          }
+
           const fullDashboard = renderOperationsDashboard({
             tenant,
             home,
             userEmail: auth.user.email,
             userRole: auth.user.role,
+            userTeam: auth.user.team,
+            issues: dashboardIssues,
             csrfToken: auth.session.csrfToken,
             activeDepartment,
             evaluations: deptEvaluations,
@@ -3956,7 +4391,9 @@ export function startConsoleServer(
             accountCluster,
           });
 
+
           // FLOW-010: the browser cookie tracks the slid DB row
+
           const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': refreshed });
           res.end(fullDashboard);
@@ -4297,6 +4734,7 @@ export function startConsoleServer(
           const q = url.searchParams.get('q') ?? undefined;
           const role = url.searchParams.get('role') ?? undefined;
           const status = url.searchParams.get('status') ?? undefined;
+          const teamParam = url.searchParams.get('team') ?? undefined;
           const rawPage = Number(url.searchParams.get('page') ?? '1');
           const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
           const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
@@ -4307,7 +4745,7 @@ export function startConsoleServer(
             selfHalts,
             policy: { approverRole: approverMin, operatorMode },
             compilerGaps,
-            filter: { q, role, status, page: pageNum },
+            filter: { q, role, status, team: teamParam, page: pageNum },
           });
           // Chat-centric: Team lives inside Workspace shell
           const isAdmin = atLeast(auth.user.role, 'admin');
@@ -4348,11 +4786,13 @@ export function startConsoleServer(
             innerHtml: teamInner,
             userEmail: auth.user.email,
             userRole: auth.user.role,
+            userTeam: auth.user.team,
             tenant,
             metrics: teamMetrics,
             roomRecency: teamRecency,
           });
-          const teamWithShell = html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
+          const teamWithShell =
+            html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(teamWithShell);
           return;
@@ -4386,6 +4826,7 @@ export function startConsoleServer(
                   email: emailList[0] ?? '',
                   name: call.fields.name ?? '',
                   role: parseRole(call.fields.role ?? 'member'),
+                  team: parseTeam(call.fields.team ?? 'unassigned'),
                 },
                 { userId: auth.user.id, role: auth.user.role },
                 at,
@@ -4445,6 +4886,7 @@ export function startConsoleServer(
           const invited: { email: string; token: string }[] = [];
           const failed: { email: string; error: string }[] = [];
           const targetRole = parseRole(call.fields.role ?? 'member');
+          const targetTeam = parseTeam(call.fields.team ?? 'unassigned');
           for (const email of emailList) {
             try {
               const { invitation, token } = await createInvitation(
@@ -4456,6 +4898,7 @@ export function startConsoleServer(
                     ? `${call.fields.name} (${email.split('@')[0]})`
                     : (email.split('@')[0] ?? 'Member'),
                   role: targetRole,
+                  team: targetTeam,
                 },
                 { userId: auth.user.id, role: auth.user.role },
                 at,
@@ -4635,6 +5078,50 @@ export function startConsoleServer(
             );
             res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
             res.end(html);
+          }
+          return;
+        }
+        if (path === '/team/team' && method === 'POST') {
+          const auth = await sessionOf();
+          if (!auth) return redirectLogin();
+          if (activationDenied(res, auth, false)) return;
+          let call: Call;
+          try {
+            call = await parseCall(req);
+          } catch (e) {
+            return json(res, 400, { ok: false, error: (e as Error).message });
+          }
+          if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
+          if (!atLeast(auth.user.role, 'admin')) return json(res, 403, { ok: false, error: 'requires admin or owner' });
+          if (!(await recentAuthGate(db, res, auth.user.id, at))) return;
+          const data = await teamData();
+          try {
+            const user = await setUserTeam(
+              db,
+              tenant,
+              call.fields.userId ?? '',
+              parseTeam(call.fields.team ?? 'unassigned'),
+              { userId: auth.user.id, role: auth.user.role },
+              at,
+            );
+            await auditConsole(db, tenant, by(auth.user), 'team.team', `user:${user.id}`, at, `team=${user.team}`);
+            const html = teamPage(
+              auth.session.csrfToken,
+              auth.user,
+              await listUsers(db, tenant),
+              data.invitations,
+              `${user.email} is now on the ${user.team} team`,
+              { home },
+            );
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(html);
+          } catch (e) {
+            const msg = e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message;
+            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, { home });
+            res.writeHead(e instanceof AuthError && e.code === 'FORBIDDEN' ? 403 : 400, {
+              'content-type': 'text/html; charset=utf-8',
+            });
+            res.end(html.replace('</body>', `<body><p class="err">${esc(msg)}</p>`));
           }
           return;
         }
@@ -6010,6 +6497,30 @@ export function startConsoleServer(
           return json(res, 200, { ok: true, result });
         }
 
+        // Agent SVG mascot images (accessible with or without siteDir)
+        if (method === 'GET' && (path.startsWith('/assets/agents/') || path.startsWith('/agents_images/'))) {
+          const rawName = path.replace(/^\/(assets\/agents|agents_images)\//, '');
+          const fileName = basename(rawName);
+          if (/\.(svg|png|webp|jpg|jpeg|gif)$/i.test(fileName)) {
+            const target = resolvePath(process.cwd(), 'site', 'assets', 'agents', fileName);
+            try {
+              const st = await stat(target);
+              if (st.isFile()) {
+                const body = await readFile(target);
+                const type = MIME[extname(target)] ?? 'image/svg+xml';
+                res.writeHead(200, {
+                  'content-type': type,
+                  'cache-control': 'public, max-age=86400, immutable',
+                });
+                res.end(body);
+                return;
+              }
+            } catch {
+              // fall through
+            }
+          }
+        }
+
         // Static site fallthrough (opt-in via siteDir). Console routes and
         // the auth pages always take precedence; only unmatched GETs fall
         // through to files, with traversal-defence inside serveStatic.
@@ -6057,13 +6568,18 @@ export function startConsoleServer(
           address: boundAddress,
           ready: () =>
             new Promise((resoleReady) => {
-              const loopbackHost = publicBind || boundHost === '0.0.0.0' || boundHost === '::' ? '127.0.0.1' : boundHost;
+              const loopbackHost =
+                publicBind || boundHost === '0.0.0.0' || boundHost === '::' ? '127.0.0.1' : boundHost;
               const probeUrl = `http://${loopbackHost}:${boundPort}/healthz`;
               const probe = new URL(probeUrl);
               const req = httpRequest(probe);
               const timer = setTimeout(() => {
                 req.destroy();
-                resoleReady({ ok: false, status: 'failed', detail: 'readiness probe timed out — console not answering yet' });
+                resoleReady({
+                  ok: false,
+                  status: 'failed',
+                  detail: 'readiness probe timed out — console not answering yet',
+                });
               }, 2000);
               req.once('response', (resP: IncomingMessage & { resume?: () => void }) => {
                 clearTimeout(timer);

@@ -334,9 +334,8 @@ T('worker team-VM: an adapter throw destroys the workspace instead of keeping ta
     });
     const res = await worker.tick(NOW);
     eq(res.requestsFailed, 1, 'the throw failed the request:');
-    const meta = (await db
-      .prepare('SELECT value FROM meta WHERE key = ?')
-      .get(`vm:team:${TEN}:engineering`)) as { value: string } | undefined;
+    const meta = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(`vm:team:${TEN}:engineering`)) as
+      { value: string } | undefined;
     eq(meta, undefined, 'no VM row survives a throw:');
     eq(existsSync(join(root, 'team-engineering')), false, 'the workspace dir is torn down:');
     const destroyed = (await db

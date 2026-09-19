@@ -66,7 +66,11 @@ export function isBusinessIntelligenceInquiry(query: string, scope = 'general'):
     /tell me about (the )?business/i,
   ];
   if (patterns.some((re) => re.test(q))) return true;
-  if ((scope === 'general' || scope === 'exec') && q.endsWith('?') && (q.includes('status') || q.includes('doing') || q.includes('going') || q.includes('health'))) {
+  if (
+    (scope === 'general' || scope === 'exec') &&
+    q.endsWith('?') &&
+    (q.includes('status') || q.includes('doing') || q.includes('going') || q.includes('health'))
+  ) {
     return true;
   }
   return false;
@@ -218,7 +222,9 @@ export async function queryBusinessState(
   lines.push(`**3. Reality Ledger Ingested Evidence**`);
   if (status.recentClaims.length > 0) {
     for (const c of status.recentClaims.slice(0, 3)) {
-      lines.push(`• **[${c.scope}]** *${c.subject}*: ${c.statement.slice(0, 120)}${c.statement.length > 120 ? '…' : ''}`);
+      lines.push(
+        `• **[${c.scope}]** *${c.subject}*: ${c.statement.slice(0, 120)}${c.statement.length > 120 ? '…' : ''}`,
+      );
     }
   } else {
     lines.push('• No external evidence has been ingested into the ledger yet. Use `/setup` to sync GitHub or files.');

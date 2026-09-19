@@ -440,10 +440,18 @@ export async function testGitHubRepo(
     const res = await fn(url);
     if (!res.ok) {
       if (res.status === 404) {
-        return { ok: false, code: 'NOT_FOUND', detail: `GitHub repository ${owner}/${repo} was not found or is private` };
+        return {
+          ok: false,
+          code: 'NOT_FOUND',
+          detail: `GitHub repository ${owner}/${repo} was not found or is private`,
+        };
       }
       if (res.status === 401 || res.status === 403) {
-        return { ok: false, code: 'RATE_OR_AUTH', detail: `GitHub API returned ${res.status} (rate limit or token required)` };
+        return {
+          ok: false,
+          code: 'RATE_OR_AUTH',
+          detail: `GitHub API returned ${res.status} (rate limit or token required)`,
+        };
       }
       return { ok: false, code: 'PROVIDER_ERROR', detail: `GitHub API returned HTTP ${res.status}` };
     }

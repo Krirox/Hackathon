@@ -117,9 +117,10 @@ export function watchRun(
   async function terminal(state: string, summary: WatchTerminalSummary): Promise<BuzzNostrEvent | null> {
     const tags: string[] = [];
     if (summary.deliverableId) tags.push(`[deliverable:${summary.deliverableId}]`);
-    const head = state === 'COMPLETED' && summary.deliverableVersion !== undefined
-      ? `Work done — v${summary.deliverableVersion}${summary.prUrl ? ` · ${summary.prUrl}` : ''}`
-      : undefined;
+    const head =
+      state === 'COMPLETED' && summary.deliverableVersion !== undefined
+        ? `Work done — v${summary.deliverableVersion}${summary.prUrl ? ` · ${summary.prUrl}` : ''}`
+        : undefined;
     return fire({
       channel: opts.channel,
       threadRoot: opts.threadRoot,

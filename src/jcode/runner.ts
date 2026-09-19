@@ -130,7 +130,9 @@ export const createGovernedPermissionPolicy =
       }
     }
 
-    const allow = opts.allow ?? new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think', 'ledgerSearch', 'ledger_search']);
+    const allow =
+      opts.allow ??
+      new Set(['read_file', 'list_dir', 'search', 'grep', 'glob', 'think', 'ledgerSearch', 'ledger_search']);
     const reversible = opts.reversibleTools ?? new Set(['write_file', 'edit_file', 'delete_file', 'apply_patch']);
     const irreversible = opts.irreversibleTools ?? new Set(['bash']);
 
@@ -407,11 +409,15 @@ export class JcodeRunner extends EventEmitter {
 
     const blocks: string[] = [];
     if (contextClaims.length > 0) {
-      const contextLines = contextClaims.map((c) => `- [${c.kind}] (${c.subject}) [${c.id}]: ${c.statement}`).join('\n');
+      const contextLines = contextClaims
+        .map((c) => `- [${c.kind}] (${c.subject}) [${c.id}]: ${c.statement}`)
+        .join('\n');
       blocks.push(`[Grounded Context]\n${contextLines}`);
     }
     if (crossRoomClaims.length > 0) {
-      const crossLines = crossRoomClaims.map((c) => `- [${c.kind}] (${c.scope}) (${c.subject}) [${c.id}]: ${c.statement}`).join('\n');
+      const crossLines = crossRoomClaims
+        .map((c) => `- [${c.kind}] (${c.scope}) (${c.subject}) [${c.id}]: ${c.statement}`)
+        .join('\n');
       blocks.push(`[Cross-Room Evidence]\n${crossLines}`);
     }
     blocks.push(`[Instruction]\n${task.command}`);

@@ -532,8 +532,26 @@ T('Feature 4: Morning briefing reports real counts and never fabricates activity
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
-      'req_overnight_1', TEN, 'REQUEST', 'risk', 'core', 'overnight check', 'COMPLETED',
-      0, 0, '{}', '{}', '[]', 'none', 'agent:risk', '[]', '[]', 'idem_ov1', 'never', NOW, NOW,
+      'req_overnight_1',
+      TEN,
+      'REQUEST',
+      'risk',
+      'core',
+      'overnight check',
+      'COMPLETED',
+      0,
+      0,
+      '{}',
+      '{}',
+      '[]',
+      'none',
+      'agent:risk',
+      '[]',
+      '[]',
+      'idem_ov1',
+      'never',
+      NOW,
+      NOW,
     );
   const withData = await huddle.synthesizeBriefing({ durationSeconds: 60 });
   eq(withData.stats.totalChecks, 1);
@@ -663,7 +681,11 @@ T('Feature 6: Time-travel fork fails closed without a real model run and uses re
   } catch (e) {
     failed = true;
     const msg = String((e as Error).message);
-    eq(msg.includes('MODEL_RUN_FAILED') || msg.includes('UNAPPROVED_MODEL') || msg.includes('MISSING_API_KEY'), true, `fork error names the real cause: ${msg}`);
+    eq(
+      msg.includes('MODEL_RUN_FAILED') || msg.includes('UNAPPROVED_MODEL') || msg.includes('MISSING_API_KEY'),
+      true,
+      `fork error names the real cause: ${msg}`,
+    );
   }
   eq(failed, true, 'fork without a runnable model fails closed');
 

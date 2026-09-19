@@ -241,8 +241,7 @@ export class AmbientMorningBriefingSynthesizer {
 
   async getLatestBriefing(): Promise<MorningBriefing | null> {
     const row = (await this.db.prepare('SELECT value FROM meta WHERE key = ?').get(`huddle:${this.tenant}:latest`)) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(row.value) as MorningBriefing;
@@ -253,8 +252,7 @@ export class AmbientMorningBriefingSynthesizer {
 
   async getBriefingById(id: string): Promise<MorningBriefing | null> {
     const row = (await this.db.prepare('SELECT value FROM meta WHERE key = ?').get(`huddle:${this.tenant}:${id}`)) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     if (!row) return null;
     try {
       return JSON.parse(row.value) as MorningBriefing;

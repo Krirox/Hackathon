@@ -5,8 +5,10 @@
 // badge rendered here is real. A quiet room shows "—", a missing tenant
 // shows "—", and there are no invented contacts or personas.
 
-const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+import { getScopeAvatarSrc } from './buzz.ts';
+import { parseTeam } from '../core/auth.ts';
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 export interface ShellRooms {
   scope: string;
@@ -64,6 +66,8 @@ export function renderWorkspaceShell(opts: {
   innerHtml: string;
   userEmail?: string;
   userRole?: string;
+  /** Session user's department — gates the engineers-only Issues link. */
+  userTeam?: string;
   tenant?: string;
   navKey?: string;
   /** Real telemetry. Callers that cannot compute it pass metrics: null → dashes. */
@@ -71,7 +75,7 @@ export function renderWorkspaceShell(opts: {
   /** Real per-room recency (minutes) keyed by scope; missing rooms render "—". */
   roomRecency: Record<string, number | null>;
 }): string {
-  const { rooms, activeScope, home, consoleNav, accountCluster, innerHtml, userEmail, userRole, tenant } = opts;
+  const { rooms, activeScope, home: _home, consoleNav, accountCluster, innerHtml, userEmail, userRole, tenant } = opts;
 
   // Identity comes from the session only. No invented persona: if a caller
   // cannot say who is viewing, the chrome says so instead of rendering
@@ -102,28 +106,58 @@ export function renderWorkspaceShell(opts: {
   };
 
   const renderRoomItem = (r: ShellRooms) => {
-    const isEngActive = (activeScope === 'infra' || activeScope === 'ops' || activeScope === 'engineering') && r.scope === 'infra';
+    const isEngActive =
+      (activeScope === 'infra' || activeScope === 'ops' || activeScope === 'engineering') && r.scope === 'infra';
     const isGenActive = (activeScope === 'general' || !activeScope) && r.scope === 'general';
     const isActive = r.scope === activeScope || isEngActive || isGenActive;
     const mins = opts.roomRecency?.[r.scope];
-    const hasUnread = r.pending > 0 || (mins !== null && mins !== undefined && mins < 180) || r.scope === 'core' || r.scope === 'product' || r.scope === 'business' || r.scope === 'legal';
+    const hasUnread =
+      r.pending > 0 ||
+      (mins !== null && mins !== undefined && mins < 180) ||
+      r.scope === 'core' ||
+      r.scope === 'product' ||
+      r.scope === 'business' ||
+      r.scope === 'legal';
     const unreadDot = hasUnread && !isActive ? `<span class="buzz-unread-dot" title="Unread activity"></span>` : '';
     const isLock = r.scope === 'legal' || r.roomName.includes('queen');
-    const lockIcon = isLock ? '<span style="font-size:11px;margin-right:3px;opacity:0.8;">🔒</span>' : '<span style="font-size:12px;margin-right:4px;opacity:0.7;">#</span>';
+    const lockIcon = isLock
+      ? '<span style="font-size:11px;margin-right:3px;opacity:0.8;">🔒</span>'
+      : '<span style="font-size:12px;margin-right:4px;opacity:0.7;">#</span>';
     const displayName = friendlyNames[r.scope] ?? r.roomName;
-    const roomUrl = r.scope === 'infra' ? `${esc(home)}console/buzz/engineering` : `${esc(home)}console/buzz/${esc(r.scope)}`;
+    const roomUrl = r.scope === 'infra' ? '/console/buzz/engineering' : `/console/buzz/${esc(r.scope)}`;
+    const avatar = getScopeAvatarSrc(r.scope);
 
     return `
       <a href="${roomUrl}" class="buzz-room-link ${isActive ? 'active' : ''}" title="#${esc(displayName)}">
-        <span class="buzz-room-name">${lockIcon}${esc(displayName)}</span>
+        <span class="buzz-room-name" style="display:inline-flex;align-items:center;min-width:0;gap:6px;">
+          <img src="${esc(avatar)}" alt="" style="width:14px;height:14px;border-radius:50%;object-fit:cover;flex-shrink:0;opacity:0.85;" loading="lazy">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${lockIcon}${esc(displayName)}</span>
+        </span>
         ${unreadDot}
       </a>`;
   };
 
-  const hiveRooms = rooms.filter((r) => theHiveScopes.includes(r.scope)).sort((a, b) => theHiveScopes.indexOf(a.scope) - theHiveScopes.indexOf(b.scope)).map(renderRoomItem).join('\n');
-  const prodRooms = rooms.filter((r) => productScopes.includes(r.scope)).sort((a, b) => productScopes.indexOf(a.scope) - productScopes.indexOf(b.scope)).map(renderRoomItem).join('\n');
-  const swarmRooms = rooms.filter((r) => swarmScopes.includes(r.scope)).sort((a, b) => swarmScopes.indexOf(a.scope) - swarmScopes.indexOf(b.scope)).map(renderRoomItem).join('\n');
-  const otherRooms = rooms.filter((r) => !theHiveScopes.includes(r.scope) && !productScopes.includes(r.scope) && !swarmScopes.includes(r.scope)).map(renderRoomItem).join('\n');
+  const hiveRooms = rooms
+    .filter((r) => theHiveScopes.includes(r.scope))
+    .sort((a, b) => theHiveScopes.indexOf(a.scope) - theHiveScopes.indexOf(b.scope))
+    .map(renderRoomItem)
+    .join('\n');
+  const prodRooms = rooms
+    .filter((r) => productScopes.includes(r.scope))
+    .sort((a, b) => productScopes.indexOf(a.scope) - productScopes.indexOf(b.scope))
+    .map(renderRoomItem)
+    .join('\n');
+  const swarmRooms = rooms
+    .filter((r) => swarmScopes.includes(r.scope))
+    .sort((a, b) => swarmScopes.indexOf(a.scope) - swarmScopes.indexOf(b.scope))
+    .map(renderRoomItem)
+    .join('\n');
+  const otherRooms = rooms
+    .filter(
+      (r) => !theHiveScopes.includes(r.scope) && !productScopes.includes(r.scope) && !swarmScopes.includes(r.scope),
+    )
+    .map(renderRoomItem)
+    .join('\n');
 
   // Real telemetry strip (dashes when unmeasured). The old redesign
   // computed these numbers and then dropped them; they are shown here.
@@ -216,7 +250,8 @@ export function renderWorkspaceShell(opts: {
     color: #334155;
     transition: background 0.12s;
   }
-  .buzz-top-link:hover {
+  .buzz-top-link:hover,
+  .buzz-top-link.active {
     background: #DCE0D9;
     color: #0F172A;
   }
@@ -393,15 +428,23 @@ export function renderWorkspaceShell(opts: {
 
     <!-- Top Links (Inbox, Projects, Agents) -->
     <div class="buzz-top-nav">
-      <a href="${esc(home)}console/buzz/engineering" class="buzz-top-link">
+      <a href="/console/buzz/engineering" class="buzz-top-link">
         <span>📥</span>
         <span>Inbox</span>
       </a>
-      <a href="${esc(home)}console/compiler" class="buzz-top-link">
+      ${
+        parseTeam(opts.userTeam) === 'engineering'
+          ? `<a href="/console/issues" class="buzz-top-link ${activeScope === 'dashboard' || activeScope === 'issues' ? 'active' : ''}" title="Engineering team Issues board">
+        <span>◆</span>
+        <span>Issues</span>
+      </a>`
+          : ''
+      }
+      <a href="/console/compiler" class="buzz-top-link">
         <span>📁</span>
         <span>Projects</span>
       </a>
-      <a href="${esc(home)}console/human-work" class="buzz-top-link">
+      <a href="/console/human-work" class="buzz-top-link">
         <span>🤖</span>
         <span>Agents</span>
       </a>
@@ -422,7 +465,7 @@ export function renderWorkspaceShell(opts: {
         <div class="buzz-group-heading">🛠️ Product</div>
         <div class="buzz-room-list">
           ${prodRooms}
-          <a href="${esc(home)}console/buzz/engineering" class="buzz-room-link" title="#flight-path">
+          <a href="/console/buzz/engineering" class="buzz-room-link" title="#flight-path">
             <span class="buzz-room-name"><span style="font-size:12px;margin-right:4px;opacity:0.7;">#</span>flight-path</span>
             <span class="buzz-unread-dot" title="Unread activity"></span>
           </a>
@@ -442,32 +485,43 @@ export function renderWorkspaceShell(opts: {
       <div>
         <div class="buzz-group-heading">Channels</div>
         <div class="buzz-room-list">
-          <a href="${esc(home)}console/buzz/general" class="buzz-room-link" style="color:#64748B;">
+          <a href="/console/buzz/general" class="buzz-room-link" style="color:#64748B;">
             <span class="buzz-room-name"><span style="margin-right:4px;">🔔</span>Welcome</span>
           </a>
         </div>
       </div>
 
-      <!-- View Dashboard Button (Above Direct Messages) -->
-      <div style="margin: 4px 0 6px;">
-        <a href="${esc(home)}console/dashboard" id="vital-dashboard-btn" class="buzz-dashboard-launcher" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;background:#DCE0D9;color:#0F172A;font-weight:600;font-size:12.5px;text-decoration:none;transition:background 0.15s;" title="View Vital System Dashboard">
+      <!-- View Dashboard & Issues Section (Engineers Only for Issues) -->
+      <div style="margin: 6px 0 8px; display: flex; flex-direction: column; gap: 4px;">
+        <a href="/console/dashboard" id="vital-dashboard-btn" class="buzz-dashboard-launcher" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;background:#DCE0D9;color:#0F172A;font-weight:600;font-size:12.5px;text-decoration:none;transition:background 0.15s;" title="View Vital System Dashboard">
           <span style="font-size:13px;">📊</span>
           <span>View Dashboard</span>
         </a>
+        ${
+          parseTeam(opts.userTeam) === 'engineering'
+            ? `<a href="/console/issues" id="sidebar-issues-dashboard-link" class="buzz-dashboard-launcher ${activeScope === 'dashboard' || activeScope === 'issues' ? 'active' : ''}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:8px;background:${activeScope === 'dashboard' || activeScope === 'issues' ? '#CED3CA' : '#DCE0D9'};color:#0F172A;font-weight:600;font-size:12px;text-decoration:none;transition:background 0.15s;" title="#dashboard — Engineering Issues Board">
+          <span class="buzz-room-name" style="display:inline-flex;align-items:center;min-width:0;gap:6px;">
+            <span style="font-size:12px;opacity:0.8;">📋</span>
+            <span>#dashboard · Issues</span>
+          </span>
+          <span style="font-size:9px;background:#0F5C57;color:#fff;padding:1px 5px;border-radius:6px;font-weight:700;">ENG</span>
+        </a>`
+            : ''
+        }
       </div>
 
       <!-- Direct messages -->
       <div>
         <div class="buzz-group-heading">Direct messages</div>
         <div class="buzz-room-list">
-          <a href="${esc(home)}console/buzz/general" class="buzz-room-link">
+          <a href="/console/buzz/general" class="buzz-room-link">
             <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#D1D5DB;display:inline-grid;place-items:center;font-size:9px;">👤</span>Samira Vance</span>
           </a>
-          <a href="${esc(home)}console/buzz/general" class="buzz-room-link">
+          <a href="/console/buzz/general" class="buzz-room-link">
             <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#FBCFE8;display:inline-grid;place-items:center;font-size:9px;color:#9D174D;">ML</span>Morgan Lee</span>
             <span style="background:#0F172A;color:#fff;font-size:9.5px;padding:0 5px;border-radius:10px;font-weight:700;">1</span>
           </a>
-          <a href="${esc(home)}console/buzz/general" class="buzz-room-link">
+          <a href="/console/buzz/general" class="buzz-room-link">
             <span class="buzz-room-name" style="gap:6px;"><span style="width:16px;height:16px;border-radius:50%;background:#BAE6FD;display:inline-grid;place-items:center;font-size:9px;color:#0369A1;">PS</span>Priya Shah</span>
           </a>
         </div>
@@ -479,14 +533,14 @@ export function renderWorkspaceShell(opts: {
 
     <!-- Bottom User Profile Card -->
     <div class="buzz-profile-card">
-      <a href="${esc(home)}account" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;text-decoration:none;color:inherit;" title="${esc(emailStr)} (${esc(roleStr)}) — Account &amp; Security">
+      <a href="/account" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;text-decoration:none;color:inherit;" title="${esc(emailStr)} (${esc(roleStr)}) — Account &amp; Security">
         <div class="buzz-profile-avatar">${esc(initials)}</div>
         <div class="buzz-profile-info">
           <div class="buzz-profile-name">${esc(userName)}</div>
           <div class="buzz-profile-sub">🐝 ${esc(tenantName)}${roleStr !== DASH ? ` · ${esc(roleStr)}` : ''}</div>
         </div>
       </a>
-      <a href="${esc(home)}account" style="color:#64748B;font-size:14px;padding:2px;" title="Account Settings">⚙️</a>
+      <a href="/account" style="color:#64748B;font-size:14px;padding:2px;" title="Account Settings">⚙️</a>
     </div>
 
     <!-- Test and Screen-reader compatibility anchors -->

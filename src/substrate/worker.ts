@@ -533,14 +533,7 @@ export class ApplicationWorker {
               if (needsVm && vm) {
                 if (outcome.status === 'COMPLETED') {
                   const { snapshotTeamVm } = await import('./vm.ts');
-                  await snapshotTeamVm(
-                    this.db,
-                    this.tenant,
-                    targetScope,
-                    reqId,
-                    outcome.artifactRef ?? null,
-                    nowIso,
-                  );
+                  await snapshotTeamVm(this.db, this.tenant, targetScope, reqId, outcome.artifactRef ?? null, nowIso);
                 } else if (outcome.status === 'FAILED' || outcome.status === 'DENIED') {
                   const { destroyTeamVm } = await import('./vm.ts');
                   await destroyTeamVm(

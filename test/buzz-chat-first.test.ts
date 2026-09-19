@@ -22,7 +22,13 @@ async function setupTestApp() {
   );
   await signupTenant(
     db,
-    { slug: 'growth-tenant', name: 'Growth', email: MARKETING_USER.email, password: MARKETING_USER.password, ownerName: 'Mark' },
+    {
+      slug: 'growth-tenant',
+      name: 'Growth',
+      email: MARKETING_USER.email,
+      password: MARKETING_USER.password,
+      ownerName: 'Mark',
+    },
     NOW,
   );
   await db
@@ -231,165 +237,170 @@ T('Cross-room mention in command box dispatches handoff to target room agent', a
   }
 });
 
-T('Tagging @coding-agent dispatches downstream task, provisions team microVM, multiplexes agents and saves snapshot', async () => {
-  await withVmRoot(async (root) => {
-    const { db, ledger, coord, comp } = await setupTestApp();
-    const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
-    try {
-      const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
-      const rootRes = await fetch(`http://127.0.0.1:${server.port}/`, {
-        headers: { cookie },
-        redirect: 'manual',
-      });
-      const csrf = (await rootRes.text()).match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+T(
+  'Tagging @coding-agent dispatches downstream task, provisions team microVM, multiplexes agents and saves snapshot',
+  async () => {
+    await withVmRoot(async (root) => {
+      const { db, ledger, coord, comp } = await setupTestApp();
+      const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+      try {
+        const { cookie } = await loginUser(server.port, OWNER.email, OWNER.password);
+        const rootRes = await fetch(`http://127.0.0.1:${server.port}/`, {
+          headers: { cookie },
+          redirect: 'manual',
+        });
+        const csrf = (await rootRes.text()).match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
 
-      // 1. Post cross-room mention tagging @coding-agent from #general
-      const postRes = await fetch(`http://127.0.0.1:${server.port}/console/buzz/general/command`, {
-        method: 'POST',
-        headers: {
-          cookie,
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: `csrf=${csrf}&command=${encodeURIComponent('@coding-agent implement auth session rotation in microVM')}`,
-        redirect: 'manual',
-      });
-      eq([302, 303].includes(postRes.status), true);
-
-      // Verify request created in target_scope = 'infra'
-      const pending = (await coord.list(TEN, { state: 'ADMITTED' })).filter((r) => r.targetScope === 'infra');
-      eq(pending.length > 0, true, 'coordination request admitted for infra scope');
-      const codingReq = pending[0]!;
-
-      // 2. Run ApplicationWorker with real VM lifecycle (non-baseline adapter)
-      let executedWorkingDir = '';
-      const worker = new ApplicationWorker(db, ledger, coord, {
-        tenant: TEN,
-        adapter: {
-          name: 'claude-code',
-          category: 'model',
-          isTestBaseline: false,
-          async run(_t, _reqId, opts) {
-            executedWorkingDir = opts.workingDir ?? '';
-            return {
-              status: 'COMPLETED',
-              adapter: 'claude-code',
-              requestId: _reqId,
-              transcript: 'done',
-              permissions: [],
-              tools: ['bash', 'file_write'],
-              usage: { input: 150, output: 250 },
-              costDollars: 0.05,
-              artifactRef: 'art_session_rot_v1',
-              isTestBaseline: false,
-            };
+        // 1. Post cross-room mention tagging @coding-agent from #general
+        const postRes = await fetch(`http://127.0.0.1:${server.port}/console/buzz/general/command`, {
+          method: 'POST',
+          headers: {
+            cookie,
+            'content-type': 'application/x-www-form-urlencoded',
           },
-        },
-        dispatchRequests: true,
-        relayOutbox: false,
-        enableLearningLoop: false,
-        sweepIntervalMs: 99_999,
-      });
+          body: `csrf=${csrf}&command=${encodeURIComponent('@coding-agent implement auth session rotation in microVM')}`,
+          redirect: 'manual',
+        });
+        eq([302, 303].includes(postRes.status), true);
 
-      const tickRes = await worker.tick(NOW);
-      eq(tickRes.requestsCompleted, 1, 'worker completed the coding task');
-      eq(executedWorkingDir.startsWith(root), true, 'executed inside team microVM root');
-      eq(existsSync(executedWorkingDir), true, 'microVM working directory was created on disk');
+        // Verify request created in target_scope = 'infra'
+        const pending = (await coord.list(TEN, { state: 'ADMITTED' })).filter((r) => r.targetScope === 'infra');
+        eq(pending.length > 0, true, 'coordination request admitted for infra scope');
+        const codingReq = pending[0]!;
 
-      // 3. Verify snapshot was recorded
-      const snapRow = (await db
-        .prepare(`SELECT detail FROM audit_log WHERE tenant = ? AND action = 'VM_SNAPSHOT' ORDER BY seq DESC LIMIT 1`)
-        .get(TEN)) as { detail: string } | undefined;
-      eq(Boolean(snapRow && snapRow.detail.includes('art_session_rot_v1')), true, 'VM snapshot saved with artifact ref');
-
-      // 4. Multiplexing: another agent (@ops-agent) runs in same scope -> reuses same microVM
-      let secondWorkingDir = '';
-      await coord.submit({
-        tenant: TEN,
-        messageClass: 'REQUEST',
-        originScope: 'business',
-        targetScope: 'infra',
-        goal: 'verify relay logs',
-        claimRefs: codingReq.claimRefs,
-        deliverableSchema: 'ops.audit',
-        bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
-        onBehalfOf: 'agent:ops-agent',
-        now: NOW,
-      });
-
-      const secondWorker = new ApplicationWorker(db, ledger, coord, {
-        tenant: TEN,
-        adapter: {
-          name: 'claude-code',
-          category: 'model',
-          isTestBaseline: false,
-          async run(_t, _reqId, opts) {
-            secondWorkingDir = opts.workingDir ?? '';
-            return {
-              status: 'COMPLETED',
-              adapter: 'claude-code',
-              requestId: _reqId,
-              transcript: 'done',
-              permissions: [],
-              tools: ['bash'],
-              usage: { input: 100, output: 100 },
-              costDollars: 0.02,
-              artifactRef: 'art_relay_v1',
-              isTestBaseline: false,
-            };
+        // 2. Run ApplicationWorker with real VM lifecycle (non-baseline adapter)
+        let executedWorkingDir = '';
+        const worker = new ApplicationWorker(db, ledger, coord, {
+          tenant: TEN,
+          adapter: {
+            name: 'claude-code',
+            category: 'model',
+            isTestBaseline: false,
+            async run(_t, _reqId, opts) {
+              executedWorkingDir = opts.workingDir ?? '';
+              return {
+                status: 'COMPLETED',
+                adapter: 'claude-code',
+                requestId: _reqId,
+                transcript: 'done',
+                permissions: [],
+                tools: ['bash', 'file_write'],
+                usage: { input: 150, output: 250 },
+                costDollars: 0.05,
+                artifactRef: 'art_session_rot_v1',
+                isTestBaseline: false,
+              };
+            },
           },
-        },
-        dispatchRequests: true,
-        relayOutbox: false,
-        enableLearningLoop: false,
-        sweepIntervalMs: 99_999,
-      });
+          dispatchRequests: true,
+          relayOutbox: false,
+          enableLearningLoop: false,
+          sweepIntervalMs: 99_999,
+        });
 
-      await secondWorker.tick(NOW);
-      eq(secondWorkingDir, executedWorkingDir, 'second agent multiplexes inside the exact same team microVM');
+        const tickRes = await worker.tick(NOW);
+        eq(tickRes.requestsCompleted, 1, 'worker completed the coding task');
+        eq(executedWorkingDir.startsWith(root), true, 'executed inside team microVM root');
+        eq(existsSync(executedWorkingDir), true, 'microVM working directory was created on disk');
 
-      // 5. On fatal error or throw, team microVM is destroyed to prevent taint
-      await coord.submit({
-        tenant: TEN,
-        messageClass: 'REQUEST',
-        originScope: 'business',
-        targetScope: 'infra',
-        goal: 'tainted job',
-        claimRefs: codingReq.claimRefs,
-        deliverableSchema: 'ops.audit',
-        bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
-        onBehalfOf: 'agent:ops-agent',
-        now: NOW,
-      });
+        // 3. Verify snapshot was recorded
+        const snapRow = (await db
+          .prepare(`SELECT detail FROM audit_log WHERE tenant = ? AND action = 'VM_SNAPSHOT' ORDER BY seq DESC LIMIT 1`)
+          .get(TEN)) as { detail: string } | undefined;
+        eq(
+          Boolean(snapRow && snapRow.detail.includes('art_session_rot_v1')),
+          true,
+          'VM snapshot saved with artifact ref',
+        );
 
-      const failingWorker = new ApplicationWorker(db, ledger, coord, {
-        tenant: TEN,
-        adapter: {
-          name: 'claude-code',
-          category: 'model',
-          isTestBaseline: false,
-          async run() {
-            throw new Error('sandbox corrupted');
+        // 4. Multiplexing: another agent (@ops-agent) runs in same scope -> reuses same microVM
+        let secondWorkingDir = '';
+        await coord.submit({
+          tenant: TEN,
+          messageClass: 'REQUEST',
+          originScope: 'business',
+          targetScope: 'infra',
+          goal: 'verify relay logs',
+          claimRefs: codingReq.claimRefs,
+          deliverableSchema: 'ops.audit',
+          bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
+          onBehalfOf: 'agent:ops-agent',
+          now: NOW,
+        });
+
+        const secondWorker = new ApplicationWorker(db, ledger, coord, {
+          tenant: TEN,
+          adapter: {
+            name: 'claude-code',
+            category: 'model',
+            isTestBaseline: false,
+            async run(_t, _reqId, opts) {
+              secondWorkingDir = opts.workingDir ?? '';
+              return {
+                status: 'COMPLETED',
+                adapter: 'claude-code',
+                requestId: _reqId,
+                transcript: 'done',
+                permissions: [],
+                tools: ['bash'],
+                usage: { input: 100, output: 100 },
+                costDollars: 0.02,
+                artifactRef: 'art_relay_v1',
+                isTestBaseline: false,
+              };
+            },
           },
-        },
-        dispatchRequests: true,
-        relayOutbox: false,
-        enableLearningLoop: false,
-        sweepIntervalMs: 99_999,
-      });
+          dispatchRequests: true,
+          relayOutbox: false,
+          enableLearningLoop: false,
+          sweepIntervalMs: 99_999,
+        });
 
-      const failTick = await failingWorker.tick(NOW);
-      eq(failTick.requestsFailed, 1, 'failing task recorded failure');
-      eq(existsSync(executedWorkingDir), false, 'corrupted team microVM destroyed on disk');
-      const metaAfterFail = await db
-        .prepare('SELECT value FROM meta WHERE key = ?')
-        .get(`vm:team:${TEN}:infra`);
-      eq(metaAfterFail, undefined, 'VM meta registration deleted after teardown');
-    } finally {
-      await server.close();
-      await db.close();
-    }
-  });
-});
+        await secondWorker.tick(NOW);
+        eq(secondWorkingDir, executedWorkingDir, 'second agent multiplexes inside the exact same team microVM');
+
+        // 5. On fatal error or throw, team microVM is destroyed to prevent taint
+        await coord.submit({
+          tenant: TEN,
+          messageClass: 'REQUEST',
+          originScope: 'business',
+          targetScope: 'infra',
+          goal: 'tainted job',
+          claimRefs: codingReq.claimRefs,
+          deliverableSchema: 'ops.audit',
+          bid: { dollars: 5, tokens: 5000, humanMinutes: 0 },
+          onBehalfOf: 'agent:ops-agent',
+          now: NOW,
+        });
+
+        const failingWorker = new ApplicationWorker(db, ledger, coord, {
+          tenant: TEN,
+          adapter: {
+            name: 'claude-code',
+            category: 'model',
+            isTestBaseline: false,
+            async run() {
+              throw new Error('sandbox corrupted');
+            },
+          },
+          dispatchRequests: true,
+          relayOutbox: false,
+          enableLearningLoop: false,
+          sweepIntervalMs: 99_999,
+        });
+
+        const failTick = await failingWorker.tick(NOW);
+        eq(failTick.requestsFailed, 1, 'failing task recorded failure');
+        eq(existsSync(executedWorkingDir), false, 'corrupted team microVM destroyed on disk');
+        const metaAfterFail = await db.prepare('SELECT value FROM meta WHERE key = ?').get(`vm:team:${TEN}:infra`);
+        eq(metaAfterFail, undefined, 'VM meta registration deleted after teardown');
+      } finally {
+        await server.close();
+        await db.close();
+      }
+    });
+  },
+);
 
 T('Inquiry in #general triggers Reality Ledger RAG and synthesizes grounded business briefing', async () => {
   const { db, ledger, coord, comp } = await setupTestApp();
@@ -399,7 +410,26 @@ T('Inquiry in #general triggers Reality Ledger RAG and synthesizes grounded busi
       `INSERT INTO claims (id, tenant, subject, kind, statement, confidence, source_uri, source_tier, extractor, extractor_ver, retrieved_at, observed_at, valid_from, status, owner, scope, created_at, seq)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run('clm_test_1', TEN, 'Billing Reconciliation', 'OBSERVATION', 'Q3 statements reconciled with 0 discrepancies found.', 1.0, 'https://finance.acme/q3', 'PRIMARY', 'file-diff', '1.0', NOW, NOW, NOW, 'ACTIVE', 'agent:finance', 'finance', NOW, 1);
+    .run(
+      'clm_test_1',
+      TEN,
+      'Billing Reconciliation',
+      'OBSERVATION',
+      'Q3 statements reconciled with 0 discrepancies found.',
+      1.0,
+      'https://finance.acme/q3',
+      'PRIMARY',
+      'file-diff',
+      '1.0',
+      NOW,
+      NOW,
+      NOW,
+      'ACTIVE',
+      'agent:finance',
+      'finance',
+      NOW,
+      1,
+    );
 
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {

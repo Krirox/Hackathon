@@ -323,7 +323,15 @@ export function normalizeScope(raw: string): string {
   if (clean.startsWith('scope:')) clean = clean.slice(6);
   if (clean.startsWith('chan-')) clean = clean.slice(5);
   if (clean === 'marketing' || clean === 'marketing-agent') return 'business';
-  if (clean === 'eng' || clean === 'eng-agent' || clean === 'engineering' || clean === 'coding' || clean === 'coding-agent' || clean === 'coder') return 'infra';
+  if (
+    clean === 'eng' ||
+    clean === 'eng-agent' ||
+    clean === 'engineering' ||
+    clean === 'coding' ||
+    clean === 'coding-agent' ||
+    clean === 'coder'
+  )
+    return 'infra';
   // Also map room IDs, channels, and names to scopes
   const match = CANONICAL_ROOMS.find(
     (r) => r.id === clean || r.name === clean || r.scope === clean || r.channel === clean || r.channel === raw,
@@ -406,9 +414,10 @@ export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: stri
   }
   try {
     const parsed = JSON.parse(row.value) as Partial<RoomConfig>;
-    const storedAlias = typeof parsed.agentName === 'string' && /^[a-z0-9_-]+-agent$/i.test(parsed.agentName.trim())
-      ? parsed.agentName.trim()
-      : undefined;
+    const storedAlias =
+      typeof parsed.agentName === 'string' && /^[a-z0-9_-]+-agent$/i.test(parsed.agentName.trim())
+        ? parsed.agentName.trim()
+        : undefined;
     return {
       id: def.id,
       name: def.name,
@@ -447,9 +456,9 @@ export interface CustomRoomDefinition {
 const customKey = (tenant: string, scope: string): string => `room:custom:${tenant}:${normalizeScope(scope)}`;
 
 export async function listCustomRooms(db: AsyncDb, tenant: string): Promise<CustomRoomDefinition[]> {
-  const rows = (await db
-    .prepare(`SELECT value FROM meta WHERE key LIKE ?`)
-    .all(`room:custom:${tenant}:%`)) as { value: string }[];
+  const rows = (await db.prepare(`SELECT value FROM meta WHERE key LIKE ?`).all(`room:custom:${tenant}:%`)) as {
+    value: string;
+  }[];
   const out: CustomRoomDefinition[] = [];
   for (const r of rows) {
     try {
@@ -490,14 +499,16 @@ export async function createCustomRoom(
   await db
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(customKey(tenant, scope), JSON.stringify({ ...def, createdAt: now }));
-  await db.prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)').run(
-    tenant,
-    by,
-    'POLICY_MUTATE',
-    `room:${scope}`,
-    JSON.stringify({ created: true, agentName: def.agentName }),
-    now,
-  );
+  await db
+    .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')
+    .run(
+      tenant,
+      by,
+      'POLICY_MUTATE',
+      `room:${scope}`,
+      JSON.stringify({ created: true, agentName: def.agentName }),
+      now,
+    );
   return def;
 }
 
@@ -513,7 +524,11 @@ export async function resolveRoomByToken(
     return { agentName: biz.agentName, targetScope: biz.scope, targetRoom: biz.name };
   }
   const direct = CANONICAL_ROOMS.find(
-    (r) => r.agentName.toLowerCase() === t || r.id.toLowerCase() === t || r.scope.toLowerCase() === t || r.name.toLowerCase() === t,
+    (r) =>
+      r.agentName.toLowerCase() === t ||
+      r.id.toLowerCase() === t ||
+      r.scope.toLowerCase() === t ||
+      r.name.toLowerCase() === t,
   );
   if (direct) return { agentName: direct.agentName, targetScope: direct.scope, targetRoom: direct.name };
   for (const def of CANONICAL_ROOMS) {
@@ -539,7 +554,9 @@ export async function saveRoomConfig(
   if (cfg.agentName !== undefined) {
     const alias = String(cfg.agentName).trim();
     if (!/^[a-z0-9_-]+-agent$/i.test(alias)) throw new Error('[rooms:BAD_AGENT] agentName must look like *-agent');
-    const taken = CANONICAL_ROOMS.some((r) => r.agentName.toLowerCase() === alias.toLowerCase() && r.scope !== current.scope);
+    const taken = CANONICAL_ROOMS.some(
+      (r) => r.agentName.toLowerCase() === alias.toLowerCase() && r.scope !== current.scope,
+    );
     if (taken) throw new Error(`[rooms:AGENT_TAKEN] ${alias} is already a built-in agent`);
   }
   const updated: RoomConfig = {

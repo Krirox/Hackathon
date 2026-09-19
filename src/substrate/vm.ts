@@ -60,16 +60,10 @@ function vmRoot(scope: string): string {
   return vmRootFor(scope);
 }
 
-export async function provisionTeamVm(
-  db: AsyncDb,
-  tenant: string,
-  scope: string,
-  now?: string,
-): Promise<TeamVm> {
+export async function provisionTeamVm(db: AsyncDb, tenant: string, scope: string, now?: string): Promise<TeamVm> {
   const at = now ?? new Date().toISOString();
-  const existing = (await db
-    .prepare(`SELECT value FROM meta WHERE key = ?`)
-    .get(`vm:team:${tenant}:${scope}`)) as { value: string } | undefined;
+  const existing = (await db.prepare(`SELECT value FROM meta WHERE key = ?`).get(`vm:team:${tenant}:${scope}`)) as
+    { value: string } | undefined;
   if (existing) {
     try {
       const parsed = JSON.parse(String(existing.value)) as TeamVm;
@@ -109,8 +103,7 @@ export async function snapshotTeamVm(
 ): Promise<VmSnapshot> {
   const at = now ?? new Date().toISOString();
   const row = (await db.prepare(`SELECT value FROM meta WHERE key = ?`).get(`vm:team:${tenant}:${scope}`)) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
 
   // No artifact ref means NO snapshot was persisted. Recording an invented
   // `snap_<timestamp>` ref (the old behavior) put a durable-looking pointer
@@ -135,11 +128,16 @@ export async function snapshotTeamVm(
   return { snapshotRef, scope, requestId, at };
 }
 
-export async function destroyTeamVm(db: AsyncDb, tenant: string, scope: string, reason: string, now?: string): Promise<void> {
+export async function destroyTeamVm(
+  db: AsyncDb,
+  tenant: string,
+  scope: string,
+  reason: string,
+  now?: string,
+): Promise<void> {
   const at = now ?? new Date().toISOString();
   const row = (await db.prepare(`SELECT value FROM meta WHERE key = ?`).get(`vm:team:${tenant}:${scope}`)) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (row) {
     try {
       const vm = JSON.parse(String(row.value)) as TeamVm;

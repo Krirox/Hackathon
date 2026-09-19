@@ -420,93 +420,93 @@ T('F25: worker posts terminal Buzz event after adapter dispatch; relay failures 
   // Keep it inside a temp root, never the production default.
   await withVmRoot(async () => {
     try {
-    const { db, ledger, coord } = await fresh();
-    const clm = await ledger.append({
-      tenant: TEN,
-      subject: 'task',
-      kind: 'OBSERVATION',
-      statement: 'do work',
-      confidence: 1,
-      observedAt: NOW,
-      validFrom: NOW,
-      owner: 'agent:w',
-      scope: 'engineering',
-      authorType: 'system',
-      provenance: sor(),
-    });
-    const { request } = await coord.submit(
-      base({ id: 'buzz1', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }),
-    );
+      const { db, ledger, coord } = await fresh();
+      const clm = await ledger.append({
+        tenant: TEN,
+        subject: 'task',
+        kind: 'OBSERVATION',
+        statement: 'do work',
+        confidence: 1,
+        observedAt: NOW,
+        validFrom: NOW,
+        owner: 'agent:w',
+        scope: 'engineering',
+        authorType: 'system',
+        provenance: sor(),
+      });
+      const { request } = await coord.submit(
+        base({ id: 'buzz1', claimRefs: [clm.id], bid: { dollars: 1, tokens: 10_000 }, now: new Date().toISOString() }),
+      );
 
-    // Inject a non-baseline adapter that completes the request without a real harness
-    const fakeAdapter: HarnessAdapter = {
-      name: 'fake-model',
-      category: 'model',
-      isTestBaseline: false,
-      async run(_tenant: string, reqId: string, _task: HarnessTask): Promise<HarnessOutcome> {
-        await coord.claimExecution(TEN, reqId, 'fake-model:worker', new Date().toISOString());
-        await coord.complete(TEN, reqId, { claims: [clm.id], cost: { tokens: 42 } });
-        return {
-          adapter: 'fake-model',
-          requestId: reqId,
-          status: 'COMPLETED',
-          transcript: 'done',
-          tools: ['write_file'],
-          usage: { input: 10, output: 5 },
-          permissions: [],
-          isTestBaseline: false,
-        };
-      },
-    };
+      // Inject a non-baseline adapter that completes the request without a real harness
+      const fakeAdapter: HarnessAdapter = {
+        name: 'fake-model',
+        category: 'model',
+        isTestBaseline: false,
+        async run(_tenant: string, reqId: string, _task: HarnessTask): Promise<HarnessOutcome> {
+          await coord.claimExecution(TEN, reqId, 'fake-model:worker', new Date().toISOString());
+          await coord.complete(TEN, reqId, { claims: [clm.id], cost: { tokens: 42 } });
+          return {
+            adapter: 'fake-model',
+            requestId: reqId,
+            status: 'COMPLETED',
+            transcript: 'done',
+            tools: ['write_file'],
+            usage: { input: 10, output: 5 },
+            permissions: [],
+            isTestBaseline: false,
+          };
+        },
+      };
 
-    const buzzSurface = createBuzzSurface({
-      relayUrl: relay.url,
-      keypair: testAgent,
-      authMode: 'dev-pubkey',
-      fetchFn: async (url, init) => {
-        const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
-        return { ok: res.ok, status: res.status, text: () => res.text() };
-      },
-      channelIdFor: () => TEST_CHANNEL,
-    });
+      const buzzSurface = createBuzzSurface({
+        relayUrl: relay.url,
+        keypair: testAgent,
+        authMode: 'dev-pubkey',
+        fetchFn: async (url, init) => {
+          const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+          return { ok: res.ok, status: res.status, text: () => res.text() };
+        },
+        channelIdFor: () => TEST_CHANNEL,
+      });
 
-    const worker = new ApplicationWorker(db, ledger, coord, {
-      tenant: TEN,
-      adapter: fakeAdapter,
-      dispatchRequests: true,
-      relayOutbox: false,
-      enableLearningLoop: false,
-      sweepIntervalMs: 99_999,
-      buzz: {
-        surface: buzzSurface,
-        channelFor: () => ({ channel: 'engineering' }),
-      },
-    });
+      const worker = new ApplicationWorker(db, ledger, coord, {
+        tenant: TEN,
+        adapter: fakeAdapter,
+        dispatchRequests: true,
+        relayOutbox: false,
+        enableLearningLoop: false,
+        sweepIntervalMs: 99_999,
+        buzz: {
+          surface: buzzSurface,
+          channelFor: () => ({ channel: 'engineering' }),
+        },
+      });
 
-    await worker.tick();
+      await worker.tick();
 
-    // Wait for async Buzz fire-and-forget posts to drain
-    for (let i = 0; i < 50 && relay.received.length === 0; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+      // Wait for async Buzz fire-and-forget posts to drain
+      for (let i = 0; i < 50 && relay.received.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
 
-    eq(
-      relay.received.length >= 1,
-      true,
-      `at least one terminal Buzz event must be posted (got ${relay.received.length}):`,
-    );
-    const last = relay.received[relay.received.length - 1]!;
-    eq(
-      last.body.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
-      true,
-      'terminal event names the request:',
-    );
-    eq(
-      last.body.tags.some((t) => t[0] === 'vital-request' && (t[2] === 'COMPLETED' || t[2] === 'FAILED')),
-      true,
-      'terminal event carries terminal state:',
-    );
-    eq(worker.status().counters.buzzRelayFailures, 0, 'no relay failures on success:');
+      eq(
+        relay.received.length >= 1,
+        true,
+        `at least one terminal Buzz event must be posted (got ${relay.received.length}):`,
+      );
+      const last = relay.received[relay.received.length - 1]!;
+      eq(
+        last.body.tags.some((t) => t[0] === 'vital-request' && t[1] === request.id),
+        true,
+        'terminal event names the request:',
+      );
+      eq(
+        last.body.tags.some((t) => t[0] === 'vital-request' && (t[2] === 'COMPLETED' || t[2] === 'FAILED')),
+        true,
+        'terminal event carries terminal state:',
+      );
+      eq(worker.status().counters.buzzRelayFailures, 0, 'no relay failures on success:');
     } finally {
       await relay.close();
     }

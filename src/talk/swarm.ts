@@ -40,7 +40,14 @@ export async function resolveDispatchTarget(
   token: string,
 ): Promise<{ agentName: string; targetScope: string; targetRoom: string } | null> {
   const t = token.trim().toLowerCase();
-  if (t === 'eng' || t === 'eng-agent' || t === 'engineering' || t === 'coding' || t === 'coding-agent' || t === 'coder') {
+  if (
+    t === 'eng' ||
+    t === 'eng-agent' ||
+    t === 'engineering' ||
+    t === 'coding' ||
+    t === 'coding-agent' ||
+    t === 'coder'
+  ) {
     const infra = CANONICAL_ROOMS.find((r) => r.scope === 'infra')!;
     return { agentName: 'ops-agent', targetScope: infra.scope, targetRoom: infra.name };
   }
@@ -61,8 +68,15 @@ export function parseCrossRoomDispatch(text: string): CrossRoomDispatch | null {
       r.id.toLowerCase() === targetToken ||
       r.scope.toLowerCase() === targetToken ||
       r.name.toLowerCase() === targetToken ||
-      ((targetToken === 'marketing' || targetToken === 'marketing-agent' || targetToken === 'business-agent') && r.scope === 'business') ||
-      ((targetToken === 'eng' || targetToken === 'eng-agent' || targetToken === 'engineering' || targetToken === 'coding' || targetToken === 'coding-agent' || targetToken === 'coder') && r.scope === 'infra'),
+      ((targetToken === 'marketing' || targetToken === 'marketing-agent' || targetToken === 'business-agent') &&
+        r.scope === 'business') ||
+      ((targetToken === 'eng' ||
+        targetToken === 'eng-agent' ||
+        targetToken === 'engineering' ||
+        targetToken === 'coding' ||
+        targetToken === 'coding-agent' ||
+        targetToken === 'coder') &&
+        r.scope === 'infra'),
   );
   if (!targetRoomDef) return null;
 
@@ -136,8 +150,24 @@ export class InterAgentSwarmCoordinator {
     const token = /^@([a-zA-Z0-9_-]+)/i.exec(input.dispatchText.trim())?.[1] ?? '';
     const resolved = await resolveDispatchTarget(this.db, input.tenant, token);
     const dispatch = resolved
-      ? { targetAgent: resolved.agentName, targetScope: resolved.targetScope, targetRoom: resolved.targetRoom, action: parsed.action, claimRefs: parsed.claimRefs }
+      ? {
+          targetAgent: resolved.agentName,
+          targetScope: resolved.targetScope,
+          targetRoom: resolved.targetRoom,
+          action: parsed.action,
+          claimRefs: parsed.claimRefs,
+        }
       : parsed;
+
+    // Loop prevention is structural (§6.3): a mention that resolves to the
+    // origin room's own agent would self-delegate. Refuse loudly here — the
+    // coordinator would refuse it downstream, but the caller needs to know
+    // WHY (and a silent no-op reads as "handled" in chat).
+    if (normalizeScope(dispatch.targetScope) === originScope) {
+      throw new Error(
+        `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent — speak in the target room instead`,
+      );
+    }
 
     const events: SwarmDeliberationEvent[] = [];
 
@@ -201,16 +231,6 @@ export class InterAgentSwarmCoordinator {
 
     if (!proposal.admitted) {
       throw new Error(`[swarm] coordination proposal refused: ${proposal.reason}`);
-    }
-
-    // Loop prevention is structural (§6.3): a mention that resolves to the
-    // origin room's own agent would self-delegate. Refuse loudly here — the
-    // coordinator would refuse it downstream, but the caller needs to know
-    // WHY (and a silent no-op reads as "handled" in chat).
-    if (normalizeScope(dispatch.targetScope) === originScope) {
-      throw new Error(
-        `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent — speak in the target room instead`,
-      );
     }
 
     const downstreamRequestId = proposal.request.id;

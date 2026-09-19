@@ -38,7 +38,8 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
   {
     id: 'starter',
     name: 'Starter (General + Marketing + Eng)',
-    description: 'Default chat-first setup: general discussion, marketing (growth), and eng (infra). Add more rooms later.',
+    description:
+      'Default chat-first setup: general discussion, marketing (growth), and eng (infra). Add more rooms later.',
     scopes: ['general', 'business', 'infra'],
   },
   {

@@ -101,10 +101,7 @@ export interface SessionInfo {
  * Windows branch is ours, not upstream's: Node cannot dial a Unix-socket
  * filesystem path on win32, so we use a named pipe there.
  */
-export function runtimeDirFrom(
-  env: NodeJS.ProcessEnv = process.env,
-  tmpdir = '/tmp',
-): string {
+export function runtimeDirFrom(env: NodeJS.ProcessEnv = process.env, tmpdir = '/tmp'): string {
   if (env.JCODE_RUNTIME_DIR) return env.JCODE_RUNTIME_DIR;
   if (env.XDG_RUNTIME_DIR) return env.XDG_RUNTIME_DIR;
   const who = env.USER ?? env.USERNAME ?? 'user';

@@ -132,11 +132,15 @@ export async function getReactions(
   if (messageIds.length === 0) return new Map();
   const ph = messageIds.map(() => '?').join(',');
   const rows = (await db
-    .prepare(`SELECT message_id, emoji, COUNT(*) as c FROM buzz_reactions WHERE tenant = ? AND message_id IN (${ph}) GROUP BY message_id, emoji`)
+    .prepare(
+      `SELECT message_id, emoji, COUNT(*) as c FROM buzz_reactions WHERE tenant = ? AND message_id IN (${ph}) GROUP BY message_id, emoji`,
+    )
     .all(tenant, ...messageIds)) as { message_id: string; emoji: string; c: number }[];
   const meRows = currentUserId
     ? ((await db
-        .prepare(`SELECT message_id, emoji FROM buzz_reactions WHERE tenant = ? AND user_id = ? AND message_id IN (${ph})`)
+        .prepare(
+          `SELECT message_id, emoji FROM buzz_reactions WHERE tenant = ? AND user_id = ? AND message_id IN (${ph})`,
+        )
         .all(tenant, currentUserId, ...messageIds)) as { message_id: string; emoji: string }[])
     : [];
   const meSet = new Set(meRows.map((r) => `${String(r.message_id)}::${String(r.emoji)}`));
@@ -163,7 +167,9 @@ export async function toggleReaction(
     .prepare('SELECT 1 FROM buzz_reactions WHERE tenant = ? AND message_id = ? AND emoji = ? AND user_id = ?')
     .get(tenant, messageId, emoji, userId)) as Record<string, unknown> | undefined;
   if (exists) {
-    await db.prepare('DELETE FROM buzz_reactions WHERE tenant = ? AND message_id = ? AND emoji = ? AND user_id = ?').run(tenant, messageId, emoji, userId);
+    await db
+      .prepare('DELETE FROM buzz_reactions WHERE tenant = ? AND message_id = ? AND emoji = ? AND user_id = ?')
+      .run(tenant, messageId, emoji, userId);
   } else {
     await db
       .prepare('INSERT INTO buzz_reactions (tenant, message_id, emoji, user_id, created_at) VALUES (?,?,?, ?, ?)')
@@ -187,15 +193,21 @@ export async function createLocalReply(
   const at = now ?? new Date().toISOString();
   const id = `msg_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
   await db
-    .prepare('INSERT INTO buzz_messages (id, tenant, scope, parent_id, author, content, created_at) VALUES (?,?,?,?,?,?,?)')
+    .prepare(
+      'INSERT INTO buzz_messages (id, tenant, scope, parent_id, author, content, created_at) VALUES (?,?,?,?,?,?,?)',
+    )
     .run(id, tenant, normalizeScope(scope), parentId, author, content.slice(0, 4000), at);
   return id;
 }
 
+
+
 /** Local stand-in when the relay is not configured: recent audit + approvals. */
 async function localRoomActivity(db: AsyncDb, tenant: string, scope: string): Promise<BuzzThreadMessage[]> {
   const localMsgs = (await db
-    .prepare('SELECT id, author, content, parent_id, created_at FROM buzz_messages WHERE tenant = ? AND scope = ? ORDER BY created_at ASC LIMIT 50')
+    .prepare(
+      'SELECT id, author, content, parent_id, created_at FROM buzz_messages WHERE tenant = ? AND scope = ? ORDER BY created_at ASC LIMIT 50',
+    )
     .all(tenant, normalizeScope(scope))) as {
     id: string;
     author: string;
@@ -239,6 +251,87 @@ function autonomyBadge(autonomy: string): string {
   return '<span style="color:#047857;">autonomous</span>';
 }
 
+export function getAgentAvatarSrc(name: string): string | null {
+  const n = name.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  if (n.includes('bumble')) return '/assets/agents/ai_image_blue.svg';
+  if (n.includes('fizz')) return '/assets/agents/ai_image_green.svg';
+  if (n.includes('honey')) return '/assets/agents/ai_image_red.svg';
+  if (n.includes('marketing') || n.includes('growth')) return '/assets/agents/ai_image_pink.svg';
+  if (n.includes('finance')) return '/assets/agents/ai_image_yellow.svg';
+  if (n.includes('legal') || n.includes('compliance')) return '/assets/agents/ai_image_purple.svg';
+  if (n.includes('product') || n.includes('feedback')) return '/assets/agents/ai_image_purplesvg.svg';
+  if (n.includes('data') || n.includes('pipeline')) return '/assets/agents/ai_image_green.svg';
+  if (n.includes('facts') || n.includes('fact')) return '/assets/agents/ai_image_blue.svg';
+  if (n.includes('risk')) return '/assets/agents/ai_image_red.svg';
+  if (n.includes('exec')) return '/assets/agents/ai_image_yellow.svg';
+  if (n.includes('general')) return '/assets/agents/ai_image_1.svg';
+  if (
+    n.includes('coding') ||
+    n.includes('ops') ||
+    n.includes('infra') ||
+    n.includes('engineering') ||
+    n.includes('sandbox')
+  ) {
+    return '/assets/agents/ai_image_2.svg';
+  }
+  if (n.includes('research') || n.includes('market') || n.includes('intel')) {
+    return '/assets/agents/ai_image_3.svg';
+  }
+  if (n.includes('agent') || n.includes('bot') || n.includes('system')) {
+    const mascotSvgs = [
+      '/assets/agents/ai_image_1.svg',
+      '/assets/agents/ai_image_2.svg',
+      '/assets/agents/ai_image_3.svg',
+      '/assets/agents/ai_image_blue.svg',
+      '/assets/agents/ai_image_green.svg',
+      '/assets/agents/ai_image_pink.svg',
+      '/assets/agents/ai_image_purple.svg',
+      '/assets/agents/ai_image_yellow.svg',
+      '/assets/agents/ai_image_red.svg',
+    ];
+    let h = 0;
+    for (let i = 0; i < n.length; i++) h = (h * 31 + n.charCodeAt(i)) >>> 0;
+    return mascotSvgs[h % mascotSvgs.length]!;
+  }
+  return null;
+}
+
+export function getScopeAvatarSrc(scope: string): string {
+  const s = scope.toLowerCase().trim();
+  switch (s) {
+    case 'general':
+      return '/assets/agents/ai_image_1.svg';
+    case 'core':
+    case 'facts':
+      return '/assets/agents/ai_image_blue.svg';
+    case 'research':
+      return '/assets/agents/ai_image_3.svg';
+    case 'risk':
+      return '/assets/agents/ai_image_red.svg';
+    case 'product':
+      return '/assets/agents/ai_image_purplesvg.svg';
+    case 'legal':
+      return '/assets/agents/ai_image_purple.svg';
+    case 'finance':
+      return '/assets/agents/ai_image_yellow.svg';
+    case 'infra':
+    case 'ops':
+    case 'engineering':
+    case 'experimental':
+      return '/assets/agents/ai_image_2.svg';
+    case 'business':
+    case 'growth':
+    case 'marketing':
+      return '/assets/agents/ai_image_pink.svg';
+    case 'data':
+      return '/assets/agents/ai_image_green.svg';
+    case 'exec':
+      return '/assets/agents/ai_image_yellow.svg';
+    default:
+      return '/assets/agents/ai_image_1.svg';
+  }
+}
+
 /** The roster: Slack-style channel browser. The sidebar (in the shell)
  *  already lists every room, so this page is the directory, not a second
  *  sidebar. */
@@ -271,12 +364,15 @@ export function renderBuzzRoster(data: BuzzRosterData, home: string, _csrf: stri
       room.health.pendingApprovals > 0
         ? ` <span style="background:#CD2553;color:#fff;font-size:11px;font-weight:700;min-width:20px;height:20px;display:inline-grid;place-items:center;border-radius:999px;padding:0 6px;">${room.health.pendingApprovals}</span>`
         : '';
-    return `<div style="display:flex;gap:12px;align-items:flex-start;padding:12px 4px;border-bottom:1px solid #E8E8E8;">
-  <span style="font-size:15px;margin-top:1px;">${room.health.badge}</span>
+    const roomDef = roomForScope(room.scope);
+    const agentName = roomDef?.agentName ?? 'agent';
+    const avatar = getScopeAvatarSrc(room.scope);
+    return `<div style="display:flex;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid #E8E8E8;">
+  <img src="${esc(avatar)}" alt="${esc(agentName)}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid #E2E8F0;background:#F8FAFC;" loading="lazy">
   <div style="flex:1;min-width:0;">
-    <div style="font-size:15px;"><a href="${esc(home)}console/buzz/${esc(room.scope)}" style="font-weight:700;color:#1D1C1D;">#${esc(room.roomName)}</a>${pending} <span style="font-weight:400;color:#616061;font-size:12px;">· ${esc(room.gauge.headerString)}</span></div>
+    <div style="font-size:15px;display:flex;align-items:center;gap:6px;"><a href="${esc(home)}console/buzz/${esc(room.scope)}" style="font-weight:700;color:#1D1C1D;">#${esc(room.roomName)}</a>${pending} <span style="font-size:12px;">${room.health.badge}</span> <span style="font-weight:400;color:#616061;font-size:12px;">· ${esc(room.gauge.headerString)}</span></div>
     <div style="font-size:13px;color:#616061;margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${esc(room.mission.slice(0, 110))}${room.mission.length > 110 ? '…' : ''}</div>
-    <div style="font-size:12px;color:#868686;margin-top:2px;">${esc(room.scope)} · ${autonomyBadge(room.autonomy)}${room.active ? '' : ' · disabled'} · ${live}</div>
+    <div style="font-size:12px;color:#868686;margin-top:2px;">${esc(room.scope)} · <strong>@${esc(agentName)}</strong> · ${autonomyBadge(room.autonomy)}${room.active ? '' : ' · disabled'} · ${live}</div>
   </div>
   <a href="${esc(home)}console/buzz/${esc(room.scope)}" style="flex-shrink:0;font-size:13px;font-weight:600;border:1px solid #DDDDDD;border-radius:6px;padding:6px 12px;color:#1D1C1D;text-decoration:none;background:#fff;">View</a>
 </div>`;
@@ -380,34 +476,29 @@ export async function renderBuzzRoom(
     return author;
   };
 
-  const getMascotAvatar = (name: string) => {
-    const n = name.toLowerCase();
-    if (n.includes('bumble')) {
-      return `<div style="width:36px;height:36px;border-radius:50%;background:#3B82F6;color:#fff;display:grid;place-items:center;font-size:18px;box-shadow:0 1px 3px rgba(59,130,246,0.3);flex-shrink:0;">🤖</div>`;
+  const getMascotAvatar = (name: string, size = 36) => {
+    const avatarSrc = getAgentAvatarSrc(name);
+    if (avatarSrc) {
+      return `<img src="${esc(avatarSrc)}" alt="${esc(name)}" class="buzz-agent-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.12);background:#F8FAFC;border:1px solid #E2E8F0;" loading="lazy">`;
     }
-    if (n.includes('fizz')) {
-      return `<div style="width:36px;height:36px;border-radius:50%;background:#22C55E;color:#fff;display:grid;place-items:center;font-size:18px;box-shadow:0 1px 3px rgba(34,197,94,0.3);flex-shrink:0;">👾</div>`;
-    }
-    if (n.includes('honey')) {
-      return `<div style="width:36px;height:36px;border-radius:50%;background:#EF4444;color:#fff;display:grid;place-items:center;font-size:18px;box-shadow:0 1px 3px rgba(239,68,68,0.3);flex-shrink:0;">🐝</div>`;
-    }
-    if (n.includes('agent') || n.includes('bot') || n.includes('system')) {
-      return `<div style="width:36px;height:36px;border-radius:50%;background:#0F5C57;color:#fff;display:grid;place-items:center;font-size:17px;flex-shrink:0;">🤖</div>`;
-    }
-    return `<div style="width:36px;height:36px;border-radius:50%;background:${avatarColor(name)};color:#1E293B;display:grid;place-items:center;font-size:12px;font-weight:700;flex-shrink:0;">${esc(initials(name))}</div>`;
+    return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${avatarColor(name)};color:#1E293B;display:grid;place-items:center;font-size:${Math.max(10, Math.round(size * 0.35))}px;font-weight:700;flex-shrink:0;border:1px solid #E2E8F0;">${esc(initials(name))}</div>`;
   };
 
   const linkify = (text: string) => {
     let out = esc(text);
-    // Mentions styled as Buzz pill with mini bee icon
-    out = out.replace(
-      /@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g,
-      '<span style="background:#F1F3F5;border:1px solid #E2E8F0;color:#1E293B;font-weight:600;padding:1px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:3px;font-size:12px;vertical-align:baseline;"><span style="font-size:10px;opacity:0.8;">🐝</span>$1</span>',
-    );
+    // Mentions styled as Buzz pill with mini avatar or bee icon
+    out = out.replace(/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)(?=\s|[—]|[:]|;|,|$)/g, (match, target) => {
+      const src = getAgentAvatarSrc(target);
+      const icon = src
+        ? `<img src="${esc(src)}" alt="" style="width:13px;height:13px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:2px;" loading="lazy">`
+        : '<span style="font-size:10px;opacity:0.8;">🐝</span>';
+      return `<span style="background:#F1F3F5;border:1px solid #E2E8F0;color:#1E293B;font-weight:600;padding:1px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:3px;font-size:12px;vertical-align:baseline;">${icon}${target}</span>`;
+    });
     // Embedded PR Card
     out = out.replace(
       /(https:\/\/github\.com\/[^\s]+|BUZ-\d+)/g,
-      (match) => `<div style="display:inline-flex;align-items:center;gap:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;margin:6px 0;max-width:100%;"><span style="width:24px;height:24px;border-radius:6px;background:#E2E8F0;display:grid;place-items:center;font-size:11px;color:#475569;flex-shrink:0;">⎇</span><div style="display:flex;flex-direction:column;min-width:0;"><span style="font-size:10px;color:#64748B;font-weight:600;">GitHub · PR</span><a href="${match}" target="_blank" style="color:#2563EB;font-weight:600;font-size:12.5px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${match}</a></div></div>`,
+      (match) =>
+        `<div style="display:inline-flex;align-items:center;gap:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;margin:6px 0;max-width:100%;"><span style="width:24px;height:24px;border-radius:6px;background:#E2E8F0;display:grid;place-items:center;font-size:11px;color:#475569;flex-shrink:0;">⎇</span><div style="display:flex;flex-direction:column;min-width:0;"><span style="font-size:10px;color:#64748B;font-weight:600;">GitHub · PR</span><a href="${match}" target="_blank" style="color:#2563EB;font-weight:600;font-size:12.5px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${match}</a></div></div>`,
     );
     // Custom inline Buzz PR card
     out = out.replace(
@@ -419,7 +510,9 @@ export async function renderBuzzRoom(
 
   const pendingHtml = pendingForRoom
     .map(
-      (r) => `<li style="display:flex;gap:10px;padding:10px 12px;border:1px solid #E2E8F0;border-left:3px solid #ECB22E;background:#fff;border-radius:8px;margin:6px 0;list-style:none;">
+      (
+        r,
+      ) => `<li style="display:flex;gap:10px;padding:10px 12px;border:1px solid #E2E8F0;border-left:3px solid #ECB22E;background:#fff;border-radius:8px;margin:6px 0;list-style:none;">
     <div style="width:34px;height:34px;border-radius:6px;background:#FFF7E6;display:grid;place-items:center;flex-shrink:0;font-size:15px;">⚠️</div>
     <div style="flex:1;min-width:0;">
       <div style="font-size:11.5px;color:#64748B;">Approval requested · ${esc(r.id.slice(0, 12))}</div>
@@ -485,13 +578,16 @@ export async function renderBuzzRoom(
           </div>`
         : '';
 
-      const seedReaction = isSeed9 && stored.length === 0
-        ? `<span style="border:1px solid #E2E8F0;border-radius:12px;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center;gap:4px;background:#F8FAFC;color:#1E293B;">❤️ <span style="font-weight:600;">1</span> <span style="font-size:10px;color:#94A3B8;">⏱️</span></span>`
-        : '';
+      const seedReaction =
+        isSeed9 && stored.length === 0
+          ? `<span style="border:1px solid #E2E8F0;border-radius:12px;padding:2px 8px;font-size:12px;display:inline-flex;align-items:center;gap:4px;background:#F8FAFC;color:#1E293B;">❤️ <span style="font-weight:600;">1</span> <span style="font-size:10px;color:#94A3B8;">⏱️</span></span>`
+          : '';
 
       const reactionForms = stored
         .map((r) => {
-          const mine = r.me ? 'background:#E8F5FA;border-color:#BAE6FD;color:#0369A1;' : 'background:#F8FAFC;border-color:#E2E8F0;color:#1E293B;';
+          const mine = r.me
+            ? 'background:#E8F5FA;border-color:#BAE6FD;color:#0369A1;'
+            : 'background:#F8FAFC;border-color:#E2E8F0;color:#1E293B;';
           return `<form method="post" action="${esc(home)}console/buzz/${esc(scope)}/react" style="display:inline;"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="messageId" value="${esc(m.id)}"><input type="hidden" name="emoji" value="${esc(r.emoji)}"><button type="submit" title="${r.me ? 'You reacted' : 'React'}" style="border:1px solid;border-radius:12px;padding:2px 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;${mine}">${esc(r.emoji)} <span style="font-weight:600;">${r.count}</span></button></form>`;
         })
         .join('');
@@ -523,7 +619,7 @@ export async function renderBuzzRoom(
         .map((r) => {
           const rw = displayName(r.author, config.agentName);
           return `<div style="display:flex;gap:8px;padding:4px 0;">
-        ${getMascotAvatar(rw)}
+        ${getMascotAvatar(rw, 26)}
         <div style="flex:1;"><span style="font-weight:600;font-size:12.5px;">${esc(rw)}</span> <span style="font-size:11px;color:#64748B;">${esc(fmtClock(r.createdAt))}</span><div style="font-size:12.5px;white-space:pre-wrap;margin-top:2px;">${linkify(r.content.slice(0, 4000))}</div></div>
       </div>`;
         })
@@ -561,14 +657,16 @@ export async function renderBuzzRoom(
     })
     .join('\n');
 
-  const threadList = pendingHtml + messages || `
+  const threadList =
+    pendingHtml + messages ||
+    `
     <li style="list-style:none;padding:48px 18px;text-align:center;">
       <div style="font-size:32px;">👋</div>
       <div style="font-size:16px;font-weight:700;color:#1E293B;margin-top:8px;">Welcome to #${esc(def.name)}</div>
       <div style="font-size:13px;color:#64748B;margin-top:4px;">This is the very beginning of #${esc(def.name)}.</div>
     </li>`;
 
-  const roomDisplayName = (scope === 'infra' || rawScope === 'engineering') ? 'engineering' : def.name;
+  const roomDisplayName = scope === 'infra' || rawScope === 'engineering' ? 'engineering' : def.name;
 
   return `
 <style>
@@ -643,10 +741,18 @@ export async function renderBuzzRoom(
 <div style="display:flex;flex-direction:column;height:100%;min-height:0;background:#FFFFFF;overflow:hidden;position:relative;">
   <!-- Room Header (Matching Image 1) -->
   <header style="padding:14px 20px 12px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
-    <div style="display:flex;align-items:center;gap:6px;">
-      <h1 style="font-size:16px;font-weight:700;margin:0;color:#0F172A;letter-spacing:-0.01em;"># ${esc(roomDisplayName)}</h1>
-      <span title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ' — ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
-      <span style="font-size:12px;font-weight:400;color:#475569;" title="Live budget gas gauge (real spend from the coordinator)">· ${esc(gauge.headerString)}</span>
+    <div style="display:flex;align-items:center;gap:10px;">
+      ${getMascotAvatar(config.agentName, 32)}
+      <div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <h1 style="font-size:16px;font-weight:700;margin:0;color:#0F172A;letter-spacing:-0.01em;"># ${esc(roomDisplayName)}</h1>
+          <span title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ' — ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
+          <span style="font-size:12px;font-weight:400;color:#475569;" title="Live budget gas gauge (real spend from the coordinator)">· ${esc(gauge.headerString)}</span>
+        </div>
+        <div style="font-size:11px;color:#64748B;margin-top:1px;">
+          Room Agent: <span style="font-weight:600;color:#0F5C57;">@${esc(config.agentName)}</span> · ${autonomyBadge(config.autonomy)}
+        </div>
+      </div>
     </div>
     <div style="display:flex;align-items:center;gap:14px;color:#64748B;">
       <span style="display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:#475569;font-weight:500;" title="Active Members in Room">

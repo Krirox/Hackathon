@@ -1,6 +1,8 @@
 import type { RoomHealthEvaluation } from '../talk/health.ts';
 import type { ShellMetrics } from './workspace-shell.ts';
 import { CANONICAL_ROOMS } from '../talk/rooms.ts';
+import { parseTeam } from '../core/auth.ts';
+import type { IssueRow } from './issues.ts';
 import {
   renderDepartmentTabs,
   renderDepartmentBanner,
@@ -21,6 +23,8 @@ export interface OperationsDashboardOptions {
   home: string;
   userEmail: string;
   userRole: string;
+  userTeam?: string;
+  issues?: IssueRow[];
   csrfToken: string;
   activeDepartment: DashboardDepartment;
   evaluations: RoomHealthEvaluation[];
@@ -41,6 +45,8 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     home,
     userEmail,
     userRole,
+    userTeam,
+    issues = [],
     csrfToken,
     activeDepartment,
     evaluations,
@@ -579,6 +585,57 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
           )
           .join('\n')}
       </div>
+
+      <!-- Engineering Issues Section (Visible to engineers only) -->
+      ${
+        parseTeam(userTeam) === 'engineering'
+          ? `
+      <div class="issues-sidebar-section" style="border-top:1px solid #E5E7EB;margin-top:10px;padding-top:10px;">
+        <div class="rooms-header" style="padding:4px 12px 6px;border-bottom:none;">
+          <div class="rooms-title" style="color:#0F5C57;font-size:11.5px;">
+            <span>📋 Issues</span>
+            <span class="rooms-badge" style="background:#E6F0EE;color:#0F5C57;">${esc(String(issues.length))}</span>
+          </div>
+          <a href="/console/issues" id="sidebar-issues-dashboard-link" style="font-size:10.5px;font-weight:600;color:#0F5C57;text-decoration:none;padding:1px 6px;border-radius:4px;background:#E6F0EE;" title="#dashboard — Open Engineering Issues Board">Board →</a>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;padding:2px 8px;max-height:220px;overflow-y:auto;">
+          ${
+            issues.length === 0
+              ? `<a href="/console/issues" class="room-entry" style="font-size:11px;color:#6B7280;padding:6px 8px;background:#F9FAFB;border-radius:6px;display:block;">
+            <div style="font-weight:500;color:#111827;">#dashboard</div>
+            <div style="font-size:10px;color:#9CA3AF;margin-top:2px;">No open issues · click to open board</div>
+          </a>`
+              : issues
+                  .slice(0, 8)
+                  .map(
+                    (iss) => `
+          <a href="/console/issues" class="room-entry" title="${esc(iss.title)} (${esc(iss.state)})" style="padding:5px 8px;background:#FFFFFF;border:1px solid #F1F5F9;border-radius:6px;">
+            <div class="room-entry-top">
+              <span class="room-name" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:105px;">${esc(iss.title)}</span>
+              <span style="font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;${
+                iss.state === 'DONE'
+                  ? 'background:#DCFCE7;color:#166534;'
+                  : iss.state === 'IN PROGRESS'
+                    ? 'background:#FEF3C7;color:#92400E;'
+                    : iss.state === 'TO DO'
+                      ? 'background:#DBEAFE;color:#1E40AF;'
+                      : 'background:#F1F5F9;color:#475569;'
+              }">${esc(iss.state)}</span>
+            </div>
+            <div class="room-entry-sub" style="font-size:9px;margin-top:2px;">
+              <span style="color:${iss.priority === 'Urgent' ? '#DC2626' : iss.priority === 'High' ? '#EA580C' : '#64748B'};font-weight:500;">
+                ${esc(iss.priority)}
+              </span>
+              <span style="color:#94A3B8;">#${esc(iss.id.slice(0, 5))}</span>
+            </div>
+          </a>`,
+                  )
+                  .join('\n')
+          }
+        </div>
+      </div>`
+          : ''
+      }
     </aside>
 
     <!-- 3. Main Center Viewport: Compiler Kanban & Reality Ledger -->

@@ -29,12 +29,41 @@ export class AuthError extends Error {
 
 export type Role = 'owner' | 'admin' | 'member';
 
+/**
+ * Department membership (the "which team is this person on" axis, orthogonal
+ * to Role). The Issues board is an ENGINEERING-team surface: gatekeeping reads
+ * `team === 'engineering'`, never a role, so a marketing admin and an
+ * engineering admin are distinguished where roles alone cannot. Owners are
+ * deliberately never special-cased here — org charts name people's team.
+ */
+export const TEAMS = ['engineering', 'marketing', 'finance', 'legal', 'support', 'operations'] as const;
+
+export type Team = (typeof TEAMS)[number] | 'unassigned';
+
+export const DEFAULT_TEAM: Team = 'unassigned';
+
+/** Normalize stored/unknown team values; 'unassigned' is not in TEAMS on purpose — new members start without a department. */
+export function parseTeam(v: unknown): Team {
+  const s = String(v ?? '')
+    .trim()
+    .toLowerCase();
+  if (s === 'unassigned' || s === '') return DEFAULT_TEAM;
+  return (TEAMS as readonly string[]).includes(s) ? (s as Team) : DEFAULT_TEAM;
+}
+
+/** True when this account may open the engineers-only Issues board. */
+export function isEngineer(user: Pick<User, 'team'>): boolean {
+  return parseTeam(user.team) === 'engineering';
+}
+
 export interface User {
   id: string;
   tenant: string;
   email: string;
   name: string;
   role: Role;
+  /** Department: who the person is, not what they may approve (that's role). */
+  team: Team;
   mustChangePassword: boolean;
   disabled: boolean;
   createdAt: string;
@@ -51,6 +80,7 @@ export interface Invitation {
   email: string;
   name: string;
   role: Role;
+  team: Team;
   invitedBy: string;
   status: InvitationStatus;
   expiresAt: string;
@@ -191,6 +221,19 @@ DROP TABLE IF EXISTS mfa_factors;
 `,
   },
   {
+    name: '0005_user_teams',
+    up: `
+ALTER TABLE users ADD COLUMN team TEXT NOT NULL DEFAULT 'unassigned';
+ALTER TABLE invitations ADD COLUMN team TEXT NOT NULL DEFAULT 'unassigned';
+CREATE INDEX IF NOT EXISTS ix_users_team ON users(tenant, team);
+`,
+    down: `
+DROP INDEX IF EXISTS ix_users_team;
+ALTER TABLE users DROP COLUMN team;
+ALTER TABLE invitations DROP COLUMN team;
+`,
+  },
+  {
     name: '0004_email_verification_mfa_recovery',
     up: `
 CREATE TABLE IF NOT EXISTS email_verifications (
@@ -282,6 +325,7 @@ function rowToUser(r: Row): User {
     email: String(r.email),
     name: String(r.name),
     role: roleOf(r.role),
+    team: parseTeam(r.team),
     mustChangePassword: Number(r.must_change_password) === 1,
     disabled: Number(r.disabled) === 1,
     createdAt: String(r.created_at),
@@ -428,7 +472,15 @@ export async function claimTenantOwner(
 async function insertUser(
   db: AsyncDb,
   tenant: string,
-  input: { email: string; name: string; role: Role; password: string; mustChangePassword: boolean; now: string },
+  input: {
+    email: string;
+    name: string;
+    role: Role;
+    team?: Team;
+    password: string;
+    mustChangePassword: boolean;
+    now: string;
+  },
 ): Promise<User> {
   const email = input.email.trim().toLowerCase();
   if (!EMAIL_RE.test(email)) throw new AuthError('BAD_EMAIL', 'a valid email is required');
@@ -440,6 +492,7 @@ async function insertUser(
     email,
     name: input.name.trim(),
     role: input.role,
+    team: input.team ?? DEFAULT_TEAM,
     mustChangePassword: input.mustChangePassword,
     disabled: false,
     createdAt: input.now,
@@ -447,7 +500,7 @@ async function insertUser(
   };
   await db
     .prepare(
-      'INSERT INTO users (id, tenant, email, name, role, password_hash, must_change_password, disabled, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO users (id, tenant, email, name, role, team, password_hash, must_change_password, disabled, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     .run(
       user.id,
@@ -455,6 +508,7 @@ async function insertUser(
       user.email,
       user.name,
       user.role,
+      user.team,
       hash,
       user.mustChangePassword ? 1 : 0,
       0,
@@ -472,7 +526,7 @@ async function insertUser(
 export async function inviteUser(
   db: AsyncDb,
   tenant: string,
-  input: { email: string; name: string; role: Role; password: string },
+  input: { email: string; name: string; role: Role; team?: Team; password: string },
   by: { userId: string; role: Role },
   now: string,
 ): Promise<User> {
@@ -485,6 +539,7 @@ export async function inviteUser(
       email: input.email,
       name: input.name,
       role: input.role,
+      team: input.team,
       password: input.password,
       mustChangePassword: true,
       now,
@@ -501,6 +556,7 @@ function rowToInvitation(r: Row): Invitation {
     email: String(r.email),
     name: String(r.name),
     role: roleOf(r.role),
+    team: parseTeam(r.team),
     invitedBy: String(r.invited_by),
     status: String(r.status) as InvitationStatus,
     expiresAt: String(r.expires_at),
@@ -558,7 +614,7 @@ export async function sweepInvitations(db: AsyncDb, tenant: string, now: string)
 export async function createInvitation(
   db: AsyncDb,
   tenant: string,
-  input: { email: string; name: string; role: Role },
+  input: { email: string; name: string; role: Role; team?: Team },
   by: { userId: string; role: Role },
   now: string,
 ): Promise<{ invitation: Invitation; token: string }> {
@@ -583,6 +639,7 @@ export async function createInvitation(
       email,
       name: input.name.trim(),
       role: input.role,
+      team: input.team ?? DEFAULT_TEAM,
       invitedBy: by.userId,
       status: 'pending',
       expiresAt: new Date(Date.parse(now) + INVITATION_TTL_MS).toISOString(),
@@ -594,8 +651,8 @@ export async function createInvitation(
     await db
       .prepare(
         `INSERT INTO invitations
-         (id, tenant, email, name, role, token_hash, invited_by, status, expires_at, accepted_at, accepted_user_id, revoked_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
+         (id, tenant, email, name, role, team, token_hash, invited_by, status, expires_at, accepted_at, accepted_user_id, revoked_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
       )
       .run(
         invitation.id,
@@ -603,6 +660,7 @@ export async function createInvitation(
         invitation.email,
         invitation.name,
         invitation.role,
+        invitation.team,
         sha256(token),
         invitation.invitedBy,
         invitation.status,
@@ -616,7 +674,7 @@ export async function createInvitation(
       'auth.invitation_created',
       `invitation:${invitation.id}`,
       now,
-      `role=${invitation.role}`,
+      `role=${invitation.role} team=${invitation.team}`,
     );
     return { invitation, token };
   });
@@ -712,6 +770,7 @@ export async function acceptInvitation(
       email: inv.email,
       name: inv.name,
       role: inv.role,
+      team: inv.team,
       password,
       mustChangePassword: false,
       now,
@@ -888,6 +947,34 @@ export async function changeUserRole(
     throw new AuthError('FORBIDDEN', 'only the owner may grant the owner role');
   await db.prepare('UPDATE users SET role = ? WHERE tenant = ? AND id = ?').run(role, tenant, userId);
   await audit(db, tenant, by.userId, 'auth.role_changed', `user:${userId}`, now, `role=${role}`);
+  const next = (await getUser(db, tenant, userId))!;
+  return next;
+}
+
+/**
+ * Department change (FLOW-009 adjacent): an admin/owner reassigns which team
+ * a member belongs to. Grant matrix mirrors changeUserRole — admins may place
+ * members anywhere; only the owner may touch an owner. No last-owner rule is
+ * needed: team is orthogonal to role and never gates sign-in.
+ */
+export async function setUserTeam(
+  db: AsyncDb,
+  tenant: string,
+  userId: string,
+  team: Team,
+  by: { userId: string; role: Role },
+  now: string,
+): Promise<User> {
+  if (by.role !== 'owner' && by.role !== 'admin')
+    throw new AuthError('FORBIDDEN', 'only an owner or admin can change team membership');
+  const target = await getUser(db, tenant, userId);
+  if (!target) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  if (target.disabled) throw new AuthError('DISABLED_USER', 'reactivate the account before changing its team');
+  if (target.role === 'owner' && by.role !== 'owner')
+    throw new AuthError('FORBIDDEN', 'only the owner may change an owner team');
+  const normalized = parseTeam(team);
+  await db.prepare('UPDATE users SET team = ? WHERE tenant = ? AND id = ?').run(normalized, tenant, userId);
+  await audit(db, tenant, by.userId, 'auth.team_changed', `user:${userId}`, now, `team=${normalized}`);
   const next = (await getUser(db, tenant, userId))!;
   return next;
 }

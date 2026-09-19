@@ -80,6 +80,7 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
     <div style="font-size:12px;color:#6B7280;">No trust gates to report until cards exist.</div>
   </div>`,
     };
+
   }
 
   // Real per-card reads: trust gaps and drift from the read-only registry

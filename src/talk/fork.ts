@@ -74,9 +74,7 @@ export class TimeTravelForkEngine {
     requestId: string,
   ): Promise<{ model: string; temperature: number; tokens: number }> {
     const row = (await this.db
-      .prepare(
-        `SELECT cost_json FROM traces WHERE tenant = ? AND request_id = ? ORDER BY created_at DESC LIMIT 1`,
-      )
+      .prepare(`SELECT cost_json FROM traces WHERE tenant = ? AND request_id = ? ORDER BY created_at DESC LIMIT 1`)
       .get(tenant, requestId)) as { cost_json: string } | undefined;
     let cost: { model?: string; temperature?: number; tokens?: number; input?: number; output?: number } = {};
     try {
@@ -103,9 +101,8 @@ export class TimeTravelForkEngine {
     env: NodeJS.ProcessEnv = process.env,
     fetchFn: typeof fetch = fetch,
   ): Promise<ForkModelRun> {
-    const { devProfile, prodProfile, readApiKey, completeChat, assertApproved, ModelError } = await import(
-      '../substrate/models.ts'
-    );
+    const { devProfile, prodProfile, readApiKey, completeChat, assertApproved, ModelError } =
+      await import('../substrate/models.ts');
 
     // The fork runs on the production lane by default (a counterfactual wants
     // the strongest approved model); an explicit dev lane override keeps CI
@@ -199,10 +196,11 @@ export class TimeTravelForkEngine {
       throw new Error('[fork:UNKNOWN_TARGET] no requestId or decisionId resolved — nothing to fork');
     }
 
-    const { model: originalModel, temperature: originalTemp, tokens: originalTokens } = await this.loadOriginalRun(
-      tenant,
-      requestId,
-    );
+    const {
+      model: originalModel,
+      temperature: originalTemp,
+      tokens: originalTokens,
+    } = await this.loadOriginalRun(tenant, requestId);
 
     // ---- Sandbox request: recorded so the fork leaves a durable trail. ----
     const sandboxRequestId = `snd_${randomUUID().slice(0, 8)}`;
@@ -242,8 +240,7 @@ export class TimeTravelForkEngine {
     }
 
     // ---- Forked side: a real model execution, or fail closed. ----
-    const grounding =
-      dec?.bundle.claims.map((c) => `- [${c.id}] ${c.statement}`).join('\n') ?? '';
+    const grounding = dec?.bundle.claims.map((c) => `- [${c.id}] ${c.statement}`).join('\n') ?? '';
     let forked: ForkModelRun;
     try {
       forked = await this.runForkedModel(
