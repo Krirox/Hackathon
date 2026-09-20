@@ -565,6 +565,71 @@ export async function inviteUser(
   });
 }
 
+/**
+ * Self-serve join for the public sign-up funnel: the joiner picks their own
+ * password (so no forced change) and lands as a `member` of the given tenant.
+ * CSRF and rate limiting are the route's job; this only enforces the same
+ * field rules every other user-creation path enforces.
+ */
+export async function selfServeSignup(
+  db: AsyncDb,
+  tenant: string,
+  input: { email: string; name: string; password: string },
+  now: string,
+): Promise<User> {
+  if (input.password.length < MIN_PASSWORD_LENGTH)
+    throw new AuthError('WEAK_PASSWORD', `password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  return db.transaction(async () => {
+    await assertEmailAvailable(db, tenant, input.email, now);
+    const user = await insertUser(db, tenant, {
+      email: input.email,
+      name: input.name,
+      role: 'member',
+      password: input.password,
+      mustChangePassword: false,
+      now,
+    });
+    await audit(db, tenant, user.id, 'auth.user_created', `user:${user.id}`, now, 'role=member self-serve-signup');
+    return user;
+  });
+}
+
+/** Look up a user row by (tenant, email) — the join key the Cognito flow uses. */
+export async function findUserByEmail(db: AsyncDb, tenant: string, email: string): Promise<User | undefined> {
+  const normalized = email.trim().toLowerCase();
+  const r = (await db.prepare('SELECT * FROM users WHERE tenant = ? AND email = ?').get(tenant, normalized)) as
+    Row | undefined;
+  return r ? rowToUser(r) : undefined;
+}
+
+/**
+ * JIT local mirror for an identity-provider account (Cognito owns the
+ * password; this row only carries tenant scoping, role, and session linkage).
+ * The local password is random and unusable by design — verification goes to
+ * the IdP, never here. First sign-in creates it; later sign-ins reuse it.
+ */
+export async function createIdpUser(
+  db: AsyncDb,
+  tenant: string,
+  input: { email: string; name?: string },
+  now: string,
+): Promise<User> {
+  const randomPassword = randomBytes(32).toString('hex');
+  return db.transaction(async () => {
+    await assertEmailAvailable(db, tenant, input.email, now);
+    const user = await insertUser(db, tenant, {
+      email: input.email,
+      name: (input.name ?? '').trim() || input.email.trim().toLowerCase(),
+      role: 'member',
+      password: randomPassword,
+      mustChangePassword: false,
+      now,
+    });
+    await audit(db, tenant, user.id, 'auth.user_created', `user:${user.id}`, now, 'role=member idp-jit');
+    return user;
+  });
+}
+
 function rowToInvitation(r: Row): Invitation {
   return {
     id: String(r.id),

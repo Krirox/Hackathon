@@ -40,6 +40,10 @@ import {
   requestEmailVerification,
   resendInvitation,
   revokeInvitation,
+  selfServeSignup,
+  findUserByEmail,
+  createIdpUser,
+  MIN_PASSWORD_LENGTH,
   transferOwnership,
   login,
   logout,
@@ -64,6 +68,7 @@ import {
   type TenantAccessState,
   type User,
 } from '../core/auth.ts';
+import { cognitoFromEnv, cognitoSignUp, cognitoVerifyPassword, CognitoError, type CognitoConfig } from './cognito.ts';
 import {
   confirmMfaEnrollment,
   consumeMfaRecoveryCode,
@@ -795,6 +800,59 @@ async function recentAuthGate(
 export const LOGIN_RATE = { limit: 30, windowMs: 10 * 60_000 };
 export const SIGNUP_RATE = { limit: 10, windowMs: 10 * 60_000 };
 
+/** Free credits granted to every account created through the public sign-up page. */
+export const SIGNUP_FREE_CREDITS = 100;
+
+/** Durable grant record: a meta row plus an audit event — never just a UI
+ * claim. One transaction: a committed signup without its grant record would
+ * promise credits the ledger cannot show. */
+async function grantSignupCredits(db: AsyncDb, tenant: string, userId: string, at: string): Promise<void> {
+  const key = `credits:${tenant}:${userId}`;
+  const value = JSON.stringify({ balance: SIGNUP_FREE_CREDITS, grantedAt: at, reason: 'signup-grant' });
+  await db.transaction(async () => {
+    await db
+      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+    await auditConsole(db, tenant, userId, 'credits.granted', key, at, `balance=${SIGNUP_FREE_CREDITS} reason=signup`);
+  });
+}
+
+/**
+ * Login when Cognito is the production identity source. The pool verifies the
+ * password; a pool success guarantees a local mirror row (JIT-created on
+ * first sign-in), and a pool "no such user" falls back to local verification
+ * so operator-seeded accounts (bootstrap owner, invitees) keep signing in
+ * unchanged. A disabled local mirror is always a denial, pool or not.
+ */
+async function loginViaIdp(
+  cognito: CognitoConfig,
+  db: AsyncDb,
+  tenant: string,
+  input: { email: string; password: string; ip?: string },
+  at: string,
+): Promise<User> {
+  try {
+    await cognitoVerifyPassword(cognito, { email: input.email, password: input.password });
+  } catch (e) {
+    if (e instanceof CognitoError && e.code === 'USER_NOT_FOUND')
+      return verifyLoginCredentials(db, { ...input, tenant }, at);
+    throw e;
+  }
+  let mirrored = await findUserByEmail(db, tenant, input.email);
+  if (!mirrored) {
+    try {
+      mirrored = await createIdpUser(db, tenant, { email: input.email }, at);
+    } catch {
+      // Two concurrent first sign-ins can both miss the mirror; the loser of
+      // the unique-row race must reuse the winner's row, not eat a denial.
+      mirrored = await findUserByEmail(db, tenant, input.email);
+      if (!mirrored) throw new AuthError('IDP_MIRROR', 'could not provision the local account — contact your operator');
+    }
+  }
+  if (mirrored.disabled) throw new AuthError('DISABLED', 'this account is disabled — contact your operator');
+  return mirrored;
+}
+
 /** Friendly text for AuthError codes surfacing on public forms. */
 function signupErrorMessage(e: unknown): string {
   const code = e instanceof AuthError ? e.code : '';
@@ -806,11 +864,18 @@ function signupErrorMessage(e: unknown): string {
     case 'BAD_EMAIL':
       return 'a valid work email is required';
     case 'BAD_NAME':
-      return 'your name and the organization name are required';
+      return 'your name is required';
     case 'WEAK_PASSWORD':
       return 'password must be at least 12 characters';
+    case 'DUPLICATE_USER':
+      return 'that email already has an account — sign in instead';
+    case 'DISABLED_USER_EXISTS':
+    case 'INVITE_EXPIRED':
+    case 'INVITE_ACCEPTED':
+    case 'INVITE_REVOKED':
+      return 'that email cannot be registered here — contact your operator';
     default:
-      return 'could not create the organization';
+      return 'could not create the account';
   }
 }
 
@@ -1346,13 +1411,20 @@ async function serveStatic(
   const root = resolvePath(siteDir);
   const target = resolvePath(root, `.${rel}`);
   if (target !== root && !target.startsWith(root + pathSep)) return null; // traversal
-  try {
-    const st = await stat(target);
+  const read = async (file: string) => {
+    const st = await stat(file);
     if (!st.isFile()) return null;
-    const type = MIME[extname(target)] ?? 'application/octet-stream';
-    let body = await readFile(target);
+    const type = MIME[extname(file)] ?? 'application/octet-stream';
+    let body = await readFile(file);
     if (coHosted && type.startsWith('text/html')) body = Buffer.from(prepareCoHostedSiteHtml(body));
     return { body, type };
+  };
+  try {
+    const direct = await read(target);
+    if (direct) return direct;
+    // Directory index: `/signup/` serves `site/signup/index.html`. The console
+    // owns the exact `/signup` route; the trailing-slash form is the site's.
+    return await read(resolvePath(target, 'index.html')).catch(() => null);
   } catch {
     return null;
   }
@@ -2351,6 +2423,10 @@ export function startConsoleServer(
   const home = resolveConsoleHome(siteDir);
   const operatorSecret = opts.operatorSecret ?? null;
   const setupSecret = opts.setupSecret ?? process.env.VITAL_SETUP_SECRET ?? null;
+  // Production identity: null unless VITAL_COGNITO_USER_POOL_ID/_CLIENT_ID are
+  // set — local dev, tests, and self-hosted deployments keep the self-contained
+  // flow and nothing on this line changes their behavior.
+  const cognito = cognitoFromEnv();
   const trustProxy = opts.trustProxy ?? process.env.TRUST_PROXY === '1';
   const operatorKeys = opts.operatorKeys ?? [];
   for (const pem of operatorKeys) operatorKeyId(pem);
@@ -2879,6 +2955,7 @@ export function startConsoleServer(
               '/api/meetings/list',
               '/login',
               '/signup',
+              '/api/signup',
               '/logout',
               '/change-password',
               '/account',
@@ -3153,11 +3230,9 @@ export function startConsoleServer(
               });
             }
             try {
-              const user = await verifyLoginCredentials(
-                db,
-                { tenant, email, password: call.fields.password ?? '', ip },
-                at,
-              );
+              const user = cognito
+                ? await loginViaIdp(cognito, db, tenant, { email, password: call.fields.password ?? '', ip }, at)
+                : await verifyLoginCredentials(db, { tenant, email, password: call.fields.password ?? '', ip }, at);
               if (await isMfaEnabled(db, user.id)) {
                 // Second factor enrolled: a correct password must NOT mint a
                 // usable session. Issue a short-lived challenge instead.
@@ -3183,11 +3258,24 @@ export function startConsoleServer(
               // EXCEPT lockout, which the user must see to know it is not their
               // password that is wrong.
               const locked = e instanceof AuthError && e.code === 'LOCKED';
-              res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' });
+              // Provider-state failures are not credential failures: the user
+              // must see "the IdP is down/throttled/needs confirmation" rather
+              // than a wrong-password lie. Denials (BAD_CREDENTIALS) stay
+              // indistinguishable on purpose.
+              const idpVisible =
+                e instanceof CognitoError &&
+                ['IDP_DOWN', 'THROTTLED', 'UNCONFIRMED', 'RESET_REQUIRED'].includes(e.code);
+              const disabledLocal = e instanceof AuthError && e.code === 'DISABLED';
+              let detail = 'invalid credentials';
+              if (idpVisible) detail = (e as CognitoError).message.replace(/^\[cognito:[^\]]+\]\s*/, '');
+              else if (locked || disabledLocal) detail = (e as AuthError).message.replace(/^\[auth:[^\]]+\]\s*/, '');
+              res.writeHead(idpVisible && (e as CognitoError).code === 'IDP_DOWN' ? 503 : 401, {
+                'content-type': 'text/html; charset=utf-8',
+              });
               const tenantCtx = await loginTenantContext(db, tenant);
               res.end(
                 loginPage(call.csrf ?? '', {
-                  error: locked ? (e as AuthError).message.replace(/^\[auth:[^\]]+\]\s*/, '') : 'invalid credentials',
+                  error: detail,
                   next,
                   email,
                   recovery: accessState === 'recovery',
@@ -3586,6 +3674,130 @@ export function startConsoleServer(
                 ),
               );
               return;
+            }
+          }
+          // ------------------------------------------- public self-serve signup
+          // The marketing site's /signup/ page talks to these two endpoints.
+          // GET hands out the pre-session CSRF token (double-submit: the page
+          // echoes it back in `x-vital-csrf`); POST creates a real account in
+          // the bound tenant and grants the signup credits. On a console that
+          // has never been provisioned, the first account claims the tenant as
+          // its owner — the same outcome the claim page produces, reached from
+          // the public funnel instead.
+          if (path === '/api/signup' && method === 'GET') {
+            const csrf = randomBytes(32).toString('hex');
+            res.writeHead(200, {
+              'content-type': 'application/json',
+              'cache-control': 'no-store',
+              'set-cookie': preCsrfCookie(csrf, secure, cookieValue(req, PRE_CSRF_COOKIE)),
+            });
+            res.end(JSON.stringify({ ok: true, csrf, freeCredits: SIGNUP_FREE_CREDITS }));
+            return;
+          }
+          if (path === '/api/signup' && method === 'POST') {
+            let call: Call;
+            try {
+              call = await parseCall(req);
+            } catch (e) {
+              return json(res, 400, { ok: false, error: (e as Error).message });
+            }
+            if (!preCsrfOk(req, call.csrf ?? call.fields.csrf ?? null))
+              return json(res, 403, { ok: false, error: 'this form expired — reload the page and try again' });
+            if (!rateOk(`self-signup:${ip ?? '-'}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at))) {
+              const shape = formErrorShape('rate-limited');
+              return json(res, shape.status, {
+                ok: false,
+                error: shape.message,
+                code: shape.code,
+                retryAfterMs: shape.retryAfterMs,
+              });
+            }
+            const email = (call.fields.email ?? '').trim().toLowerCase();
+            const name =
+              [call.fields.firstName, call.fields.lastName]
+                .map((part) => (part ?? '').trim())
+                .filter(Boolean)
+                .join(' ') || (call.fields.name ?? '').trim();
+            const password = call.fields.password ?? '';
+            // Every field check and every local precondition runs BEFORE the
+            // pool is touched: a request the console would refuse must never
+            // leave an orphaned Cognito account behind (an attacker could
+            // otherwise provision a pool identity for a local user's email
+            // and authenticate as them — the pool, not the local row, would
+            // vouch for the login).
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+              return json(res, 400, { ok: false, error: 'a valid work email is required' });
+            if (!name) return json(res, 400, { ok: false, error: 'your name is required' });
+            if (password.length < MIN_PASSWORD_LENGTH)
+              return json(res, 400, {
+                ok: false,
+                error: `password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+              });
+            const known = await getTenant(db, tenant);
+            if (!known && publicBind && !hasBootstrapCreds())
+              return json(res, 403, {
+                ok: false,
+                error: 'remote signup is disabled: configure VITAL_BOOTSTRAP_EMAIL and VITAL_BOOTSTRAP_PASSWORD',
+              });
+            if (await findUserByEmail(db, tenant, email))
+              return json(res, 400, { ok: false, error: 'that email already has an account — sign in instead' });
+            // In production the pool is the source of truth: the account is
+            // created there first, then mirrored locally below.
+            let confirmationRequired = false;
+            if (cognito) {
+              try {
+                const pool = await cognitoSignUp(cognito, {
+                  email,
+                  password,
+                  givenName: call.fields.firstName?.trim(),
+                  familyName: call.fields.lastName?.trim(),
+                });
+                confirmationRequired = !pool.userConfirmed;
+              } catch (e) {
+                if (e instanceof CognitoError && e.code === 'USER_EXISTS') {
+                  // Pool already knows this email (a retry after a partial
+                  // failure). The local check above proved no mirror exists,
+                  // so repair the pair below; the pool password stays as-is.
+                  confirmationRequired = false;
+                } else if (e instanceof CognitoError && e.code === 'WEAK_PASSWORD') {
+                  return json(res, 400, { ok: false, error: 'password does not meet the identity provider policy' });
+                } else if (e instanceof CognitoError && e.code === 'THROTTLED') {
+                  return json(res, 429, {
+                    ok: false,
+                    error: 'the identity provider is rate-limiting sign-ups — try again later',
+                  });
+                } else {
+                  return json(res, 503, {
+                    ok: false,
+                    error: 'the identity provider is unreachable — no account was created',
+                  });
+                }
+              }
+            }
+            try {
+              let userId: string;
+              // With Cognito active the local row gets a random unusable
+              // password: the console DB must never hold a crackable copy of
+              // the pool credential, and login verifies against the pool.
+              const localPassword = cognito ? randomBytes(32).toString('hex') : password;
+              if (!known) {
+                // Fresh, never-provisioned console: the first public account
+                // claims it as owner, mirroring the /signup claim flow.
+                const { owner } = await signupTenant(
+                  db,
+                  { slug: tenant, name: tenant, email, password: localPassword, ownerName: name },
+                  at,
+                );
+                await recordSignupAt(db, tenant, at);
+                await auditConsole(db, tenant, owner.id, 'auth.tenant_provisioned_web', `tenant:${tenant}`, at);
+                userId = owner.id;
+              } else {
+                userId = (await selfServeSignup(db, tenant, { email, name, password: localPassword }, at)).id;
+              }
+              await grantSignupCredits(db, tenant, userId, at);
+              return json(res, 200, { ok: true, email, credits: SIGNUP_FREE_CREDITS, confirmationRequired });
+            } catch (e) {
+              return json(res, 400, { ok: false, error: signupErrorMessage(e) });
             }
           }
           if (path === '/change-password' && method === 'GET') {

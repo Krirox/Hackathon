@@ -105,3 +105,12 @@ output "buzz_rds_endpoint" {
 output "buzz_service" {
   value = var.enable_buzz ? aws_ecs_service.buzz[0].name : null
 }
+
+output "cognito_user_pool_id" {
+  description = "Public sign-up funnel user pool (wired into the core task env)"
+  value       = aws_cognito_user_pool.public.id
+}
+
+output "cognito_user_pool_client_id" {
+  value = aws_cognito_user_pool_client.funnel.id
+}

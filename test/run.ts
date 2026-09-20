@@ -34,6 +34,7 @@ import './jcode.test.ts';
 import './vendor.test.ts';
 import './talk.test.ts';
 import './auth.test.ts';
+import './cognito.test.ts';
 import './flow-007-010.test.ts';
 import './operator.test.ts';
 import './erasure.test.ts';

@@ -2,7 +2,7 @@
 
 **The grounding and reflex layer for the sovereign agent stack.**
 
-Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->885/885 tests passing<!-- /vital:testcount -->**
+Status: v2 core built and green — typecheck clean, **<!-- vital:testcount -->894/894 tests passing<!-- /vital:testcount -->**
 (real sockets, real sqlite; lint/format/provenance/audit gates green).
 Supersedes: "Final Idea: The Living Company.md" (v1), the v2 assessment rewrite, and the v3 sovereign-stack revision. This is the single source of truth.
 
@@ -16,7 +16,7 @@ Supersedes: "Final Idea: The Living Company.md" (v1), the v2 assessment rewrite,
 > We do not claim to run the company. We claim to **close the loop on specific changes faster than humans can alone, and to prove it with a number.**
 > The runtime is the end state. The wedge is the entry fee.
 
-**The deepest principle.** A company should get better at deciding *when intelligence is necessary*. So the system's north-star metric is not "tasks completed by agents." It is **`intelligence cost per good decision`**, and its trend over time.
+**The deepest principle.** A company should get better at deciding _when intelligence is necessary_. So the system's north-star metric is not "tasks completed by agents." It is **`intelligence cost per good decision`**, and its trend over time.
 
 ---
 
@@ -64,8 +64,8 @@ That kills the weakest version of our pitch ("agents are coming") and replaces i
 a stronger one ("agents are already acting, and nobody can audit it"). It also supplies
 the two pains a governance layer needs:
 
-- **Cost.** A Hacker News user reporting a month of heavy use: *"I've used less tokens
-  in the last 5 years prior to this month than I have this month"* ([HN](https://news.ycombinator.com/item?id=49261514)).
+- **Cost.** A Hacker News user reporting a month of heavy use: _"I've used less tokens
+  in the last 5 years prior to this month than I have this month"_ ([HN](https://news.ycombinator.com/item?id=49261514)).
   Always-on bots burn tokens; budgeted coordination is a buyer pain, not a theory.
 - **Irreversible external action.** The same user had a bot contact ~40 fabric
   suppliers, negotiate prices, lock one in, and order samples. Nobody should be able
@@ -83,7 +83,7 @@ measured refusal rates, or self-hosted agent governance.**
 
 **The strategic conclusion.** Do not sell a company operating system. Sell one measurable loop, and let the accumulated corpus justify the runtime later. The three numbers above — 95% pilot failure, 40% cancellation, 82% capital to vertical — are the reason this document has a wedge, a pre-registered metrics table, and kill criteria.
 
-**Unverified, do not cite:** the "Carnegie Mellon / Wharton agent-washing study" referenced in earlier drafts. No primary source was located. The *concept* (labelling ordinary automation as agents) is real and worth defending against; the *citation* is not established.
+**Unverified, do not cite:** the "Carnegie Mellon / Wharton agent-washing study" referenced in earlier drafts. No primary source was located. The _concept_ (labelling ordinary automation as agents) is real and worth defending against; the _citation_ is not established.
 
 ---
 
@@ -91,13 +91,13 @@ measured refusal rates, or self-hosted agent governance.**
 
 Everything in this system follows from one discipline:
 
-| Layer | Job | Implementation | Rule |
-|---|---|---|---|
-| **Talk** | humans + agents coordinate visibly | **Buzz** (Nostr, signed identities) or Slack | a channel is a *projection*, never a store |
-| **Compute** | agents execute with scoped tools | **our own** scope sandbox + scheduler, with **jcode** and other harnesses driven over their APIs | an agent acts as its scope, with its grants, audited |
-| **Claim** | what is true, what is believed, what was decided | **the Reality Ledger** | the *only* place claims live |
+| Layer       | Job                                              | Implementation                                                                                   | Rule                                                 |
+| ----------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| **Talk**    | humans + agents coordinate visibly               | **Buzz** (Nostr, signed identities) or Slack                                                     | a channel is a _projection_, never a store           |
+| **Compute** | agents execute with scoped tools                 | **our own** scope sandbox + scheduler, with **jcode** and other harnesses driven over their APIs | an agent acts as its scope, with its grants, audited |
+| **Claim**   | what is true, what is believed, what was decided | **the Reality Ledger**                                                                           | the _only_ place claims live                         |
 
-**The single most common failure mode this prevents:** letting chat be the system of record. v1's own document complained that "customer information should not die inside support tickets" — and then designed a system where agents ask each other questions *in chat*, which is precisely how information dies inside threads. The fix is structural, not cultural.
+**The single most common failure mode this prevents:** letting chat be the system of record. v1's own document complained that "customer information should not die inside support tickets" — and then designed a system where agents ask each other questions _in chat_, which is precisely how information dies inside threads. The fix is structural, not cultural.
 
 **The second most common failure mode:** letting a message carry work. See §6.
 
@@ -105,7 +105,7 @@ Everything in this system follows from one discipline:
 
 ## 4. The Reality Ledger
 
-Append-only, bi-temporal, typed claims. This replaces v1's "Company Reality Model," which was directionally correct but assumed the model could simply be *maintained*. It can't, unless the schema makes lying impossible.
+Append-only, bi-temporal, typed claims. This replaces v1's "Company Reality Model," which was directionally correct but assumed the model could simply be _maintained_. It can't, unless the schema makes lying impossible.
 
 ### 4.1 Claim kinds
 
@@ -117,15 +117,15 @@ Append-only, bi-temporal, typed claims. This replaces v1's "Company Reality Mode
 
 ### 4.3 Hard invariants — enforced in code, not documented as policy
 
-| | Invariant | Why it exists |
-|---|---|---|
+|        | Invariant                                                                                                                                                                     | Why it exists                                                                                                                               |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | **I1** | **No generated facts.** An agent may create BELIEF, ASSUMPTION, HYPOTHESIS, PREDICTION, OBSERVATION, DECISION, ACTION. It may **never** create FACT, MEASUREMENT, or OUTCOME. | This is the whole ballgame. It is the difference between an organisation that knows things and one that agrees with its own hallucinations. |
-| **I2** | FACT and MEASUREMENT require `SYSTEM_OF_RECORD` or `MEASURED` provenance — **regardless of author**. | A confident, well-sourced-sounding vendor blog is still self-serving. |
-| **I3** | Every claim has a named human owner. No orphans. | Accountability must survive agent autonomy. |
-| **I4** | A `contradicts` link flips both claims to DISPUTED and opens a resolution ticket. | Contradiction must be an event, never silence. Silent contradiction is how two teams ship two different truths. |
-| **I5** | `valid_until` expiry ⇒ STALE, computed on a sweep. | Staleness must be *felt by the system* before it is noticed by a customer. |
-| **I6** | High-tier reasoning context includes **only** VERIFIED, unexpired, **non-provisional** claims. | Onboarding-inferred reality must never trigger autonomous action. |
-| **I7** | Append-only. Supersede by writing a new row + link; never rewrite history. | Replay and blame are not optional. |
+| **I2** | FACT and MEASUREMENT require `SYSTEM_OF_RECORD` or `MEASURED` provenance — **regardless of author**.                                                                          | A confident, well-sourced-sounding vendor blog is still self-serving.                                                                       |
+| **I3** | Every claim has a named human owner. No orphans.                                                                                                                              | Accountability must survive agent autonomy.                                                                                                 |
+| **I4** | A `contradicts` link flips both claims to DISPUTED and opens a resolution ticket.                                                                                             | Contradiction must be an event, never silence. Silent contradiction is how two teams ship two different truths.                             |
+| **I5** | `valid_until` expiry ⇒ STALE, computed on a sweep.                                                                                                                            | Staleness must be _felt by the system_ before it is noticed by a customer.                                                                  |
+| **I6** | High-tier reasoning context includes **only** VERIFIED, unexpired, **non-provisional** claims.                                                                                | Onboarding-inferred reality must never trigger autonomous action.                                                                           |
+| **I7** | Append-only. Supersede by writing a new row + link; never rewrite history.                                                                                                    | Replay and blame are not optional.                                                                                                          |
 
 ### 4.4 Decision records
 
@@ -143,7 +143,7 @@ v1's biggest idea and its vaguest mechanism. "Monitor what's relevant" is not a 
 
 ### 5.1 Genome → Watch Contract
 
-The Company Genome is authored *with* a human, then **compiled into an executable contract**: entities, predicates, a **materiality gate** (a signal must link to a live GOAL or a revenue/cost/risk path), sources with trust tiers and rate budgets, thresholds, cost caps, and a 30-day re-review date.
+The Company Genome is authored _with_ a human, then **compiled into an executable contract**: entities, predicates, a **materiality gate** (a signal must link to a live GOAL or a revenue/cost/risk path), sources with trust tiers and rate budgets, thresholds, cost caps, and a 30-day re-review date.
 
 Attention stops being a vibe. It becomes a query plan with a bill attached.
 
@@ -170,7 +170,7 @@ A world model that feeds strategy is an **adversarial target**. A competitor can
 - mention-spike anomaly check (account age, co-timing clustering);
 - **external text is quoted data, never a system role, never a tool selector.**
 
-QM already screens *tool results* through a provenance-labelled classifier and exposes a `securityScreen` proxy contract (`user_input` / `tool_response` hooks, score/threshold, shadow or enforce, **fails closed**). Our Integrity Gate is the sibling that covers *world-model inputs*, which is a different trust problem: QM asks "is this content trying to hijack the agent?" We ask "is this content trying to hijack the company's strategy?"
+QM already screens _tool results_ through a provenance-labelled classifier and exposes a `securityScreen` proxy contract (`user_input` / `tool_response` hooks, score/threshold, shadow or enforce, **fails closed**). Our Integrity Gate is the sibling that covers _world-model inputs_, which is a different trust problem: QM asks "is this content trying to hijack the agent?" We ask "is this content trying to hijack the company's strategy?"
 
 ---
 
@@ -178,15 +178,15 @@ QM already screens *tool results* through a provenance-labelled classifier and e
 
 The user-facing model is exactly what it should look like: **each team has a channel, each channel has a room agent, humans talk to their own agent, and cross-team work happens visibly in the open.**
 
-What must *not* happen is the naive version: an agent hopping into another channel and asking another agent a question in free text. That single design choice resurrects three of the four problems v1 itself listed as unsolved.
+What must _not_ happen is the naive version: an agent hopping into another channel and asking another agent a question in free text. That single design choice resurrects three of the four problems v1 itself listed as unsolved.
 
 ### 6.1 Three message classes — collapsing them is the bug
 
-| | What it is | Budget | Refusable? | Interrupts a human? |
-|---|---|---|---|---|
-| **QUERY** | read-only question | tokens only | yes | **never** |
-| **REQUEST** | real work with a deliverable | full bid: owner, deadline, $, rounds, stop condition | **yes — refusal is a logged outcome** | only in the *origin* channel |
-| **NOTICE** | FYI | none | n/a | **never — digest only** |
+|             | What it is                   | Budget                                               | Refusable?                            | Interrupts a human?          |
+| ----------- | ---------------------------- | ---------------------------------------------------- | ------------------------------------- | ---------------------------- |
+| **QUERY**   | read-only question           | tokens only                                          | yes                                   | **never**                    |
+| **REQUEST** | real work with a deliverable | full bid: owner, deadline, $, rounds, stop condition | **yes — refusal is a logged outcome** | only in the _origin_ channel |
+| **NOTICE**  | FYI                          | none                                                 | n/a                                   | **never — digest only**      |
 
 ### 6.2 What actually crosses a channel boundary
 
@@ -212,7 +212,7 @@ Hop limit (3) · cycle detection via inherited hop chain · idempotency dedupe (
 
 ### 6.4 Room agent vs worker — the cost discipline
 
-- **Room agent = a scope.** Durable. Owns memory, files, keychain, permissions, crons, sandbox. Cheap to have many, because it is a *configuration*, not a running process.
+- **Room agent = a scope.** Durable. Owns memory, files, keychain, permissions, crons, sandbox. Cheap to have many, because it is a _configuration_, not a running process.
 - **Workers = ephemeral processes.** Spawned by a request or cron, die on completion. These are what must not accumulate.
 
 This is how v1's promise — "prevents a company accumulating 200 permanent agents" — actually holds. Agent count becomes a governed metric with a kill condition, not a vanity number.
@@ -231,15 +231,15 @@ Four execution classes, not v1's seven tiers. Fewer classes = fewer misroute sur
 
 **R1 Deterministic first.** A registry of task types → rules handles the bulk of traffic with zero learned inference. The model-based layer only sees ambiguous input.
 
-**R2 Shadow until proven.** `controlRate` starts at **0**: the router logs what it *would* have chosen while a fixed safe policy executes. Control is granted only after routing precision clears its gate (≥2,000 labelled samples at ≥0.90).
+**R2 Shadow until proven.** `controlRate` starts at **0**: the router logs what it _would_ have chosen while a fixed safe policy executes. Control is granted only after routing precision clears its gate (≥2,000 labelled samples at ≥0.90).
 
-**R3 Asymmetric loss.** For irreversible actions, misrouting *down* is catastrophic. The router therefore **fails up**. A pricing change or external publish never executes on a confident-but-wrong low tier.
+**R3 Asymmetric loss.** For irreversible actions, misrouting _down_ is catastrophic. The router therefore **fails up**. A pricing change or external publish never executes on a confident-but-wrong low tier.
 
 **R4 Error budgets per tier.** Exceed budget → auto-revert that tier to the fixed policy.
 
 **R5 Coupling guard.** A Skill Card may only run at the tier it was validated at, in a scope it was validated for. This is what stops §7 and §8 from compounding each other's errors.
 
-*Note: QM already ships `src/harness/harness-router.ts` — approved-harness lists, per-scope runtime selection, model/thinking-level/fast-mode resolution. Our router sits **above** that: it decides whether a task should be a rule, a compiled workflow, a model call, or a human. QM's decides which harness and model to use once we've said "MODEL." Different layer, no overlap.*
+_Note: QM already ships `src/harness/harness-router.ts` — approved-harness lists, per-scope runtime selection, model/thinking-level/fast-mode resolution. Our router sits **above** that: it decides whether a task should be a rule, a compiled workflow, a model call, or a human. QM's decides which harness and model to use once we've said "MODEL." Different layer, no overlap._
 
 ---
 
@@ -247,7 +247,7 @@ Four execution classes, not v1's seven tiers. Fewer classes = fewer misroute sur
 
 The strongest original idea in v1, and the one with real research behind it. The AFTER benchmark finds procedural memory yields genuine gains (single refinement round +3.7–6.7 points; skills evolved from diverse multi-model traces hit 73.1% cross-model accuracy) **but that skills specialize to their origin role and lose effectiveness under transfer** ([arXiv 2606.23127](https://arxiv.org/abs/2606.23127)).
 
-That finding *is* the product spec. A compiler that ignores it manufactures brittle procedures and deploys them too broadly.
+That finding _is_ the product spec. A compiler that ignores it manufactures brittle procedures and deploys them too broadly.
 
 ### 8.1 Lifecycle
 
@@ -266,7 +266,7 @@ Advance **one step at a time**, each step through an explicit gate. Demotion is 
 ### 8.3 The gates
 
 - **Compilation refuses bad teachers.** No trace with `UNRESOLVED` outcome; no trace the router flagged below 0.5 confidence. A compiler that learns from traces the router doubted manufactures bad procedures.
-- **→ SHADOW** requires passing regression tests and an eval-suite reference. *The eval is written before the fix.*
+- **→ SHADOW** requires passing regression tests and an eval-suite reference. _The eval is written before the fix._
 - **→ BOUNDED_PILOT** requires cross-model transfer + ≥20 shadow runs at ≥0.90.
 - **→ PROMOTED** requires regression + cross-model + data-regime, and ≥50 pilot runs at ≥0.95.
 - **Scope expansion is a separate act from promotion.** A card promoted in Marketing may not serve Sales until a `cross_role` transfer test passes **for Sales specifically**.
@@ -281,35 +281,35 @@ QM's skill registry imports `SKILL.md` packs from git with a `trustTier: interna
 
 EWMA over a rolling window of live outcomes vs. the validated baseline. Breach ⇒ auto-demote + drift ticket. Silent degradation is the failure mode that kills compiled systems, and it is the one nobody demos.
 
-> **Moat scope, corrected 2026-09-15 (§29.4).** The compiler's *plumbing* is now commoditised twice — QM's skill registry and TencentDB Agent Memory's Skills both ship versions, trigger boundaries, validation rules and review-gated sharing. What remains ours is only the **evidence layer**: transfer testing, quarantine, and drift-triggered auto-demote. Never claim the compiler as a differentiator wholesale; claim the gate.
+> **Moat scope, corrected 2026-09-15 (§29.4).** The compiler's _plumbing_ is now commoditised twice — QM's skill registry and TencentDB Agent Memory's Skills both ship versions, trigger boundaries, validation rules and review-gated sharing. What remains ours is only the **evidence layer**: transfer testing, quarantine, and drift-triggered auto-demote. Never claim the compiler as a differentiator wholesale; claim the gate.
 
 ---
 
 ## 9. Autonomy and governance
 
-v1 proposed a seven-rung ladder: read → observe → analyze → propose → draft → execute-with-approval → autonomous. **Ladders are wrong**, because they imply *global* promotion per agent. Autonomy must be granted per **action class × scope**.
+v1 proposed a seven-rung ladder: read → observe → analyze → propose → draft → execute-with-approval → autonomous. **Ladders are wrong**, because they imply _global_ promotion per agent. Autonomy must be granted per **action class × scope**.
 
 ### 9.1 R/A/I matrix
 
-| Action class | Example | Default | Promotion requires |
-|---|---|---|---|
-| `READ` | query systems | autonomous | — |
-| `ANALYZE` | summarise, model | autonomous | eval pass |
-| `RECOMMEND` | propose to a human | autonomous | precision ≥ threshold |
-| `ACT_REVERSIBLE` | draft, schedule, internal ticket, feature flag | approval → autonomous | Trust Ledger + 200 clean instances |
+| Action class       | Example                                                     | Default                   | Promotion requires                                      |
+| ------------------ | ----------------------------------------------------------- | ------------------------- | ------------------------------------------------------- |
+| `READ`             | query systems                                               | autonomous                | —                                                       |
+| `ANALYZE`          | summarise, model                                            | autonomous                | eval pass                                               |
+| `RECOMMEND`        | propose to a human                                          | autonomous                | precision ≥ threshold                                   |
+| `ACT_REVERSIBLE`   | draft, schedule, internal ticket, feature flag              | approval → autonomous     | Trust Ledger + 200 clean instances                      |
 | `ACT_IRREVERSIBLE` | publish, price change, refund, contract, prod deploy, spend | **human command, always** | legal review + named officer; **not offered in year 1** |
 
-QM's org-wide **Strict / Auto / Dangerous** postures are the *substrate*; the matrix is the *policy* layered on it. Money-touching, customer-facing and production scopes are pinned to Strict in the deployment config so no agent can loosen it — QM's rule is that narrower scopes may only tighten, which is exactly the direction we want.
+QM's org-wide **Strict / Auto / Dangerous** postures are the _substrate_; the matrix is the _policy_ layered on it. Money-touching, customer-facing and production scopes are pinned to Strict in the deployment config so no agent can loosen it — QM's rule is that narrower scopes may only tighten, which is exactly the direction we want.
 
 ### 9.2 Anti-approval-fatigue machinery
 
 A human who approves 200 items a day is not providing oversight; they are a bottleneck with a signature.
 
 - **Honeytasks** — seeded known-good/known-bad items in the approval stream, measuring whether humans are actually reading.
-- **Approval sampling** — a random percentage of *auto-approved* items forced into deep human review, detecting silent drift.
+- **Approval sampling** — a random percentage of _auto-approved_ items forced into deep human review, detecting silent drift.
 - **Batch ceilings** — batching allowed only for reversible, low-blast-radius actions.
 - **Automatic autonomy freeze** when human bad-item detection drops below threshold.
-- **Silence budget** — each capability must justify why it *didn't* speak. Reported quarterly.
+- **Silence budget** — each capability must justify why it _didn't_ speak. Reported quarterly.
 
 ### 9.3 Kill switches
 
@@ -337,7 +337,7 @@ feedback / failure → failure pattern (clustered) → EVAL CASE added FIRST
 
 ### 10.1 Attribution — results must be counterfactual
 
-Narrative causality ("the campaign worked") is not an OUTCOME. An OUTCOME requires a measurement basis: holdout lanes, segment/geo splits, pre-registered metrics, and a comparison against a baseline that was agreed *before* the pilot started. The pre-registration step is the anti-self-deception control, and it is the direct answer to the 95% pilot-failure finding.
+Narrative causality ("the campaign worked") is not an OUTCOME. An OUTCOME requires a measurement basis: holdout lanes, segment/geo splits, pre-registered metrics, and a comparison against a baseline that was agreed _before_ the pilot started. The pre-registration step is the anti-self-deception control, and it is the direct answer to the 95% pilot-failure finding.
 
 ---
 
@@ -356,7 +356,7 @@ decision_id → Σ(inference $ + tool $ + human_minutes × loaded rate + retry c
 2. **% of work at REFLEX/WORKFLOW tier** — should rise.
 3. **Human minutes reclaimed vs. consumed by oversight** — net, honestly.
 
-This is what makes v1's "the longer the organisation operates, the less intelligence it needs for routine work" a *falsifiable curve* instead of a rhetorical flourish. And cost is a leading cited cause of agentic project cancellation, so this panel is a retention feature, not a demo.
+This is what makes v1's "the longer the organisation operates, the less intelligence it needs for routine work" a _falsifiable curve_ instead of a rhetorical flourish. And cost is a leading cited cause of agentic project cancellation, so this panel is a retention feature, not a demo.
 
 ---
 
@@ -366,11 +366,11 @@ Absent from v1 entirely. Non-optional here, because QM's model is "the agent act
 
 - **Untrusted-content quarantine** — external text is sanitised and rendered as quoted data with source chrome; never in a system role.
 - **No scope holds both read-secrets and external egress.** Enforced via QM's capability-token egress proxy (`egress-authz`), which already implements host allow/deny policy, SSRF/IP-blocklist protection including cloud metadata endpoints, and an egress audit sink. We configure it; we do not rebuild it.
-- **Prompt-injection red-team suite in CI**, re-run on every model *and* every harness swap.
+- **Prompt-injection red-team suite in CI**, re-run on every model _and_ every harness swap.
 - **Rebuildable sandboxes from a manifest** — persistence must never be trust-bearing.
 - **Immutable audit log separate from the Ledger**, so a compromised runtime cannot erase its own trail.
 - **Tenant isolation** at storage and index level; no cross-tenant embedding leakage. Data residency, PII classification, erasure path.
-- **The Ledger is exportable.** Lock-in by value, not by hostage-taking — and this is a *sales asset* against the black-box objection.
+- **The Ledger is exportable.** Lock-in by value, not by hostage-taking — and this is a _sales asset_ against the black-box objection.
 
 ---
 
@@ -378,15 +378,15 @@ Absent from v1 entirely. Non-optional here, because QM's model is "the agent act
 
 Nine questions per capability (observe / state / triggers / understands / influences / executes / measures / escalates / stays silent), plus **two mandatory additions**: an outcome metric and a **kill condition**.
 
-| Capability | Core state | Outcome metric | Dies when |
-|---|---|---|---|
-| **Market** | opportunity/threat register | qualified opportunities adopted; threats acted on in time | opportunity→decision conversion < baseline 2 quarters running |
-| **Customer** | pain/need patterns | % of churn/CSAT variance explained | patterns never confirmed by Product |
-| **Product** | problems, hypotheses, experiments | validated-value rate; prediction accuracy | roadmap inputs ignored by humans |
-| **Marketing** | brand/positioning/campaign model | pipeline & activation lift per launch | drafts need >X% human rewrite |
-| **Sales** | win/loss learning register | win-rate delta; loss-reason coverage | loss reasons stay "unknown" |
-| **Engineering** | system/quality state | change-failure rate, MTTR, cost/deploys | releases don't trigger downstream action |
-| **Finance** | runway/forecast/cost model | forecast error; **cost per good decision** | attribution untrusted |
+| Capability      | Core state                        | Outcome metric                                            | Dies when                                                     |
+| --------------- | --------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------- |
+| **Market**      | opportunity/threat register       | qualified opportunities adopted; threats acted on in time | opportunity→decision conversion < baseline 2 quarters running |
+| **Customer**    | pain/need patterns                | % of churn/CSAT variance explained                        | patterns never confirmed by Product                           |
+| **Product**     | problems, hypotheses, experiments | validated-value rate; prediction accuracy                 | roadmap inputs ignored by humans                              |
+| **Marketing**   | brand/positioning/campaign model  | pipeline & activation lift per launch                     | drafts need >X% human rewrite                                 |
+| **Sales**       | win/loss learning register        | win-rate delta; loss-reason coverage                      | loss reasons stay "unknown"                                   |
+| **Engineering** | system/quality state              | change-failure rate, MTTR, cost/deploys                   | releases don't trigger downstream action                      |
+| **Finance**     | runway/forecast/cost model        | forecast error; **cost per good decision**                | attribution untrusted                                         |
 
 **Missions are ephemeral by default.** "Should we enter Germany?" spawns a temporary team, executes under a bid, is mined for knowledge, is recorded as a DECISION + Context Bundle, and archives.
 
@@ -396,11 +396,11 @@ Nine questions per capability (observe / state / triggers / understands / influe
 
 Three products, not one chat box:
 
-| Surface | Job | Anti-pattern avoided |
-|---|---|---|
-| **Feed** | "3 things matter today" — ranked, capped, digestible | notification overload |
-| **Room** | humans + agents collaborate: conversation **+ live state + evidence + decision + owner** | black-box agents |
-| **Ledger** | replay: why did we do this, who approved, what happened, what did it cost | unaccountable automation |
+| Surface    | Job                                                                                      | Anti-pattern avoided     |
+| ---------- | ---------------------------------------------------------------------------------------- | ------------------------ |
+| **Feed**   | "3 things matter today" — ranked, capped, digestible                                     | notification overload    |
+| **Room**   | humans + agents collaborate: conversation **+ live state + evidence + decision + owner** | black-box agents         |
+| **Ledger** | replay: why did we do this, who approved, what happened, what did it cost                | unaccountable automation |
 
 Feed and Room are **Buzz**. We do not build chat — that is career-ending in 2026. The Ledger is our only bespoke surface, and it is a read-model over Postgres.
 
@@ -412,7 +412,7 @@ Feed and Room are **Buzz**. We do not build chat — that is career-ending in 20
 
 > A product change is detected → the system produces a **verified change summary** → identifies affected segments → drafts launch, support and sales assets → routes them for **human approval in the room they're already in** → executes approved steps → measures the outcome → writes DECISION + OUTCOME + Context Bundle to the Ledger → the whole chain becomes a TRACE for a candidate Skill Card.
 
-**Why this wedge survives the market's failure pattern.** Recurring (every release), cross-functional by construction, close to revenue, executive-visible, measurable in 30 days, exercises every core subsystem at low blast radius — and on this stack it is nearly free, because Buzz *has* repos (release detection is a native event), Buzz *has* rooms (the approval surface exists day one), QM *has* crons/watches/webhooks (the trigger machinery exists), and jcode *already does* the engineering half.
+**Why this wedge survives the market's failure pattern.** Recurring (every release), cross-functional by construction, close to revenue, executive-visible, measurable in 30 days, exercises every core subsystem at low blast radius — and on this stack it is nearly free, because Buzz _has_ repos (release detection is a native event), Buzz _has_ rooms (the approval surface exists day one), QM _has_ crons/watches/webhooks (the trigger machinery exists), and jcode _already does_ the engineering half.
 
 **Pre-registered success metrics** (agreed before pilot start): ship→launch-ready time −50% · human hours per launch −40% · customer-facing claim error <1% and zero regulatory · support-ticket delta vs holdout · feature-adoption lift vs holdout · cost per launch net-positive · stale facts caught by system before human >0 · override rate falling.
 
@@ -422,28 +422,28 @@ Feed and Room are **Buzz**. We do not build chat — that is career-ending in 20
 
 ## 16. The sovereign stack
 
-| | What it is | Our relationship to it |
-|---|---|---|
-| **[Buzz](https://buzz.xyz)** | Block/Jack Dorsey, launched 21 Jul 2026. Rust + TS, **Apache 2.0**, built on **Nostr** over a relay you own. Channels, threads, DMs, voice, **git repos**, workflows. Every agent gets its **own cryptographic identity**. Model-agnostic, self-hosted, self-sovereign. | **The talk layer.** We render into it and bind claim IDs to signed events. We never store claims in it. |
-| **[QM](https://github.com/yc-software/qm)** | "Multiplayer agent harness for work." MIT. Each person and each room has its own scoped memory, files, keychain view, permissions, crons, web apps, durable sandbox. Harness-agnostic (Pi, OpenCode, Codex, Claude Code) over one core + Postgres. Strict/Auto/Dangerous postures. Git-imported skill packs with trust tiers and admin-gated org promotion. | **A source we absorb from, not a host we run on.** We vendor its leaf modules (§16.2) and build our own substrate. Its *design* is the best free thing it gives us. |
-| **[jcode](https://github.com/1jehuang/jcode)** | **Rust** (1,198 `.rs`, **0** `.go`), MIT, v0.84.0, YC-launched, `jcode.sh`. Cargo workspace of ~40 crates: fast TUI, multi-model, swarm coordination, 30+ tools, local-embedding + graph memory (async, non-blocking), MCP, background/overnight runs. Ships a **TypeScript SDK**, per-platform npm binaries, and `jcode-harness-api` (client/events/requests/sockets). | **The hands** — but see §16.3: it is **not** a QM harness, so it is driven as a sibling process, not mounted inside QM. |
+|                                                | What it is                                                                                                                                                                                                                                                                                                                                                              | Our relationship to it                                                                                                                                              |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **[Buzz](https://buzz.xyz)**                   | Block/Jack Dorsey, launched 21 Jul 2026. Rust + TS, **Apache 2.0**, built on **Nostr** over a relay you own. Channels, threads, DMs, voice, **git repos**, workflows. Every agent gets its **own cryptographic identity**. Model-agnostic, self-hosted, self-sovereign.                                                                                                 | **The talk layer.** We render into it and bind claim IDs to signed events. We never store claims in it.                                                             |
+| **[QM](https://github.com/yc-software/qm)**    | "Multiplayer agent harness for work." MIT. Each person and each room has its own scoped memory, files, keychain view, permissions, crons, web apps, durable sandbox. Harness-agnostic (Pi, OpenCode, Codex, Claude Code) over one core + Postgres. Strict/Auto/Dangerous postures. Git-imported skill packs with trust tiers and admin-gated org promotion.             | **A source we absorb from, not a host we run on.** We vendor its leaf modules (§16.2) and build our own substrate. Its _design_ is the best free thing it gives us. |
+| **[jcode](https://github.com/1jehuang/jcode)** | **Rust** (1,198 `.rs`, **0** `.go`), MIT, v0.84.0, YC-launched, `jcode.sh`. Cargo workspace of ~40 crates: fast TUI, multi-model, swarm coordination, 30+ tools, local-embedding + graph memory (async, non-blocking), MCP, background/overnight runs. Ships a **TypeScript SDK**, per-platform npm binaries, and `jcode-harness-api` (client/events/requests/sockets). | **The hands** — but see §16.3: it is **not** a QM harness, so it is driven as a sibling process, not mounted inside QM.                                             |
 
 ### 16.1 What QM already has — the design to copy, the code to weigh
 
 Reading actual source rather than a README changed the plan twice. First it showed how much exists; then it showed we cannot simply run on top of it.
 
-| QM module | What it does | Consequence for us |
-|---|---|---|
-| `harness/harness-router.ts` | approved-harness lists, per-scope runtime selection, model/thinking/fast-mode resolution | Our router sits **above** it (which tier), not beside it |
-| `loops/governor.ts` | loop health: quarantine/throttle/ping, consecutive-failure and return-rate thresholds | **148 lines, imports only `../types.ts` — the single cleanest absorb candidate.** Same semantics as our budget-death + auto-demote |
-| `loops/ship-gate.ts` | `undeclaredShipActions` — actions a loop took that it never declared | **Exactly our R/A/I enforcement primitive.** 73 lines; needs `trigger-store` + `util/crypto` |
-| `idempotency/` | durable `once(key, fn)` with retention | 79 lines + `persistence/durable-map` (310). Our REQUEST dedupe delegates here |
+| QM module                                   | What it does                                                                             | Consequence for us                                                                                                                                            |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness/harness-router.ts`                 | approved-harness lists, per-scope runtime selection, model/thinking/fast-mode resolution | Our router sits **above** it (which tier), not beside it                                                                                                      |
+| `loops/governor.ts`                         | loop health: quarantine/throttle/ping, consecutive-failure and return-rate thresholds    | **148 lines, imports only `../types.ts` — the single cleanest absorb candidate.** Same semantics as our budget-death + auto-demote                            |
+| `loops/ship-gate.ts`                        | `undeclaredShipActions` — actions a loop took that it never declared                     | **Exactly our R/A/I enforcement primitive.** 73 lines; needs `trigger-store` + `util/crypto`                                                                  |
+| `idempotency/`                              | durable `once(key, fn)` with retention                                                   | 79 lines + `persistence/durable-map` (310). Our REQUEST dedupe delegates here                                                                                 |
 | `egress-authz` + `auth/capability-token.ts` | capability tokens, host allow/deny, SSRF + cloud-metadata IP blocking, egress audit sink | **Copy the design, including its blocklist** (`169.254.0.0/16`, `fd00:ec2::254`, `metadata.goog`). This is the hardest thing on the list to rebuild correctly |
-| `securityScreen` proxy contract | `user_input`/`tool_response` hooks, score/threshold, shadow/enforce, **fails closed** | Our Integrity Gate adopts the same shape. Ours covers world-model *inputs*; theirs covers tool results |
-| `skills/` + `skill-registry.md` | git pack import, normalizer, eligibility, `trustTier`, admin-gated publish, sync engine | 1,940 lines and tightly coupled. **Adopt the model, do not vendor it** |
-| `memory/strategies/` | per-turn, agent-only, consolidation, scratch-promote; provider router to external stores | Confirms our separation: memory is where agents work, the Ledger is where claims live |
-| `cron` / `monitors` / `webhooks` / `wake` | schedulers, pollers, verifiers, background wake | **Substrate, not absorbable** — entangled with Slack/E2B/Modal/Fly/AWS. We build our own, smaller |
-| `policy/command-policy.ts` | predeclared approvals + hard denials, applied in **every** posture including Dangerous | 911 lines, needs `types` + `safe-regex` + `errors`. **Absorb**: the hard-deny list is battle-tested thinking |
+| `securityScreen` proxy contract             | `user_input`/`tool_response` hooks, score/threshold, shadow/enforce, **fails closed**    | Our Integrity Gate adopts the same shape. Ours covers world-model _inputs_; theirs covers tool results                                                        |
+| `skills/` + `skill-registry.md`             | git pack import, normalizer, eligibility, `trustTier`, admin-gated publish, sync engine  | 1,940 lines and tightly coupled. **Adopt the model, do not vendor it**                                                                                        |
+| `memory/strategies/`                        | per-turn, agent-only, consolidation, scratch-promote; provider router to external stores | Confirms our separation: memory is where agents work, the Ledger is where claims live                                                                         |
+| `cron` / `monitors` / `webhooks` / `wake`   | schedulers, pollers, verifiers, background wake                                          | **Substrate, not absorbable** — entangled with Slack/E2B/Modal/Fly/AWS. We build our own, smaller                                                             |
+| `policy/command-policy.ts`                  | predeclared approvals + hard denials, applied in **every** posture including Dangerous   | 911 lines, needs `types` + `safe-regex` + `errors`. **Absorb**: the hard-deny list is battle-tested thinking                                                  |
 
 ### 16.2 Why absorbing beats depending (and what it costs)
 
@@ -453,23 +453,23 @@ The earlier version of this section was titled "Why composition beats constructi
 2. **COGS stays low** — AWS Fargate/RDS/Lambda + open harnesses + aggressive L0/L1 triage. No per-seat margin anxiety. (Unchanged by the switch: we were never paying per-seat for QM.)
 3. **Sovereignty is a live 2026 buying reason** — for EU, fintech, health, and residency-constrained buyers, "your runtime, your boxes, your models" beats any hosted agent platform.
 4. **Harness-agnosticism is a hedge** — we sit above the frontier-model race, so model churn doesn't invalidate us.
-5. **Audit is partly free** — Buzz's signed identities are genuinely free. QM's "everything is audited" posture is now a *pattern we re-implement*, not something we inherit. The audit log, the separate immutable store, and the egress sink are ours.
+5. **Audit is partly free** — Buzz's signed identities are genuinely free. QM's "everything is audited" posture is now a _pattern we re-implement_, not something we inherit. The audit log, the separate immutable store, and the egress sink are ours.
 6. **The moat moves to the right place** — not "our architecture," but the accumulated corpus: claim schemas, watch contracts, transfer-tested skill cards, eval suites, routing calibration, Context Bundles. Portable across harnesses. Compounding per tenant.
 
 ### 16.3 The integration correction (found by reading source, not READMEs)
 
 Two claims that survived three drafts of confident writing were false:
 
-1. **jcode is Rust, not Go.** The project is `1jehuang/jcode` — 1,198 `.rs` files, **0** `.go`, Cargo workspace v0.84.0, MIT, YC-launched. The Go project is `cnjack/jcode`, an entirely different codebase that happens to share the name. We cloned the wrong one, then *rewrote our own correct documentation to match the wrong clone* — which is the exact failure mode the Reality Ledger exists to prevent: a confident, well-sourced-sounding assertion that was wrong because its provenance was a mistake.
+1. **jcode is Rust, not Go.** The project is `1jehuang/jcode` — 1,198 `.rs` files, **0** `.go`, Cargo workspace v0.84.0, MIT, YC-launched. The Go project is `cnjack/jcode`, an entirely different codebase that happens to share the name. We cloned the wrong one, then _rewrote our own correct documentation to match the wrong clone_ — which is the exact failure mode the Reality Ledger exists to prevent: a confident, well-sourced-sounding assertion that was wrong because its provenance was a mistake.
 2. **QM cannot drive jcode as a harness.** QM's approved-harness set is `pi | opencode | codex | claude` (`src/model/pi-models.ts`), and the string "jcode" appears **zero** times across QM's `src/`, `plugins/` and `docs/`. So "Engineering scope → harness = jcode" was never implementable as drawn.
 
-**The real integration.** jcode ships `crates/jcode-harness-api` (client · events · requests · sockets) plus a **TypeScript SDK** with per-platform npm binaries. So Vital drives jcode as a **sibling process over that API** — the same coordination path as everything else: a REQUEST with a bid, a deliverable, claims written back — rather than QM mounting it. Engineering scope keeps a *QM* harness for in-sandbox work; jcode is used where its strengths are real: swarms, long background/overnight runs, RAM efficiency, and its own memory graph.
+**The real integration.** jcode ships `crates/jcode-harness-api` (client · events · requests · sockets) plus a **TypeScript SDK** with per-platform npm binaries. So Vital drives jcode as a **sibling process over that API** — the same coordination path as everything else: a REQUEST with a bid, a deliverable, claims written back — rather than QM mounting it. Engineering scope keeps a _QM_ harness for in-sandbox work; jcode is used where its strengths are real: swarms, long background/overnight runs, RAM efficiency, and its own memory graph.
 
-**A pattern worth stealing.** jcode's `crates/jcode-command-risk/src/gate.rs` is a deterministic, explicitly **non-model** refusal gate. Its stated reasoning is our problem statement: an LLM judge is expensive, adds latency to every borderline call, and *"can be talked around by the same reasoning that produced the command."* So instead it refuses once and returns a structured prompt forcing the **generating** model to supply a `justification` naming what the user actually asked for — and *"the refusal is not satisfiable by repetition: a blind retry of the identical call fails again."*
+**A pattern worth stealing.** jcode's `crates/jcode-command-risk/src/gate.rs` is a deterministic, explicitly **non-model** refusal gate. Its stated reasoning is our problem statement: an LLM judge is expensive, adds latency to every borderline call, and _"can be talked around by the same reasoning that produced the command."_ So instead it refuses once and returns a structured prompt forcing the **generating** model to supply a `justification` naming what the user actually asked for — and _"the refusal is not satisfiable by repetition: a blind retry of the identical call fails again."_
 
 That is a better mechanism than ours for the same failure mode. Our honeytasks measure whether **humans** are rubber-stamping; jcode's gate makes **agent** rubber-stamping structurally impossible at the point of action, with no extra model in the loop. Adopt it for `ACT_*` escalation: a refusal clearable only by new information, never by retry.
 
-**Net — and this number moved twice.** The first read of QM's source suggested ~60% of the build already existed. That was measured against *running on* QM. Once the plan became *absorb from* QM, the figure fell, because most of what we were counting is substrate we now own: scoped sandboxes, the scheduler, crons/monitors/webhooks, the egress proxy, the skill registry, the web UI and the Slack plugin. QM's own dependency list is the tell — `@anthropic-ai/claude-agent-sdk`, `@openai/codex`, `opencode-ai`, `@slack/*`, `e2b`, `modal`, AWS SDK, fastify. Absorbing all of that is not a startup, it is a fork.
+**Net — and this number moved twice.** The first read of QM's source suggested ~60% of the build already existed. That was measured against _running on_ QM. Once the plan became _absorb from_ QM, the figure fell, because most of what we were counting is substrate we now own: scoped sandboxes, the scheduler, crons/monitors/webhooks, the egress proxy, the skill registry, the web UI and the Slack plugin. QM's own dependency list is the tell — `@anthropic-ai/claude-agent-sdk`, `@openai/codex`, `opencode-ai`, `@slack/*`, `e2b`, `modal`, AWS SDK, fastify. Absorbing all of that is not a startup, it is a fork.
 
 **What we actually take** is leaf modules with light coupling, MIT-licensed, vendored with pinned provenance headers and a `LICENSE-THIRD-PARTY.md`:
 
@@ -482,7 +482,7 @@ That is a better mechanism than ours for the same failure mode. Our honeytasks m
 
 **What we explicitly do not take:** `loops/item-ledger.ts` (504 lines, imports `slack/mrkdwn` — a Slack dependency in a ledger is the wrong shape), and any of the substrate above.
 
-**So the honest scope statement is:** we are building a runtime with a *head start in design and a few hundred lines of proven policy code*, not assembling a platform out of other people's services. Genuinely-new work: the **typed claim ledger**, the **eval spine**, the **attribution layer**, the **R/A/I matrix + Trust Ledger + honeytasks**, the **Watch Contract compiler**, the **transfer-testing gates**, and now **our own sandbox/scheduler/egress substrate**.
+**So the honest scope statement is:** we are building a runtime with a _head start in design and a few hundred lines of proven policy code_, not assembling a platform out of other people's services. Genuinely-new work: the **typed claim ledger**, the **eval spine**, the **attribution layer**, the **R/A/I matrix + Trust Ledger + honeytasks**, the **Watch Contract compiler**, the **transfer-testing gates**, and now **our own sandbox/scheduler/egress substrate**.
 
 That is a bigger build than §16 claimed an hour ago. It is still smaller than v2's greenfield platform, and the research-adjacent parts are still the parts nobody has solved.
 
@@ -551,19 +551,19 @@ That is a bigger build than §16 claimed an hour ago. It is still smaller than v
 
 ## 18. Roadmap with exit gates
 
-| Phase | Time | Build | **Gate to proceed** |
-|---|---|---|---|
-| **0 Substrate + vendoring** | 3w | Vital core skeleton; `src/vendor/qm/` with provenance headers + `LICENSE-THIRD-PARTY.md`; jcode driven over harness-api; Buzz instance; one reference topology; end-to-end verify in CI | vendored files isolated and pinned; a jcode session runs end-to-end; a stranger boots the topology from the README |
-| **1 Ledger v0** | 3w | claim schema; signature binding; read-only release ingestion | 100 claims populated; stale-fact rate measurable; **zero actions taken** |
-| **2 Ship-to-Result** | 5w | change summary + asset drafting + Buzz approval + outcome capture | ≥50 launches; time/hours delta proven; claim error <1% |
-| **3 Eval spine** | 4w | evals per capability; honeytasks; attribution holdouts | every capability has a **failing** eval before it gets a new feature |
-| **4 Router shadow** | 4w | 4-class router in shadow; calibration; error budgets | precision ≥ gate on 2,000 labelled tasks |
-| **5 Compiler** | 6w | Skill Cards, quarantine→promote, transfer tests, drift | ≥10 cards promoted **and** surviving transfer; auto-demote proven in a drill |
-| **6 Sense** | 6w | Watch Contracts, materiality, Integrity Gate, Market+Customer scopes | beats a curated human watchlist on precision/recall at lower cost; zero poisoning incidents |
-| **7 Act** | ongoing | `ACT_REVERSIBLE` autonomy via Trust Ledger | honeytask detection ≥ threshold; kill-switch drills pass; legal review |
-| **8 Runtime** | 12mo+ | expand beyond launches; sell to COO/CFO | `cost_per_good_decision` falling **3 consecutive quarters** — the only proof the thesis is true |
+| Phase                       | Time    | Build                                                                                                                                                                                   | **Gate to proceed**                                                                                                |
+| --------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **0 Substrate + vendoring** | 3w      | Vital core skeleton; `src/vendor/qm/` with provenance headers + `LICENSE-THIRD-PARTY.md`; jcode driven over harness-api; Buzz instance; one reference topology; end-to-end verify in CI | vendored files isolated and pinned; a jcode session runs end-to-end; a stranger boots the topology from the README |
+| **1 Ledger v0**             | 3w      | claim schema; signature binding; read-only release ingestion                                                                                                                            | 100 claims populated; stale-fact rate measurable; **zero actions taken**                                           |
+| **2 Ship-to-Result**        | 5w      | change summary + asset drafting + Buzz approval + outcome capture                                                                                                                       | ≥50 launches; time/hours delta proven; claim error <1%                                                             |
+| **3 Eval spine**            | 4w      | evals per capability; honeytasks; attribution holdouts                                                                                                                                  | every capability has a **failing** eval before it gets a new feature                                               |
+| **4 Router shadow**         | 4w      | 4-class router in shadow; calibration; error budgets                                                                                                                                    | precision ≥ gate on 2,000 labelled tasks                                                                           |
+| **5 Compiler**              | 6w      | Skill Cards, quarantine→promote, transfer tests, drift                                                                                                                                  | ≥10 cards promoted **and** surviving transfer; auto-demote proven in a drill                                       |
+| **6 Sense**                 | 6w      | Watch Contracts, materiality, Integrity Gate, Market+Customer scopes                                                                                                                    | beats a curated human watchlist on precision/recall at lower cost; zero poisoning incidents                        |
+| **7 Act**                   | ongoing | `ACT_REVERSIBLE` autonomy via Trust Ledger                                                                                                                                              | honeytask detection ≥ threshold; kill-switch drills pass; legal review                                             |
+| **8 Runtime**               | 12mo+   | expand beyond launches; sell to COO/CFO                                                                                                                                                 | `cost_per_good_decision` falling **3 consecutive quarters** — the only proof the thesis is true                    |
 
-**v2 progress (2026-09-09, <!-- vital:testcount -->885/885 tests green<!-- /vital:testcount -->; re-verified 2026-09-17 — quote the fresh number, never this one).** Phase 0 substrate exists
+**v2 progress (2026-09-09, 885/885 tests green; re-verified 2026-09-17 — a dated record of what was true then, deliberately unmarked; the live count lives in the README banner).** Phase 0 substrate exists
 as tested code (scheduler, sandbox, egress core, screen, identity, two
 harness adapters) — deployment, not design, is what's left. Ledger v0 is
 built past its gate shape (decisions, bundles, replay, outcomes, curation
@@ -600,20 +600,20 @@ North star: intelligence cost per good decision (falling)
 
 ## 20. Risk register (top 10)
 
-| Risk | L | I | Mitigation |
-|---|---|---|---|
-| Buyers won't pay for a runtime, only outcomes | H | H | wedge-first GTM; runtime is roadmap, not pitch |
-| **Buzz is ~7 weeks old**; Nostr chat+git unproven as system of record | H | H | Ledger exportable + protocol-independent; Buzz is a surface. **Test the Buzz→Slack swap in Phase 0, not Phase 7** |
-| **QM is young; upstream moves fast** | H | M | **Neutralised by absorbing rather than depending** — no fork, no sync, no drift. New cost: the substrate we inherited is now ours to build and secure, especially egress. Upstream still worth tracking for ideas |
-| We become an infra/support company | H | **H** | **worse now** — absorbing means we own the substrate. Mitigate: one supported topology, automated verification, paid managed tier, and resist custom-config sales asks |
-| Agent holds a person's credentials + reads the open web | H | **H** | no read-secrets+egress in one scope; Strict posture on money/customer/prod; `ACT_IRREVERSIBLE` never autonomous in year 1 |
-| Prompt injection with real teeth (durable sandbox = persistent foothold) | H | **H** | our Integrity Gate + QM-shaped content screen; injection suite in CI; **rebuildable sandboxes** so persistence is never trust-bearing. *We now own this defence rather than inheriting it* |
-| Router never clears its error budget | M | H | deterministic policy carries the bulk; learned layer optional, not load-bearing |
-| Procedures degrade silently across teams | M | H | transfer tests + drift monitors + auto-demote + scoped promotion |
-| Humans rubber-stamp; oversight is theater | H | H | honeytasks, sampling, batch ceilings, automatic autonomy freeze |
-| Platform incumbents / context-layer vendors absorb the niche | H | M | own the decision+procedure+outcome corpus, not the data layer; stay exportable and integration-friendly |
-| **Memory layers commoditise our positioning by proximity** (TDAM ships skills+memory+ACLs free, looks like us lexically) | M | H | sell *provable* not *remembered*; keep the moat claim scoped to transfer-testing/quarantine/drift; publish an **action-correctness** benchmark they cannot answer (§29.5) |
-| **Zero-code on-ramp gap** — their integration is one env var, ours is a week | H | H | build a proxy-shaped Vital on-ramp, or shrink `npx vital init` install surface (§29.3) |
+| Risk                                                                                                                     | L   | I     | Mitigation                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------ | --- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Buyers won't pay for a runtime, only outcomes                                                                            | H   | H     | wedge-first GTM; runtime is roadmap, not pitch                                                                                                                                                                    |
+| **Buzz is ~7 weeks old**; Nostr chat+git unproven as system of record                                                    | H   | H     | Ledger exportable + protocol-independent; Buzz is a surface. **Test the Buzz→Slack swap in Phase 0, not Phase 7**                                                                                                 |
+| **QM is young; upstream moves fast**                                                                                     | H   | M     | **Neutralised by absorbing rather than depending** — no fork, no sync, no drift. New cost: the substrate we inherited is now ours to build and secure, especially egress. Upstream still worth tracking for ideas |
+| We become an infra/support company                                                                                       | H   | **H** | **worse now** — absorbing means we own the substrate. Mitigate: one supported topology, automated verification, paid managed tier, and resist custom-config sales asks                                            |
+| Agent holds a person's credentials + reads the open web                                                                  | H   | **H** | no read-secrets+egress in one scope; Strict posture on money/customer/prod; `ACT_IRREVERSIBLE` never autonomous in year 1                                                                                         |
+| Prompt injection with real teeth (durable sandbox = persistent foothold)                                                 | H   | **H** | our Integrity Gate + QM-shaped content screen; injection suite in CI; **rebuildable sandboxes** so persistence is never trust-bearing. _We now own this defence rather than inheriting it_                        |
+| Router never clears its error budget                                                                                     | M   | H     | deterministic policy carries the bulk; learned layer optional, not load-bearing                                                                                                                                   |
+| Procedures degrade silently across teams                                                                                 | M   | H     | transfer tests + drift monitors + auto-demote + scoped promotion                                                                                                                                                  |
+| Humans rubber-stamp; oversight is theater                                                                                | H   | H     | honeytasks, sampling, batch ceilings, automatic autonomy freeze                                                                                                                                                   |
+| Platform incumbents / context-layer vendors absorb the niche                                                             | H   | M     | own the decision+procedure+outcome corpus, not the data layer; stay exportable and integration-friendly                                                                                                           |
+| **Memory layers commoditise our positioning by proximity** (TDAM ships skills+memory+ACLs free, looks like us lexically) | M   | H     | sell _provable_ not _remembered_; keep the moat claim scoped to transfer-testing/quarantine/drift; publish an **action-correctness** benchmark they cannot answer (§29.5)                                         |
+| **Zero-code on-ramp gap** — their integration is one env var, ours is a week                                             | H   | H     | build a proxy-shaped Vital on-ramp, or shrink `npx vital init` install surface (§29.3)                                                                                                                            |
 
 ---
 
@@ -622,34 +622,34 @@ North star: intelligence cost per good decision (falling)
 Stated so we notice when we're wrong.
 
 1. **Absorbing beats depending, and beats greenfield.** **v2 outcome, 2026-09-09:
-HELD.** Seven QM modules absorbed as narrowed, provenance-pinned vendoring
-(governor, ship-gate, command-policy, crypto, objects, errors, safe-regex);
-idempotency deliberately skipped (our SQLite dedupe already exists — no
-parallel path). Substrate took weeks of design-and-test, not 6 months, so
-the reconsider-QM trigger never fired. The "~8 weeks to first loop" figure
-is still dead (re-estimated ~18–23 weeks solo) — but the cause is pilots
-and rooms, not substrate.
+   HELD.** Seven QM modules absorbed as narrowed, provenance-pinned vendoring
+   (governor, ship-gate, command-policy, crypto, objects, errors, safe-regex);
+   idempotency deliberately skipped (our SQLite dedupe already exists — no
+   parallel path). Substrate took weeks of design-and-test, not 6 months, so
+   the reconsider-QM trigger never fired. The "~8 weeks to first loop" figure
+   is still dead (re-estimated ~18–23 weeks solo) — but the cause is pilots
+   and rooms, not substrate.
 2. **Grounding beats reasoning.** If gains come mostly from swapping to a better model rather than from ledger/eval/transfer quality, there is no moat.
-3. **Procedures transfer, but only some.** Expect a *minority* of cards to survive cross-role/cross-model testing. Build for quarantine, not magic.
+3. **Procedures transfer, but only some.** Expect a _minority_ of cards to survive cross-role/cross-model testing. Build for quarantine, not magic.
 4. **Attention is the binding constraint, not intelligence.** If the customer's bottleneck turns out to be capability rather than coordination, the wedge must move.
-5. **Sovereignty is a buying reason, not a niche preference.** If no EU/fintech/health buyer chooses us *because* we run on their boxes, the self-hosted ops burden isn't justified.
+5. **Sovereignty is a buying reason, not a niche preference.** If no EU/fintech/health buyer chooses us _because_ we run on their boxes, the self-hosted ops burden isn't justified.
 6. **One buyer exists.** If no single executive owns this before IT/Legal/Product all agree, verticalise rather than horizontalise.
 
 ---
 
 ## 22. What was removed from v1, and why
 
-| Removed | Reason |
-|---|---|
-| "AI-native company operating system" as the pitch | no single buyer; invites incumbent comparison; contradicts the pilot-failure evidence |
-| Seven-level autonomy ladder | ladders imply global promotion; replaced by per-action-class R/A/I matrix |
-| Seven-tier cognitive router | misroute surface too large; 4 classes, deterministic-first, shadow-gated |
-| Community/tech/market monitoring at launch | poisoning risk + no materiality mechanism; deferred to Phase 6 |
-| Idea → Company Blueprint → build-a-company | unfalsifiable and far from revenue; kept as a later onboarding mode only |
-| "Prevents 200 permanent agents" as a bullet | promoted to a governed metric: agent count, mission count, per-capability kill conditions |
-| "becomes progressively more efficient" | now a single measurable curve: `cost_per_good_decision`, with a quarterly trend gate |
-| Building our own chat UI | **Buzz exists.** Still true, still the right call |
-| Running Vital *inside* QM as a deployment layer | superseded — we absorb from QM and own the substrate. Costs us the sandbox/scheduler/egress we thought we'd got for free, buys us control and no fork-drift discipline |
+| Removed                                             | Reason                                                                                                                                                                             |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "AI-native company operating system" as the pitch   | no single buyer; invites incumbent comparison; contradicts the pilot-failure evidence                                                                                              |
+| Seven-level autonomy ladder                         | ladders imply global promotion; replaced by per-action-class R/A/I matrix                                                                                                          |
+| Seven-tier cognitive router                         | misroute surface too large; 4 classes, deterministic-first, shadow-gated                                                                                                           |
+| Community/tech/market monitoring at launch          | poisoning risk + no materiality mechanism; deferred to Phase 6                                                                                                                     |
+| Idea → Company Blueprint → build-a-company          | unfalsifiable and far from revenue; kept as a later onboarding mode only                                                                                                           |
+| "Prevents 200 permanent agents" as a bullet         | promoted to a governed metric: agent count, mission count, per-capability kill conditions                                                                                          |
+| "becomes progressively more efficient"              | now a single measurable curve: `cost_per_good_decision`, with a quarterly trend gate                                                                                               |
+| Building our own chat UI                            | **Buzz exists.** Still true, still the right call                                                                                                                                  |
+| Running Vital _inside_ QM as a deployment layer     | superseded — we absorb from QM and own the substrate. Costs us the sandbox/scheduler/egress we thought we'd got for free, buys us control and no fork-drift discipline             |
 | The departments/**org-chart metaphor** in the pitch | commoditised as a demo — TDAM ships a one-person company with Scout/Builder/Reviewer squads and memory loadouts, free, with a video (§29.4). Keep the primitives, cut the metaphor |
 
 ---
@@ -666,7 +666,7 @@ and rooms, not substrate.
 
 ## 24. Verified build state (v2, 2026-09-09)
 
-**Typecheck: 0 errors. Tests: <!-- vital:testcount -->885/885 green<!-- /vital:testcount -->** (real sockets, real sqlite;
+**Typecheck: 0 errors. Tests: <!-- vital:testcount -->894/894 green<!-- /vital:testcount -->** (real sockets, real sqlite;
 eslint, prettier, provenance-guard, and audit gates green; 20 commits on
 main). Every behaviour below is proven by a named test — `[x]` in TODO.md
 means verified by a passing test or run, never "written".
@@ -682,29 +682,30 @@ means verified by a passing test or run, never "written".
 
 Implemented:
 
-| File | Contents | Verified behaviour |
-|---|---|---|
-| `src/core/types.ts` | claim kinds, agent-creatable subset, source tiers + rank, action classes, routing classes, message classes, request states, `CostBid` | — |
-| `src/core/db.ts` + `migrations.ts` | sqlite driver, savepoint-nested transactions, 17-table schema (v4), tenant `nextSeq`, SQLite/Postgres dialect helpers, named migration journal with tested rollback | migrations run clean |
-| `src/ledger/` | Reality Ledger + decisions/outcomes/replay/export/curation | I1 agent-cannot-mint-FACT ✓ (adversarial, all 11 kinds) · I2 ungrounded FACT rejected ✓ · I3 zero orphans (300-append property test) ✓ · I4 contradiction→DISPUTED ✓ · I5 staleness sweep ✓ · I6 context excludes stale/provisional/unverified ✓ · append-only supersede ✓ · Context Bundles + tamper-evident replay ✓ · OUTCOME needs basis ✓ · corrections counted ✓ · full export ✓ |
-| `src/coord/` | QUERY/REQUEST/NOTICE + decompose + scheduler | ungrounded work refused ✓ · self-delegation refused ✓ · idempotent dedupe ✓ · NOTICE never interrupts ✓ · paid QUERY rejected ✓ · hop limit ✓ · cycle detection ✓ (fuzz-verified over 120 random graphs) · budget death ✓ · refusal counted ✓ · org daily budget denies ✓ · **escalation cap BLOCKS** ✓ · budgeted decomposition ✓ |
-| `src/router/` | 4-class Cognitive Router | controlRate starts 0 ✓ · irreversible fails up ✓ · reflex registry + coverage ✓ · coupling guard (shadow AND control) ✓ · precision gate ✓ · task registry (fail-closed) ✓ · calibration memory ✓ · labeling queue (proposals, never auto-label) ✓ |
-| `src/compiler/` + `registry.ts` | Organizational Compiler | imported packs quarantine + forced third-party ✓ · refuses low-confidence/unresolved/mixed-batch traces ✓ · promotion blocked without transfer evidence ✓ · illegal jumps refused ✓ · per-role expansion ✓ · drift auto-demote ✓ · candidate mining ✓ · registry reads with trust gaps ✓ · card eval suites ✓ |
-| `src/gov/` | R/A/I matrix · Trust Ledger · honeytasks · kills · sampling · batches · shell gate · act path · rate limits | matrix dominates, ship gates hold lower ✓ · 200-clean promotion, override resets ✓ · honey-miss freezes immediately ✓ · kill drill passes ✓ · deterministic sampling ✓ · batch ceilings ✓ · autonomy freeze ✓ · hard-deny shell screening ✓ · autonomous-only execution ✓ |
-| `src/evals/` | spine: suites · promotion · injection · held-out guard | bank/list/run/record ✓ · correction→regression pipeline ✓ · offline→shadow→canary→promote + rollback ✓ · injection corpus over both hooks ✓ · held-out exclusion + audited runs ✓ |
-| `src/attrib/` | cost roll-up · holdouts · pre-registration · caveats · tier mix | cost per good decision (null, never 0, when unknown) ✓ · deterministic lanes ✓ · deception caveats ✓ |
-| `src/ingest/` | file/GitHub/Serper collectors | checkpointed · fingerprinted dedupe · ground tiers refused ✓ · key in header only ✓ · novelty-vs-ledger ✓ |
-| `src/sense/` | Watch Contracts · materiality · Integrity Gate · poisoning suite | 30-day re-review + budget suspend ✓ · ≥2-path corroboration ✓ · self-serving discount ✓ · astroturf detection ✓ · quoted-data enforcement ✓ · poisoning suite with control ✓ |
-| `src/wedge/` | Ship-to-Result · churn · feature-request · deep research | cited summaries ✓ · 5-leg fan-out, scheduler-only ✓ · claims checker + denylist ✓ · churn loop + coherence ✓ · research→plan→approve→code ✓ · agentic research (plan review, dedupe, budgets, cancel, verified reports) ✓ |
-| `src/talk/` | TalkSurface bind/verify + third-party reconstruction | swap-safe ✓ · tamper-evident ✓ · strict hex validation ✓ |
-| `src/substrate/` | scheduler · sandbox · egress · screen · identity · harness adapters | crons + webhook budgets ✓ · manifest rebuild + tamper felt ✓ · metadata/link-local blocks, fail closed ✓ · shadow→enforce, fails closed ✓ · HMAC scope tokens ✓ · jcode + offline second harness ✓ · harness selection ✓ |
-| `src/capabilities/` | contracts + silence budget | 9 Qs + metric + kill ✓ · retire-not-rebrand ✓ · silence review ✓ |
-| `src/vendor/qm/` | governor · ship-gate · command-policy · crypto · objects · errors · safe-regex, provenance-pinned | narrowed absorbs verified by semantic tests ✓ · idempotency deliberately skipped (SQLite dedupe exists) ✓ |
+| File                               | Contents                                                                                                                                                            | Verified behaviour                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/core/types.ts`                | claim kinds, agent-creatable subset, source tiers + rank, action classes, routing classes, message classes, request states, `CostBid`                               | —                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/core/db.ts` + `migrations.ts` | sqlite driver, savepoint-nested transactions, 17-table schema (v4), tenant `nextSeq`, SQLite/Postgres dialect helpers, named migration journal with tested rollback | migrations run clean                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/ledger/`                      | Reality Ledger + decisions/outcomes/replay/export/curation                                                                                                          | I1 agent-cannot-mint-FACT ✓ (adversarial, all 11 kinds) · I2 ungrounded FACT rejected ✓ · I3 zero orphans (300-append property test) ✓ · I4 contradiction→DISPUTED ✓ · I5 staleness sweep ✓ · I6 context excludes stale/provisional/unverified ✓ · append-only supersede ✓ · Context Bundles + tamper-evident replay ✓ · OUTCOME needs basis ✓ · corrections counted ✓ · full export ✓ |
+| `src/coord/`                       | QUERY/REQUEST/NOTICE + decompose + scheduler                                                                                                                        | ungrounded work refused ✓ · self-delegation refused ✓ · idempotent dedupe ✓ · NOTICE never interrupts ✓ · paid QUERY rejected ✓ · hop limit ✓ · cycle detection ✓ (fuzz-verified over 120 random graphs) · budget death ✓ · refusal counted ✓ · org daily budget denies ✓ · **escalation cap BLOCKS** ✓ · budgeted decomposition ✓                                                     |
+| `src/router/`                      | 4-class Cognitive Router                                                                                                                                            | controlRate starts 0 ✓ · irreversible fails up ✓ · reflex registry + coverage ✓ · coupling guard (shadow AND control) ✓ · precision gate ✓ · task registry (fail-closed) ✓ · calibration memory ✓ · labeling queue (proposals, never auto-label) ✓                                                                                                                                     |
+| `src/compiler/` + `registry.ts`    | Organizational Compiler                                                                                                                                             | imported packs quarantine + forced third-party ✓ · refuses low-confidence/unresolved/mixed-batch traces ✓ · promotion blocked without transfer evidence ✓ · illegal jumps refused ✓ · per-role expansion ✓ · drift auto-demote ✓ · candidate mining ✓ · registry reads with trust gaps ✓ · card eval suites ✓                                                                          |
+| `src/gov/`                         | R/A/I matrix · Trust Ledger · honeytasks · kills · sampling · batches · shell gate · act path · rate limits                                                         | matrix dominates, ship gates hold lower ✓ · 200-clean promotion, override resets ✓ · honey-miss freezes immediately ✓ · kill drill passes ✓ · deterministic sampling ✓ · batch ceilings ✓ · autonomy freeze ✓ · hard-deny shell screening ✓ · autonomous-only execution ✓                                                                                                              |
+| `src/evals/`                       | spine: suites · promotion · injection · held-out guard                                                                                                              | bank/list/run/record ✓ · correction→regression pipeline ✓ · offline→shadow→canary→promote + rollback ✓ · injection corpus over both hooks ✓ · held-out exclusion + audited runs ✓                                                                                                                                                                                                      |
+| `src/attrib/`                      | cost roll-up · holdouts · pre-registration · caveats · tier mix                                                                                                     | cost per good decision (null, never 0, when unknown) ✓ · deterministic lanes ✓ · deception caveats ✓                                                                                                                                                                                                                                                                                   |
+| `src/ingest/`                      | file/GitHub/Serper collectors                                                                                                                                       | checkpointed · fingerprinted dedupe · ground tiers refused ✓ · key in header only ✓ · novelty-vs-ledger ✓                                                                                                                                                                                                                                                                              |
+| `src/sense/`                       | Watch Contracts · materiality · Integrity Gate · poisoning suite                                                                                                    | 30-day re-review + budget suspend ✓ · ≥2-path corroboration ✓ · self-serving discount ✓ · astroturf detection ✓ · quoted-data enforcement ✓ · poisoning suite with control ✓                                                                                                                                                                                                           |
+| `src/wedge/`                       | Ship-to-Result · churn · feature-request · deep research                                                                                                            | cited summaries ✓ · 5-leg fan-out, scheduler-only ✓ · claims checker + denylist ✓ · churn loop + coherence ✓ · research→plan→approve→code ✓ · agentic research (plan review, dedupe, budgets, cancel, verified reports) ✓                                                                                                                                                              |
+| `src/talk/`                        | TalkSurface bind/verify + third-party reconstruction                                                                                                                | swap-safe ✓ · tamper-evident ✓ · strict hex validation ✓                                                                                                                                                                                                                                                                                                                               |
+| `src/substrate/`                   | scheduler · sandbox · egress · screen · identity · harness adapters                                                                                                 | crons + webhook budgets ✓ · manifest rebuild + tamper felt ✓ · metadata/link-local blocks, fail closed ✓ · shadow→enforce, fails closed ✓ · HMAC scope tokens ✓ · jcode + offline second harness ✓ · harness selection ✓                                                                                                                                                               |
+| `src/capabilities/`                | contracts + silence budget                                                                                                                                          | 9 Qs + metric + kill ✓ · retire-not-rebrand ✓ · silence review ✓                                                                                                                                                                                                                                                                                                                       |
+| `src/vendor/qm/`                   | governor · ship-gate · command-policy · crypto · objects · errors · safe-regex, provenance-pinned                                                                   | narrowed absorbs verified by semantic tests ✓ · idempotency deliberately skipped (SQLite dedupe exists) ✓                                                                                                                                                                                                                                                                              |
 
 Bugs found and fixed during verification (all real, all caught only by running the code — every one typechecked clean):
+
 1. **Hop-limit off-by-one** — `chain` holds origin scopes only, so the target hop was never counted and 4-hop chains passed. Fixed by comparing `chain.length > HARD_MAX_HOPS`.
 2. **`compile()` rejected every imported pack** — the function accepted a `source` argument that `.strict()` zod parsing then threw on. Fixed by destructuring before parse.
-3. **`staleFactRate` double-counted** — a claim past TTL *and* swept to STALE incremented twice, reporting 200%. Fixed to a single disjunction.
+3. **`staleFactRate` double-counted** — a claim past TTL _and_ swept to STALE incremented twice, reporting 200%. Fixed to a single disjunction.
 4. **Error-frame crash (P0)** — any harness `error` frame killed the process via `ERR_UNHANDLED_ERROR`. Fixed by namespacing emits and rejecting pending requests.
 5. **Dropped permission/cancel writes** — fire-and-forget round-trips lost to socket close. Fixed by draining in-flight round-trips and awaiting cancel.
 6. **Hex-tamper acceptance** — `Buffer.from(x, 'hex')` silently drops invalid trailing characters, accepting appended garbage in scope tokens and envelopes. Fixed with strict hex validation in both verifiers.
@@ -713,7 +714,7 @@ Bugs found and fixed during verification (all real, all caught only by running t
 
 Also implemented: `src/jcode/{protocol,client,runner}.ts` — the jcode harness-API connection (NDJSON, `req`/`ev` tags, protocol v1), verified field-by-field against `crates/jcode-harness-api/src/{lib,requests,events}.rs` rather than a README. A coding need becomes a REQUEST, is admitted by the scheduler, opens a jcode session, streams the turn, and answers every `permission_request` through our R/A/I policy — so an agent cannot self-approve what a human would have had to approve. Deliverable, tool calls, token usage and cost are written back to the Ledger and the run becomes a compilable TRACE. Tests drive it over a **real socket** via `test/fake-harness.ts`, so framing, the hello-first rule, `reply_to` correlation and the permission round-trip are exercised for real.
 
-**Two protocol facts found by reading source, not docs:** `SessionInfo` carries `session_id`, not `id` (our client would have thrown `NO_SESSION` on every call); and jcode's own SDK notes the `permissions` capability is **absent from the current bridge**, so a client that *waits* for a permission prompt deadlocks — we require only `sessions` and degrade instead of hanging.
+**Two protocol facts found by reading source, not docs:** `SessionInfo` carries `session_id`, not `id` (our client would have thrown `NO_SESSION` on every call); and jcode's own SDK notes the `permissions` capability is **absent from the current bridge**, so a client that _waits_ for a permission prompt deadlocks — we require only `sessions` and degrade instead of hanging.
 
 **Three absorb corrections found the same way:** `governor.ts` was never types-only (narrowed; `collectVitals` dropped); `ship-gate.ts` needed its `trigger-store` import re-pointed at vendored `objects.ts`; `idempotency`'s `durable-map` is Postgres-backed, so the absorb was **skipped** — our SQLite dedupe already exists and there is exactly one dedupe mechanism.
 
@@ -724,17 +725,17 @@ Not yet built (v2 remainder — production surface, pilot traffic, GTM): live Bu
 ## 25. Positioning, in one line each
 
 **Against Grok Bot specifically.** We are not another teammate. Vital is the
-accountability layer *for* teammates like Grok Bot. Frameworks and harnesses make
+accountability layer _for_ teammates like Grok Bot. Frameworks and harnesses make
 agents do things; Vital makes what they did attributable, bounded, approved, costed,
 and measured. This positioning also dodges the fight we would lose — we will never
 out-frontier a frontier lab, and v1's "monitor the whole internet" ambition is
 better left to whoever has the compute.
 
-**Against memory layers (TencentDB Agent Memory).** *They make agents remember; we make agents provable.* Remembering a wrong thing confidently is the failure mode memory does not solve — and their own roadmap says so, in writing, in 2026 (§29.2).
+**Against memory layers (TencentDB Agent Memory).** _They make agents remember; we make agents provable._ Remembering a wrong thing confidently is the failure mode memory does not solve — and their own roadmap says so, in writing, in 2026 (§29.2).
 
-**The sentence that must survive a car ride.** *Model output can never mint a FACT.*
+**The sentence that must survive a car ride.** _Model output can never mint a FACT._
 It is simple, obvious, memorable, and it is a design commitment enforced in code
-(I1), not a marketing claim. It satisfies Hale's legibility rule and it *is* the
+(I1), not a marketing claim. It satisfies Hale's legibility rule and it _is_ the
 product.
 
 **The reframe that makes us fundable pre-revenue.** We are not asking for belief in
@@ -748,15 +749,15 @@ revenue. We are asking for belief that one instrumented workflow can be proven i
 Vital's own pre-registration discipline, turned outward. These are thresholds we
 publish in the deck and can be wrong about publicly:
 
-| Metric | Definition | Series A gate |
-|---|---|---|
-| FACT-minting violations | model outputs written as FACT without verifier evidence | **0** |
-| Routing precision | correct tier on labelled shadow-mode decisions | ≥ 0.90 on ≥2,000 |
-| Irreversible-action escalation | risky actions routed to a human | 100% |
-| Cost per verified outcome | inference + tool + human minutes ÷ verified results | falling 3 consecutive months |
-| Outcome writeback rate | launches with a measured OUTCOME claim | ≥ 0.80 |
-| Procedure transfer survival | promoted cards passing cross-role tests | > 0, and honestly low |
-| M3 cohort retention | a16z rebases AI retention from M0 to M3 | ≥ 60% |
+| Metric                         | Definition                                              | Series A gate                |
+| ------------------------------ | ------------------------------------------------------- | ---------------------------- |
+| FACT-minting violations        | model outputs written as FACT without verifier evidence | **0**                        |
+| Routing precision              | correct tier on labelled shadow-mode decisions          | ≥ 0.90 on ≥2,000             |
+| Irreversible-action escalation | risky actions routed to a human                         | 100%                         |
+| Cost per verified outcome      | inference + tool + human minutes ÷ verified results     | falling 3 consecutive months |
+| Outcome writeback rate         | launches with a measured OUTCOME claim                  | ≥ 0.80                       |
+| Procedure transfer survival    | promoted cards passing cross-role tests                 | > 0, and honestly low        |
+| M3 cohort retention            | a16z rebases AI retention from M0 to M3                 | ≥ 60%                        |
 
 If the first row is ever non-zero, the thesis is broken, not the pilot.
 
@@ -769,16 +770,16 @@ Colour here is load-bearing, not decorative — the deck must demonstrate the le
 **Brand:** canvas `#FAFAF8` (never pure white; it blooms on projectors) · ink
 `#0A0F14` · accent deep teal `#0F5C57` · muted `#6B7280` · hairline `#E4E4E1`.
 Teal, not blue, because blue is every other AI deck and green is already reserved
-below to mean *verified*.
+below to mean _verified_.
 
 **Semantic tags — never used for decoration:**
 
-| Kind | Hex | Glyph |
-|---|---|---|
-| `FACT` | `#0F7A3D` | `✓` |
-| `HYPOTHESIS` | `#B45309` | `?` |
-| `PREDICTION` | `#4338CA` | `→` |
-| `RISK` | `#B91C1C` | `!` |
+| Kind         | Hex       | Glyph |
+| ------------ | --------- | ----- |
+| `FACT`       | `#0F7A3D` | `✓`   |
+| `HYPOTHESIS` | `#B45309` | `?`   |
+| `PREDICTION` | `#4338CA` | `→`   |
+| `RISK`       | `#B91C1C` | `!`   |
 
 **Two hard rules.** (1) Never colour alone — every tag carries its glyph; ~1 in 12
 men is colourblind, and a deck whose argument lives in hue collapses. (2) The four
@@ -787,7 +788,7 @@ ledger metaphor is dead. Arbitrary categories use teal tints plus grey. No dark
 deck except an optional inverted closing slide; no gradients, shadows, or thin
 rules; test on a projector, not a 6K display.
 
-**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->885 tests green<!-- /vital:testcount -->
+**The dogfood move.** Tag the deck's own claims — `FACT` <!-- vital:testcount -->894 tests green<!-- /vital:testcount -->
 (reproducible: `npm run typecheck && npm test`), `HYPOTHESIS` PM/Growth
 will pay (untested), `PREDICTION` precision ≥ 0.90 by month 9
 (dated, checkable). One slide, four lines. It proves the product by using it and it
@@ -806,7 +807,7 @@ team, roadmap/use of funds) plus its named deck-killer: posturing.
 
 1. **Title** — Vital / grounding and reflex layer for production AI agents / seed · pre-revenue.
 2. **Problem** — agents already do real work with no accountability. Flow + 4 red markers. Include the dated TDAM roadmap quote (§29.2): a competitor conceding that extracted memories go stale and can only be viewed or deleted is the best third-party validation we have.
-3. **Why now** — *the hard part is no longer "can it generate", it's "can we trust what it did."*
+3. **Why now** — _the hard part is no longer "can it generate", it's "can we trust what it did."_
 4. **Insight** — model output can never mint a FACT.
 5. **Solution** — Ledger → Coordination → Router → Compiler, as one pipeline.
 6. **Demo** — Ship-to-Result trace, six steps, status line at bottom.
@@ -821,7 +822,7 @@ team, roadmap/use of funds) plus its named deck-killer: posturing.
 unverifiable Buzz/QM/jcode integration claims, the 82%-vertical-capital figure
 (unverified in our sources), MIT NANDA's 95% as a blunt headline (contested and
 frequently misquoted), compliance readiness we have not audited, any rounded-up
-buyer count, the org-chart metaphor (§29.4), and any claim that a competitor *lacks*
+buyer count, the org-chart metaphor (§29.4), and any claim that a competitor _lacks_
 a control we have not confirmed absent — say "not documented in public evidence."
 
 **Demo Day cut (7):** merge 1+2, drop 3/6/9/12. Test each slide at five seconds on
@@ -837,24 +838,24 @@ someone who has never heard of Vital; anything unexplainable gets cut.
 
 It is a **memory** layer; Vital is a **governance** layer. I grepped for our four differentiators and got hits, and every hit is a false friend:
 
-| Term | Their code | Their meaning | Our meaning |
-|---|---|---|---|
-| `provenance` | 13 files | **which prompt version generated this memory** (sha256 of the prompt) | **what source justifies this as true** |
-| `demote` | 5 files | **version head superseded** — v1 demoted when v2 appended; a concurrency/CRUD fix | **empirically degrading -> fail open to reasoning** |
-| `decay` | 7 files | **per-hop score decay in graph search** — a retrieval ranking knob | **EWMA drift over live outcomes** |
-| `TTL` | 104 files | **file-retention / cache / lock expiry** — when to delete bytes | **claim validity expiry** — when to exclude from context |
+| Term         | Their code | Their meaning                                                                     | Our meaning                                              |
+| ------------ | ---------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `provenance` | 13 files   | **which prompt version generated this memory** (sha256 of the prompt)             | **what source justifies this as true**                   |
+| `demote`     | 5 files    | **version head superseded** — v1 demoted when v2 appended; a concurrency/CRUD fix | **empirically degrading -> fail open to reasoning**      |
+| `decay`      | 7 files    | **per-hop score decay in graph search** — a retrieval ranking knob                | **EWMA drift over live outcomes**                        |
+| `TTL`        | 104 files  | **file-retention / cache / lock expiry** — when to delete bytes                   | **claim validity expiry** — when to exclude from context |
 
 And two decisive absences: **`quarantine` — 0 files**; **typed claim kinds (`FACT`/`BELIEF`/`HYPOTHESIS`/`PREDICTION`) — 0 matches.** The overlap is lexical, not functional. Anyone skimming the README would conclude we are redundant. That is a positioning risk, not an architectural one — and it is why this section exists.
 
 ### 29.2 Their roadmap concedes our thesis — quote it verbatim
 
-From `ROADMAP.md`, under *Editable memories: L1-L3*:
+From `ROADMAP.md`, under _Editable memories: L1-L3_:
 
 > "Automatically extracted memories won't stay correct forever — facts expire, decisions get reversed, and extraction itself can be off. The panel currently only allows viewing and deleting."
 >
 > "The value of memory depends on accuracy. Giving people a way to correct it is more realistic than expecting extraction to be perfect."
 
-Plus, from Contributing: *"Agent Memory doesn't have a settled standard yet."*
+Plus, from Contributing: _"Agent Memory doesn't have a settled standard yet."_
 
 This is a well-funded incumbent describing our exact problem space and stating that today's answer is delete-or-nothing. It is the strongest third-party validation available to us — from a competitor's own repo, dated, attributable. **Use it on the problem slide (§28 slide 2), quoted and dated.**
 
@@ -862,7 +863,7 @@ This is a well-funded incumbent describing our exact problem space and stating t
 
 > "One Proxy, unchanged protocol, zero-code integration — point the Agent's base URL to the Proxy and it's done. **No plugin, hook, or MCP server is required.**"
 
-That is why they will win distribution: adoption cost is near zero, and adoption cost is the entire game for a solo founder. Our story today is *compose with Buzz/QM/jcode, wire a ledger, instrument a router* — roughly a week of engineering per tenant against their **one environment variable**.
+That is why they will win distribution: adoption cost is near zero, and adoption cost is the entire game for a solo founder. Our story today is _compose with Buzz/QM/jcode, wire a ledger, instrument a router_ — roughly a week of engineering per tenant against their **one environment variable**.
 
 This is a real hole in the plan, and it is a **packaging** gap, not a feature gap. In priority order:
 
@@ -872,31 +873,31 @@ This is a real hole in the plan, and it is a **packaging** gap, not a feature ga
 
 ### 29.4 What it commoditises — and the moat that survives
 
-The compiler's **plumbing** is now commoditised twice: QM already had scope-owned skills, sharing by grant, admin-gated promotion and git-imported packs; TDAM independently ships Skills with "versions, resource files, trigger boundaries, execution steps, and validation rules" and private-by-default sharing after review. So the claim *plumbing is 80% solved* got stronger and the claim *the compiler is a differentiator* got weaker.
+The compiler's **plumbing** is now commoditised twice: QM already had scope-owned skills, sharing by grant, admin-gated promotion and git-imported packs; TDAM independently ships Skills with "versions, resource files, trigger boundaries, execution steps, and validation rules" and private-by-default sharing after review. So the claim _plumbing is 80% solved_ got stronger and the claim _the compiler is a differentiator_ got weaker.
 
-What remains ours, and only ours: **the evidence layer — transfer testing, quarantine, and drift-triggered auto-demote.** Say it exactly that way or we are selling plumbing. (Also note: their `private`/`team`/`restricted`/`agent` ACLs are *visibility* controls; our R/A/I matrix is *action* controls. Different axis, no conflict.)
+What remains ours, and only ours: **the evidence layer — transfer testing, quarantine, and drift-triggered auto-demote.** Say it exactly that way or we are selling plumbing. (Also note: their `private`/`team`/`restricted`/`agent` ACLs are _visibility_ controls; our R/A/I matrix is _action_ controls. Different axis, no conflict.)
 
 Their **org-chart pitch** — a one-person company with Scout / Builder / Reviewer squads, each with a memory loadout — is our departments metaphor, shipped, free, with a demo video. **Cut the org-chart metaphor from the deck; keep the primitives.**
 
 ### 29.5 Two commercial reads that favour us
 
-- **It is a funnel to Tencent VectorDB + COS.** Backends are `tcvdb` and COS; MongoDB is "experimental, off by default." Fine motivation — but for the EU/fintech/health buyers we price at a premium, a Tencent-branded, Tencent-storage-shaped dependency is a procurement question, not a neutral pick. Our sovereignty story gets **sharper** against this specific thing. *(Inference from backends and branding, not from any statement they have made.)*
-- **Their benchmark is one self-reported number on one benchmark** — PersonaMem 48% -> 76%, no third-party run, no task-accuracy or action-safety measure. Don't compete on their axis; **the standard of proof is the gap.** A public benchmark on *action* correctness — typed claims, quarantine, drift-demote — is the axis they cannot answer today without rebuilding.
+- **It is a funnel to Tencent VectorDB + COS.** Backends are `tcvdb` and COS; MongoDB is "experimental, off by default." Fine motivation — but for the EU/fintech/health buyers we price at a premium, a Tencent-branded, Tencent-storage-shaped dependency is a procurement question, not a neutral pick. Our sovereignty story gets **sharper** against this specific thing. _(Inference from backends and branding, not from any statement they have made.)_
+- **Their benchmark is one self-reported number on one benchmark** — PersonaMem 48% -> 76%, no third-party run, no task-accuracy or action-safety measure. Don't compete on their axis; **the standard of proof is the gap.** A public benchmark on _action_ correctness — typed claims, quarantine, drift-demote — is the axis they cannot answer today without rebuilding.
 - Practical note: 81 MB of TypeScript, three services and a vector DB, landing on the same 32 GB box that already holds the customer's monorepo and Timescale instance. Bundling it would add disk and RAM pressure to the exact constraint the deployment model already carries.
 
 ### 29.6 Decision
 
-| Action | Do it? |
-|---|---|
-| Depend on it / bundle it | **No** — occupies our positioning, does not supply our differentiator, drags Tencent storage |
-| Absorb code | **No** — inconsistent with the absorb-QM logic (that was 148-line leaf modules with types-only imports; this is three services and a vector DB) |
-| Steal the zero-code proxy on-ramp | **Yes** — highest-value item here; a GTM fix, not a feature |
-| Quote their roadmap on the problem slide | **Yes** — dated, attributed, from a competitor's own repo |
-| Re-scope the compiler's claimed moat to evidence-only | **Yes** |
-| Cut the org-chart metaphor | **Yes** |
-| Add typed-claims / quarantine / drift-demote to the benchmark we publish | **Yes** |
+| Action                                                                   | Do it?                                                                                                                                          |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Depend on it / bundle it                                                 | **No** — occupies our positioning, does not supply our differentiator, drags Tencent storage                                                    |
+| Absorb code                                                              | **No** — inconsistent with the absorb-QM logic (that was 148-line leaf modules with types-only imports; this is three services and a vector DB) |
+| Steal the zero-code proxy on-ramp                                        | **Yes** — highest-value item here; a GTM fix, not a feature                                                                                     |
+| Quote their roadmap on the problem slide                                 | **Yes** — dated, attributed, from a competitor's own repo                                                                                       |
+| Re-scope the compiler's claimed moat to evidence-only                    | **Yes**                                                                                                                                         |
+| Cut the org-chart metaphor                                               | **Yes**                                                                                                                                         |
+| Add typed-claims / quarantine / drift-demote to the benchmark we publish | **Yes**                                                                                                                                         |
 
-**One line:** *They make agents remember. We make agents provable. Remembering a wrong thing confidently is the failure mode memory layers do not solve — and their own roadmap says so.*
+**One line:** _They make agents remember. We make agents provable. Remembering a wrong thing confidently is the failure mode memory layers do not solve — and their own roadmap says so._
 
 ### 29.7 Verified vs inferred
 
