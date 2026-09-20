@@ -152,10 +152,7 @@ function resolveBase(region: string, endpoint: string | undefined): string {
   try {
     url = new URL(endpoint);
   } catch {
-    throw new S3Error(
-      'BAD_ENDPOINT',
-      'S3 endpoint is not a parseable URL: refusing instead of signing toward garbage',
-    );
+    throw new S3Error('BAD_ENDPOINT', 'S3 endpoint is not a parseable URL: refusing instead of signing toward garbage');
   }
   const host = url.hostname;
   const local = host === 'localhost' || host === '127.0.0.1' || host === '::1';

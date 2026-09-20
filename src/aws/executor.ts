@@ -236,9 +236,7 @@ export async function runJob(
   const current = await coord.get(job.tenant, job.requestId);
   const holder = current?.execOwner ?? null;
   if (holder && holder !== (job.onBehalfOf ?? 'lambda-executor')) {
-    throw new Error(
-      `[executor:CLAIM_LOST] request ${job.requestId} is claimed by ${holder}: refusing to double-spend`,
-    );
+    throw new Error(`[executor:CLAIM_LOST] request ${job.requestId} is claimed by ${holder}: refusing to double-spend`);
   }
 
   const grounded = [...(job.claimRefs ?? []), ...(req.claimRefs ?? [])];

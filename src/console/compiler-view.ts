@@ -79,7 +79,10 @@ function lifecycleRailHtml(): string {
     <div style="display:grid;gap:8px;">
       ${steps
         .map(
-          (s, i) => `<div class="v-attention-item" style="border-left:3px solid var(--v-accent);border-radius:14px;padding:11px 13px;">
+          (
+            s,
+            i,
+          ) => `<div class="v-attention-item" style="border-left:3px solid var(--v-accent);border-radius:14px;padding:11px 13px;">
         <span class="v-badge" style="border-radius:9999px;"><span class="dot"></span>${esc(String(i + 1))}</span>
         <span><strong>${esc(s.name)}</strong><span class="v-meta" style="display:block;">${esc(s.note)}</span></span>
       </div>`,

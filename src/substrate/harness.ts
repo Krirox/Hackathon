@@ -333,8 +333,7 @@ export class LocalEchoAdapter implements HarnessAdapter {
  * No silent fallback to an unlisted harness — unknown work fails closed.
  */
 export function selectAdapter(taskType: string, available: HarnessAdapter[]): HarnessAdapter {
-  if (available.length === 0)
-    throw new HarnessError('NO_HARNESS', 'no harness adapted: refusing rather than guessing');
+  if (available.length === 0) throw new HarnessError('NO_HARNESS', 'no harness adapted: refusing rather than guessing');
   if (taskType.startsWith('engineering.')) {
     const jcode = available.find((a) => a.name === 'jcode');
     if (jcode) return jcode;

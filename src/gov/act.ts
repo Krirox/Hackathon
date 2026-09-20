@@ -153,10 +153,7 @@ export async function compensateReversible(
 
 export async function assertNoHalt(db: AsyncDb, tenant: string, scope: string, actionClass: string): Promise<void> {
   if (await checkKill(db, tenant, scope, actionClass)) {
-    throw new ActError(
-      'HALTED_WHEN_STOPPED',
-      `stop active for ${scope}/${actionClass}: recover via recoverStop first`,
-    );
+    throw new ActError('HALTED_WHEN_STOPPED', `stop active for ${scope}/${actionClass}: recover via recoverStop first`);
   }
 }
 

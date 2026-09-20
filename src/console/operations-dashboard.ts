@@ -46,7 +46,6 @@ export function resolvePrimaryTab(
 
 export interface OperationsDashboardOptions {
   tenant: string;
-  home: string;
   userEmail: string;
   userRole: string;
   userTeam?: string;
@@ -77,12 +76,10 @@ export interface OperationsDashboardOptions {
 export function renderOperationsDashboard(opts: OperationsDashboardOptions): string {
   const {
     tenant,
-    home,
     userEmail,
     userRole,
     userTeam,
     issues = [],
-    csrfToken,
     activeDepartment,
     activeTab = 'home',
     evaluations,
@@ -115,7 +112,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
   void initials;
   void userName;
   const utcHour = new Date().getUTCHours();
-  const defaultGreeting = utcHour < 12 ? 'Good morning' : utcHour < 18 ? 'Good afternoon' : 'Good evening';
+  let defaultGreeting = 'Good evening';
+  if (utcHour < 12) defaultGreeting = 'Good morning';
+  else if (utcHour < 18) defaultGreeting = 'Good afternoon';
 
   // Honest fallbacks: missing data renders as "n/a", never an invented value.
   const dollarsStr = `$${metrics.dollarsToday.toFixed(2)}`;
@@ -510,10 +509,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     };
   });
 
-  const deptTabs = renderDepartmentTabs(activeDepartment, home);
+  const deptTabs = renderDepartmentTabs(activeDepartment);
   const deptBanner = renderDepartmentBanner({
     activeScope: activeDepartment,
-    home,
     userRole,
     evaluations,
   });

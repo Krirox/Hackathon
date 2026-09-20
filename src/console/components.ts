@@ -60,7 +60,6 @@ function kpiIconSvg(glyph?: string, label?: string): { svg: string; bg: string; 
 /** KPI card (Picture 1 style): soft circular icon, label, large metric, action link. */
 export function kpiCard(c: KpiCard): string {
   const icon = kpiIconSvg(c.glyph, c.label);
-  const linkText = c.linkLabel ? esc(c.linkLabel) : (c.href ? `${esc(c.sub)} →` : esc(c.sub));
   const linkHtml = c.href
     ? `<a href="${esc(c.href)}" class="v-kpi-link" style="color:var(--v-muted);text-decoration:none;font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:4px;transition:color .15s ease;"><span>${esc(c.sub)}</span><span style="font-size:13px;line-height:1;margin-left:2px;">→</span></a>`
     : `<span style="color:var(--v-muted);font-size:12px;">${esc(c.sub)}</span>`;

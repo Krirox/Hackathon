@@ -1361,7 +1361,8 @@ async function serveStatic(
 function statusLabel(user: User): string {
   const s = membershipStatus(user);
   if (s === 'disabled') return '<span class="v-badge v-badge-risk"><span class="dot"></span>disabled</span>';
-  if (s === 'pending_activation') return '<span class="v-badge v-badge-warn"><span class="dot"></span>pending activation</span>';
+  if (s === 'pending_activation')
+    return '<span class="v-badge v-badge-warn"><span class="dot"></span>pending activation</span>';
   return '<span class="v-badge v-badge-good"><span class="dot"></span>active</span>';
 }
 
@@ -1739,10 +1740,7 @@ ${
 </div>`
     : '<p class="sub">Ask an admin or the owner to create accounts.</p>'
 }
-${stopsSection(csrf, canManage, extra?.stops, extra?.selfHalts)}
-${governanceSection(extra?.policy)}
-${compilerGapsSection(extra?.compilerGaps)}
-${billingScopeSection()}`,
+ `,
   );
 }
 
@@ -1891,9 +1889,11 @@ function stopsSection(
     <div>
       <div style="display:flex;align-items:center;gap:10px;">
         <h2 class="v-card-title">Emergency stops</h2>
-        ${stops.length > 0
-          ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${stops.length} active</span>`
-          : `<span class="v-badge v-badge-good"><span class="dot"></span>Normal</span>`}
+        ${
+          stops.length > 0
+            ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${stops.length} active</span>`
+            : `<span class="v-badge v-badge-good"><span class="dot"></span>Normal</span>`
+        }
       </div>
       <p class="sub" style="margin:6px 0 0;font-size:13px;max-width:78ch;line-height:1.5;">A stop denies new authorizations at once and never force-terminates work already executing. Recovery is audited with a recorded reason; a restart does not clear a stop.</p>
     </div>
@@ -1953,12 +1953,12 @@ function governanceSection(policy?: {
   const rows = SETTINGS_INVENTORY.map((entry) => {
     const impact = changeImpact(entry.key);
     const src = sourceOf.get(entry.key) ?? 'default';
-    const srcBadge =
-      src === 'startup'
-        ? `<span class="v-badge v-badge-warn" style="font-size:11px;padding:2px 8px;">startup</span>`
-        : src === 'runtime'
-          ? `<span class="v-badge v-badge-info" style="font-size:11px;padding:2px 8px;">runtime</span>`
-          : `<span class="v-badge" style="font-size:11px;padding:2px 8px;">${esc(src)}</span>`;
+    const badge = (tone: string, label: string) =>
+      `<span class="v-badge${tone}" style="font-size:11px;padding:2px 8px;">${esc(label)}</span>`;
+    let srcBadge: string;
+    if (src === 'startup') srcBadge = badge(' v-badge-warn', 'startup');
+    else if (src === 'runtime') srcBadge = badge(' v-badge-info', 'runtime');
+    else srcBadge = badge('', src);
     return `<tr>
   <td><code style="font-family:var(--font-mono);font-size:12px;background:var(--v-bg-2);padding:2px 6px;border-radius:4px;">${esc(entry.key)}</code></td>
   <td><span class="v-badge" style="font-size:11px;padding:2px 8px;">${esc(entry.area)}</span></td>

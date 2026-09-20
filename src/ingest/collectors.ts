@@ -323,9 +323,7 @@ async function settleInboxRows(db: AsyncDb, ids: string[], outcome: 'DONE' | 'FA
         { status: string; owner: string | null } | undefined;
       if (!row) continue; // row vanished: nothing to settle
       if (row.status === 'CLAIMED' && row.owner !== owner) {
-        throw new Error(
-          `[inbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'}: settlement refused`,
-        );
+        throw new Error(`[inbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'}: settlement refused`);
       }
       // Already DONE/FAILED by a legitimate earlier settlement: idempotent no-op.
     }

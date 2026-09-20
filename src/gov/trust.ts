@@ -789,8 +789,7 @@ export function buildSelfHaltNotification(input: {
     detectedAt: input.detectedAt,
     affected: input.affected ?? [],
     recovery: input.recovery ?? 'authorized recovery with a recorded reason via recoverStop',
-    fallback:
-      'audit-log AUTOMATION_SELF_HALT row: the notification payload is always persisted even if delivery fails',
+    fallback: 'audit-log AUTOMATION_SELF_HALT row: the notification payload is always persisted even if delivery fails',
   };
 }
 

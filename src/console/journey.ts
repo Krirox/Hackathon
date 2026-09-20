@@ -266,7 +266,9 @@ export function renderJourneyMilestone(journey: TenantJourney, home: string): st
       const marker = markerFor(done, current);
       const color = colorFor(done, current);
       const weight = current ? '700' : '600';
-      const label = s.href ? `<a href="${esc(s.href)}" style="color:var(--v-ink);text-decoration:none;">${esc(s.label)}</a>` : esc(s.label);
+      const label = s.href
+        ? `<a href="${esc(s.href)}" style="color:var(--v-ink);text-decoration:none;">${esc(s.label)}</a>`
+        : esc(s.label);
       const when = whenFor(s.at, current);
       const elapsed =
         done && signedUp !== null && s.at !== null && s.id !== 'signup'
