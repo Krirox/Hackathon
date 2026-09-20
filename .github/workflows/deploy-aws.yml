@@ -12,7 +12,10 @@ on:
         default: ''
 jobs:
   deploy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Keep GitHub-hosted until the Blacksmith org subscription is confirmed
+    # working: blacksmith-* labels queue forever when the app isn't provisioned,
+    # and a deploy must never die of a silent runner shortage.
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
