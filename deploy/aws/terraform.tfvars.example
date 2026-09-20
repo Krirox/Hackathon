@@ -9,6 +9,8 @@ project = "vital"
 # create-repos -> push -> apply. See docs/deployment.md.
 # core_image     = "<account>.dkr.ecr.eu-central-1.amazonaws.com/vital-core:boot"
 # executor_image = "<account>.dkr.ecr.eu-central-1.amazonaws.com/vital-executor:boot"
+# Pilot: jcode sidecar off until ghcr.io/1jehuang/jcode is mirrored to ECR (private GHCR).
+# jcode_sidecar_enabled = false
 jcode_image    = "ghcr.io/1jehuang/jcode:v0.84.0"
 
 desired_count     = 2

@@ -1,7 +1,7 @@
 # AWS deploy: build vital-core + executor images, push to ECR, terraform apply.
 # Manual dispatch only — infra changes are never a side effect of a test push.
-# Required repo secrets: AWS_ROLE_TO_ASSUME (OIDC), GHCR_PULL_TOKEN (read
-# ghcr.io/1jehuang/jcode — anonymous pull is 403 from AWS), plus TF_VAR_* …
+# Required repo secrets: AWS_ROLE_TO_ASSUME (OIDC), plus TF_VAR_* for every
+# sensitive var in deploy/aws/variables.tf (see terraform.tfvars.example).
 name: deploy-aws
 on:
   workflow_dispatch:
@@ -79,25 +79,6 @@ jobs:
           docker build -f deploy/aws/Dockerfile.executor -t "$EXEC_REPO:${{ steps.tag.outputs.tag }}" .
           docker push "$EXEC_REPO:${{ steps.tag.outputs.tag }}"
           echo "EXECUTOR_IMAGE=$EXEC_REPO:${{ steps.tag.outputs.tag }}" >> "$GITHUB_ENV"
-      - name: Mirror jcode sidecar to ECR
-        env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-          JCODE_SOURCE: ${{ vars.JCODE_SOURCE_IMAGE || 'ghcr.io/1jehuang/jcode:v0.84.0' }}
-          GHCR_PULL_USER: ${{ github.actor }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GHCR_PULL_TOKEN:-}" ]; then
-            echo "::error::Add repository secret GHCR_PULL_TOKEN (GitHub PAT with read:packages) so CI can pull ${JCODE_SOURCE} and mirror it to ECR. ECS cannot pull that GHCR image anonymously (403)."
-            exit 1
-          fi
-          echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
-          docker pull "$JCODE_SOURCE"
-          aws ecr describe-repositories --repository-names vital-jcode 2>/dev/null || \
-            aws ecr create-repository --repository-name vital-jcode --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true
-          JCODE_REPO=$(aws ecr describe-repositories --repository-names vital-jcode --query 'repositories[0].repositoryUri' --output text)
-          docker tag "$JCODE_SOURCE" "$JCODE_REPO:${{ steps.tag.outputs.tag }}"
-          docker push "$JCODE_REPO:${{ steps.tag.outputs.tag }}"
-          echo "JCODE_IMAGE=$JCODE_REPO:${{ steps.tag.outputs.tag }}" >> "$GITHUB_ENV"
       - uses: hashicorp/setup-terraform@v3
       - name: Terraform apply
         working-directory: deploy/aws
@@ -136,7 +117,7 @@ jobs:
             -var "region=$AWS_REGION" \
             -var "core_image=$CORE_IMAGE" \
             -var "executor_image=$EXECUTOR_IMAGE" \
-            -var "jcode_image=$JCODE_IMAGE" \
+            -var "jcode_sidecar_enabled=false" \
             -var "domain_name=${{ vars.DOMAIN_NAME }}" \
             -var "hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}" \
             -var "ops_alarm_email=${{ vars.OPS_ALARM_EMAIL }}"

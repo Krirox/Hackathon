@@ -756,7 +756,12 @@ resource "aws_ecs_task_definition" "core" {
   memory                   = var.core_memory
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
-  volume { name = "jcode-sock" }
+  dynamic "volume" {
+    for_each = var.jcode_sidecar_enabled ? [1] : []
+    content {
+      name = "jcode-sock"
+    }
+  }
   volume {
     name = "sandboxes"
     efs_volume_configuration {
@@ -765,16 +770,16 @@ resource "aws_ecs_task_definition" "core" {
       authorization_config { access_point_id = aws_efs_access_point.sandboxes.id }
     }
   }
-  container_definitions = jsonencode([
+  container_definitions = jsonencode(concat([
     {
       name         = "vital-core"
       image        = local.core_image
       essential    = true
       portMappings = [{ containerPort = 3100, protocol = "tcp" }]
-      mountPoints = [
-        { sourceVolume = "sandboxes", containerPath = "/var/vital/sandboxes" },
-        { sourceVolume = "jcode-sock", containerPath = "/run" }
-      ]
+      mountPoints = concat(
+        [{ sourceVolume = "sandboxes", containerPath = "/var/vital/sandboxes" }],
+        var.jcode_sidecar_enabled ? [{ sourceVolume = "jcode-sock", containerPath = "/run" }] : []
+      )
       environment = concat([
         { name = "HOST", value = "0.0.0.0" },
         { name = "PORT", value = "3100" },
@@ -789,7 +794,6 @@ resource "aws_ecs_task_definition" "core" {
         { name = "VITAL_BOOTSTRAP_EMAIL", value = var.bootstrap_email },
         { name = "VITAL_WITH_WORKER", value = "1" },
         { name = "TALK_SURFACE", value = "buzz" },
-        { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" },
         { name = "ARTIFACT_DIR", value = "/var/vital/sandboxes/artifacts" },
         # Sandbox snapshots default to `data/snapshots` RELATIVE to the process
         # cwd (coding/snapshot-store.ts defaultDir), which on Fargate is the
@@ -814,7 +818,9 @@ resource "aws_ecs_task_definition" "core" {
         # driver actually launches tasks — see the staged note in variables.tf.
         { name = "AWS_REGION", value = var.region },
         { name = "ALLOWED_EGRESS_HOSTS", value = local.allowed_egress }
-        ], local.bedrock_model_env, local.tls_enabled == 1 ? [
+        ], var.jcode_sidecar_enabled ? [
+        { name = "JCODE_API_SOCKET", value = "/run/jcode-api.sock" }
+      ] : [], local.bedrock_model_env, local.tls_enabled == 1 ? [
         # Only with a certificate attached (dns.tf): the ALB then terminates
         # TLS and redirects :80, so the session cookie must carry `Secure` or
         # the browser will also send it over a plaintext http:// downgrade.
@@ -857,7 +863,8 @@ resource "aws_ecs_task_definition" "core" {
           awslogs-stream-prefix = "core"
         }
       }
-    },
+    }
+  ], var.jcode_sidecar_enabled ? [
     {
       name        = "jcode"
       image       = var.jcode_image
@@ -873,7 +880,7 @@ resource "aws_ecs_task_definition" "core" {
         }
       }
     }
-  ])
+  ] : []))
 }
 
 resource "aws_secretsmanager_secret" "db_url" { name = "${local.name}/database-url" }

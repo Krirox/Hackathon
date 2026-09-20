@@ -40,9 +40,15 @@ variable "executor_image" {
 }
 
 variable "jcode_image" {
-  description = "Container image for the jcode sibling sidecar (Rust harness API over localhost socket)"
+  description = "Container image for the jcode sibling sidecar (Rust harness API over localhost socket). Ignored when jcode_sidecar_enabled is false."
   type        = string
   default     = "ghcr.io/1jehuang/jcode:v0.84.0"
+}
+
+variable "jcode_sidecar_enabled" {
+  description = "Run the jcode sidecar in the vital-core ECS task. Off for pilot deploys when ghcr.io/1jehuang/jcode is not pullable — coding harness paths stay dry-run until re-enabled."
+  type        = bool
+  default     = false
 }
 
 variable "desired_count" {
