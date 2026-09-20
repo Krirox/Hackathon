@@ -49,7 +49,7 @@ export function requireReviewSecret(): string {
   const secret = reviewSecretFromEnv();
   if (!secret) {
     throw new Error(
-      '[talk:NO_REVIEW_SECRET] VITAL_REVIEW_SECRET is not set — review tokens cannot be minted or verified without it',
+      '[talk:NO_REVIEW_SECRET] VITAL_REVIEW_SECRET is not set: review tokens cannot be minted or verified without it',
     );
   }
   return secret;

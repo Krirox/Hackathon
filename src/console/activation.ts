@@ -191,8 +191,8 @@ function stepStatus(done: boolean, ready: boolean): 'done' | 'pending' | 'blocke
 
 function sourceSyncDetail(ingested: boolean, state: string): string {
   if (ingested) return 'At least one source item became ledger evidence';
-  if (state === 'empty') return 'Source is empty — add a file, then sync';
-  if (state === 'failed') return 'Ingestion failed — inspect the source status below';
+  if (state === 'empty') return 'Source is empty. Add a file, then sync';
+  if (state === 'failed') return 'Ingestion failed. Inspect the source status below';
   return 'Run ingestion after configuring a source';
 }
 
@@ -519,7 +519,7 @@ export async function startFirstReleaseWorkflow(
        ORDER BY created_at LIMIT 1`,
     )
     .get(tenant, config.scope)) as { id: string; statement: string } | undefined;
-  if (!claim) throw new Error('no ingested evidence found — sync your source first');
+  if (!claim) throw new Error('no ingested evidence found: sync your source first');
   const run = await fanOutWorkflow(db, coord, tenant, {
     release: `first-${claim.id.slice(0, 8)}`,
     claimIds: [claim.id],
@@ -544,7 +544,7 @@ export async function seedSampleWalkthrough(
     tenant,
     subject: 'sample:release-notes',
     kind: 'OBSERVATION',
-    statement: 'SAMPLE ONLY — v0.1 adds export receipts (not customer evidence)',
+    statement: 'SAMPLE ONLY: v0.1 adds export receipts (not customer evidence)',
     confidence: 1,
     observedAt: now,
     validFrom: now,
@@ -565,7 +565,7 @@ export async function seedSampleWalkthrough(
     messageClass: 'REQUEST',
     originScope: SAMPLE_SCOPE,
     targetScope: 'marketing',
-    goal: 'SAMPLE WALKTHROUGH — draft launch copy from labeled demo evidence',
+    goal: 'SAMPLE WALKTHROUGH: draft launch copy from labeled demo evidence',
     claimRefs: [claim.id],
     deliverableSchema: 'launch-copy.v1',
     bid: { dollars: 0, tokens: 0, humanMinutes: 5, deadline: now, maxRounds: 1, maxHops: 1 },
@@ -615,7 +615,7 @@ function renderSourceHealthCard(state: ActivationState): string {
       ? `<div class="sub">freshness · ${esc(String(health.freshnessSeconds))}s since last successful poll</div>`
       : '';
   const err = health.lastError
-    ? `<p class="err">${esc(health.lastError.code)} — ${esc(health.lastError.detail)}</p>`
+    ? `<p class="err">${esc(health.lastError.code)}: ${esc(health.lastError.detail)}</p>`
     : '';
   const inbox = `<div class="sub">inbox · pending ${health.inbox.pending} · claimed ${health.inbox.claimed} · done ${health.inbox.done} · failed ${health.inbox.failed}</div>`;
   return `${checkpoint}${freshness}${inbox}${err}<p class="sub">${esc(health.permissionNote)}</p><p class="sub">${esc(health.actionsNote)}</p>`;
@@ -648,7 +648,7 @@ export function renderActivationPanel(state: ActivationState, csrf: string, home
 <p class="v-sub">${esc(state.nextAction.detail)}</p></div>`
     : '';
   const sample = state.sampleActive
-    ? `<p class="v-sub">Sample walkthrough is active — evidence in scope <code>${esc(SAMPLE_SCOPE)}</code> is labeled demo data, not customer proof.</p>`
+    ? `<p class="v-sub">Sample walkthrough is active. Evidence in scope <code>${esc(SAMPLE_SCOPE)}</code> is labeled demo data, not customer proof.</p>`
     : `<form method="post" action="/setup/sample"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-secondary v-btn-sm">Run labeled sample walkthrough</button></form>`;
   return `<section id="activation-setup" style="margin-bottom:16px;">
 <div class="v-split">
@@ -713,7 +713,7 @@ ${renderSourceHealthCard(state)}</div>`
 <a class="v-btn v-btn-secondary v-btn-sm" href="/console/data">Open Data &amp; Retention</a></section>`;
   // Layout-only rules; every color, radius and shadow comes from the token
   // system injected at the response boundary (theme.ts).
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup — organization activation</title>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup: organization activation</title>
 <style>
 body{margin:0 auto;padding:28px 20px 48px;max-width:840px}
 form.settings{display:grid;gap:16px}
@@ -737,7 +737,7 @@ ${healthCard}
 <p class="v-sub" style="margin:4px 0 10px;">The scope gates which rooms and grants the work inherits.</p>
 <label>Release scope <input class="v-input" name="scope" required value="${esc(config?.scope ?? 'engineering')}" placeholder="engineering"></label></section>
 <section id="source" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 3</p><h2 class="v-card-title">Evidence source</h2>
-<p class="v-sub" style="margin:4px 0 10px;">Collection is deterministic (L0) — no model reads raw material.</p>
+<p class="v-sub" style="margin:4px 0 10px;">Collection is deterministic (L0); no model reads raw material.</p>
 <label>Source directory or GitHub repository (e.g. <code>owner/repo</code> or <code>/path/to/changelog</code>) <input class="v-input" name="sourcePath" required value="${esc(config?.sourcePath ?? '')}" placeholder="owner/repo or /path/to/changelog"></label>
 <label>Artifact store <input class="v-input" name="artifactDir" value="${esc(config?.artifactDir ?? defaultArtifactDir(users[0]?.tenant ?? 'tenant'))}"></label></section>
 <section id="policy" class="v-card" style="margin:0;"><p class="v-eyebrow">Step 4</p><h2 class="v-card-title">Approval policy</h2>

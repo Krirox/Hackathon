@@ -59,9 +59,9 @@ export type EmptyKind = 'unconfigured' | 'no-data' | 'no-match';
 
 export function emptyState(kind: EmptyKind, opts: { title?: string; body?: string; clearUrl?: string } = {}): string {
   if (kind === 'unconfigured')
-    return `<p class="sub">${esc(opts.title ?? 'Not configured yet')}${opts.body ? ` — ${esc(opts.body)}` : ''}</p>`;
+    return `<p class="sub">${esc(opts.title ?? 'Not configured yet')}${opts.body ? `: ${esc(opts.body)}` : ''}</p>`;
   if (kind === 'no-data')
-    return `<p class="sub">${esc(opts.title ?? 'No data yet')}${opts.body ? ` — ${esc(opts.body)}` : ''}</p>`;
+    return `<p class="sub">${esc(opts.title ?? 'No data yet')}${opts.body ? `: ${esc(opts.body)}` : ''}</p>`;
   const clear = opts.clearUrl ? ` <a href="${esc(opts.clearUrl)}">Clear search and filters</a>` : '';
   return `<p class="sub">${esc(opts.title ?? 'No results')}: ${esc(opts.body ?? 'No matching work found.')}${clear}</p>`;
 }
@@ -107,7 +107,7 @@ export function partialBlock(lists: PartialLists): string {
 }
 
 export function timeoutBlock(): string {
-  return `<div class="error-summary" role="alert"><p><strong>Timed out with an unknown result.</strong> Refresh to reconcile server state before retrying — the action may already have landed, so never assume nothing happened.</p></div>`;
+  return `<div class="error-summary" role="alert"><p><strong>Timed out with an unknown result.</strong> Refresh to reconcile server state before retrying. The action may already have landed, so never assume nothing happened.</p></div>`;
 }
 
 export function refreshBlock(what: string): string {
@@ -125,7 +125,7 @@ export function destructiveConfirm(opts: {
 
 /** Consistent action labels across review / correction / approval / erasure. */
 export const ACTION_LABELS = {
-  approve: 'Approve — begin work',
+  approve: 'Approve: begin work',
   decline: 'Decline request',
   correct: 'Save correction',
   refreshEvidence: 'Refresh evidence and re-review',

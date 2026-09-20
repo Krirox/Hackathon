@@ -165,7 +165,7 @@ export class InterAgentSwarmCoordinator {
     // needs to know WHY (and a silent no-op reads as "handled" in chat).
     if (normalizeScope(dispatch.targetScope) === originScope) {
       throw new Error(
-        `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent — speak in the target room instead`,
+        `[swarm] self-delegation refused: @${dispatch.targetAgent} is ${originScope}'s own agent: speak in the target room instead`,
       );
     }
 

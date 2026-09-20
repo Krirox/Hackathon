@@ -43,7 +43,7 @@ interface OutcomeRow {
   created_at: string;
 }
 
-const DASH = '—';
+const DASH = 'n/a';
 
 function fmtWhen(iso: string | null): string {
   if (!iso) return DASH;
@@ -252,7 +252,7 @@ function colorFor(done: boolean, current: boolean): string {
 
 function headlineFor(journey: TenantJourney, signedUp: string | null): string {
   if (journey.completedAt !== null && signedUp !== null) {
-    return `Journey closed in ${fmtElapsed(signedUp, journey.completedAt)} — measured outcome recorded ${fmtWhen(journey.completedAt)}.`;
+    return `Journey closed in ${fmtElapsed(signedUp, journey.completedAt)}; measured outcome recorded ${fmtWhen(journey.completedAt)}.`;
   }
   if (journey.completedAt !== null) {
     return `Measured outcome recorded ${fmtWhen(journey.completedAt)}.`;
@@ -269,10 +269,10 @@ export function renderJourneyMilestone(journey: TenantJourney, home: string): st
       const done = s.at !== null;
       const current = journey.currentIndex === i;
       const marker = markerFor(done, current);
-      const color = colorFor(done, current);
-      const weight = current ? '700' : '600';
+      const color = done ? 'var(--v-fact)' : current ? 'var(--v-accent)' : 'var(--v-faint)';
+      const weight = current ? '650' : '500';
       const label = s.href
-        ? `<a href="${esc(s.href)}" style="color:var(--v-ink)">${esc(s.label)}</a>`
+        ? `<a href="${esc(s.href)}" style="color:var(--v-ink);text-decoration:none;">${esc(s.label)}</a>`
         : esc(s.label);
       const when = whenFor(s.at, current);
       const elapsed =
@@ -282,25 +282,33 @@ export function renderJourneyMilestone(journey: TenantJourney, home: string): st
       let markerBg = 'var(--v-bg-2)';
       if (done) markerBg = 'var(--v-tint-good-bg)';
       else if (current) markerBg = 'var(--v-accent-dim)';
-      return `<li style="display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:12px;align-items:start;padding:11px 0;border-bottom:1px solid var(--v-line);">
-<span aria-hidden="true" style="width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:${markerBg};color:${color};">${marker}</span>
-<span style="min-width:0;"><span style="font-weight:${weight};font-size:13.5px;color:${color};">${label}</span><br><span class="v-sub">${esc(s.detail)}${elapsed}</span></span>
-<span class="v-meta" style="white-space:nowrap;">${esc(when)}</span>
+
+      return `<li style="display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:14px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--v-line);">
+<span aria-hidden="true" style="width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:700;background:${markerBg};color:${color};flex-shrink:0;margin-top:1px;">${marker}</span>
+<span style="min-width:0;"><span style="font-weight:${weight};font-size:13.5px;color:var(--v-ink);">${label}</span><br><span class="v-sub" style="font-size:12px;color:var(--v-muted);line-height:1.45;margin-top:2px;display:inline-block;">${esc(s.detail)}${elapsed}</span></span>
+<span class="v-meta" style="white-space:nowrap;font-size:12px;color:var(--v-faint);">${esc(when)}</span>
 </li>`;
     })
     .join('');
 
   const headline = headlineFor(journey, signedUp);
 
-  return `<section id="tenant-journey" class="v-card" style="margin-bottom:16px;">
-<div class="v-split" style="margin-bottom:4px;">
-  <div><p class="v-eyebrow">First-run journey</p>
-  <h2 class="v-card-title" style="margin-top:4px;">${doneCount} of ${journey.stages.length} milestones recorded</h2></div>
-  <div class="v-tabs"><a class="v-tab" href="${esc(home)}console/requests">Review queue</a><a class="v-tab" href="/setup">Setup</a></div>
+  return `<section id="tenant-journey" class="v-card" style="margin-bottom:20px;padding:22px 24px;border-radius:18px;background:var(--v-bg-1);border:1px solid var(--v-line);box-shadow:var(--v-card-shadow);">
+<div class="v-split" style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+  <div>
+    <p class="v-eyebrow" style="font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.09em;color:var(--v-muted);">First-run journey</p>
+    <h2 class="v-card-title" style="margin-top:4px;font-size:17px;font-weight:650;color:var(--v-ink);">${doneCount} of ${journey.stages.length} milestones recorded</h2>
+  </div>
+  <div style="display:flex;gap:8px;">
+    <a href="${esc(home)}console/requests" class="v-btn v-btn-secondary" style="display:inline-flex;align-items:center;padding:6px 14px;border-radius:9999px;font-size:12px;font-weight:500;text-decoration:none;border:1px solid var(--v-line);background:var(--v-bg-1);color:var(--v-ink-2);">Review queue</a>
+    <a href="/setup" class="v-btn v-btn-secondary" style="display:inline-flex;align-items:center;padding:6px 14px;border-radius:9999px;font-size:12px;font-weight:500;text-decoration:none;border:1px solid var(--v-line);background:var(--v-bg-1);color:var(--v-ink-2);">Setup</a>
+  </div>
 </div>
-<p class="v-sub" style="margin-bottom:6px;">Signup → setup → first source → approval → deliverable → measured outcome. Every milestone is a durable record — nothing is simulated.</p>
-<div class="v-progress" style="margin-bottom:4px;"><i style="width:${Math.round((doneCount / journey.stages.length) * 100)}%"></i></div>
+<p class="v-sub" style="font-size:12.5px;color:var(--v-muted);margin-bottom:10px;">Signup → setup → first source → approval → deliverable → measured outcome. Every milestone is a durable record. Nothing is simulated.</p>
+<div style="height:6px;background:var(--v-line);border-radius:9999px;overflow:hidden;margin-bottom:12px;">
+  <div style="height:100%;width:${Math.round((doneCount / journey.stages.length) * 100)}%;background:var(--v-fact);border-radius:9999px;transition:width .3s ease;"></div>
+</div>
 <ol style="list-style:none;padding:0;margin:0;">${items}</ol>
-<p class="v-sub" style="margin-top:10px;">${headline}</p>
+<p class="v-sub" style="margin-top:14px;font-size:12px;color:var(--v-muted);">${headline}</p>
 </section>`;
 }

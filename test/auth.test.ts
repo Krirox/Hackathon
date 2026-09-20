@@ -1163,7 +1163,7 @@ T('the team page and invite/disable flows are role-gated and audited', async () 
       body: `csrf=${ownerCsrf}&userId=${memberRow!.id}&confirmEmail=newbie%40acme.test`,
     });
     eq(disabled.status, 200, 'owner disables the member:');
-    eq(disabled.body.includes('every live session was revoked'), true);
+    eq(disabled.body.includes('Every live session was revoked'), true);
     await rejects(
       () => sessionUser(db, member.cookie.split('=')[1]!, NOW),
       'NO_SESSION',

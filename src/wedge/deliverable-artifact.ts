@@ -421,7 +421,7 @@ export async function approveDeliverableVersion(
   if (version.fingerprint !== input.fingerprint) {
     throw new WedgeError(
       'VERSION_MISMATCH',
-      'asset fingerprint does not match the reviewed version — refresh and re-review',
+      'asset fingerprint does not match the reviewed version: refresh and re-review',
     );
   }
   if (version.status === 'approved') {

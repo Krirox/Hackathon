@@ -138,7 +138,7 @@ export async function renderAuditPage(db: AsyncDb, tenant: string, opts: AuditPa
   <label class="v-sr-only" for="actor">Filter by actor (user id or email)</label>
   <input id="actor" name="actor" class="v-input" value="${esc(opts.actor ?? '')}" placeholder="Filter by actor…" autocomplete="off">
   <label class="v-sr-only" for="action">Filter by action</label>
-  <input id="action" name="action" class="v-input" value="${esc(opts.action ?? '')}" placeholder="Action — e.g. console.approve" autocomplete="off">
+  <input id="action" name="action" class="v-input" value="${esc(opts.action ?? '')}" placeholder="Action (e.g. console.approve)" autocomplete="off">
   <button class="v-btn v-btn-primary" type="submit">Filter</button>
   <a class="v-btn v-btn-ghost" href="${esc(root)}">Clear${activeFilters > 0 ? ` (${activeFilters})` : ''}</a>
   <details class="v-disclose">

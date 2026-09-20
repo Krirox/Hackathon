@@ -85,7 +85,7 @@ export function startEgressProxy(
         port: 0,
         method: req.method ?? '?',
         verdict: 'deny',
-        reason: 'origin-form request has no proxy authority — refused',
+        reason: 'origin-form request has no proxy authority: refused',
       });
       res.writeHead(400, { 'content-type': 'text/plain' });
       res.end('proxy requires absolute-URI requests');

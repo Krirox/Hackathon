@@ -106,12 +106,12 @@ export async function renderDigest(
   // rather than a bare paragraph. The exact since/now instants stay on the page
   // because "the last 7 days" is only auditable if you can see the boundaries.
   const window = `<p class="v-sub">NOTICE activity window (UTC): ${opts.since ? esc(opts.since) : 'all recorded history'} through ${esc(now)}, inclusive.</p>
-<p class="v-meta">Informational only — no approval required and no review attention consumed. Same-scope topics are grouped when successive notices are at most 24 hours apart within this window; latest activity first.</p>`;
+<p class="v-meta">Informational only: no approval required and no review attention consumed. Same-scope topics are grouped when successive notices are at most 24 hours apart within this window; latest activity first.</p>`;
   if (entries.length === 0) {
     // The window note stays even when empty: "no notices in this window" is
     // only meaningful alongside the window it refers to.
     return `${window}<div class="v-empty" style="margin-top:16px;">
-  <h3>Digest empty — no notices in this time window</h3>
+  <h3>Digest empty: no notices in this time window</h3>
   <p>NOTICEs are informational: they never ask for a decision and never consume review attention, so an empty digest is a healthy digest. Widen the window to look further back.</p>
   <p><a class="v-btn v-btn-secondary v-btn-sm" href="${esc(digestUrl('all'))}">Show all history</a></p>
 </div>`;

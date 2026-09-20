@@ -275,7 +275,7 @@ export class LiveTranscriptManager {
   ): Promise<TranscriptSegment | null> {
     if (!this.sttProvider) {
       throw new Error(
-        '[stt:NO_PROVIDER] no speech-to-text provider is configured for this meeting — live audio cannot be transcribed here',
+        '[stt:NO_PROVIDER] no speech-to-text provider is configured for this meeting: live audio cannot be transcribed here',
       );
     }
     if (this.sttProvider.transcribeLiveChunk) {

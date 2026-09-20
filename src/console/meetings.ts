@@ -92,7 +92,7 @@ export function renderMeetingRoomView(opts: {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>${esc(meeting.title)} — Vital Meeting</title>
+  <title>${esc(meeting.title)} · Vital Meeting</title>
   <meta name="vital-csrf" content="${esc(csrf)}">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📹</text></svg>">
   <style>${stageTokensCss()}</style>
@@ -135,7 +135,7 @@ export function renderMeetingRoomView(opts: {
   <div class="meeting-main-area">
     <div class="meeting-stage" id="video-stage">
       <div class="stage-hero" id="stage-hero">
-        <button type="button" class="hero-pin-btn" id="hero-pin-btn" data-action="pin-hero" title="Unpin — return to active speaker"><span data-icon="pin"></span></button>
+        <button type="button" class="hero-pin-btn" id="hero-pin-btn" data-action="pin-hero" title="Unpin: return to active speaker"><span data-icon="pin"></span></button>
       </div>
       <div class="video-rail video-grid" id="video-rail" aria-label="Participants"></div>
     </div>
@@ -462,7 +462,7 @@ export function renderMeetingDetailView(opts: {
       <section class="intel-card rag-card">
         <h2 class="card-heading">Ask About This Meeting</h2>
         <div class="rag-conversation" id="rag-chat-history">
-          <div class="rag-system-msg">Ask any question. Answers come from lexical retrieval over meeting chunks, with cited timestamps. (Chunks are indexed with hash-based term vectors, not a semantic embedding model — retrieval matches words, not meanings.)</div>
+          <div class="rag-system-msg">Ask any question. Answers come from lexical retrieval over meeting chunks, with cited timestamps. (Chunks are indexed with hash-based term vectors, not a semantic embedding model; retrieval matches words, not meanings.)</div>
         </div>
         <form class="rag-input-form" onsubmit="submitMeetingQuestion(event)">
           <input type="text" id="rag-query-input" class="rag-input" placeholder="e.g. What did we decide about the launch?" required>
@@ -1046,13 +1046,13 @@ export function renderMeetingLibraryView(opts: { meetings: Meeting[]; home: stri
 </script>
 
 <style>
-/* Meeting Intelligence library — styled on the Console design system (--v-*
+/* Meeting Intelligence library: styled on the Console design system (--v-*
    tokens) so it reads as a native console page in BOTH themes. It previously
    shipped a fixed light palette (--v-stage-white / ink-strong backgrounds with
    dark stage text), which painted a bright island inside the dark Console
    shell. Every rule below now speaks in theme-adaptive console tokens. */
 
-/* Back to Console — small pill above the library title. Uses shell tokens so
+/* Back to Console: small pill above the library title. Uses shell tokens so
    it flips with light/dark and matches the topbar/rail. */
 .btn-back-console {
   display: inline-flex;

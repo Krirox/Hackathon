@@ -109,7 +109,7 @@ export class TenantScopeError extends Error {
   constructor(sql: string, table: string) {
     super(
       `[tenant:UNSCOPED] statement touches "${table}" without a tenant predicate: ` +
-        `${sql.replace(/\s+/g, ' ').trim().slice(0, 160)} — use forTenant(db, tenant) and filter on tenant`,
+        `${sql.replace(/\s+/g, ' ').trim().slice(0, 160)}: use forTenant(db, tenant) and filter on tenant`,
     );
     this.name = 'TenantScopeError';
   }

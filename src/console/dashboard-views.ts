@@ -40,33 +40,36 @@ export function renderDepartmentTabs(activeScope: DashboardDepartment, home: str
     .map((t) => {
       const isSelected = activeScope === t.id;
       const activeStyle = isSelected
-        ? 'background:var(--v-ink);color:var(--v-bg-1);border-color:var(--v-ink);font-weight:600;'
-        : 'background:var(--v-bg-1);color:var(--v-ink-2);border-color:var(--v-line-strong);';
+        ? 'background:var(--v-ink);color:var(--v-bg-0);border-color:var(--v-ink);font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.12);'
+        : 'background:var(--v-bg-1);color:var(--v-ink-2);border-color:var(--v-line);';
       const url = t.id === 'all' ? `/console/dashboard` : `/console/dashboard?scope=${t.id}`;
       const aria = isSelected ? ' aria-current="true"' : '';
-      return `<a href="${esc(url)}"${aria} style="display:inline-flex;align-items:center;padding:7px 14px;border-radius:999px;border:1px solid;font-size:12.5px;text-decoration:none;transition:all .15s var(--ease-out);white-space:nowrap;${activeStyle}">
+      return `<a href="${esc(url)}"${aria} class="dept-tab-pill" style="display:inline-flex;align-items:center;padding:7px 16px;border-radius:9999px;border:1px solid;font-size:12.5px;text-decoration:none;transition:all .16s cubic-bezier(0.16,1,0.3,1);white-space:nowrap;${activeStyle}">
         <span>${esc(t.label)}</span>
       </a>`;
     })
     .join('');
 
-  return `<nav aria-label="Department Views" style="display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 16px;">
+  return `<nav aria-label="Department Views" style="display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:4px 0 20px;">
     ${tabHtml}
+    <div style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--v-bg-1);border:1px solid var(--v-line);color:var(--v-faint);flex-shrink:0;margin-left:4px;" title="Department view scope filters">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    </div>
   </nav>`;
 }
 
 /** Real status cell: never a fabricated healthy default for missing rooms. */
 function statusOf(room: RoomHealthEvaluation | undefined): string {
-  if (!room) return '<span class="v-badge"><span class="dot" style="background:var(--v-faint);"></span>no room data</span>';
+  if (!room) return '<span class="v-badge" style="border-radius:9999px;"><span class="dot" style="background:var(--v-faint);"></span>no room data</span>';
   let tone = 'v-badge-warn';
   if (room.status === 'healthy' || room.badge.includes('🟢')) tone = 'v-badge-good';
   else if (room.status === 'halted' || room.badge.includes('🔴')) tone = 'v-badge-risk';
-  return `<span class="v-badge ${tone}">${esc(room.badge)} ${esc(room.status)}</span>`;
+  return `<span class="v-badge ${tone}" style="border-radius:9999px;">${esc(room.badge)} ${esc(room.status)}</span>`;
 }
 
 /** Real ceiling display: an unset (0) ceiling says so instead of inventing one. */
 function ceilingOf(room: RoomHealthEvaluation | undefined, kind: 'dollars' | 'tokens'): string {
-  if (!room) return '—';
+  if (!room) return 'n/a';
   const v = kind === 'dollars' ? room.spendCeilingDollars : room.spendCeilingTokens;
   return v > 0 ? v.toLocaleString() : 'unset';
 }
@@ -80,30 +83,30 @@ function bannerShell(opts: {
   actions: string;
   tiles: string;
 }): string {
-  return `<div class="v-card" style="border-left:3px solid ${opts.bar};padding:18px 20px;margin-bottom:18px;background:${opts.tintBg};">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;">
+  return `<div class="v-card" style="border-left:4px solid ${opts.bar};padding:22px 24px;border-radius:18px;margin-bottom:20px;background:${opts.tintBg};box-shadow:var(--v-card-shadow);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
         <div style="min-width:0;">
-          <h2 class="v-card-title" style="color:${opts.tintInk};">${opts.title}</h2>
-          <p class="v-sub" style="font-size:12.5px;margin:3px 0 0;">${opts.sub}</p>
+          <h2 class="v-card-title" style="color:${opts.tintInk};font-size:17px;font-weight:650;">${opts.title}</h2>
+          <p class="v-sub" style="font-size:12.5px;margin:3px 0 0;line-height:1.4;">${opts.sub}</p>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">${opts.actions}</div>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:14px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:16px;">
         ${opts.tiles}
       </div>
     </div>`;
 }
 
 function tile(label: string, value: string, sub: string): string {
-  return `<div style="background:var(--v-bg-1);border:1px solid var(--v-line);padding:12px 14px;border-radius:12px;min-width:0;">
-          <div class="v-eyebrow">${esc(label)}</div>
-          <div style="font-size:15px;font-weight:700;color:var(--v-ink);margin-top:3px;overflow-wrap:anywhere;">${value}</div>
-          <div class="v-meta" style="margin-top:2px;">${sub}</div>
+  return `<div style="background:var(--v-bg-1);border:1px solid var(--v-line);padding:14px 16px;border-radius:14px;min-width:0;box-shadow:var(--v-card-shadow);">
+          <div class="v-eyebrow" style="font-size:10.5px;letter-spacing:0.07em;">${esc(label)}</div>
+          <div style="font-size:16px;font-weight:700;color:var(--v-ink);margin-top:3px;overflow-wrap:anywhere;">${value}</div>
+          <div class="v-meta" style="margin-top:2px;font-size:11.5px;">${sub}</div>
         </div>`;
 }
 
 function actionBtn(href: string, label: string, primary: boolean): string {
-  return `<a href="${esc(href)}" class="v-btn ${primary ? 'v-btn-primary' : 'v-btn-secondary'}" style="min-height:34px;padding:7px 14px;font-size:12px;">${esc(label)}</a>`;
+  return `<a href="${esc(href)}" class="v-btn ${primary ? 'v-btn-primary' : 'v-btn-secondary'}" style="min-height:34px;padding:7px 16px;font-size:12px;border-radius:9999px;">${esc(label)}</a>`;
 }
 
 export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string {
@@ -122,7 +125,7 @@ export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string
       title: 'Legal &amp; Compliance Portal',
       sub: 'Regulatory compliance posture, gate review decisions, and GDPR Article 17 privacy rights.',
       actions: `${actionBtn(`/console/data`, 'Data & GDPR Portability →', true)}${actionBtn(`/console/audit`, 'Audit Trail →', false)}`,
-      tiles: `${tile('#compliance room', statusOf(legalRoom), legalRoom ? `${legalRoom.pendingApprovals} gate(s) awaiting review` : 'no evaluation for this scope')}${tile('#risk-monitor room', statusOf(riskRoom), riskRoom ? `Active stops: ${riskRoom.activeStops}` : 'no evaluation for this scope')}${tile('Open contradictions', legalRoom ? `${legalRoom.contradictions} open` : '—', 'from the room-health rollup (ledger contradiction pairs)')}`,
+      tiles: `${tile('#compliance room', statusOf(legalRoom), legalRoom ? `${legalRoom.pendingApprovals} gate(s) awaiting review` : 'no evaluation for this scope')}${tile('#risk-monitor room', statusOf(riskRoom), riskRoom ? `Active stops: ${riskRoom.activeStops}` : 'no evaluation for this scope')}${tile('Open contradictions', legalRoom ? `${legalRoom.contradictions} open` : 'n/a', 'from the room-health rollup (ledger contradiction pairs)')}`,
     });
   }
 
@@ -154,9 +157,9 @@ export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string
       tintInk: 'var(--v-tint-warn-ink)',
       bar: 'var(--v-hypo)',
       title: 'Financial Operations &amp; Budget Ledger',
-      sub: 'Attention accounting, daily spend caps, and financial gate reviews — figures below are live rollups.',
+      sub: 'Attention accounting, daily spend caps, and financial gate reviews. Figures below are live rollups.',
       actions: actionBtn(`/console/buzz/finance`, 'Open #finance →', true),
-      tiles: `${tile('Spend (all time)', finRoom ? `$${finRoom.spendDollars.toFixed(2)} / $${ceilingOf(finRoom, 'dollars')}` : '—', finRoom ? `Ceiling utilization: ${finRoom.budgetPercentage}%` : 'no evaluation for this scope')}${tile('Tokens spent · Token Burn Rate', finRoom ? finRoom.spendTokens.toLocaleString() : '—', `ceiling ${ceilingOf(finRoom, 'tokens')}`)}${tile('Pending review gates', finRoom ? String(finRoom.pendingApprovals) : '—', 'cost-per-signal needs measured routing outcomes')}`,
+      tiles: `${tile('Spend (all time)', finRoom ? `$${finRoom.spendDollars.toFixed(2)} / $${ceilingOf(finRoom, 'dollars')}` : 'n/a', finRoom ? `Ceiling utilization: ${finRoom.budgetPercentage}%` : 'no evaluation for this scope')}${tile('Tokens spent · Token Burn Rate', finRoom ? finRoom.spendTokens.toLocaleString() : 'n/a', `ceiling ${ceilingOf(finRoom, 'tokens')}`)}${tile('Pending review gates', finRoom ? String(finRoom.pendingApprovals) : 'n/a', 'cost-per-signal needs measured routing outcomes')}`,
     });
   }
 
@@ -175,7 +178,7 @@ export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string
       tintInk: 'var(--v-tint-info-ink)',
       bar: 'var(--v-accent)',
       title: 'Engineering &amp; Infrastructure Command',
-      sub: 'Workspace isolation, Organizational Compiler drift, ingestion pipelines, and substrate health — figures below are live rollups.',
+      sub: 'Workspace isolation, Organizational Compiler drift, ingestion pipelines, and substrate health. Figures below are live rollups.',
       actions: actionBtn(`/console/buzz/infra`, 'Open #infra →', true),
       tiles: `${roomTile(opsRoom, '#infra')}${roomTile(dataRoom, '#data')}${roomTile(coreRoom, '#reality-core')}`,
     });

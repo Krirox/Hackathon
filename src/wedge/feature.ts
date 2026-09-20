@@ -38,7 +38,7 @@ export async function researchCompetitors(
   if (input.findings.length === 0) {
     throw new WedgeError(
       'EMPTY_RESEARCH',
-      'deep research with no findings researched nothing — cite sources or skip the stage',
+      'deep research with no findings researched nothing: cite sources or skip the stage',
     );
   }
   const ids: string[] = [];
@@ -49,7 +49,7 @@ export async function researchCompetitors(
     if (!RESEARCH_TIERS.includes(tier)) {
       throw new WedgeError(
         'RESEARCH_MINTS_FACT',
-        'research observes; it does not mint ground truth — promotion is governed',
+        'research observes; it does not mint ground truth: promotion is governed',
       );
     }
     const c = await ledger.append({
@@ -209,12 +209,12 @@ export async function codeApprovedFeature(
   const now = input.now ?? new Date().toISOString();
   const replay = await ledger.replayDecision(tenant, input.decisionId);
   if (!replay.record.approvedBy) {
-    throw new WedgeError('UNAPPROVED_CODE', `decision ${input.decisionId} has no human approver — coding refused`);
+    throw new WedgeError('UNAPPROVED_CODE', `decision ${input.decisionId} has no human approver: coding refused`);
   }
   if (replay.record.autonomy !== 'approval' && replay.record.autonomy !== 'human-command') {
     throw new WedgeError(
       'UNAPPROVED_CODE',
-      `decision ${input.decisionId} autonomy is ${replay.record.autonomy} — coding refused`,
+      `decision ${input.decisionId} autonomy is ${replay.record.autonomy}: coding refused`,
     );
   }
 
@@ -260,7 +260,7 @@ export async function codeApprovedFeature(
       const details = drifted.map((d) => `${d.id}:${d.frozenStatus}->${d.currentStatus}`).join(', ');
       throw new WedgeError(
         'DRIFTED_DECISION',
-        `decision evidence has drifted since approval (${details}) — reapproval required`,
+        `decision evidence has drifted since approval (${details}): reapproval required`,
       );
     }
 
@@ -270,13 +270,13 @@ export async function codeApprovedFeature(
       if (!live || (UNUSABLE as readonly string[]).includes(live.status)) {
         throw new WedgeError(
           'DRIFTED_DECISION',
-          `decision cites claim ${entry.id} which is now ${live ? live.status : 'missing'} — reapproval required`,
+          `decision cites claim ${entry.id} which is now ${live ? live.status : 'missing'}: reapproval required`,
         );
       }
       if (live.validUntil && live.validUntil <= now) {
         throw new WedgeError(
           'DRIFTED_DECISION',
-          `decision cites claim ${entry.id} which expired at ${live.validUntil} — reapproval required`,
+          `decision cites claim ${entry.id} which expired at ${live.validUntil}: reapproval required`,
         );
       }
     }
@@ -286,7 +286,7 @@ export async function codeApprovedFeature(
   // F03: same executable set as every worker — ACCEPTED (human-approved) is
   // claimable, so an approved coding plan can actually run.
   if (!req || (req.state !== 'ADMITTED' && req.state !== 'ACCEPTED' && req.state !== 'IN_FLIGHT')) {
-    throw new WedgeError('UNADMITTED_CODE', `request ${input.requestId} is not executable — coding refused`);
+    throw new WedgeError('UNADMITTED_CODE', `request ${input.requestId} is not executable: coding refused`);
   }
 
   const outcome = await adapter.run(tenant, input.requestId, {

@@ -2,8 +2,8 @@
 // Left: App icon rail + Rooms sidebar. Right: Full-height chat or page content.
 //
 // Honesty rule (matches console/buzz.ts): every number, name, and unread
-// badge rendered here is real. A quiet room shows "—", a missing tenant
-// shows "—", and there are no invented contacts or personas.
+// badge rendered here is real. A quiet room shows "n/a", a missing tenant
+// shows "n/a", and there are no invented contacts or personas.
 
 import { getScopeAvatarSrc } from './buzz.ts';
 import { svgIcon } from './buzz-icons.ts';
@@ -24,13 +24,13 @@ export function buzzDocument(title: string, inner: string): string {
   // The trailing comment opts this document out of the Console design system:
   // the Workspace mirrors upstream Buzz, which means Buzz's own native font
   // stack and palette, not the Console tokens. See THEME_OPTOUT_MARKER.
-  return `<!doctype html><html lang="en"><head><!-- data-vital-no-theme --><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Workspace</title>
+  return `<!doctype html><html lang="en"><head><!-- data-vital-no-theme --><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Workspace</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>try{if(localStorage.getItem('buzz-theme')==='dark'){document.documentElement.className+=' buzz-dark';}}catch(e){}</script>
 </head><body><main id="main" style="height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden;">${inner}</main></body></html>`;
 }
 
-const DASH = '—';
+const DASH = 'n/a';
 
 function fmtDollars(n: number): string {
   return `$${n.toFixed(2)}`;
@@ -57,7 +57,7 @@ export function renderWorkspaceShell(opts: {
   navKey?: string;
   /** Real telemetry. Callers that cannot compute it pass metrics: null → dashes. */
   metrics: ShellMetrics | null;
-  /** Real per-room recency (minutes) keyed by scope; missing rooms render "—". */
+  /** Real per-room recency (minutes) keyed by scope; missing rooms render "n/a". */
   roomRecency: Record<string, number | null>;
 }): string {
   const { rooms, activeScope, home: _home, consoleNav, accountCluster, innerHtml, userEmail, userRole, tenant } = opts;
@@ -159,7 +159,7 @@ export function renderWorkspaceShell(opts: {
     --buzz-ink-3: #64748B;
     --buzz-ink-inverse: #FFFFFF;
     /* Initials on the generated pastel avatar chips: the chip stays light in
-       both themes, so its ink must stay dark — intentionally NOT overridden in
+       both themes, so its ink must stay dark: intentionally NOT overridden in
        html.buzz-dark. */
     --buzz-avatar-ink: #1E293B;
     --buzz-accent: #0F5C57;
@@ -198,8 +198,8 @@ export function renderWorkspaceShell(opts: {
   /* ── Dark mode ────────────────────────────────────────────────────
      Buzz's OWN dark ramp. It borrows the marketing/Console dark *values*
      (near-black canvas, chartreuse accent, translucent glass borders) so a
-     toggle feels consistent across the product, but keeps Buzz's token NAMES
-     — the surface-split guard stays intact: no --v-* tokens, no data-theme
+     toggle feels consistent across the product, but keeps Buzz's token NAMES:
+     the surface-split guard stays intact, no --v-* tokens, no data-theme
      attribute, no Inter. Only a class on <html> flips the values. */
   html.buzz-dark {
     color-scheme: dark;
@@ -417,7 +417,7 @@ export function renderWorkspaceShell(opts: {
     box-shadow: 0 0 0 2px var(--buzz-canvas);
   }
 
-  /* Dashboard / issues launchers (BEM — no more inline overrides + !important) */
+  /* Dashboard / issues launchers (BEM: no more inline overrides + !important) */
   .buzz-launcher {
     display: flex;
     align-items: center;
@@ -550,7 +550,7 @@ export function renderWorkspaceShell(opts: {
 
   /* Dark-mode toggle (sidebar, mirrors the Console topbar control). Buzz keeps
      its own marker (data-buzz-theme-toggle) so it never collides with the
-     Console's own toggle attribute — the surface-split regression test forbids
+     Console's own toggle attribute: the surface-split regression test forbids
      the Console control from appearing on the chat. The Console attribute name
      is deliberately not spelled out here: this comment is emitted inside the
      chat document, and that test greps the whole page for the literal, so a
@@ -657,7 +657,7 @@ export function renderWorkspaceShell(opts: {
         </a>
         ${
           parseTeam(opts.userTeam) === 'engineering'
-            ? `<a href="/console/issues" id="sidebar-issues-dashboard-link" class="buzz-launcher ${activeScope === 'dashboard' || activeScope === 'issues' ? 'buzz-launcher--active' : ''}" style="justify-content:space-between;" title="#dashboard — Engineering Issues Board">
+            ? `<a href="/console/issues" id="sidebar-issues-dashboard-link" class="buzz-launcher ${activeScope === 'dashboard' || activeScope === 'issues' ? 'buzz-launcher--active' : ''}" style="justify-content:space-between;" title="#dashboard · Engineering Issues Board">
           <span class="buzz-launcher__label">
             ${svgIcon('clipboard', 14)}
             <span>#dashboard · Issues</span>
@@ -674,7 +674,7 @@ export function renderWorkspaceShell(opts: {
 
     <!-- Bottom User Profile Card -->
     <div class="buzz-profile-card">
-      <a href="/account" class="buzz-profile-link" title="${esc(emailStr)} (${esc(roleStr)}) — Account &amp; Security">
+      <a href="/account" class="buzz-profile-link" title="${esc(emailStr)} (${esc(roleStr)}) · Account &amp; Security">
         <div class="buzz-profile-avatar">${esc(initials)}</div>
         <div class="buzz-profile-info">
           <div class="buzz-profile-name">${esc(userName)}</div>

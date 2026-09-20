@@ -34,7 +34,7 @@ function renderItem(item: DeliverableItem): string {
     item.claimIds.length > 0
       ? `<p><small>Citations: ${item.claimIds.map((id) => `<a href="/console/claims/${esc(encodeURIComponent(id))}"><code>${esc(id)}</code></a>`).join(', ')}</small></p>`
       : '<p><small>No citations</small></p>';
-  return `<li><p><strong>${esc(classLabel(item.classification))}</strong> — ${esc(item.text)}</p>${cites}${fail}</li>`;
+  return `<li><p><strong>${esc(classLabel(item.classification))}</strong>: ${esc(item.text)}</p>${cites}${fail}</li>`;
 }
 
 function renderChecks(version: DeliverableVersion): string {
@@ -160,7 +160,7 @@ Deliverable schema
 <input type="text" name="deliverableSchema" value="${esc(defaultSchema)}" required>
 </label>
 <label style="display:block;margin-bottom:0.5rem">
-<input type="checkbox" name="externalPublish"> External publication (irreversible — approving it records the authorization; it is not posted or deployed by this console)
+<input type="checkbox" name="externalPublish"> External publication (irreversible: approving it records the authorization; it is not posted or deployed by this console)
 </label>
 <button type="submit">Submit deliverable draft</button>
 </form>
@@ -203,13 +203,13 @@ ${addedHtml(diff)}
   let reviewForms: string;
   if (canReview) {
     const externalConfirm = version.externalPublish
-      ? `<label style="display:block;margin:0.5rem 0">Type <code>PUBLISH</code> to confirm you are authorizing an irreversible external action — one that you (or an operator) carry out outside this console: <input type="text" name="confirmText" placeholder="PUBLISH" required></label>`
+      ? `<label style="display:block;margin:0.5rem 0">Type <code>PUBLISH</code> to confirm you are authorizing an irreversible external action, one that you (or an operator) carry out outside this console: <input type="text" name="confirmText" placeholder="PUBLISH" required></label>`
       : '';
     reviewForms = `<form data-review-action="approve-deliverable" action="/api/deliverables/${esc(encodeURIComponent(version.id))}/approve" method="post">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input type="hidden" name="fingerprint" value="${esc(version.fingerprint)}">
 ${operatorFields(opts, version.id, 'approve-deliverable')}
-<label><input type="checkbox" name="confirmed" required> I inspected this exact asset (v${version.version}, fingerprint <code>${esc(version.fingerprint.slice(0, 12))}…</code>) and approve it${version.externalPublish ? ' — understanding that this records the authorization and publishes nothing by itself' : ''}</label>
+<label><input type="checkbox" name="confirmed" required> I inspected this exact asset (v${version.version}, fingerprint <code>${esc(version.fingerprint.slice(0, 12))}…</code>) and approve it${version.externalPublish ? '. This records the authorization and publishes nothing by itself' : ''}</label>
 ${externalConfirm}
 <button type="submit">Approve deliverable</button>
 </form>
@@ -221,7 +221,7 @@ ${operatorFields(opts, version.id, 'request-changes')}
 <button type="submit">Request changes</button>
 </form>`;
   } else if (version.status === 'approved') {
-    reviewForms = `<p>Final deliverable approved${version.decisionId ? ` — <a href="/console/decisions/${esc(encodeURIComponent(version.decisionId))}">view receipt</a>` : ''}.</p>`;
+    reviewForms = `<p>Final deliverable approved${version.decisionId ? `. <a href="/console/decisions/${esc(encodeURIComponent(version.decisionId))}">View receipt</a>` : ''}.</p>`;
   } else {
     reviewForms = `<p>Deliverable review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
   }
@@ -274,7 +274,7 @@ ${CLAIM_CITE_SCRIPT}
         // like a deployment is the kind of copy that gets someone to approve
         // something they believe already happened.
         consequences:
-          'Irreversible action. Approving records human-command authorization in the ledger — this console does not publish, post, or deploy; the operator performs the external action outside it.',
+          'Irreversible action. Approving records human-command authorization in the ledger. This console does not publish, post, or deploy; the operator performs the external action outside it.',
         retained: 'Audit ledger and decision receipt',
       })
     : '';
@@ -283,7 +283,7 @@ ${CLAIM_CITE_SCRIPT}
 <h2>Deliverable preview (${esc(version.kind)} · ${esc(version.deliverableSchema)})</h2>
 <p>Version ${version.version} · ${esc(version.status)} · ${versionLinks}</p>
 ${externalNote}
-<p>This is the exact asset under review — not only its schema and goal.</p>
+<p>This is the exact asset under review, not only its schema and goal.</p>
 <h3>Content</h3>
 <p><a href="/api/deliverables/${esc(encodeURIComponent(version.id))}/artifact" download>Download artifact v${version.version}</a></p>
 <pre>${esc(content)}</pre>

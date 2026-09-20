@@ -307,7 +307,7 @@ export function signAsRoomAgent(
   const agent = agentForScope(rawScope);
   if (!agent) {
     throw new Error(
-      `[buzz:NO_AGENT_KEY] no Buzz agent key configured — set BUZZ_AGENT_MASTER_KEY to sign as ${roomForScope(rawScope).agentName}`,
+      `[buzz:NO_AGENT_KEY] no Buzz agent key configured: set BUZZ_AGENT_MASTER_KEY to sign as ${roomForScope(rawScope).agentName}`,
     );
   }
   return signNostrEvent(agent.keypair, {
@@ -407,7 +407,7 @@ export async function resolveRoomDef(
     defaultBudgetDollars: 500,
     defaultBudgetTokens: 2_000_000,
     defaultSoRs: [],
-    recommendedModel: '—',
+    recommendedModel: 'n/a',
   };
 }
 
@@ -488,7 +488,7 @@ export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: stri
       defaultBudgetDollars: 500,
       defaultBudgetTokens: 2_000_000,
       defaultSoRs: [],
-      recommendedModel: '—',
+      recommendedModel: 'n/a',
     } as CanonicalRoomDefinition);
   const def = resolved;
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(configKey(tenant, def.scope))) as

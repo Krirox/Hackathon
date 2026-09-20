@@ -79,7 +79,7 @@ export function readApiKey(env: NodeJS.ProcessEnv, profile: ModelProfile): strin
   if (!resolved) {
     throw new ModelError(
       'MISSING_API_KEY',
-      `${profile.apiKeyEnv} is not set — ${profile.name} (${profile.provider}/${profile.model}) cannot run without it. Keys live in env, never in code.`,
+      `${profile.apiKeyEnv} is not set: ${profile.name} (${profile.provider}/${profile.model}) cannot run without it. Keys live in env, never in code.`,
     );
   }
   return resolved;
@@ -205,7 +205,7 @@ export function assertApproved(profile: ModelProfile, lane: string, env: NodeJS.
   if (!approvedModels(lane, env).includes(profile.model)) {
     throw new ModelError(
       'UNAPPROVED_MODEL',
-      `model "${profile.model}" is not approved for lane "${lane}" — register it or refuse the work`,
+      `model "${profile.model}" is not approved for lane "${lane}": register it or refuse the work`,
     );
   }
 }

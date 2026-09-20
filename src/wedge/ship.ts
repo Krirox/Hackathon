@@ -96,7 +96,7 @@ export async function summarizeRelease(
     if (missing.length > 0) {
       throw new WedgeError(
         'UNVERIFIABLE_CITATION',
-        `"${it.text}" cites ${missing.join(', ')} — stale, disputed, provisional, or unknown`,
+        `"${it.text}" cites ${missing.join(', ')}: stale, disputed, provisional, or unknown`,
       );
     }
     whatChanged.push({ text: it.text, claimIds: it.claimIds });
@@ -332,7 +332,7 @@ export async function fanOut(
       'product',
       'marketing',
       'REQUEST',
-      `launch narrative + blog + in-app copy — ${brief}`,
+      `launch narrative + blog + in-app copy: ${brief}`,
       'launch-pack.v1',
       15,
     ),
@@ -340,16 +340,16 @@ export async function fanOut(
       'product',
       'customer',
       'REQUEST',
-      `support macro + FAQ + churn-risk segment — ${brief}`,
+      `support macro + FAQ + churn-risk segment: ${brief}`,
       'support-pack.v1',
       15,
     ),
-    sales: await req('product', 'sales', 'REQUEST', `battlecard + objection handling — ${brief}`, 'battlecard.v1', 10),
+    sales: await req('product', 'sales', 'REQUEST', `battlecard + objection handling: ${brief}`, 'battlecard.v1', 10),
     product: await req(
       'engineering',
       'product',
       'QUERY',
-      `does this close a known pain pattern? — ${brief}`,
+      `does this close a known pain pattern?: ${brief}`,
       'pain-link.v1',
       0,
     ),
@@ -357,7 +357,7 @@ export async function fanOut(
       'product',
       'finance',
       'REQUEST',
-      `budget headroom for paid launch — ${brief}`,
+      `budget headroom for paid launch: ${brief}`,
       'budget-check.v1',
       10,
     ),

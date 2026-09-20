@@ -21,7 +21,7 @@ export interface ShellMetrics {
   /** Human minutes spent today / delegated ceiling (ceiling <= 0 renders as spent, no invented cap). */
   humanMinutesToday: number;
   humanMinutesCap: number;
-  /** Org-wide daily dollar ceiling the coordinator enforces (<= 0 renders as em dash — never an invented limit). */
+  /** Org-wide daily dollar ceiling the coordinator enforces (<= 0 renders as "n/a" — never an invented limit). */
   dailyBudgetCeiling: number;
 }
 

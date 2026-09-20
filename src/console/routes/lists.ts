@@ -330,10 +330,10 @@ export function listsRoutes(): RouteDef<ListsEnv>[] {
           `<a href="${esc(`/console/requests?scope=${encodeURIComponent(r.scope)}&return=${encodeURIComponent(here)}`)}" class="v-meta">${statusChip(r.status)}</a>`,
           r.pending > 0
             ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.pending} waiting</span>`
-            : '<span class="v-meta">—</span>',
+            : '<span class="v-meta">none</span>',
           r.stops > 0
             ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${r.stops} stop${r.stops === 1 ? '' : 's'}</span>`
-            : '<span class="v-meta">—</span>',
+            : '<span class="v-meta">none</span>',
           `<span class="v-num v-meta">${Math.round(r.budget)}%</span>`,
         ];
         // Group the current page by category, in the canonical order.

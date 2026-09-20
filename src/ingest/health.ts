@@ -76,7 +76,7 @@ const FILE_PERMISSION_NOTE =
   'Vital reads the configured directory with the console process identity. The path must exist, be readable, and stay outside the artifact and database stores.';
 
 const SERPER_PERMISSION_NOTE =
-  'Serper credentials travel in the X-API-KEY header only — never stored in the ledger, logs, or request bodies. Set SERPER_API_KEY in the environment.';
+  'Serper credentials travel in the X-API-KEY header only: never stored in the ledger, logs, or request bodies. Set SERPER_API_KEY in the environment.';
 
 const GITHUB_PERMISSION_NOTE =
   'GitHub release polling uses the public API. Private repositories require a token configured at the deployment boundary (not written to claims).';
@@ -119,19 +119,19 @@ export function ingestErrorCode(err: unknown): string {
 export function ingestErrorDetail(code: string): string {
   switch (code) {
     case 'UNCONFIGURED':
-      return 'credentials or source path are missing — configure before syncing';
+      return 'credentials or source path are missing: configure before syncing';
     case 'RATE_LIMITED':
-      return 'provider rate limit — wait and retry; checkpoint is preserved';
+      return 'provider rate limit: wait and retry; checkpoint is preserved';
     case 'PROVIDER_ERROR':
-      return 'upstream provider rejected the request — verify credentials and reachability';
+      return 'upstream provider rejected the request: verify credentials and reachability';
     case 'SOURCE_REJECTED':
-      return 'source exceeded configured size or shape limits — fix the directory contents';
+      return 'source exceeded configured size or shape limits: fix the directory contents';
     case 'TIER_REJECTED':
-      return 'collector attempted a ground tier — collectors write OBSERVATION only';
+      return 'collector attempted a ground tier: collectors write OBSERVATION only';
     case 'POLL_FAILED':
-      return 'poll failed — inspect connection test output and retry';
+      return 'poll failed: inspect connection test output and retry';
     default:
-      return 'ingestion error — retry after fixing the reported condition';
+      return 'ingestion error: retry after fixing the reported condition';
   }
 }
 
@@ -252,17 +252,17 @@ export function deriveIntegrationState(input: {
     return { state: 'unconfigured', detail: 'choose a source on the setup page before syncing' };
   }
   if (input.disabled) {
-    return { state: 'disabled', detail: 'integration is disabled — re-enable before polling' };
+    return { state: 'disabled', detail: 'integration is disabled: re-enable before polling' };
   }
   if (input.lastPoll && !input.lastPoll.ok && input.lastPoll.errorCode === 'RATE_LIMITED') {
     return {
       state: 'rate_limited',
-      detail: 'provider rate limit — checkpoint preserved; retry after the window resets',
+      detail: 'provider rate limit: checkpoint preserved; retry after the window resets',
     };
   }
   const preservedSuccesses =
     input.stats.done > 0
-      ? `; ${input.stats.done} source item${input.stats.done === 1 ? '' : 's'} already ingested into the ledger — preserved`
+      ? `; ${input.stats.done} source item${input.stats.done === 1 ? '' : 's'} already ingested into the ledger: preserved`
       : '';
   if (input.lastPoll && !input.lastPoll.ok) {
     const code = input.lastPoll.errorCode ?? 'POLL_FAILED';
@@ -274,13 +274,13 @@ export function deriveIntegrationState(input: {
   if (input.stats.pending > 0 || input.stats.claimed > 0) {
     return {
       state: 'syncing',
-      detail: `${input.stats.pending} pending · ${input.stats.claimed} in progress — worker is settling receipts`,
+      detail: `${input.stats.pending} pending · ${input.stats.claimed} in progress: worker is settling receipts`,
     };
   }
   if (input.stats.failed > 0) {
     return {
       state: 'failed',
-      detail: `${input.stats.failed} receipt${input.stats.failed === 1 ? '' : 's'} failed — fix the source and retry sync${preservedSuccesses}`,
+      detail: `${input.stats.failed} receipt${input.stats.failed === 1 ? '' : 's'} failed: fix the source and retry sync${preservedSuccesses}`,
     };
   }
   if (input.stats.done > 0) {
@@ -293,7 +293,7 @@ export function deriveIntegrationState(input: {
     ) {
       return {
         state: 'delayed',
-        detail: `last successful sync was ${Math.round((input.nowMs - Date.parse(input.lastSuccessAt)) / 3_600_000)}h ago — source may need a refresh`,
+        detail: `last successful sync was ${Math.round((input.nowMs - Date.parse(input.lastSuccessAt)) / 3_600_000)}h ago: source may need a refresh`,
       };
     }
     return {
@@ -307,13 +307,13 @@ export function deriveIntegrationState(input: {
   if (input.lastPoll?.ok && input.lastPoll.eventsFetched === 0) {
     return {
       state: 'empty',
-      detail: 'source is reachable but returned no new events — add or change source content, then sync',
+      detail: 'source is reachable but returned no new events: add or change source content, then sync',
     };
   }
   if (input.stats.total === 0) {
     return {
       state: 'empty',
-      detail: 'source is configured but no events have arrived yet — add content or run sync',
+      detail: 'source is configured but no events have arrived yet: add content or run sync',
     };
   }
   return { state: 'rejected', detail: 'events were received but none could be ingested as evidence' };
@@ -413,7 +413,7 @@ export function testFileDirectory(
   return {
     ok: true,
     code: 'REACHABLE',
-    detail: `${samples.length} file${samples.length === 1 ? '' : 's'} readable — sync to stage events`,
+    detail: `${samples.length} file${samples.length === 1 ? '' : 's'} readable: sync to stage events`,
     preview: { count: samples.length, samples: samples.slice(0, 5) },
   };
 }
@@ -514,7 +514,7 @@ export function integrationReadinessState(health: IntegrationHealth): {
   detail: string;
   unconfigured?: boolean;
 } {
-  const label = `${health.collector}: ${health.state} — ${health.stateDetail}`;
+  const label = `${health.collector}: ${health.state}: ${health.stateDetail}`;
   switch (health.state) {
     case 'ready':
     case 'empty':

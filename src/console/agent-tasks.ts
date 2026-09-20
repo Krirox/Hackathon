@@ -106,7 +106,7 @@ function levelFor(ratio: number | null): GuardLevel['level'] {
 export function leaseGuard(r: CoordinationRequest, now: string): GuardLevel | null {
   if (r.state !== 'IN_FLIGHT') return null;
   const quietMs = minutesAgo(now, r.updatedAt) * 1000;
-  const owner = r.execOwner ?? '—';
+  const owner = r.execOwner ?? 'unassigned';
   if (!r.execOwner) return { level: 'risk', text: 'lease lost' };
   if (quietMs < 60_000) return { level: 'ok', text: `lease held · ${owner}` };
   if (quietMs < 120_000) return { level: 'warn', text: `lease ageing · ${owner}` };
@@ -349,7 +349,7 @@ function renderSwarmChain(task: AgentTask): string {
   const hops = task.swarmChain
     .map((s, i) => `<span class="v-swarm-hop">${esc(s)}</span>${i < task.swarmChain.length - 1 ? '<span class="v-swarm-sep" aria-hidden="true">→</span>' : ''}`)
     .join('');
-  return `<div class="v-swarm-chain" title="Swarm deliberation chain (hop_chain) — unparented handoffs, not sub-agents">
+  return `<div class="v-swarm-chain" title="Swarm deliberation chain (hop_chain): unparented handoffs, not sub-agents">
   <span class="v-swarm-label">swarm</span>${hops}</div>`;
 }
 

@@ -57,7 +57,7 @@ export function agentKeyResolution(): AgentKeyResolution | null {
     return { source: 'master-key', detail: 'derived from BUZZ_AGENT_MASTER_KEY' };
   }
   if (devKeysAllowed()) {
-    return { source: 'dev-key', detail: 'development keys (BUZZ_ALLOW_DEV_KEYS=1) — never production' };
+    return { source: 'dev-key', detail: 'development keys (BUZZ_ALLOW_DEV_KEYS=1): never production' };
   }
   return null;
 }
@@ -77,7 +77,7 @@ export function resolveAgentKey(label: string): { keypair: NostrKeypair; resolut
   if (devKeysAllowed()) {
     return {
       keypair: deriveNostrKeypair(DEV_MASTER_SECRET, label),
-      resolution: { source: 'dev-key', detail: 'development keys (BUZZ_ALLOW_DEV_KEYS=1) — never production' },
+      resolution: { source: 'dev-key', detail: 'development keys (BUZZ_ALLOW_DEV_KEYS=1): never production' },
     };
   }
   throw new AgentKeyError(

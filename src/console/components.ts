@@ -19,29 +19,63 @@ export interface KpiCard {
   glyph?: string;
 }
 
-/** KPI card (brief §6): eyebrow label, large metric, context line, action. */
-export function kpiCard(c: KpiCard): string {
-  const link = c.href
-    ? `<a href="${esc(c.href)}" style="font-size:12px;font-weight:600;color:inherit;opacity:.85;">${esc(c.linkLabel ?? 'Inspect →')}</a>`
-    : '';
-  if (c.tone === 'accent') {
-    return `<div class="v-card v-card-hover" style="position:relative;overflow:hidden;padding:20px;background:var(--v-accent)!important;color:var(--v-accent-ink)!important;border:0;">
-    <div class="v-eyebrow" style="color:inherit;opacity:.75;display:flex;gap:6px;align-items:center;">${c.glyph ? `<span aria-hidden="true">${esc(c.glyph)}</span>` : ''}${esc(c.label)}</div>
-    <div class="v-kpi" style="margin:6px 0;">${esc(c.value)}</div>
-    <div style="font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center;opacity:.9;"><span>${esc(c.sub)}</span>${link}</div>
-  </div>`;
+function kpiIconSvg(glyph?: string, label?: string): { svg: string; bg: string; color: string } {
+  const lbl = (label || '').toLowerCase();
+  const g = glyph || '';
+  if (lbl.includes('human') || g === '!') {
+    return {
+      svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4.5c1.47-1.47 4.5-2 4.5-2"/><path d="M12 9v5s3.03-.55 4.5-2c1.47-1.47 2-4.5 2-4.5"/></svg>',
+      bg: 'var(--v-tint-info-bg)',
+      color: 'var(--v-tint-info-ink)',
+    };
   }
-  const barByTone: Record<string, string> = {
-    risk: 'var(--v-risk)',
-    good: 'var(--v-fact)',
-    default: 'var(--v-line-strong)',
+  if (lbl.includes('spend') || g === '$') {
+    return {
+      svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+      bg: 'var(--v-tint-good-bg)',
+      color: 'var(--v-tint-good-ink)',
+    };
+  }
+  if (lbl.includes('room') || g === '#') {
+    return {
+      svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+      bg: 'var(--v-tint-info-bg)',
+      color: 'var(--v-tint-info-ink)',
+    };
+  }
+  if (lbl.includes('drift') || lbl.includes('card') || g === '~') {
+    return {
+      svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+      bg: 'var(--v-tint-warn-bg)',
+      color: 'var(--v-tint-warn-ink)',
+    };
+  }
+  return {
+    svg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+    bg: 'var(--v-bg-2, rgba(0,0,0,0.04))',
+    color: 'var(--v-ink, currentColor)',
   };
-  const bar = barByTone[c.tone ?? 'default'] ?? barByTone.default;
-  return `<div class="v-card v-card-hover" style="position:relative;overflow:hidden;padding:20px 20px 20px 24px;">
-    <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${bar}"></div>
-    <div class="v-eyebrow" style="display:flex;gap:6px;align-items:center;">${c.glyph ? `<span aria-hidden="true">${esc(c.glyph)}</span>` : ''}${esc(c.label)}</div>
-    <div class="v-kpi" style="margin:6px 0;">${esc(c.value)}</div>
-    <div class="v-sub" style="font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center;"><span>${esc(c.sub)}</span>${link}</div>
+}
+
+/** KPI card (Picture 1 style): soft circular icon, label, large metric, action link. */
+export function kpiCard(c: KpiCard): string {
+  const icon = kpiIconSvg(c.glyph, c.label);
+  const linkText = c.linkLabel ? esc(c.linkLabel) : (c.href ? `${esc(c.sub)} →` : esc(c.sub));
+  const linkHtml = c.href
+    ? `<a href="${esc(c.href)}" class="v-kpi-link" style="color:var(--v-muted);text-decoration:none;font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:4px;transition:color .15s ease;"><span>${esc(c.sub)}</span><span style="font-size:13px;line-height:1;margin-left:2px;">→</span></a>`
+    : `<span style="color:var(--v-muted);font-size:12px;">${esc(c.sub)}</span>`;
+
+  return `<div class="v-card v-kpi-card v-card-hover" style="display:flex;flex-direction:row;align-items:flex-start;gap:14px;padding:18px 20px;border-radius:18px;position:relative;overflow:hidden;background:var(--v-bg-1);border:1px solid var(--v-line);box-shadow:var(--v-card-shadow);transition:all .2s cubic-bezier(0.16,1,0.3,1);">
+    <div style="width:40px;height:40px;border-radius:50%;background:${icon.bg};color:${icon.color};display:grid;place-items:center;flex-shrink:0;margin-top:2px;">
+      ${icon.svg}
+    </div>
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">
+      <div class="v-sub" style="font-size:12.5px;font-weight:500;color:var(--v-muted);">${esc(c.label)}</div>
+      <div style="font-size:28px;font-weight:700;letter-spacing:-0.025em;color:var(--v-ink);font-variant-numeric:tabular-nums;line-height:1.15;margin:2px 0 4px;">${esc(c.value)}</div>
+      <div style="font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:6px;">
+        ${linkHtml}
+      </div>
+    </div>
   </div>`;
 }
 
@@ -52,12 +86,16 @@ export function kpiCard(c: KpiCard): string {
 
 /** Section wrapper with title, subtitle, and optional action link. */
 export function sectionCard(title: string, sub: string, action: string, body: string): string {
-  return `<section class="v-card" style="padding:20px 22px;">
-    <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:14px;flex-wrap:wrap;">
-      <div><h2 class="v-card-title">${esc(title)}</h2>
-      <p class="v-sub" style="font-size:12px;margin:3px 0 0;">${esc(sub)}</p></div>
-      ${action}
-    </div>${body}</section>`;
+  return `<section class="v-card v-section-card" style="padding:22px 24px;border-radius:18px;background:var(--v-bg-1);border:1px solid var(--v-line);box-shadow:var(--v-card-shadow);">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:16px;flex-wrap:wrap;">
+      <div style="min-width:0;">
+        <h2 class="v-card-title" style="font-size:16px;font-weight:650;letter-spacing:-0.015em;color:var(--v-ink);">${esc(title)}</h2>
+        <p class="v-sub" style="font-size:12.5px;color:var(--v-muted);margin:3px 0 0;line-height:1.4;">${esc(sub)}</p>
+      </div>
+      <div class="section-card-action" style="flex-shrink:0;">${action}</div>
+    </div>
+    ${body}
+  </section>`;
 }
 
 /** Small status chip: dot + label, color + text (never color alone). */
@@ -67,7 +105,7 @@ export function statusChip(status: string): string {
   if (s.includes('halt')) color = 'var(--v-risk)';
   else if (s.includes('degrad')) color = 'var(--v-hypo)';
   else if (s.includes('health')) color = 'var(--v-fact)';
-  return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--v-muted);"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block;"></span>${esc(status || '—')}</span>`;
+  return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--v-muted);"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block;"></span>${esc(status || 'unknown')}</span>`;
 }
 
 export interface PaletteItem {
@@ -95,7 +133,7 @@ export function paletteHtml(items: PaletteItem[]): string {
   </div>
   <script>(()=>{const ITEMS=${data};const root=document.getElementById('vital-palette');const input=document.getElementById('vital-palette-input');const list=document.getElementById('vital-palette-list');if(!root||!input||!list)return;let sel=0;let filtered=ITEMS;
   const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
-  function draw(){list.innerHTML=filtered.length?filtered.map((it,i)=>'<button type=button data-i='+i+' style="display:flex;width:100%;text-align:left;gap:10px;align-items:center;padding:8px 10px;border-radius:8px;border:0;cursor:pointer;background:'+(i===sel?'var(--v-accent-dim)':'transparent')+';color:var(--v-ink);font-size:13px;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+esc(it.label)+'</span><span style="font-size:11px;color:var(--v-muted);">'+esc(it.hint||'')+(it.keys?' · '+esc(it.keys):'')+'</span></button>').join(''):'<p class=v-sub style="padding:12px;font-size:12px;">No matches — try rooms, ledger, approvals…</p>';
+  function draw(){list.innerHTML=filtered.length?filtered.map((it,i)=>'<button type=button data-i='+i+' style="display:flex;width:100%;text-align:left;gap:10px;align-items:center;padding:8px 10px;border-radius:8px;border:0;cursor:pointer;background:'+(i===sel?'var(--v-accent-dim)':'transparent')+';color:var(--v-ink);font-size:13px;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+esc(it.label)+'</span><span style="font-size:11px;color:var(--v-muted);">'+esc(it.hint||'')+(it.keys?' · '+esc(it.keys):'')+'</span></button>').join(''):'<p class=v-sub style="padding:12px;font-size:12px;">No matches. Try rooms, ledger, approvals…</p>';
   list.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>go(Number(b.dataset.i))));}
   function go(i){const it=filtered[i];if(!it)return;close();if(it.run==='toggle-theme'){document.querySelector('[data-vital-theme-toggle]')?.click();return;}if(it.href){location.href=it.href;}}
   function open(){root.style.display='block';input.value='';filtered=ITEMS;sel=0;draw();setTimeout(()=>input.focus(),0);}

@@ -281,7 +281,7 @@ export class ApplicationWorker {
     // cross-model gate. Say so here: a transfer test that ran but cannot promote
     // is a fact the operator needs, not a silent success.
     if (!runs.some((r) => r.kind === 'cross_model')) {
-      const msg = `[worker:TRANSFER_SMOKE_ONLY] card=${cardId} — every attached harness is a test baseline, so the run recorded harness_smoke and the cross-model gate is still open`;
+      const msg = `[worker:TRANSFER_SMOKE_ONLY] card=${cardId}: every attached harness is a test baseline, so the run recorded harness_smoke and the cross-model gate is still open`;
       this.lastError = msg;
       this.errors.push(msg);
     }
@@ -315,7 +315,7 @@ export class ApplicationWorker {
       // transcript would fill the review queue with the harness's own words.
       if (input.isTestBaseline) return;
       if (!input.content.trim()) {
-        throw new Error('run completed with an empty transcript — nothing to draft');
+        throw new Error('run completed with an empty transcript: nothing to draft');
       }
       const existing = await loadDeliverableByRequest(this.db, this.tenant, input.requestId);
       if (existing) return;
@@ -352,8 +352,8 @@ export class ApplicationWorker {
     const scope = payload.scope ?? '*';
     const summary =
       row.kind === 'canary-sla-miss'
-        ? `Honeytask canary missed — scope ${scope}: ${payload.reason ?? 'canary SLA miss'}`
-        : `Automation frozen — scope ${scope}/${payload.actionClass ?? '*'}: ${payload.reason ?? 'self-halt'}`;
+        ? `Honeytask canary missed: scope ${scope}: ${payload.reason ?? 'canary SLA miss'}`
+        : `Automation frozen: scope ${scope}/${payload.actionClass ?? '*'}: ${payload.reason ?? 'self-halt'}`;
     if (!this.buzz) {
       throw new Error(`[worker:OUTBOX_UNDELIVERABLE] no Buzz surface bound: ${summary}`);
     }
@@ -512,7 +512,7 @@ export class ApplicationWorker {
               // with the DB as the only witness that it was not. A row nobody can
               // deliver must stay FAILED and retrying so it is visible.
               throw new Error(
-                `outbox: no handler for kind "${row.kind}" — refusing to settle it as delivered`,
+                `outbox: no handler for kind "${row.kind}": refusing to settle it as delivered`,
               );
             }
             await settleOutbox(this.db, [row.id], 'DONE', { owner: this.workerId });

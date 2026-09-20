@@ -48,7 +48,7 @@ export async function renderLearningPage(
       ? '<div class="v-empty" style="margin-top:12px;"><h3>No unlabeled routing decisions</h3><p>The queue fills as the router makes shadow decisions.</p></div>'
       : `<div class="v-table-wrap"><table class="v-table"><thead><tr><th>decision</th><th>task</th><th>proposed → executed</th><th>evidence</th><th>label</th></tr></thead><tbody>${queue
           .map((d) => {
-            const rate = d.evidence.successRate === null ? '—' : `${(d.evidence.successRate * 100).toFixed(0)}%`;
+            const rate = d.evidence.successRate === null ? 'n/a' : `${(d.evidence.successRate * 100).toFixed(0)}%`;
             return `<tr>
 <td><span class="v-code-pill">${esc(String(d.id))}</span></td>
 <td><strong>${esc(d.taskType)}</strong> <span class="v-meta">· ${esc(d.scope)}</span></td>
@@ -88,7 +88,7 @@ export async function renderLearningPage(
   <div>
     <p class="v-eyebrow">System</p>
     <h1 class="v-page-title">Learning review</h1>
-    <p class="v-sub" style="margin-top:6px;">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card — <a href="/console/learning/compile">compile a mined candidate</a>, and queue transfer evidence from a card's page.</p>
+    <p class="v-sub" style="margin-top:6px;">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card. <a href="/console/learning/compile">Compile a mined candidate</a>, and queue transfer evidence from a card's page.</p>
   </div>
   <a class="v-btn v-btn-secondary v-btn-sm" href="/console/workflows">← Workflows</a>
 </div>
@@ -155,7 +155,7 @@ ${notice}${error}
     .join('\n');
   return `<p class="sub"><a href="/console/learning">← Learning review</a></p>
 <h1>Compile a skill card</h1>
-<p class="sub">Compiling turns repeated successful traces into a procedure the router may use. It enters CANDIDATE — promotion still requires transfer evidence and drift watching.</p>
+<p class="sub">Compiling turns repeated successful traces into a procedure the router may use. It enters CANDIDATE. Promotion still requires transfer evidence and drift watching.</p>
 ${notice}${error}
 ${rows}`;
 }
@@ -180,7 +180,7 @@ export async function renderLearningCardPage(
       : `<ul>${evidence.transfers
           .map(
             (t) =>
-              `<li>${esc(t.kind)}${t.variant ? ` (${esc(t.variant)})` : ''} — ${t.passed ? 'passed' : '<strong>failed</strong>'} · ${t.score.toFixed(2)} · v${t.cardVersion}${t.evaluator ? ` · ${esc(t.evaluator)}` : ''}</li>`,
+              `<li>${esc(t.kind)}${t.variant ? ` (${esc(t.variant)})` : ''}: ${t.passed ? 'passed' : '<strong>failed</strong>'} · ${t.score.toFixed(2)} · v${t.cardVersion}${t.evaluator ? ` · ${esc(t.evaluator)}` : ''}</li>`,
           )
           .join('')}</ul>`;
   const runs =
@@ -197,7 +197,7 @@ export async function renderLearningCardPage(
   // said "run transfer" and offered nothing to press.
   const transferForm = opts.csrf
     ? `<h3>Run a transfer test</h3>
-<p class="sub">Queued as a durable outbox job: the harnesses that produce transfer evidence are attached to a worker, not to this server. A run that fails is recorded as a failed transfer — negative evidence counts.</p>
+<p class="sub">Queued as a durable outbox job: the harnesses that produce transfer evidence are attached to a worker, not to this server. A run that fails is recorded as a failed transfer. Negative evidence counts.</p>
 <form method="post" action="/console/learning/cards/${esc(encodeURIComponent(card.id))}/transfer-test">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <label>Target scope <input name="targetScope" required placeholder="a scope other than ${esc(card.originScope)}"></label>

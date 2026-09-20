@@ -116,7 +116,7 @@ export async function persistSnapshotLayers(
   const d = await store.put('deps', o.dependencies);
   const dockerRefs: string[] = [];
   for (const digest of o.dockerDigests) {
-    const r = await store.put('docker', digest); // digest string only — immutable ref, no image copy
+    const r = await store.put('docker', digest); // digest string only: immutable ref, no image copy
     dockerRefs.push(r.hash);
   }
   return { workspaceHash: w.hash, depHash: d.hash, dockerRefs };

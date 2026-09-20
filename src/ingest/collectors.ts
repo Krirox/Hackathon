@@ -324,7 +324,7 @@ async function settleInboxRows(db: AsyncDb, ids: string[], outcome: 'DONE' | 'FA
       if (!row) continue; // row vanished: nothing to settle
       if (row.status === 'CLAIMED' && row.owner !== owner) {
         throw new Error(
-          `[inbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'} — settlement refused`,
+          `[inbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'}: settlement refused`,
         );
       }
       // Already DONE/FAILED by a legitimate earlier settlement: idempotent no-op.
@@ -438,7 +438,7 @@ export function storeArtifact(
   if (bytes > maxBytes) {
     throw new ArtifactStoreError(
       'TOO_LARGE',
-      `artifact for "${event.uri}" is ${bytes} bytes, over the ${maxBytes}-byte cap — refusing instead of storing an unbounded tree`,
+      `artifact for "${event.uri}" is ${bytes} bytes, over the ${maxBytes}-byte cap: refusing instead of storing an unbounded tree`,
     );
   }
   const ref = createHash('sha256').update(serialized, 'utf8').digest('hex');
@@ -498,7 +498,7 @@ export function verifyArtifact(dirOrRef: string, refOrDir?: string, maxBytes: nu
   if (size > maxBytes) {
     throw new ArtifactStoreError(
       'TOO_LARGE',
-      `artifact "${ref}" is ${size} bytes, over the ${maxBytes}-byte cap — refusing instead of hashing an unbounded tree`,
+      `artifact "${ref}" is ${size} bytes, over the ${maxBytes}-byte cap: refusing instead of hashing an unbounded tree`,
     );
   }
 
@@ -507,7 +507,7 @@ export function verifyArtifact(dirOrRef: string, refOrDir?: string, maxBytes: nu
   if (actualHash !== ref) {
     throw new ArtifactStoreError(
       'CORRUPT',
-      `artifact "${ref}" failed content-address verification (actual sha256: "${actualHash}") — refusing tampered blob`,
+      `artifact "${ref}" failed content-address verification (actual sha256: "${actualHash}"): refusing tampered blob`,
     );
   }
 
@@ -562,7 +562,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
     if (bytes > this.maxBytes) {
       throw new ArtifactStoreError(
         'TOO_LARGE',
-        `artifact "${ref}" is ${bytes} bytes, over the ${this.maxBytes}-byte cap — refusing instead of storing an unbounded tree`,
+        `artifact "${ref}" is ${bytes} bytes, over the ${this.maxBytes}-byte cap: refusing instead of storing an unbounded tree`,
       );
     }
     if (ref.includes('/') || ref.includes('\\') || ref.includes('..')) {
@@ -587,7 +587,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
     if (size > this.maxBytes) {
       throw new ArtifactStoreError(
         'TOO_LARGE',
-        `artifact "${ref}" is ${size} bytes, over the ${this.maxBytes}-byte cap — refusing instead of hashing an unbounded tree`,
+        `artifact "${ref}" is ${size} bytes, over the ${this.maxBytes}-byte cap: refusing instead of hashing an unbounded tree`,
       );
     }
     return readFileSync(full);
@@ -611,7 +611,7 @@ export async function ingestEvents(
 ): Promise<string[]> {
   if ((GROUND_TIERS as readonly string[]).includes(collector.sourceTier)) {
     throw new Error(
-      `[ingest:INGEST_TIER] collector "${collector.name}" declares ground tier ${collector.sourceTier} — collectors write OBSERVATION, promotion is governed`,
+      `[ingest:INGEST_TIER] collector "${collector.name}" declares ground tier ${collector.sourceTier}: collectors write OBSERVATION, promotion is governed`,
     );
   }
   const ids: string[] = [];
@@ -703,7 +703,7 @@ export async function ingestEvents(
             'ingest',
             'SIMILAR_DEMOTE',
             dup.hit.claimId,
-            `near-duplicate of new claim ${claimId} (score ${dup.hit.score.toFixed(2)}) — provisional pending review`,
+            `near-duplicate of new claim ${claimId} (score ${dup.hit.score.toFixed(2)}): provisional pending review`,
             opts.now,
           );
       }
@@ -1037,7 +1037,7 @@ export function serperSearchCollector(
     extractorVersion: '1.0.0',
     async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
       if (!opts.apiKey)
-        throw new Error('[ingest:SERPER_KEY] Serper API key missing — set SERPER_API_KEY, never hardcode it');
+        throw new Error('[ingest:SERPER_KEY] Serper API key missing: set SERPER_API_KEY, never hardcode it');
       const res = await opts.fetchFn('https://google.serper.dev/search', {
         method: 'POST',
         headers: { 'X-API-KEY': opts.apiKey, 'Content-Type': 'application/json' },
@@ -1052,7 +1052,7 @@ export function serperSearchCollector(
         eventId: r.link,
         revision: fingerprintOf(`${r.title}:${r.snippet ?? ''}`),
         occurredAt: r.date ?? now,
-        summary: `${r.title} — ${(r.snippet ?? '').slice(0, 300)}`,
+        summary: `${r.title}: ${(r.snippet ?? '').slice(0, 300)}`,
         payload: { title: r.title, snippet: r.snippet ?? '', date: r.date ?? null, query },
       }));
       await stageToInbox(db, tenant, name, out, now);
@@ -1103,7 +1103,7 @@ export function stripeInvoicesCollector(
     extractorVersion: '1.0.0',
     async poll(db: AsyncDb, now: string, tenant = 'default'): Promise<RawEvent[]> {
       if (!opts.apiKey) {
-        throw new Error('[ingest:STRIPE_KEY] Stripe API key missing — set STRIPE_SECRET_KEY, never hardcode it');
+        throw new Error('[ingest:STRIPE_KEY] Stripe API key missing: set STRIPE_SECRET_KEY, never hardcode it');
       }
       const fetchFn = opts.fetchFn ?? ((url: string, init: { method: string; headers: Record<string, string> }) => fetch(url, init));
       const limit = opts.limit ?? 100;

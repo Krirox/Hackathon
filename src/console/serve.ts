@@ -588,6 +588,7 @@ async function wrapInWorkspaceShell(
   navKey?: string,
   activeScope?: string | null,
   isDrawer?: boolean,
+  precomputedMetrics?: import('./shell-metrics.ts').ShellMetrics | null,
 ): Promise<string> {
   // The Workspace/chat pages render the Buzz shell (workspace-shell.ts) and
   // keep upstream Buzz's own document, fonts and palette; the Console pages
@@ -633,7 +634,7 @@ async function wrapInWorkspaceShell(
     auth.user.role,
     auth.session.csrfToken,
   );
-  const shellMetrics = await shellMetricsFor(db, tenant);
+  const shellMetrics = precomputedMetrics !== undefined ? precomputedMetrics : await shellMetricsFor(db, tenant);
   const shellRecency = await roomRecency(
     db,
     tenant,
@@ -686,8 +687,9 @@ async function wrapInWorkspaceShell(
   // carry" and the fragment now appears exactly once, inside the shell.
   const head = stripUtilityPageStyles(/<head[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? '');
   const openBody = /<body[^>]*>/i.exec(html)?.[0] ?? '<body>';
+  const csrfMeta = auth?.session?.csrfToken ? `<meta name="vital-csrf" content="${esc(auth.session.csrfToken)}">` : '';
   return themeDocument(
-    `<!doctype html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}</head>${openBody}${shell}</body></html>`,
+    `<!doctype html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${csrfMeta}${head}</head>${openBody}${shell}</body></html>`,
   );
 }
 
@@ -738,7 +740,7 @@ function prefersHtml(req: IncomingMessage): boolean {
 function respondGetError(req: IncomingMessage, res: ServerResponse, status: number, error: string): void {
   if (prefersHtml(req)) {
     const html = page(
-      `Vital Console — ${status}`,
+      `Vital Console: ${status}`,
       `<h1>Error ${status}</h1><p class="err">${esc(error)}</p><p class="sub"><a href="javascript:history.back()">← Go back</a> · <a href="/">Console home</a></p>`,
     );
     res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
@@ -799,7 +801,7 @@ async function recentAuthGate(
       e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : 'recent authentication required';
     json(res, 403, {
       ok: false,
-      error: `${msg} — sign out and sign in again, then retry`,
+      error: `${msg}. Sign out and sign in again, then retry`,
       code: 'REAUTH_REQUIRED',
     });
     return false;
@@ -859,12 +861,12 @@ function loginPage(
     ? `<p class="sub"><strong>${esc(reauthResume(opts.next).notice)}</strong> You will return to your task after signing in.</p>`
     : '';
   const errorBlock = opts.error
-    ? `<div class="error-summary" role="alert" tabindex="-1" data-error-summary><p><strong>Sign in failed.</strong></p><ul><li><a href="#email">${esc(opts.error)}</a> Your email is preserved — check the highlighted field and try again.</li></ul></div>`
+    ? `<div class="error-summary" role="alert" tabindex="-1" data-error-summary><p><strong>Sign in failed.</strong></p><ul><li><a href="#email">${esc(opts.error)}</a> Your email is preserved. Check the highlighted field and try again.</li></ul></div>`
     : '';
   return page(
-    'Vital Console — sign in',
+    'Vital Console: sign in',
     `<h1>Sign in to ${esc(name)}</h1>
-<p class="sub">This console serves the organization <code>${esc(slug)}</code>. Membership is invite-only — ask your administrator if you need access.</p>
+<p class="sub">This console serves the organization <code>${esc(slug)}</code>. Membership is invite-only. Ask your administrator if you need access.</p>
 ${expiredNotice}
 ${opts.notice ? `<p class="sub" role="status">${esc(opts.notice)}</p>` : ''}
 ${errorBlock}
@@ -884,7 +886,7 @@ ${
   <button type="submit">Sign in</button>
 </form>
 <p class="sub"><a href="/forgot-password${opts.next ? `?next=${encodeURIComponent(opts.next)}` : ''}">Forgot password?</a></p>
-<p class="sub">Deploying a new instance? <a href="mailto:hello@vital.company">Contact us</a> for a pilot walkthrough — this console does not create additional tenants.</p>`,
+<p class="sub">Deploying a new instance? <a href="mailto:hello@vital.company">Contact us</a> for a pilot walkthrough. This console does not create additional tenants.</p>`,
   );
 }
 
@@ -914,7 +916,7 @@ function forgotPasswordPage(csrf: string, opts: { error?: string; notice?: strin
 </div>`;
 
   return page(
-    'Vital Console — reset password',
+    'Vital Console: reset password',
     `<h1>Reset your password</h1>
 ${mailerNote}
 ${opts.notice ? `<div class="success" role="status"><p class="sub"><strong>${esc(opts.notice)}</strong></p></div>` : ''}
@@ -933,7 +935,7 @@ ${opts.error ? `<div class="error-summary" role="alert"><p class="err">${esc(opt
 function resetPasswordPage(csrf: string, token: string, opts: { error?: string; next?: string } = {}): string {
   const nextField = opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : '';
   return page(
-    'Vital Console — choose a new password',
+    'Vital Console: choose a new password',
     `<h1>Choose a new password</h1>
 <p class="sub">This link is single-use and expires shortly. Saving a new password signs out every other session.</p>
 ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
@@ -951,7 +953,7 @@ ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
 
 function recoveryPage(boundSlug: string): string {
   return page(
-    'Vital Console — owner recovery required',
+    'Vital Console: owner recovery required',
     `<h1>Owner recovery required</h1>
 <p class="sub">The organization <strong>${esc(boundSlug)}</strong> has member accounts but no active owner.
 Self-serve claiming is closed to protect established organizations.</p>
@@ -972,7 +974,7 @@ function signupPage(
   needsSetupSecret = false,
 ): string {
   return page(
-    'Vital Console — provision this organization',
+    'Vital Console: provision this organization',
     `<h1>Provision this console</h1>
 <p class="sub">This console serves the organization <strong>${esc(boundSlug)}</strong> and has no owner yet.
 Claiming it makes you its owner. Membership in already-running organizations is invite-only.</p>
@@ -1002,10 +1004,10 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 function changePasswordPage(csrf: string, error?: string): string {
   const result = passwordChangeResult('forced');
   return page(
-    'Vital Console — activate your account',
+    'Vital Console: activate your account',
     `<h1>${esc(result.heading)}</h1>
 <p class="sub">Your operator issued a temporary password. Choose a new one before using the console.
-${esc(result.sessionNote)} — ${esc(result.nextStep)}</p>
+${esc(result.sessionNote)}; ${esc(result.nextStep)}</p>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <form method="post" action="/change-password">
   <input type="hidden" name="csrf" value="${esc(csrf)}">
@@ -1096,7 +1098,7 @@ function accountPage(
   <div style="display:grid;gap:5px;">
     <label for="password" style="font-size:13px;font-weight:600;color:var(--v-ink-2);">New password</label>
     <input id="password" name="password" type="password" class="v-input" autocomplete="new-password" required minlength="12" placeholder="Minimum 12 characters">
-    <span class="v-meta">${esc(result.sessionNote)} — ${esc(result.nextStep)}</span>
+    <span class="v-meta">${esc(result.sessionNote)}; ${esc(result.nextStep)}</span>
   </div>
   <button type="submit" class="v-btn v-btn-primary" style="justify-self:start;">Save new password</button>
 </form>`;
@@ -1108,7 +1110,7 @@ function accountPage(
 </div>`;
 
   return page(
-    'Vital Console — account and security',
+    'Vital Console: account and security',
     `<div class="v-stack" style="max-width:720px;">
 
   <!-- Page header -->
@@ -1197,7 +1199,7 @@ function mfaChallengePage(csrf: string, opts: { error?: string; next?: string; r
     ? '<a href="/login/mfa">Use an authenticator code instead</a>'
     : '<a href="/login/mfa?mode=recovery">Use a recovery code</a>';
   return page(
-    'Vital Console — two-factor verification',
+    'Vital Console: two-factor verification',
     `<h1>Two-factor verification</h1>
 <p class="sub">${hint}</p>
 ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
@@ -1215,7 +1217,7 @@ ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
 function mfaSetupPage(csrf: string, secret: string, email: string, opts: { error?: string } = {}): string {
   const uri = otpauthUri(email, secret);
   return page(
-    'Vital Console — enable two-factor authentication',
+    'Vital Console: enable two-factor authentication',
     `<h1>Enable two-factor authentication</h1>
 <p class="sub">Add this secret to your authenticator app (Google Authenticator, 1Password, Authy), then enter the 6-digit code it shows.</p>
 ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
@@ -1233,9 +1235,9 @@ ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ''}
 
 function mfaRecoveryCodesPage(codes: string[], home: string): string {
   return page(
-    'Vital Console — recovery codes',
+    'Vital Console: recovery codes',
     `<h1>Save your recovery codes</h1>
-<p class="sub">These single-use codes are shown once. Store them somewhere safe — each signs you in once if you lose your authenticator.</p>
+<p class="sub">These single-use codes are shown once. Store them somewhere safe; each signs you in once if you lose your authenticator.</p>
 <div class="success"><ul>${codes.map((c) => `<li><code>${esc(c)}</code></li>`).join('')}</ul></div>
 <p class="sub"><a href="${esc(home)}">Continue to the console</a></p>`,
   );
@@ -1361,16 +1363,16 @@ async function serveStatic(
 
 function statusLabel(user: User): string {
   const s = membershipStatus(user);
-  if (s === 'disabled') return '<span class="err">disabled</span>';
-  if (s === 'pending_activation') return '<span class="sub">pending activation</span>';
-  return 'active';
+  if (s === 'disabled') return '<span class="v-badge v-badge-risk"><span class="dot"></span>disabled</span>';
+  if (s === 'pending_activation') return '<span class="v-badge v-badge-warn"><span class="dot"></span>pending activation</span>';
+  return '<span class="v-badge v-badge-good"><span class="dot"></span>active</span>';
 }
 
 function invitationLabel(inv: Invitation): string {
-  if (inv.status === 'pending') return '<span class="sub">invited</span>';
-  if (inv.status === 'expired') return '<span class="err">expired</span>';
-  if (inv.status === 'revoked') return '<span class="err">revoked</span>';
-  return 'accepted';
+  if (inv.status === 'pending') return '<span class="v-badge v-badge-info"><span class="dot"></span>invited</span>';
+  if (inv.status === 'expired') return '<span class="v-badge v-badge-risk"><span class="dot"></span>expired</span>';
+  if (inv.status === 'revoked') return '<span class="v-badge v-badge-risk"><span class="dot"></span>revoked</span>';
+  return '<span class="v-badge v-badge-good"><span class="dot"></span>accepted</span>';
 }
 
 /** An admin (or the owner) may disable a member; nobody disables an owner but the owner, or themselves. */
@@ -1404,32 +1406,34 @@ function disableForm(csrf: string, u: User, users: User[], confirmation?: Disabl
   let consequences = `<p class="sub">Disabling <strong>${esc(u.name)}</strong> (${esc(u.email)}) revokes every live session immediately. They cannot sign in again until reactivated.</p>`;
   if (confirmation) {
     const workNote = confirmation.needsHandoff
-      ? ` They own ${confirmation.work.claimCount} open claim(s) and ${confirmation.work.requestCount} open request(s) — choose a handoff below.`
+      ? ` They own ${confirmation.work.claimCount} open claim(s) and ${confirmation.work.requestCount} open request(s). Choose a handoff below.`
       : '';
     const ownerNote = confirmation.lastUsableOwner
-      ? ' This is the last usable owner — disabling them leaves the organization without an active owner.'
+      ? ' This is the last usable owner; disabling them leaves the organization without an active owner.'
       : '';
     consequences = `<p class="sub">Disabling <strong>${esc(confirmation.person.name)}</strong> (${esc(confirmation.person.email)}) ${esc(confirmation.sessionConsequence)} ${esc(confirmation.accessConsequence)}${workNote}${ownerNote}</p>`;
   }
-  return `<details>
-  <summary style="cursor:pointer;color:var(--v-muted)">Disable</summary>
-  <form method="post" action="/team/disable" style="margin-top:8px;display:grid;gap:8px;max-width:360px">
-    <input type="hidden" name="csrf" value="${esc(csrf)}">
-    <input type="hidden" name="userId" value="${esc(u.id)}">
-    ${consequences}
-    <label class="sub" for="confirm-${esc(u.id)}">type their email to confirm</label>
-    <input id="confirm-${esc(u.id)}" name="confirmEmail" type="email" required placeholder="${esc(u.email)}">
-    ${
-      handoff
-        ? `<label class="sub" for="handoff-${esc(u.id)}">hand outstanding claims/requests to</label>
-    <select id="handoff-${esc(u.id)}" name="handoffToUserId">
-      <option value="">— choose if they own open work —</option>
-      ${handoff}
-    </select>`
-        : ''
-    }
-    <button type="submit" class="v-btn v-btn-secondary" style="min-height:auto;">Disable member</button>
-  </form>
+  return `<details style="display:inline-block;text-align:left;">
+  <summary style="cursor:pointer;color:var(--v-muted);font-size:12px;font-weight:500;">Disable</summary>
+  <div style="position:absolute;right:32px;margin-top:6px;z-index:20;background:var(--v-bg-1);border:1px solid var(--v-line-strong);border-radius:var(--radius-card);padding:16px;box-shadow:var(--v-card-shadow);max-width:360px;">
+    <form method="post" action="/team/disable" style="display:grid;gap:8px;">
+      <input type="hidden" name="csrf" value="${esc(csrf)}">
+      <input type="hidden" name="userId" value="${esc(u.id)}">
+      ${consequences}
+      <label class="sub" for="confirm-${esc(u.id)}" style="font-size:12px;">type their email to confirm</label>
+      <input id="confirm-${esc(u.id)}" name="confirmEmail" type="email" class="v-input" required placeholder="${esc(u.email)}">
+      ${
+        handoff
+          ? `<label class="sub" for="handoff-${esc(u.id)}" style="font-size:12px;">hand outstanding claims/requests to</label>
+      <select id="handoff-${esc(u.id)}" name="handoffToUserId" class="v-input v-select">
+        <option value="">choose if they own open work</option>
+        ${handoff}
+      </select>`
+          : ''
+      }
+      <button type="submit" class="v-btn v-btn-danger v-btn-sm" style="margin-top:4px;">Disable member</button>
+    </form>
+  </div>
 </details>`;
 }
 
@@ -1440,7 +1444,7 @@ function roleForm(csrf: string, viewer: User, u: User): string {
   return `<form method="post" action="/team/role" style="display:inline">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
     <input type="hidden" name="userId" value="${esc(u.id)}">
-    <select name="role" onchange="this.form.submit()">${options}</select>
+    <select name="role" class="v-input v-select" style="padding:3px 22px 3px 8px;font-size:12px;height:28px;width:auto;display:inline-block;" onchange="this.form.submit()">${options}</select>
   </form>`;
 }
 
@@ -1455,7 +1459,7 @@ function teamForm(csrf: string, viewer: User, u: User): string {
   return `<form method="post" action="/team/team" style="display:inline">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
     <input type="hidden" name="userId" value="${esc(u.id)}">
-    <select name="team" onchange="this.form.submit()" aria-label="Team for ${esc(u.email)}">${options}</select>
+    <select name="team" class="v-input v-select" style="padding:3px 22px 3px 8px;font-size:12px;height:28px;width:auto;display:inline-block;" onchange="this.form.submit()" aria-label="Team for ${esc(u.email)}">${options}</select>
   </form>`;
 }
 
@@ -1491,7 +1495,7 @@ function meetingPipelineOptions(env: NodeJS.ProcessEnv = process.env): MeetingPi
 function inviteLinkNotice(links: { email: string; link: string }[]): string {
   if (links.length === 0) return '';
   const shown = links.map((l) => (links.length === 1 ? l.link : `${l.email}: ${l.link}`)).join(' · ');
-  return ` Acceptance link${links.length === 1 ? '' : 's'} (shown once — deliver securely): ${shown}`;
+  return ` Acceptance link${links.length === 1 ? '' : 's'} (shown once; deliver securely): ${shown}`;
 }
 
 function teamPage(
@@ -1623,9 +1627,9 @@ function teamPage(
     })
     .join('');
 
-  const filterForm = `<form method="get" action="/team" style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
-  <input type="search" name="q" value="${esc(extra?.filter?.q ?? '')}" placeholder="Search email or name…" style="padding:8px 10px;font-size:13px">
-  <select name="role" style="padding:8px 10px;font-size:13px">
+  const filterForm = `<form method="get" action="/team" class="v-filterbar" style="margin-bottom:16px;">
+  <input class="v-input" type="search" name="q" value="${esc(extra?.filter?.q ?? '')}" placeholder="Search email or name…" style="max-width:240px;">
+  <select class="v-input v-select" name="role" style="max-width:130px;">
     <option value="">All roles</option>
     <option value="owner" ${roleFilter === 'owner' ? 'selected' : ''}>owner</option>
     <option value="admin" ${roleFilter === 'admin' ? 'selected' : ''}>admin</option>
@@ -1633,76 +1637,117 @@ function teamPage(
     <option value="member" ${roleFilter === 'member' ? 'selected' : ''}>member</option>
     <option value="viewer" ${roleFilter === 'viewer' ? 'selected' : ''}>viewer</option>
   </select>
-  <select name="status" style="padding:8px 10px;font-size:13px">
+  <select class="v-input v-select" name="status" style="max-width:130px;">
     <option value="">All statuses</option>
     <option value="active" ${statusFilter === 'active' ? 'selected' : ''}>active</option>
     <option value="disabled" ${statusFilter === 'disabled' ? 'selected' : ''}>disabled</option>
   </select>
-  <select name="team" style="padding:8px 10px;font-size:13px">
+  <select class="v-input v-select" name="team" style="max-width:140px;">
     <option value="">All teams</option>
     ${TEAM_OPTIONS.map((t) => `<option value="${t}"${teamFilter === t ? 'selected' : ''}>${t}</option>`).join('')}
   </select>
-  <button type="submit" style="min-height:36px;padding:8px 14px;font-size:13px">Filter roster</button>
-  ${q || roleFilter || statusFilter ? '<a href="/team" class="sub" style="margin-left:8px">Clear filters</a>' : ''}
+  <button type="submit" class="v-btn v-btn-primary v-btn-sm">Filter roster</button>
+  ${q || roleFilter || statusFilter || teamFilter ? '<a href="/team" class="v-btn v-btn-ghost v-btn-sm">Clear filters</a>' : ''}
 </form>`;
 
   const paginationBar =
     totalPages > 1
-      ? `<nav aria-label="Roster pagination" style="margin-top:12px;display:flex;gap:14px;align-items:center">
-  ${pageNum > 1 ? `<a href="/team?page=${pageNum - 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Previous</a>` : ''}
-  <span>Page ${pageNum} of ${totalPages} (${totalCount} members)</span>
-  ${pageNum < totalPages ? `<a href="/team?page=${pageNum + 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Next</a>` : ''}
+      ? `<nav aria-label="Roster pagination" class="v-pager">
+  ${pageNum > 1 ? `<a class="v-btn v-btn-secondary v-btn-sm" href="/team?page=${pageNum - 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Previous</a>` : ''}
+  <span class="v-meta">Page ${pageNum} of ${totalPages} (${totalCount} members)</span>
+  ${pageNum < totalPages ? `<a class="v-btn v-btn-secondary v-btn-sm" href="/team?page=${pageNum + 1}${q ? `&q=${encodeURIComponent(extra?.filter?.q ?? '')}` : ''}${roleFilter ? `&role=${encodeURIComponent(roleFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}">Next</a>` : ''}
 </nav>`
       : '';
 
   return page(
-    'Vital Console — team',
-    `<p class="sub"><a href="${esc(extra?.home ?? '/')}">← console</a></p>
-<h1>Team</h1>
-${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
-<h2>${membersHeading}</h2>
-${filterForm}
-<table style="border-collapse:collapse;min-width:640px">
-  <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">team</th><th align="left">status</th><th></th></tr></thead>
-  <tbody>${rows || '<tr><td colspan="6" class="sub">No matching team members found.</td></tr>'}</tbody>
-</table>
-${paginationBar}
+    'Vital Console: team',
+    `<div class="v-page-head">
+  <div>
+    <p class="sub" style="margin:0 0 6px;"><a href="${esc(extra?.home ?? '/')}">← console</a></p>
+    <p class="v-eyebrow">Administration</p>
+    <h1 class="v-page-title">Team</h1>
+    <p class="v-sub" style="margin:6px 0 0;font-size:13px;">Manage organization roster, member roles, security stops, and runtime governance policies.</p>
+  </div>
+</div>
+${notice ? `<div class="v-card" style="margin-bottom:18px;border-left:3px solid var(--v-fact);padding:14px 18px;"><p class="sub" style="margin:0;color:var(--v-ink);">${esc(notice)}</p></div>` : ''}
+<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:14px;">
+    <div>
+      <h2 class="v-card-title">${membersHeading}</h2>
+      <p class="v-sub" style="margin:4px 0 0;font-size:12.5px;">Active and disabled accounts in this tenant.</p>
+    </div>
+  </div>
+  ${filterForm}
+  <div class="v-table-wrap">
+    <table class="v-table">
+      <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">team</th><th align="left">status</th><th align="right"></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="sub" style="text-align:center;padding:24px;">No matching team members found.</td></tr>'}</tbody>
+    </table>
+  </div>
+  ${paginationBar ? `<div style="margin-top:14px;">${paginationBar}</div>` : ''}
+</div>
 ${
   pendingInvites.length
-    ? `<h2>${invitesHeading}</h2>
-<table style="border-collapse:collapse;min-width:640px">
-  <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th align="left">expires</th><th></th></tr></thead>
-  <tbody>${inviteRows}</tbody>
-</table>`
+    ? `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:14px;">
+    <div>
+      <h2 class="v-card-title">${invitesHeading}</h2>
+      <p class="v-sub" style="margin:4px 0 0;font-size:12.5px;">Pending out-of-band invitation tokens awaiting acceptance.</p>
+    </div>
+  </div>
+  <div class="v-table-wrap">
+    <table class="v-table">
+      <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">status</th><th align="left">expires</th><th align="right"></th></tr></thead>
+      <tbody>${inviteRows}</tbody>
+    </table>
+  </div>
+</div>`
     : ''
 }
 ${
   canManage
-    ? `<h2>${esc(accountNotice.heading)}</h2>
-<p class="sub">${esc(accountNotice.detail)}</p>
-<form method="post" action="/team/invite">
-  <input type="hidden" name="csrf" value="${esc(csrf)}">
-  <label class="sub" for="email">work email (single or comma/newline separated)</label>
-  <textarea id="email" name="email" rows="2" required placeholder="member@acme.test, teammate@acme.test" style="width:100%;font-family:inherit;box-sizing:border-box"></textarea>
-  <label class="sub" for="name">name</label>
-  <input id="name" name="name" required>
-  <label class="sub" for="role">role</label>
-  <select id="role" name="role">
-    ${roleOptions}
-  </select>
-  <label class="sub" for="team">team (department)</label>
-  <select id="team" name="team">
-    ${TEAM_OPTIONS.map((t) => `<option value="${t}"${t === 'unassigned' ? ' selected' : ''}>${t}</option>`).join('')}
-  </select>
-  <button type="submit">${esc(accountNotice.button)}</button>
-</form>`
+    ? `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:14px;">
+    <div>
+      <h2 class="v-card-title">${esc(accountNotice.heading)}</h2>
+      <p class="sub" style="margin:4px 0 0;font-size:13px;max-width:78ch;line-height:1.5;">${esc(accountNotice.detail)}</p>
+    </div>
+  </div>
+  <form method="post" action="/team/invite" style="display:grid;gap:14px;max-width:540px;">
+    <input type="hidden" name="csrf" value="${esc(csrf)}">
+    <div>
+      <label class="sub v-field-label" for="email" style="display:block;margin-bottom:6px;">work email (single or comma/newline separated)</label>
+      <textarea id="email" name="email" rows="2" class="v-input" required placeholder="member@acme.test, teammate@acme.test" style="resize:vertical;"></textarea>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div>
+        <label class="sub v-field-label" for="name" style="display:block;margin-bottom:6px;">name</label>
+        <input id="name" name="name" class="v-input" required placeholder="Full name">
+      </div>
+      <div>
+        <label class="sub v-field-label" for="role" style="display:block;margin-bottom:6px;">role</label>
+        <select id="role" name="role" class="v-input v-select">
+          ${roleOptions}
+        </select>
+      </div>
+    </div>
+    <div>
+      <label class="sub v-field-label" for="team" style="display:block;margin-bottom:6px;">team (department)</label>
+      <select id="team" name="team" class="v-input v-select" style="max-width:240px;">
+        ${TEAM_OPTIONS.map((t) => `<option value="${t}"${t === 'unassigned' ? ' selected' : ''}>${t}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <button type="submit" class="v-btn v-btn-primary">${esc(accountNotice.button)}</button>
+    </div>
+  </form>
+</div>`
     : '<p class="sub">Ask an admin or the owner to create accounts.</p>'
 }
- ${stopsSection(csrf, canManage, extra?.stops, extra?.selfHalts)}
- ${governanceSection(extra?.policy)}
- ${compilerGapsSection(extra?.compilerGaps)}
- ${billingScopeSection()}
- `,
+${stopsSection(csrf, canManage, extra?.stops, extra?.selfHalts)}
+${governanceSection(extra?.policy)}
+${compilerGapsSection(extra?.compilerGaps)}
+${billingScopeSection()}`,
   );
 }
 
@@ -1718,31 +1763,45 @@ function stopsSection(
       const effects = haltEffects(stop.scope, stop.actionClass);
       const reason = stop.reason ?? 'no reason recorded';
       const recover = canManage
-        ? `<form method="post" action="/team/stops/recover" style="margin-top:8px;display:grid;gap:8px;max-width:360px">
+        ? `<form method="post" action="/team/stops/recover" style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:380px;">
     <input type="hidden" name="csrf" value="${esc(csrf)}">
     <input type="hidden" name="scope" value="${esc(stop.scope)}">
     <input type="hidden" name="actionClass" value="${esc(stop.actionClass)}">
-    <label class="sub" for="reason-${esc(stop.scope)}-${esc(stop.actionClass)}">recovery reason (recorded in the audit log)</label>
-    <input id="reason-${esc(stop.scope)}-${esc(stop.actionClass)}" name="reason" required>
-    <button type="submit">Recover stop</button>
+    <label class="sub" for="reason-${esc(stop.scope)}-${esc(stop.actionClass)}" style="font-size:12px;font-weight:500;">recovery reason (recorded in the audit log)</label>
+    <input id="reason-${esc(stop.scope)}-${esc(stop.actionClass)}" name="reason" class="v-input" required placeholder="Reason for recovery…">
+    <button type="submit" class="v-btn v-btn-primary v-btn-sm" style="align-self:flex-start;">Recover stop</button>
   </form>`
         : '';
-      return `<article>
-  <p><strong>scope ${esc(stop.scope)} × class ${esc(stop.actionClass)}</strong> — engaged by ${esc(stop.by)} at ${esc(stop.at)}</p>
-  <p class="sub">reason: ${esc(reason)}</p>
-  <p class="sub">${esc(stop.affected)}</p>
-  <ul class="sub"><li>in-flight work: ${esc(effects.inFlight.detail)}</li><li>queued work: ${esc(effects.queued.detail)}</li><li>external operations: ${esc(effects.external.detail)}</li></ul>
-  <p class="sub">recovery: ${esc(stop.recovery)}</p>
+      return `<article style="background:var(--v-bg-2);border:1px solid var(--v-line-strong);border-radius:var(--radius-md);padding:14px 16px;margin-bottom:12px;">
+  <p style="margin:0 0 4px;"><strong>scope ${esc(stop.scope)} × class ${esc(stop.actionClass)}</strong> · engaged by ${esc(stop.by)} at ${esc(stop.at)}</p>
+  <p class="sub" style="margin:0 0 6px;">reason: <strong>${esc(reason)}</strong></p>
+  <p class="sub" style="margin:0 0 8px;">${esc(stop.affected)}</p>
+  <ul class="sub" style="margin:0 0 8px;padding-left:18px;"><li>in-flight work: ${esc(effects.inFlight.detail)}</li><li>queued work: ${esc(effects.queued.detail)}</li><li>external operations: ${esc(effects.external.detail)}</li></ul>
+  <p class="sub" style="margin:0 0 4px;">recovery: ${esc(stop.recovery)}</p>
   ${recover}
 </article>`;
     })
     .join('');
   const policyDrill = describeDrillMode('policy-only');
   const runtimeDrill = describeDrillMode('runtime-halt');
-  return `<h2>Emergency stops</h2>
-<p class="sub">A stop denies new authorizations at once and never force-terminates work already executing. Recovery is audited with a recorded reason — a restart does not clear a stop.</p>
-<p class="sub">Drills come in two modes. Policy-only (<code>${policyDrill.evidence}</code>): ${esc(policyDrill.summary)}. Runtime-halt (<code>${runtimeDrill.evidence}</code>): ${esc(runtimeDrill.summary)}. Run <code>vital drill --policy-only</code> or <code>vital drill --runtime --scope &lt;scope&gt; --class &lt;class&gt;</code> — drill evidence never counts as production readiness.</p>
-${entries || '<p class="sub">No active stops.</p>'}${selfHaltEntries(selfHalts)}`;
+  return `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:14px;">
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <h2 class="v-card-title">Emergency stops</h2>
+        ${stops.length > 0
+          ? `<span class="v-badge v-badge-risk"><span class="dot"></span>${stops.length} active</span>`
+          : `<span class="v-badge v-badge-good"><span class="dot"></span>Normal</span>`}
+      </div>
+      <p class="sub" style="margin:6px 0 0;font-size:13px;max-width:78ch;line-height:1.5;">A stop denies new authorizations at once and never force-terminates work already executing. Recovery is audited with a recorded reason; a restart does not clear a stop.</p>
+    </div>
+  </div>
+  <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-md);padding:12px 14px;margin-bottom:16px;">
+    <p class="sub" style="margin:0;font-size:12.5px;line-height:1.55;">Drills come in two modes. Policy-only (<code>${policyDrill.evidence}</code>): ${esc(policyDrill.summary)}. Runtime-halt (<code>${runtimeDrill.evidence}</code>): ${esc(runtimeDrill.summary)}. Run <code>vital drill --policy-only</code> or <code>vital drill --runtime --scope &lt;scope&gt; --class &lt;class&gt;</code>. Drill evidence never counts as production readiness.</p>
+  </div>
+  ${entries || '<div style="padding:14px 16px;background:var(--v-bg-2);border-radius:var(--radius-md);border:1px dashed var(--v-line);"><p class="sub" style="margin:0;">No active stops.</p></div>'}
+  ${selfHaltEntries(selfHalts)}
+</div>`;
 }
 
 function selfHaltEntries(
@@ -1760,7 +1819,7 @@ function selfHaltEntries(
     .map(
       (h) =>
         `<li>${esc(h.at)} · ${esc(h.action)} · ${esc(h.target)} by ${esc(h.actor)}${
-          h.detail ? ` — ${esc(h.detail.slice(0, 200))}` : ''
+          h.detail ? ` · ${esc(h.detail.slice(0, 200))}` : ''
         }${
           h.outboxStatus
             ? ` · outbox: ${esc(h.outboxStatus.status)} attempts=${esc(String(h.outboxStatus.attempts))} nextAt=${esc(h.outboxStatus.nextAt)}`
@@ -1768,9 +1827,11 @@ function selfHaltEntries(
         }</li>`,
     )
     .join('');
-  return `<h3>Recent automation self-halts</h3>
-<p class="sub">Recorded when automation froze itself (trust freeze); the audit log is the delivery fallback — no silent halts.</p>
-<ul class="sub">${items}</ul>`;
+  return `<div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--v-line);">
+  <h3 class="v-card-title" style="font-size:14px;margin-bottom:4px;">Recent automation self-halts</h3>
+  <p class="sub" style="margin:0 0 10px;font-size:12.5px;">Recorded when automation froze itself (trust freeze); the audit log is the delivery fallback; no silent halts.</p>
+  <ul class="sub" style="margin:0;padding-left:18px;display:grid;gap:6px;">${items}</ul>
+</div>`;
 }
 
 // FLOW-025: effective governance policy with its source. Read-only display:
@@ -1789,21 +1850,48 @@ function governanceSection(policy?: {
   const sourceOf = new Map(sources.map((s) => [s.setting, s.source]));
   const rows = SETTINGS_INVENTORY.map((entry) => {
     const impact = changeImpact(entry.key);
+    const src = sourceOf.get(entry.key) ?? 'default';
+    const srcBadge =
+      src === 'startup'
+        ? `<span class="v-badge v-badge-warn" style="font-size:11px;padding:2px 8px;">startup</span>`
+        : src === 'runtime'
+          ? `<span class="v-badge v-badge-info" style="font-size:11px;padding:2px 8px;">runtime</span>`
+          : `<span class="v-badge" style="font-size:11px;padding:2px 8px;">${esc(src)}</span>`;
     return `<tr>
-  <td><code>${esc(entry.key)}</code></td>
-  <td>${esc(entry.area)}</td>
+  <td><code style="font-family:var(--font-mono);font-size:12px;background:var(--v-bg-2);padding:2px 6px;border-radius:4px;">${esc(entry.key)}</code></td>
+  <td><span class="v-badge" style="font-size:11px;padding:2px 8px;">${esc(entry.area)}</span></td>
   <td><code>${esc(values[entry.key] ?? '')}</code></td>
-  <td>${esc(sourceOf.get(entry.key) ?? 'default')}</td>
-  <td class="sub">${esc(entry.entryPoint)}</td>
-  <td class="sub">changes: ${esc(impact.changes)} · does not change: ${esc(impact.notChanges)} · ${esc(impact.requires)}</td>
+  <td>${srcBadge}</td>
+  <td class="sub" style="font-size:12px;">${esc(entry.entryPoint)}</td>
+  <td class="sub" style="font-size:12px;max-width:380px;">changes: ${esc(impact.changes)} · does not change: ${esc(impact.notChanges)} · ${esc(impact.requires)}</td>
 </tr>`;
   }).join('');
-  return `<h2>Governance policy</h2>
-<p class="sub">The active policy and where each setting comes from. Startup-only settings require a restart; runtime settings are audited per change. This page never grants autonomy — agents act only inside the R/A/I matrix.</p>
-<table style="border-collapse:collapse;min-width:640px">
-  <thead><tr class="sub"><th align="left">setting</th><th align="left">area</th><th align="left">value</th><th align="left">source</th><th align="left">entry point</th><th align="left">impact</th></tr></thead>
-  <tbody>${rows}</tbody>
-</table>`;
+  return `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:14px;">
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <h2 class="v-card-title">Governance policy</h2>
+        <span class="v-badge"><span class="dot"></span>Effective runtime &amp; startup settings</span>
+      </div>
+      <p class="sub" style="margin:6px 0 0;font-size:13px;max-width:82ch;line-height:1.5;">The active policy and where each setting comes from. Startup-only settings require a restart; runtime settings are audited per change. This page never grants autonomy. Agents act only inside the R/A/I matrix.</p>
+    </div>
+  </div>
+  <div class="v-table-wrap">
+    <table class="v-table">
+      <thead>
+        <tr class="sub">
+          <th align="left">setting</th>
+          <th align="left">area</th>
+          <th align="left">value</th>
+          <th align="left">source</th>
+          <th align="left">entry point</th>
+          <th align="left">impact</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+</div>`;
 }
 
 // FLOW-025 companion sections (read-only; never grant autonomy or imply a
@@ -1817,22 +1905,34 @@ function compilerGapsSection(
   const items = withGaps
     .map(
       (g) =>
-        `<li><code>${esc(g.cardId)}</code> ${esc(g.intent)} (${esc(g.state)}) — gaps: ${esc(g.gaps.join('; '))}${g.evalRef ? ` · eval: <code>${esc(g.evalRef)}</code>` : ' · no eval suite reference — evals are the spec'} · <a href="/console/learning/${esc(encodeURIComponent(g.cardId))}">evaluation evidence</a></li>`,
+        `<li><code style="font-family:var(--font-mono);font-size:12px;background:var(--v-bg-2);padding:2px 6px;border-radius:4px;">${esc(g.cardId)}</code> <strong>${esc(g.intent)}</strong> <span class="v-badge" style="font-size:11px;padding:1px 6px;margin:0 4px;">${esc(g.state)}</span> · gaps: <span class="err">${esc(g.gaps.join('; '))}</span>${g.evalRef ? ` · eval: <code>${esc(g.evalRef)}</code>` : ' · no eval suite reference (evals are the spec)'} · <a href="/console/learning/${esc(encodeURIComponent(g.cardId))}">evaluation evidence</a></li>`,
     )
     .join('');
-  return `<h2>Compiler trust gaps</h2>
-<p class="sub">Skill cards with open transfer or evaluation gaps stay scoped where they were validated until the listed evidence passes. Linking evidence here never promotes a card — promotion runs only through the governed transfer-test path, which is not exposed in this console yet.</p>
-${items ? `<ul class="sub">${items}</ul>` : '<p class="sub">No open trust gaps: every card currently holds the evidence its state requires.</p>'}`;
+  return `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:12px;">
+    <div>
+      <h2 class="v-card-title">Compiler trust gaps</h2>
+      <p class="sub" style="margin:4px 0 0;font-size:13px;max-width:78ch;line-height:1.5;">Skill cards with open transfer or evaluation gaps stay scoped where they were validated until the listed evidence passes. Linking evidence here never promotes a card. Promotion runs only through the governed transfer-test path, which is not exposed in this console yet.</p>
+    </div>
+  </div>
+  ${items ? `<ul class="sub" style="margin:0;padding-left:18px;display:grid;gap:8px;">${items}</ul>` : '<p class="sub" style="margin:0;">No open trust gaps: every card currently holds the evidence its state requires.</p>'}
+</div>`;
 }
 
 function billingScopeSection(): string {
-  return `<h2>Engagement and billing scope</h2>
-<p class="sub">Engagement is a direct pilot scoped to the Ship-to-Result wedge with pre-registered metrics and kill criteria agreed before the pilot starts — <a href="mailto:hello@vital.company">contact us</a> for a pilot walkthrough. There is no hosted subscription, invoice, or billing flow in this release — do not present the pilot as one. Subscription or invoice flows will only appear if a hosted commercial model is selected.</p>`;
+  return `<div class="v-card" style="margin-bottom:20px;">
+  <div class="v-card-head" style="margin-bottom:12px;">
+    <div>
+      <h2 class="v-card-title">Engagement and billing scope</h2>
+      <p class="sub" style="margin:4px 0 0;font-size:13px;max-width:78ch;line-height:1.55;">Engagement is a direct pilot scoped to the Ship-to-Result wedge with pre-registered metrics and kill criteria agreed before the pilot starts. <a href="mailto:hello@vital.company">Contact us</a> for a pilot walkthrough. There is no hosted subscription, invoice, or billing flow in this release. Do not present the pilot as one. Subscription or invoice flows will only appear if a hosted commercial model is selected.</p>
+    </div>
+  </div>
+</div>`;
 }
 
 function acceptInvitePage(csrf: string, token: string, inv: Invitation, opts: { error?: string } = {}): string {
   return page(
-    'Vital Console — accept invitation',
+    'Vital Console: accept invitation',
     `<h1>Join ${esc(inv.tenant)}</h1>
 <p class="sub">You were invited as <strong>${esc(inv.role)}</strong>. Choose a password to activate <strong>${esc(inv.email)}</strong>.</p>
 ${opts.error ? `<p class="err">${esc(opts.error)}</p>` : ''}
@@ -2267,10 +2367,11 @@ export function startConsoleServer(
     // Tri-state rather than pass/fail: an optional dependency that was never
     // configured is *grey*, not red — a red pill would claim a failure that
     // never happened.
-    if (status === 'ok') return '<span class="v-badge v-badge-good"><span class="dot"></span>ok</span>';
+    if (status === 'ok')
+      return '<span class="v-badge v-badge-good" style="border-radius:9999px;padding:3px 10px;font-size:11.5px;font-weight:600;"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--v-fact);display:inline-block;margin-right:5px;"></span>ok</span>';
     if (status === 'unconfigured-optional')
-      return '<span class="v-badge"><span class="dot" style="background:var(--v-faint)"></span>not configured</span>';
-    return '<span class="v-badge v-badge-risk"><span class="dot"></span>needs attention</span>';
+      return '<span class="v-badge" style="border-radius:9999px;padding:3px 10px;font-size:11.5px;font-weight:500;background:var(--v-bg-2);color:var(--v-muted);"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--v-faint);display:inline-block;margin-right:5px;"></span>not configured</span>';
+    return '<span class="v-badge v-badge-risk" style="border-radius:9999px;padding:3px 10px;font-size:11.5px;font-weight:600;"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--v-risk);display:inline-block;margin-right:5px;"></span>needs attention</span>';
   };
 
   const renderSystemReadiness = async (at: string): Promise<string> => {
@@ -2278,54 +2379,49 @@ export function startConsoleServer(
     const items = r.checks
       .map(
         (c) =>
-          `<li class="v-row"><span class="v-row-main">${readinessPill(c.status)}<strong>${esc(c.name)}</strong></span><span class="v-meta">${c.detail ? esc(c.detail) : ''}</span></li>`,
+          `<li style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 0;border-bottom:1px solid var(--v-line);font-size:13px;"><div style="display:flex;align-items:center;gap:12px;min-width:0;">${readinessPill(c.status)}<strong style="color:var(--v-ink);font-weight:600;">${esc(c.name)}</strong></div><span class="v-meta" style="font-size:12px;color:var(--v-muted);">${c.detail ? esc(c.detail) : ''}</span></li>`,
       )
       .join('');
     const headline = r.ready ? 'System is ready' : 'System needs attention';
-    return `<section id="system-readiness" class="v-card" style="margin-bottom:16px;">
-<div class="v-split" style="margin-bottom:6px;">
+    return `<section id="system-readiness" class="v-card" style="margin-bottom:20px;padding:22px 24px;border-radius:18px;background:var(--v-bg-1);border:1px solid var(--v-line);box-shadow:var(--v-card-shadow);">
+<div class="v-split" style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
   <div>
-    <p class="v-eyebrow">System readiness</p>
-    <h2 class="v-card-title" style="margin-top:4px;">${esc(headline)}</h2>
+    <p class="v-eyebrow" style="font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.09em;color:var(--v-muted);">System readiness</p>
+    <h2 class="v-card-title" style="margin-top:4px;font-size:17px;font-weight:650;color:var(--v-ink);">${esc(headline)}</h2>
   </div>
-  <a class="v-btn v-btn-secondary v-btn-sm" href="/api/metrics" rel="noreferrer">Raw readiness (JSON)</a>
+  <a class="v-btn v-btn-secondary" href="/api/metrics" rel="noreferrer" style="display:inline-flex;align-items:center;padding:6px 14px;border-radius:9999px;font-size:12px;font-weight:500;text-decoration:none;border:1px solid var(--v-line);background:var(--v-bg-1);color:var(--v-ink-2);">Raw readiness (JSON)</a>
 </div>
 <ul style="list-style:none;padding:0;margin:6px 0 0">${items}</ul>
-<p class="v-meta" style="margin-top:10px;"><a href="/setup">Continue setup</a></p>
+<p class="v-meta" style="margin-top:14px;font-size:12px;"><a href="/setup" style="color:var(--v-accent);text-decoration:none;font-weight:500;">Continue setup →</a></p>
 </section>`;
   };
 
   /**
    * Executor honesty banner for the dashboard.
-   *
-   * Renders nothing when a real executor checked in recently — silence means the
-   * ordinary case. It speaks up only when approved work would not run at all, or
-   * would "run" through the echo harness, whose runs report COMPLETED without
-   * doing work. That last case used to be invisible: the readiness strip said a
-   * worker was alive, and the operator had no way to tell an executor from a
-   * test double.
    */
   const renderExecutorBanner = async (at: string): Promise<string> => {
     const health = describeExecutorHealth(await readWorkerHeartbeat(db, tenant), at);
     if (health.state === 'live' && !health.baseline) return '';
-    const risk = health.state === 'absent' || health.baseline;
     let title = 'Executor silent';
     if (health.baseline) title = 'No real executor attached';
     else if (health.state === 'absent') title = 'No executor deployed';
-    let hint = 'It may not have returned yet; legs already EXECUTING are flagged on their workflow page.';
-    if (health.state === 'absent') {
-      hint = 'Start one with <code>vital worker</code> or <code>vital serve --with-worker</code>.';
-    } else if (health.baseline) {
-      hint =
-        "Approved work will be 'completed' by the test-baseline harness and leave no deliverable to review. Attach a real executor (for example <code>JCODE_API_SOCKET</code>) before trusting these runs.";
+    let hint = 'Start one with <code>vital worker</code>.';
+    if (health.baseline) {
+      hint = 'Approved work will be completed by test harness. Attach a real executor before trusting runs.';
     }
-    return `<section class="v-card" style="border-color:var(--v-${risk ? 'risk' : 'warn'})">
-<div class="v-split" style="align-items:flex-start">
-  <div><p class="v-eyebrow">Execution</p><h2 class="v-card-title" style="margin-top:4px;">${esc(title)}</h2>
-  <p class="v-meta" style="margin-top:6px;">${esc(health.detail)}</p>
-  <p class="v-meta" style="margin-top:6px;">${hint}</p></div>
-  <a class="v-btn v-btn-secondary v-btn-sm" href="/console/workflows">Workflows</a>
+    return `<section class="v-card v-executor-banner" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-radius:18px;background:var(--v-bg-1);border:1px solid var(--v-line);box-shadow:var(--v-card-shadow);margin-bottom:20px;">
+<div style="display:flex;align-items:center;gap:16px;min-width:0;">
+  <div style="width:42px;height:42px;border-radius:50%;background:var(--v-bg-2, rgba(0,0,0,0.04));color:var(--v-ink);display:grid;place-items:center;flex-shrink:0;">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
+  </div>
+  <div style="min-width:0;">
+    <h2 class="v-card-title" style="font-size:15.5px;font-weight:650;color:var(--v-ink);margin:0;">${esc(title)}</h2>
+    <p class="v-sub" style="font-size:12.5px;color:var(--v-muted);margin:3px 0 0;line-height:1.4;">${esc(health.detail ? `${health.detail}. ` : '')}${hint}</p>
+  </div>
 </div>
+<a href="/console/dashboard?tab=workflows" class="v-btn v-btn-secondary" style="display:inline-flex;align-items:center;gap:4px;padding:8px 18px;border-radius:9999px;font-size:12.5px;font-weight:600;text-decoration:none;border:1px solid var(--v-line);background:var(--v-bg-1);color:var(--v-ink);white-space:nowrap;flex-shrink:0;">
+  <span>View workflows</span><span style="font-size:14px;line-height:1;margin-left:2px;">→</span>
+</a>
 </section>`;
   };
 
@@ -2846,7 +2942,7 @@ export function startConsoleServer(
             const expired = url.searchParams.get('reason') === 'expired';
             const notice =
               url.searchParams.get('reset') === 'ok'
-                ? 'Password saved. Every other session was signed out — sign in to continue.'
+                ? 'Password saved. Every other session was signed out. Sign in to continue.'
                 : undefined;
             res.writeHead(200, {
               'content-type': 'text/html; charset=utf-8',
@@ -2878,7 +2974,7 @@ export function startConsoleServer(
             if (!preCsrfOk(req, call.csrf)) {
               const fresh = randomBytes(32).toString('hex');
               const shape = formErrorShape('csrf-expired');
-              const msg = 'This sign-in form expired. Your email is preserved — submit again.';
+              const msg = 'This sign-in form expired. Your email is preserved. Submit again.';
               if (isBrowserForm(req)) {
                 res.writeHead(200, {
                   'content-type': 'text/html; charset=utf-8',
@@ -2906,7 +3002,7 @@ export function startConsoleServer(
                 retryAfterMs: bucket ? Math.max(0, bucket.reset - Date.parse(at)) : undefined,
               });
               const guidance = retryGuidance('rate-limit');
-              const msg = retryAt ? `${shape.message} — try again after ${retryAt}` : shape.message;
+              const msg = retryAt ? `${shape.message}. Try again after ${retryAt}` : shape.message;
               if (isBrowserForm(req)) {
                 res.writeHead(shape.status, { 'content-type': 'text/html; charset=utf-8' });
                 const tenantCtx = await loginTenantContext(db, tenant);
@@ -3014,7 +3110,7 @@ export function startConsoleServer(
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!preCsrfOk(req, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+              return json(res, 403, { ok: false, error: 'bad CSRF token; reload the form' });
             if (!rateOk(`mfa:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
               const shape = formErrorShape('rate-limited');
               return json(res, shape.status, { ok: false, error: shape.message, code: shape.code });
@@ -3032,7 +3128,7 @@ export function startConsoleServer(
               });
               res.end(
                 mfaChallengePage(csrfLocked, {
-                  error: 'Too many failed attempts — try again later.',
+                  error: 'Too many failed attempts. Try again later.',
                   next,
                   recovery: mode,
                 }),
@@ -3094,7 +3190,7 @@ export function startConsoleServer(
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!preCsrfOk(req, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+              return json(res, 403, { ok: false, error: 'bad CSRF token; reload the form' });
             if (!rateOk(`reset:${ip ?? '-'}:${tenant}`, LOGIN_RATE.limit, LOGIN_RATE.windowMs, Date.parse(at))) {
               const shape = formErrorShape('rate-limited');
               const guidance = retryGuidance('rate-limit');
@@ -3113,7 +3209,7 @@ export function startConsoleServer(
             // recorded and an operator delivers it. Claiming an inbox delivery here
             // was the false promise this branch used to make.
             let notice =
-              'If an account exists for that email, the reset request has been recorded. Automatic email delivery is not configured on this host — ask your operator to deliver your single-use link via vital reset-link (turnaround: under 1 hour).';
+              'If an account exists for that email, the reset request has been recorded. Automatic email delivery is not configured on this host. Ask your operator to deliver your single-use link via vital reset-link (turnaround: under 1 hour).';
             if (token) {
               // FLOW-007: recovery rides on a verified address. The reset token
               // is still issued (no oracle for strangers), but the owner is
@@ -3122,10 +3218,10 @@ export function startConsoleServer(
               const channel = await recoveryChannelStatus(db, tenant, email);
               if (channel.exists && !channel.verified)
                 notice +=
-                  ' Note: this email address is not yet verified — verify it from Account and security before relying on it for recovery.';
+                  ' Note: this email address is not yet verified; verify it from Account and security before relying on it for recovery.';
               if (exposeResetToken) {
                 const link = `/reset-password?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ''}`;
-                notice = `Reset link (development only): ${link}${channel.exists && !channel.verified ? ' (email unverified — verify before relying on it)' : ''}`;
+                notice = `Reset link (development only): ${link}${channel.exists && !channel.verified ? ' (email unverified; verify before relying on it)' : ''}`;
               }
             }
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -3167,7 +3263,7 @@ export function startConsoleServer(
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!preCsrfOk(req, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+              return json(res, 403, { ok: false, error: 'bad CSRF token; reload the form' });
             const token = call.fields.token ?? '';
             const inv = token ? await peekInvitationByToken(db, token, at) : undefined;
             try {
@@ -3185,7 +3281,7 @@ export function startConsoleServer(
                 inv
                   ? acceptInvitePage(call.csrf ?? '', token, inv, { error: msg })
                   : page(
-                      'Vital Console — accept invitation',
+                      'Vital Console: accept invitation',
                       `<p class="err">${esc(msg)}</p><p class="sub"><a href="/login">Sign in</a></p>`,
                     ),
               );
@@ -3201,7 +3297,7 @@ export function startConsoleServer(
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!preCsrfOk(req, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+              return json(res, 403, { ok: false, error: 'bad CSRF token; reload the form' });
             const next = safeReturnPath(call.fields.next);
             const token = call.fields.token ?? '';
             try {
@@ -3272,14 +3368,14 @@ export function startConsoleServer(
             if (publicBind && !hasBootstrapCreds())
               return json(res, 403, {
                 ok: false,
-                error: 'remote signup is disabled — configure VITAL_BOOTSTRAP_EMAIL and VITAL_BOOTSTRAP_PASSWORD',
+                error: 'remote signup is disabled: configure VITAL_BOOTSTRAP_EMAIL and VITAL_BOOTSTRAP_PASSWORD',
               });
             if (accessState === 'ready')
-              return json(res, 403, { ok: false, error: 'signup is closed — membership is invite-only' });
+              return json(res, 403, { ok: false, error: 'signup is closed: membership is invite-only' });
             if (accessState === 'recovery')
               return json(res, 403, {
                 ok: false,
-                error: 'owner recovery is required — contact your operator (see /signup for instructions)',
+                error: 'owner recovery is required: contact your operator (see /signup for instructions)',
               });
             let call: Call;
             try {
@@ -3288,13 +3384,13 @@ export function startConsoleServer(
               return json(res, 400, { ok: false, error: (e as Error).message });
             }
             if (!preCsrfOk(req, call.csrf))
-              return json(res, 403, { ok: false, error: 'bad CSRF token — reload the form' });
+              return json(res, 403, { ok: false, error: 'bad CSRF token; reload the form' });
             if (!setupAuthorized(req, call.fields.setupSecret))
               return json(res, 403, {
                 ok: false,
                 error: setupSecret
-                  ? 'setup authorization required — provide the configured setup secret'
-                  : 'remote organization claiming requires setup authorization — configure VITAL_SETUP_SECRET',
+                  ? 'setup authorization required: provide the configured setup secret'
+                  : 'remote organization claiming requires setup authorization: configure VITAL_SETUP_SECRET',
               });
             if (!rateOk(`signup:${ip ?? '-'}:${tenant}`, SIGNUP_RATE.limit, SIGNUP_RATE.windowMs, Date.parse(at))) {
               const shape = formErrorShape('rate-limited');
@@ -3388,7 +3484,7 @@ export function startConsoleServer(
             if (!csrfOk(auth.session, call.csrf)) {
               if (isBrowserForm(req)) {
                 res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-                res.end(changePasswordPage(auth.session.csrfToken, 'This form expired — submit again.'));
+                res.end(changePasswordPage(auth.session.csrfToken, 'This form expired. Submit again.'));
                 return;
               }
               return json(res, 403, { ok: false, error: 'bad CSRF token' });
@@ -3452,7 +3548,7 @@ export function startConsoleServer(
               auth.session.csrfToken,
               auth.user,
               undefined,
-              'Verification token issued. Outbound email is not configured — ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
+              'Verification token issued. Outbound email is not configured. Ask your operator to retrieve your link with vital verify-link (turnaround: under 1 business day).',
               home,
               {
                 emailVerified: verified,
@@ -3471,7 +3567,7 @@ export function startConsoleServer(
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
               res.end(
                 page(
-                  'Vital Console — email verified',
+                  'Vital Console: email verified',
                   `<h1>Email verified</h1><p class="sub">${esc(user.email)} is now a trusted recovery channel.</p><p class="sub"><a href="/login">Sign in</a></p>`,
                 ),
               );
@@ -3479,7 +3575,7 @@ export function startConsoleServer(
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
               res.end(
                 page(
-                  'Vital Console — verification failed',
+                  'Vital Console: verification failed',
                   `<p class="err">${esc(e instanceof AuthError ? e.message.replace(/^\[auth:[^\]]+\]\s*/, '') : (e as Error).message)}</p><p class="sub">Ask for a fresh link from Account and security.</p>`,
                 ),
               );
@@ -3500,7 +3596,7 @@ export function startConsoleServer(
               if (isBrowserForm(req)) {
                 res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
                 res.end(
-                  accountPage(auth.session.csrfToken, auth.user, 'This form expired — submit again.', undefined, home),
+                  accountPage(auth.session.csrfToken, auth.user, 'This form expired. Submit again.', undefined, home),
                 );
                 return;
               }
@@ -3636,7 +3732,7 @@ export function startConsoleServer(
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
               res.end(
                 page(
-                  'Vital Console — sign out',
+                  'Vital Console: sign out',
                   `<h1>Sign out?</h1><p class="sub">This ends the current session on this device.</p>
 <form method="post" action="/logout">
   <input type="hidden" name="csrf" value="${esc(auth.session.csrfToken)}">
@@ -3839,7 +3935,7 @@ export function startConsoleServer(
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             res.end(
               await wrapInWorkspaceShell(
-                detailDocument('Compiler — Why Not Trusted Yet', content, { ...detailOpts, hideHeader: true }),
+                detailDocument('Compiler: Why Not Trusted Yet', content, { ...detailOpts, hideHeader: true }),
                 db,
                 tenant,
                 home,
@@ -4151,7 +4247,7 @@ export function startConsoleServer(
               res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
               res.end(
                 page(
-                  'Vital Console — Issues',
+                  'Vital Console: Issues',
                   `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
                 ),
               );
@@ -4906,7 +5002,7 @@ export function startConsoleServer(
             const queueNotice = url.searchParams.get('queued')
               ? `Transfer test queued (job ${url.searchParams.get('queued')}). A worker runs it and banks the result.`
               : url.searchParams.get('compiled')
-                ? 'Card compiled into CANDIDATE — promotion still requires transfer evidence.'
+                ? 'Card compiled into CANDIDATE. Promotion still requires transfer evidence.'
                 : undefined;
             const body = await renderLearningCardPage(db, comp, tenant, cardId, {
               csrf: auth.session.csrfToken,
@@ -5387,7 +5483,7 @@ export function startConsoleServer(
               }
             }
 
-            const fullDashboard = renderOperationsDashboard({
+            const dashboardContent = renderOperationsDashboard({
               tenant,
               home,
               userEmail: auth.user.email,
@@ -5415,6 +5511,19 @@ export function startConsoleServer(
               accountCluster,
             });
 
+            const navKey = activeTab === 'home' ? 'dashboard' : activeTab;
+            const fullDashboard = await wrapInWorkspaceShell(
+              dashboardContent,
+              db,
+              tenant,
+              home,
+              auth,
+              navKey,
+              undefined,
+              false,
+              shellMetrics,
+            );
+
             // FLOW-010: the browser cookie tracks the slid DB row
 
             const refreshed = sessionCookie(auth.session.id, at, secure, auth.session);
@@ -5424,6 +5533,19 @@ export function startConsoleServer(
           }
 
           // ---------------------------------------------------------- setup (FLOW-012)
+          const sendShelledSetup = async (
+            authObj: { user: import('../core/auth.ts').User; session: { csrfToken: string; id: string } },
+            code: number,
+            state: Parameters<typeof renderSetupPage>[0],
+            usersList: Parameters<typeof renderSetupPage>[1],
+            msg?: string,
+          ) => {
+            const raw = renderSetupPage(state, usersList, authObj.session.csrfToken, home, msg);
+            const shelled = await wrapInWorkspaceShell(raw, db, tenant, home, authObj, 'setup');
+            res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(shelled);
+          };
+
           if (path === '/setup' && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
@@ -5433,8 +5555,7 @@ export function startConsoleServer(
             const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
               approverRole: approverMin,
             });
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home));
+            await sendShelledSetup(auth, 200, state, users);
             return;
           }
           if (path === '/setup' && method === 'POST') {
@@ -5457,14 +5578,12 @@ export function startConsoleServer(
               const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
                 approverRole: approverMin,
               });
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, 'Setup saved.'));
+              await sendShelledSetup(auth, 200, state, users, 'Setup saved.');
             } catch (e) {
               const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
                 approverRole: approverMin,
               });
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+              await sendShelledSetup(auth, 400, state, users, (e as Error).message);
             }
             return;
           }
@@ -5507,8 +5626,7 @@ export function startConsoleServer(
             const message = test.ok
               ? `Connection test passed (${test.code}).${preview}`
               : `Connection test failed (${test.code}): ${test.detail}`;
-            res.writeHead(test.ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(renderSetupPage(state, users, auth.session.csrfToken, home, message));
+            await sendShelledSetup(auth, test.ok ? 200 : 400, state, users, message);
             return;
           }
           if (path === '/setup/ingest' && method === 'POST') {
@@ -5544,14 +5662,12 @@ export function startConsoleServer(
                 result.errors.length > 0
                   ? `Ingestion finished with ${result.failed} failure(s).`
                   : `Synced ${result.processed} receipt(s).`;
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, detail));
+              await sendShelledSetup(auth, 200, state, users, detail);
             } catch (e) {
               const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
                 approverRole: approverMin,
               });
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+              await sendShelledSetup(auth, 400, state, users, (e as Error).message);
             }
             return;
           }
@@ -5576,8 +5692,7 @@ export function startConsoleServer(
               const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
                 approverRole: approverMin,
               });
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+              await sendShelledSetup(auth, 400, state, users, (e as Error).message);
             }
             return;
           }
@@ -5606,8 +5721,7 @@ export function startConsoleServer(
               const state = await buildActivationState(db, ledger, coord, tenant, at, users, {
                 approverRole: approverMin,
               });
-              res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(renderSetupPage(state, users, auth.session.csrfToken, home, (e as Error).message));
+              await sendShelledSetup(auth, 400, state, users, (e as Error).message);
             }
             return;
           }
@@ -5623,8 +5737,9 @@ export function startConsoleServer(
             const notice =
               url.searchParams.get('saved') === 'ok' ? 'Room configuration saved and deployed.' : undefined;
             const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, notice, home);
+            const shelled = await wrapInWorkspaceShell(html, db, tenant, home, auth, 'setup');
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(html);
+            res.end(shelled);
             return;
           }
           if (
@@ -5674,8 +5789,9 @@ export function startConsoleServer(
               return redirect(res, '/setup/rooms?saved=ok');
             } catch (e) {
               const html = await renderRoomsSetupPage(db, tenant, auth.session.csrfToken, (e as Error).message, home);
+              const shelled = await wrapInWorkspaceShell(html, db, tenant, home, auth, 'setup');
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(html);
+              res.end(shelled);
               return;
             }
           }
@@ -5777,57 +5893,9 @@ export function startConsoleServer(
               compilerGaps,
               filter: { q, role, status, team: teamParam, page: pageNum },
             });
-            // Chat-centric: Team lives inside Workspace shell
-            const isAdmin = atLeast(auth.user.role, 'admin');
-            const teamNav = renderConsoleNav(
-              buildConsoleNav(home, {
-                requests: true,
-                claims: true,
-                rooms: true,
-                humanWork: true,
-                settings: isAdmin,
-                learning: isAdmin,
-                audit: isAdmin,
-                data: isAdmin,
-                buzz: isAdmin,
-              }),
-              'team',
-            );
-            const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-            const teamRooms = (await roomHealth(db, tenant)).map((h) => ({
-              scope: h.scope,
-              roomName: h.roomName,
-              badge: h.badge,
-              pending: h.pendingApprovals,
-              category: h.category,
-            }));
-            // Same inner-body extraction as every other shelled page: the shell
-            // owns the skip link and the #main landmark, so a page must not ship
-            // a second copy of either.
-            const teamInner = workspaceInnerHtml(html);
-            const teamMetrics = await shellMetricsFor(db, tenant);
-            const teamRecency = await roomRecency(
-              db,
-              tenant,
-              teamRooms.map((r) => r.scope),
-            );
-            const teamShelled = renderConsoleShell({
-              rooms: teamRooms,
-              home,
-              consoleNav: teamNav,
-              accountCluster: teamCluster,
-              innerHtml: teamInner,
-              userEmail: auth.user.email,
-              userRole: auth.user.role,
-              userTeam: auth.user.team,
-              tenant,
-              metrics: teamMetrics,
-              roomRecency: teamRecency,
-            });
-            const teamWithShell =
-              html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
+            const teamShelled = await wrapInWorkspaceShell(html, db, tenant, home, auth, 'team');
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(teamWithShell);
+            res.end(teamShelled);
             return;
           }
           if (path === '/team/invite' && method === 'POST') {
@@ -6096,7 +6164,7 @@ export function startConsoleServer(
                 auth.user,
                 await listUsers(db, tenant),
                 data.invitations,
-                `${user.email} reactivated — they must sign in again; old sessions stay revoked`,
+                `${user.email} reactivated. They must sign in again; old sessions stay revoked`,
                 { home },
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -6289,7 +6357,7 @@ export function startConsoleServer(
               if (confirm !== target.email)
                 throw new AuthError(
                   'CONFIRM_MISMATCH',
-                  'confirmation email does not match — type the member email exactly',
+                  'confirmation email does not match: type the member email exactly',
                 );
               const handoffToUserId = call.fields.handoffToUserId?.trim() || undefined;
               const { reassigned } = await disableUser(db, tenant, target.id, at, {
@@ -6306,7 +6374,7 @@ export function startConsoleServer(
                 auth.user,
                 await listUsers(db, tenant),
                 data.invitations,
-                `${target.email} disabled — every live session was revoked immediately.${handoffMsg} Reactivate restores sign-in access but does not restore old sessions.`,
+                `${target.email} disabled. Every live session was revoked immediately.${handoffMsg} Reactivate restores sign-in access but does not restore old sessions.`,
                 { home },
               );
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -6636,7 +6704,7 @@ export function startConsoleServer(
             }
             const fingerprint = String(call.fields.fingerprint ?? '').trim();
             if (!fingerprint) {
-              json(res, 400, { ok: false, error: 'fingerprint required — refresh the deliverable preview' });
+              json(res, 400, { ok: false, error: 'fingerprint required: refresh the deliverable preview' });
               return;
             }
             const who = by(auth.user);
@@ -6653,7 +6721,7 @@ export function startConsoleServer(
                 json(res, 400, {
                   ok: false,
                   error:
-                    'type PUBLISH to confirm you are authorizing an external publication — the console records the authorization and publishes nothing itself',
+                    'type PUBLISH to confirm you are authorizing an external publication. The console records the authorization and publishes nothing itself',
                 });
                 return;
               }
@@ -6844,7 +6912,7 @@ export function startConsoleServer(
             if (!statement) {
               json(res, 400, {
                 ok: false,
-                error: 'a correction needs the corrected statement — pass { statement }',
+                error: 'a correction needs the corrected statement: pass { statement }',
               });
               return;
             }
@@ -7023,7 +7091,7 @@ export function startConsoleServer(
             if (kind !== 'snapshot' && kind !== 'evidence-package') {
               json(res, 400, {
                 ok: false,
-                error: 'unknown export kind — snapshot or evidence-package',
+                error: 'unknown export kind: snapshot or evidence-package',
               });
               return;
             }
@@ -7371,7 +7439,7 @@ export function startConsoleServer(
                   return json(res, 401, {
                     ok: false,
                     error:
-                      'review token expired or is a legacy token without expiry — open the request review page and approve there',
+                      'review token expired or is a legacy token without expiry. Open the request review page and approve there',
                     code: 'TOKEN_EXPIRED',
                   });
                 }
@@ -7393,7 +7461,7 @@ export function startConsoleServer(
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
               res.end(
                 themeDocument(
-                  `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${verb} request — Vital</title>${themeHead()}</head><body style="padding:0"><main id="main" style="max-width:560px;margin:0 auto;padding:40px 20px 64px"><div class="utility-bar" style="display:flex;justify-content:flex-end;margin-bottom:18px">${themeToggleButton()}</div><div class="card" style="padding:26px 28px"><span class="v-badge v-badge-warn"><span class="dot"></span>Human decision</span><h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:12px 0 8px;color:var(--v-ink)">${verb} request <code>${esc(requestId)}</code>?</h1><p class="sub" style="color:var(--v-muted);font-size:13.5px;line-height:1.6;margin:0 0 20px">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook" style="display:grid;gap:12px;max-width:320px"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" class="v-btn ${action === 'decline' ? 'v-btn-danger' : 'v-btn-primary'}">${verb} request</button></form><p style="margin:20px 0 0"><a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Return to Mission Control</a></p></div></main></body></html>`,
+                  `<!DOCTYPE html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${verb} request · Vital</title>${themeHead()}</head><body style="padding:0"><main id="main" style="max-width:560px;margin:0 auto;padding:40px 20px 64px"><div class="utility-bar" style="display:flex;justify-content:flex-end;margin-bottom:18px">${themeToggleButton()}</div><div class="card" style="padding:26px 28px"><span class="v-badge v-badge-warn"><span class="dot"></span>Human decision</span><h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:12px 0 8px;color:var(--v-ink)">${verb} request <code>${esc(requestId)}</code>?</h1><p class="sub" style="color:var(--v-muted);font-size:13.5px;line-height:1.6;margin:0 0 20px">This request is waiting on a human. Confirming records the decision in the audit log.</p><form method="POST" action="/api/buzz/webhook" style="display:grid;gap:12px;max-width:320px"><input type="hidden" name="token" value="${esc(token ?? '')}"><input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="requestId" value="${esc(requestId)}"><button type="submit" class="v-btn ${action === 'decline' ? 'v-btn-danger' : 'v-btn-primary'}">${verb} request</button></form><p style="margin:20px 0 0"><a href="${esc(home)}" class="v-btn v-btn-ghost v-btn-sm">← Return to Mission Control</a></p></div></main></body></html>`,
                 ),
               );
               return;
@@ -7438,7 +7506,7 @@ export function startConsoleServer(
                   if (!tokenUpdatedAt) {
                     throw new ExecutionSpecError(
                       'STALE_REVIEW',
-                      'this approval link carries no reviewed request version — open the request review page and approve there',
+                      'this approval link carries no reviewed request version. Open the request review page and approve there',
                       { requiresReReview: true },
                     );
                   }
@@ -7732,7 +7800,7 @@ export function startConsoleServer(
                 resoleReady({
                   ok: false,
                   status: 'failed',
-                  detail: 'readiness probe timed out — console not answering yet',
+                  detail: 'readiness probe timed out: console not answering yet',
                 });
               }, 2000);
               req.once('response', (resP: IncomingMessage & { resume?: () => void }) => {

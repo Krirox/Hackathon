@@ -138,7 +138,7 @@ export class LiveCanvasSynchronizer {
     // 2. Real procedure cards with measured drift
     let procedureSection: string;
     if (!this.compiler) {
-      procedureSection = `_Procedure compiler not connected — no card data._`;
+      procedureSection = `_Procedure compiler not connected: no card data._`;
     } else {
       try {
         const cards = await this.compiler.list(this.tenant);
@@ -187,7 +187,7 @@ export class LiveCanvasSynchronizer {
       procedureSection,
       '',
       `---`,
-      `*Every figure above is a live read from the Reality Ledger, traces, and compiler registry. Empty sections are empty — nothing here is simulated.*`,
+      `*Every figure above is a live read from the Reality Ledger, traces, and compiler registry. Empty sections are empty: nothing here is simulated.*`,
     ].join('\n');
   }
 
@@ -228,7 +228,7 @@ export class LiveCanvasSynchronizer {
       `## 1. Derivation Graph (claim_links)`,
       ...(links.length > 0
         ? ['```text', ...links.map((l) => `[${l.from_id}] --${l.link}--> [${l.to_id}]`), '```']
-        : [`_No claim links recorded yet — the derivation graph is empty._`]),
+        : [`_No claim links recorded yet: the derivation graph is empty._`]),
       '',
       `## 2. Canonical Reality Ledger State`,
       `| Claim ID | Subject | Statement | Status | Confidence |`,
@@ -238,7 +238,7 @@ export class LiveCanvasSynchronizer {
             (c) =>
               `| \`[${c.id}]\` | \`${c.subject}\` | ${c.statement} | \`${c.status}\` | \`${(c.confidence ?? 1).toFixed(2)}\` |`,
           )
-        : [`_The Reality Ledger is empty — no claims recorded yet._`]),
+        : [`_The Reality Ledger is empty: no claims recorded yet._`]),
       '',
       `---`,
       `*Claim graph served from the ledger by \`@${config.agentName}\`. No derived metric is shown unless it is computed from the rows above.*`,
@@ -259,7 +259,7 @@ export class LiveCanvasSynchronizer {
       `- **Dollars spent**: \`$${health.spendDollars.toFixed(2)}\` of ceiling \`$${health.spendCeilingDollars}\``,
       `- **Tokens spent**: \`${health.spendTokens.toLocaleString()} / ${health.spendCeilingTokens.toLocaleString()}\``,
       `- **Connected systems of record**: ${config.connectedSoRs.length > 0 ? config.connectedSoRs.map((s) => `\`${s}\``).join(', ') : '_none configured_'}`,
-      `- **Cost-per-signal**: _not computed here — see the dashboard; a real figure requires measured routing outcomes, none of which this canvas fabricates._`,
+      `- **Cost-per-signal**: _not computed here: see the dashboard; a real figure requires measured routing outcomes, none of which this canvas fabricates._`,
       '',
       `## 2. Dynamic Budget Gas Gauge`,
       `\`\`\`text`,
@@ -291,12 +291,12 @@ export class LiveCanvasSynchronizer {
       `| System Capability | Risk Category (policy) | Governance Mechanism |`,
       `| :--- | :--- | :--- |`,
       `| Cognitive Procedure Drift | Limited Risk | Trace EWMA monitoring + auto-demote |`,
-      `| Autonomous External Action | High Risk | Human oversight — \`ACT_IRREVERSIBLE\` is human-command only |`,
+      `| Autonomous External Action | High Risk | Human oversight: \`ACT_IRREVERSIBLE\` is human-command only |`,
       `| External Egress Collector | Limited Risk | Domain allowlist, fail-closed |`,
       '',
       `## 2. Audit & Calibration State`,
       `- **Audit log rows (append-only)**: \`${auditRows.toLocaleString()}\``,
-      `- **Hash-chain verification**: _no automated chain verifier is wired yet — none is claimed here_`,
+      `- **Hash-chain verification**: _no automated chain verifier is wired yet: none is claimed here_`,
       `- **Honeytask calibration**: \`${config.verifiedCalibrated ? '🟢 CALIBRATED' : '🟡 UNCALIBRATED'}\``,
       '',
       `---`,

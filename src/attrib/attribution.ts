@@ -55,7 +55,7 @@ export async function getRates(db: AsyncDb, tenant: string): Promise<Rates> {
       !Number.isFinite(dollarPerHumanMinute) ||
       dollarPerHumanMinute < 0
     ) {
-      throw new AttributionError('BAD_RATES', 'stored rates are not usable — refusing to price on garbage');
+      throw new AttributionError('BAD_RATES', 'stored rates are not usable: refusing to price on garbage');
     }
     return { dollarPerToken, dollarPerHumanMinute };
   } catch (e) {
@@ -449,7 +449,7 @@ export function attributionCaveats(input: {
 }): string[] {
   const caveats: string[] = [];
   if (!input.hasPrereg)
-    caveats.push('no pre-registration: thresholds were not agreed before the pilot — delta claims are post-hoc');
+    caveats.push('no pre-registration: thresholds were not agreed before the pilot: delta claims are post-hoc');
   if (!input.hasBaseline) caveats.push('no baseline captured: there is no delta to prove');
   if (!input.hasHoldout) caveats.push('no holdout lane: cannot rule out seasonality or cannibalisation');
   if (input.daysObserved < 14)

@@ -79,8 +79,8 @@ function lifecycleRailHtml(): string {
     <div style="display:grid;gap:8px;">
       ${steps
         .map(
-          (s, i) => `<div class="v-attention-item" style="border-left:3px solid var(--v-accent);">
-        <span class="v-badge"><span class="dot"></span>${esc(String(i + 1))}</span>
+          (s, i) => `<div class="v-attention-item" style="border-left:3px solid var(--v-accent);border-radius:14px;padding:11px 13px;">
+        <span class="v-badge" style="border-radius:9999px;"><span class="dot"></span>${esc(String(i + 1))}</span>
         <span><strong>${esc(s.name)}</strong><span class="v-meta" style="display:block;">${esc(s.note)}</span></span>
       </div>`,
         )
@@ -100,17 +100,17 @@ export async function renderCompilerParts(
   if (cards.length === 0) {
     const empty = `<div class="v-empty">
   <h3>No skill cards compiled yet</h3>
-  <p>Cards appear here as traces are compiled — nothing is demo-seeded. The board fills column by column as the compiler mines repeated successful procedures.</p>
+  <p>Cards appear here as traces are compiled. Nothing is demo-seeded. The board fills column by column as the compiler mines repeated successful procedures.</p>
 </div>`;
     return {
       boardHtml: empty,
       metricsHtml: `<div class="v-empty" style="padding:18px 20px;text-align:left;">
-  <p style="margin:0;">No board metrics yet — metrics are computed from real cards and traces.</p>
+  <p style="margin:0;">No board metrics yet. Metrics are computed from real cards and traces.</p>
 </div>`,
       rightPanelHtml: `
   <div class="v-card">
     <h2 class="v-card-title">Why not trusted yet</h2>
-    <p class="v-sub" style="margin:8px 0 0;line-height:1.55;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded. Compilation is an explicit, gated act: <a href="/console/learning/compile">compile a mined candidate</a> to create the first card. Mining alone will not fill this board.</p>
+    <p class="v-sub" style="margin:8px 0 0;line-height:1.55;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces. Nothing here is demo-seeded. Compilation is an explicit, gated act: <a href="/console/learning/compile">compile a mined candidate</a> to create the first card. Mining alone will not fill this board.</p>
   </div>
   ${lifecycleRailHtml()}`,
     };
@@ -238,7 +238,7 @@ export async function renderCompilerParts(
             )
             .join('\n')
     }
-    <p class="v-meta" style="margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board. That path is now reachable: <a href="/console/learning/compile">compile a mined candidate</a>, then queue a transfer test from the card's page. Promotion still requires cross-model evidence, so a smoke run against a test-baseline harness will not move a card.</p>
+    <p class="v-meta" style="margin-top:14px;">Trust gates run through the governed transfer-test path. Promotion is never granted from this board. That path is now reachable: <a href="/console/learning/compile">compile a mined candidate</a>, then queue a transfer test from the card's page. Promotion still requires cross-model evidence, so a smoke run against a test-baseline harness will not move a card.</p>
   </div>
   ${lifecycleRailHtml()}`;
 
@@ -258,7 +258,7 @@ export async function renderCompilerView(
   /* Board chrome lives with the board: kanban columns sized to the surface,
      horizontally scrollable on narrow viewports instead of collapsing. */
   .v-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px;}
-  .v-board-col{flex:1 1 0;min-width:190px;background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-lg);padding:10px 10px 6px;}
+  .v-board-col{flex:1 1 0;min-width:190px;background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:18px;padding:12px 12px 8px;}
   .v-board-col-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--v-line);}
 </style>
 <section class="compiler-view">

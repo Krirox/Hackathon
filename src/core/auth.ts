@@ -467,7 +467,7 @@ export async function claimTenantOwner(
     if (state === 'recovery')
       throw new AuthError(
         'RECOVERY_REQUIRED',
-        `tenant "${slug}" has accounts but no usable owner — contact your operator`,
+        `tenant "${slug}" has accounts but no usable owner: contact your operator`,
       );
     const owner = await insertUser(db, slug, {
       email,
@@ -604,7 +604,7 @@ async function assertEmailAvailable(db: AsyncDb, tenant: string, email: string, 
     .get(tenant, normalized)) as { id: string; disabled: number } | undefined;
   if (existing) {
     if (Number(existing.disabled) === 1)
-      throw new AuthError('DISABLED_USER_EXISTS', `${normalized} is disabled — reactivate the account instead`);
+      throw new AuthError('DISABLED_USER_EXISTS', `${normalized} is disabled: reactivate the account instead`);
     throw new AuthError('DUPLICATE_USER', `${normalized} already has an active account`);
   }
   await sweepInvitations(db, tenant, now);
@@ -612,7 +612,7 @@ async function assertEmailAvailable(db: AsyncDb, tenant: string, email: string, 
     .prepare("SELECT id FROM invitations WHERE tenant = ? AND email = ? AND status = 'pending'")
     .get(tenant, normalized)) as { id: string } | undefined;
   if (pending)
-    throw new AuthError('INVITATION_PENDING', `${normalized} already has a pending invitation — resend or revoke it`);
+    throw new AuthError('INVITATION_PENDING', `${normalized} already has a pending invitation: resend or revoke it`);
 }
 
 /** Mark expired pending invitations so the team page stays truthful. */
@@ -753,7 +753,7 @@ export async function resendInvitation(
   if (!inv) throw new AuthError('UNKNOWN_INVITATION', `no invitation ${invitationId}`);
   if (inv.status === 'accepted') throw new AuthError('INVITATION_ACCEPTED', 'accepted invitations cannot be resent');
   if (inv.status === 'revoked')
-    throw new AuthError('INVITATION_REVOKED', 'revoked invitations cannot be resent — create a new account');
+    throw new AuthError('INVITATION_REVOKED', 'revoked invitations cannot be resent: create a new account');
   const token = newToken();
   const expiresAt = new Date(Date.parse(now) + INVITATION_TTL_MS).toISOString();
   await db
@@ -778,7 +778,7 @@ export async function acceptInvitation(
   if (inv.status === 'revoked') throw new AuthError('BAD_INVITATION', 'this invitation was revoked');
   if (inv.status === 'accepted') throw new AuthError('BAD_INVITATION', 'this invitation was already accepted');
   if (inv.status === 'expired')
-    throw new AuthError('BAD_INVITATION', 'this invitation expired — ask your admin for a new one');
+    throw new AuthError('BAD_INVITATION', 'this invitation expired: ask your admin for a new one');
   return db.transaction(async () => {
     const existing = await db.prepare('SELECT id FROM users WHERE tenant = ? AND email = ?').get(inv.tenant, inv.email);
     if (existing) throw new AuthError('DUPLICATE_USER', `${inv.email} already has an account`);
@@ -897,7 +897,7 @@ export async function disableUser(
     if (!opts.handoffToUserId)
       throw new AuthError(
         'HANDOFF_REQUIRED',
-        `${target.email} owns ${work.claimCount} claim(s) and ${work.requestCount} open request(s) — choose a handoff recipient`,
+        `${target.email} owns ${work.claimCount} claim(s) and ${work.requestCount} open request(s): choose a handoff recipient`,
       );
     const handoff = await getUser(db, tenant, opts.handoffToUserId);
     if (!handoff || handoff.disabled) throw new AuthError('BAD_HANDOFF', 'handoff recipient must be an active member');
@@ -1032,9 +1032,9 @@ export function membershipRoster(users: User[], invitations: Invitation[], now: 
   const rows: MembershipRow[] = [];
   for (const inv of invitations) {
     if (inv.status === 'accepted' || inv.status === 'revoked') continue;
-    let detail = `invited — acceptance link expires ${inv.expiresAt.slice(0, 10)}`;
+    let detail = `invited: acceptance link expires ${inv.expiresAt.slice(0, 10)}`;
     if (inv.status === 'expired' || (inv.status === 'pending' && inv.expiresAt <= now))
-      detail = 'invitation expired — resend it or create a new account';
+      detail = 'invitation expired: resend it or create a new account';
     rows.push({ kind: 'invited', email: inv.email, name: inv.name, role: inv.role, detail });
   }
   for (const u of users) {
@@ -1044,7 +1044,7 @@ export function membershipRoster(users: User[], invitations: Invitation[], now: 
         email: u.email,
         name: u.name,
         role: u.role,
-        detail: 'sign-in revoked — reactivate to restore access without restoring old sessions',
+        detail: 'sign-in revoked: reactivate to restore access without restoring old sessions',
       });
     } else if (membershipStatus(u) === 'pending_activation') {
       rows.push({
@@ -1052,10 +1052,10 @@ export function membershipRoster(users: User[], invitations: Invitation[], now: 
         email: u.email,
         name: u.name,
         role: u.role,
-        detail: 'pending activation — a password change is required before continuing',
+        detail: 'pending activation: a password change is required before continuing',
       });
     } else {
-      rows.push({ kind: 'active', email: u.email, name: u.name, role: u.role, detail: 'active — can sign in' });
+      rows.push({ kind: 'active', email: u.email, name: u.name, role: u.role, detail: 'active: can sign in' });
     }
   }
   return rows;
@@ -1071,7 +1071,7 @@ export function createAccountNotice(): CreateAccountNotice {
   return {
     heading: 'Create account',
     detail:
-      'Creates a pending invitation. Deliver the acceptance link to this person out of band (email, chat, ticket). They choose their own password when accepting — you never set it here.',
+      'Creates a pending invitation. Deliver the acceptance link to this person out of band (email, chat, ticket). They choose their own password when accepting: you never set it here.',
     button: 'Create account',
   };
 }
@@ -1205,7 +1205,7 @@ export async function verifyLoginCredentials(
 
   const lockedUntil = (await lockedMessage(key)) ?? (await lockedMessage(accountKey));
   if (lockedUntil)
-    throw new AuthError('LOCKED', `too many failed attempts — locked until ${lockedUntil}`);
+    throw new AuthError('LOCKED', `too many failed attempts: locked until ${lockedUntil}`);
 
   const user = (await db.prepare('SELECT * FROM users WHERE tenant = ? AND email = ?').get(input.tenant, email)) as
     | Row
@@ -1232,7 +1232,7 @@ export async function checkMfaLockout(db: AsyncDb, tenant: string, userId: strin
     .prepare('SELECT locked_until FROM login_attempts WHERE key = ? AND day = ?')
     .get(`mfa:${tenant}|${userId}`, day)) as { locked_until: string | null } | undefined;
   if (row?.locked_until && row.locked_until > now) {
-    throw new AuthError('LOCKED', `too many failed attempts — locked until ${row.locked_until}`);
+    throw new AuthError('LOCKED', `too many failed attempts: locked until ${row.locked_until}`);
   }
 }
 
@@ -1589,7 +1589,7 @@ export function mfaPolicy(): {
     recovery: 'single-use hashed recovery codes',
     recentAuthWindowMs: MFA_RECENT_AUTH_WINDOW_MS,
     sensitiveOps: ['role-change', 'disable', 'transfer-ownership', 'reactivate', 'recovery'],
-    webauthn: 'schema-reserved only — not an offered factor',
+    webauthn: 'schema-reserved only: not an offered factor',
   };
 }
 

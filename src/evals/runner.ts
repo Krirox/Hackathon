@@ -128,11 +128,11 @@ export async function runSuite(
 ): Promise<SuiteRun> {
   const at = opts.now ?? new Date().toISOString();
   if (suite.startsWith('heldout/') && opts.heldOut !== true) {
-    throw new EvalError('HELD_OUT_SUITE', `suite "${suite}" is held out — pass { heldOut: true } to run it, visibly`);
+    throw new EvalError('HELD_OUT_SUITE', `suite "${suite}" is held out: pass { heldOut: true } to run it, visibly`);
   }
   const cases = await listCases(db, tenant, suite, { includeHeldOut: opts.heldOut === true });
   if (cases.length === 0)
-    throw new EvalError('EMPTY_SUITE', `suite "${suite}" has no cases — a suite that cannot fail proves nothing`);
+    throw new EvalError('EMPTY_SUITE', `suite "${suite}" has no cases: a suite that cannot fail proves nothing`);
   if (suite.startsWith('heldout/')) {
     await db
       .prepare('INSERT INTO audit_log (tenant, actor, action, target, detail, at) VALUES (?,?,?,?,?,?)')

@@ -130,7 +130,7 @@ function assertRef(ref: string): void {
   if (!SHA256_HEX.test(ref)) {
     throw new S3Error(
       'BAD_REF',
-      `artifact ref "${ref}" is not a sha256 hex digest — S3 keys are content-addressed (<sha256>); refusing instead of storing under an unaddressable name`,
+      `artifact ref "${ref}" is not a sha256 hex digest: S3 keys are content-addressed (<sha256>); refusing instead of storing under an unaddressable name`,
     );
   }
 }
@@ -154,7 +154,7 @@ function resolveBase(region: string, endpoint: string | undefined): string {
   } catch {
     throw new S3Error(
       'BAD_ENDPOINT',
-      'S3 endpoint is not a parseable URL — refusing instead of signing toward garbage',
+      'S3 endpoint is not a parseable URL: refusing instead of signing toward garbage',
     );
   }
   const host = url.hostname;
@@ -165,7 +165,7 @@ function resolveBase(region: string, endpoint: string | undefined): string {
   if (url.protocol !== 'https:' && !local) {
     throw new S3Error(
       'BAD_ENDPOINT',
-      `S3 endpoint must be https:// (got "${url.protocol}//${host}") — http is allowed only for explicit localhost/127.0.0.1 overrides`,
+      `S3 endpoint must be https:// (got "${url.protocol}//${host}"): http is allowed only for explicit localhost/127.0.0.1 overrides`,
     );
   }
   return url.origin;
@@ -187,7 +187,7 @@ export class S3ArtifactStore {
     if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(opts.bucket)) {
       throw new S3Error(
         'BAD_BUCKET',
-        `S3 bucket "${opts.bucket}" violates bucket naming (3-63 chars, lowercase, dots/dashes) — refusing instead of signing toward a shelf that cannot exist`,
+        `S3 bucket "${opts.bucket}" violates bucket naming (3-63 chars, lowercase, dots/dashes): refusing instead of signing toward a shelf that cannot exist`,
       );
     }
     if (!opts.credentials?.accessKeyId || !opts.credentials?.secretAccessKey) {
@@ -195,15 +195,15 @@ export class S3ArtifactStore {
       // diagnostics must never become credential exfiltration.
       throw new S3Error(
         'BAD_CREDENTIALS',
-        'S3 credentials are missing accessKeyId/secretAccessKey — refusing an unsigned artifact call',
+        'S3 credentials are missing accessKeyId/secretAccessKey: refusing an unsigned artifact call',
       );
     }
     if (!opts.region)
-      throw new S3Error('BAD_REGION', 'S3 region is empty — the SigV4 scope needs a region to bind the signature to');
+      throw new S3Error('BAD_REGION', 'S3 region is empty: the SigV4 scope needs a region to bind the signature to');
     if (!opts.fetchFn)
       throw new S3Error(
         'BAD_TRANSPORT',
-        'S3 fetchFn is missing — the network is injected, never ambient, so tests stub it',
+        'S3 fetchFn is missing: the network is injected, never ambient, so tests stub it',
       );
     this.bucket = opts.bucket;
     this.region = opts.region;
@@ -231,7 +231,7 @@ export class S3ArtifactStore {
     if (bytes.length > this.maxBytes) {
       throw new S3Error(
         'TOO_LARGE',
-        `artifact "${ref}" is ${bytes.length} bytes, over the ${this.maxBytes}-byte cap — single PUT only, no multipart (see note above); refusing instead of buffering an unbounded tree`,
+        `artifact "${ref}" is ${bytes.length} bytes, over the ${this.maxBytes}-byte cap: single PUT only, no multipart (see note above); refusing instead of buffering an unbounded tree`,
       );
     }
     const payloadHash = sha256Hex(bytes);
@@ -275,14 +275,14 @@ export class S3ArtifactStore {
     if (bytes.length > this.maxBytes) {
       throw new S3Error(
         'TOO_LARGE',
-        `artifact "${ref}" is ${bytes.length} bytes, over the ${this.maxBytes}-byte cap — refusing instead of hashing an unbounded tree`,
+        `artifact "${ref}" is ${bytes.length} bytes, over the ${this.maxBytes}-byte cap: refusing instead of hashing an unbounded tree`,
       );
     }
     const actual = sha256Hex(bytes);
     if (actual !== ref) {
       throw new S3Error(
         'CORRUPT',
-        `artifact "${ref}" failed content verification (bytes hash to "${actual}") — tampered or crossed object; refusing instead of returning strange bytes under a trusted name`,
+        `artifact "${ref}" failed content verification (bytes hash to "${actual}"): tampered or crossed object; refusing instead of returning strange bytes under a trusted name`,
       );
     }
     return bytes;

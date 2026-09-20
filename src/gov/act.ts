@@ -58,7 +58,7 @@ export async function actReversible<T = unknown>(
 ): Promise<{ claimId: string; kind: ReversibleKind; receipt?: ActReceipt<T> }> {
   if (verdict === 'denied') throw new ActError('DENIED_ACTION', `refused: ${reasons.join('; ')}`);
   if (verdict === 'human-command') {
-    throw new ActError('HUMAN_COMMAND', 'this action class is human-command — no autonomous execution path exists');
+    throw new ActError('HUMAN_COMMAND', 'this action class is human-command: no autonomous execution path exists');
   }
   if (verdict === 'approval') {
     throw new ActError('NEEDS_APPROVAL', `a human approves first: ${reasons.join('; ')}`);
@@ -155,7 +155,7 @@ export async function assertNoHalt(db: AsyncDb, tenant: string, scope: string, a
   if (await checkKill(db, tenant, scope, actionClass)) {
     throw new ActError(
       'HALTED_WHEN_STOPPED',
-      `stop active for ${scope}/${actionClass} — recover via recoverStop first`,
+      `stop active for ${scope}/${actionClass}: recover via recoverStop first`,
     );
   }
 }
@@ -164,10 +164,10 @@ export type ActFailure = 'rate-limit' | 'timeout-unknown' | 'dependency-outage' 
 
 export function actRetryGuidance(failure: ActFailure, actionClass: string): { retryable: boolean; strategy: string } {
   if (failure === 'denied' || failure === 'needs-approval') {
-    return { retryable: false, strategy: 'explicit human decision only — refusals are never retried automatically' };
+    return { retryable: false, strategy: 'explicit human decision only: refusals are never retried automatically' };
   }
   if (actionClass === 'ACT_IRREVERSIBLE') {
-    return { retryable: false, strategy: 'explicit human resubmission only — irreversible effects are never replayed' };
+    return { retryable: false, strategy: 'explicit human resubmission only: irreversible effects are never replayed' };
   }
   if (failure === 'timeout-unknown') {
     return { retryable: true, strategy: 'reconcile-then-retry under the same idempotency key' };

@@ -139,7 +139,7 @@ export function evaluateContract(
     return {
       material: false,
       state: status.state,
-      reasons: [`contract is ${status.state} — re-review before it fires again`],
+      reasons: [`contract is ${status.state}: re-review before it fires again`],
     };
   }
 
@@ -147,7 +147,7 @@ export function evaluateContract(
   const liveGoals = signal.goalRefs.filter((g) => liveGoalIds.includes(g));
   const priced = (signal.revenueCostRiskRefs ?? []).filter((r) => contract.revenueCostRisk.includes(r));
   if (liveGoals.length === 0 && priced.length === 0) {
-    return { material: false, state: 'ACTIVE', reasons: ['no live GOAL and no revenue/cost/risk path — archive'] };
+    return { material: false, state: 'ACTIVE', reasons: ['no live GOAL and no revenue/cost/risk path: archive'] };
   }
   if (liveGoals.length > 0) reasons.push(`links live goal(s): ${liveGoals.join(', ')}`);
   if (priced.length > 0) reasons.push(`touches revenue/cost/risk: ${priced.join(', ')}`);
@@ -157,7 +157,7 @@ export function evaluateContract(
     return {
       material: false,
       state: 'ACTIVE',
-      reasons: [...reasons, `outside contract entities: ${unknownEntities.join(', ')} — archive`],
+      reasons: [...reasons, `outside contract entities: ${unknownEntities.join(', ')}: archive`],
     };
   }
 
@@ -170,7 +170,7 @@ export function evaluateContract(
         state: 'ACTIVE',
         reasons: [
           ...reasons,
-          `no matching contract predicate (signal: ${signal.predicates.join(', ')}, contract requires: ${contract.predicates.join(', ')}) — archive`,
+          `no matching contract predicate (signal: ${signal.predicates.join(', ')}, contract requires: ${contract.predicates.join(', ')}): archive`,
         ],
       };
     }
@@ -186,14 +186,14 @@ export function evaluateContract(
         return {
           material: false,
           state: 'ACTIVE',
-          reasons: [...reasons, `missing required threshold score for "${k}" (needs >= ${required}) — archive`],
+          reasons: [...reasons, `missing required threshold score for "${k}" (needs >= ${required}): archive`],
         };
       }
       if (score < required) {
         return {
           material: false,
           state: 'ACTIVE',
-          reasons: [...reasons, `score ${k}=${score} below threshold ${required} — archive`],
+          reasons: [...reasons, `score ${k}=${score} below threshold ${required}: archive`],
         };
       }
     }
@@ -204,7 +204,7 @@ export function evaluateContract(
         return {
           material: false,
           state: 'ACTIVE',
-          reasons: [...reasons, `score ${k}=${v} below threshold ${t} — archive`],
+          reasons: [...reasons, `score ${k}=${v} below threshold ${t}: archive`],
         };
       }
     }

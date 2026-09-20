@@ -145,7 +145,7 @@ export class TimeTravelForkEngine {
     }
     const text = result.text.trim();
     if (!text) {
-      throw new ModelError('EMPTY_RESPONSE', 'forked model returned no content — no counterfactual exists');
+      throw new ModelError('EMPTY_RESPONSE', 'forked model returned no content: no counterfactual exists');
     }
 
     return {
@@ -193,7 +193,7 @@ export class TimeTravelForkEngine {
     }
 
     if (!requestId) {
-      throw new Error('[fork:UNKNOWN_TARGET] no requestId or decisionId resolved — nothing to fork');
+      throw new Error('[fork:UNKNOWN_TARGET] no requestId or decisionId resolved: nothing to fork');
     }
 
     const {
@@ -302,7 +302,7 @@ export class TimeTravelForkEngine {
 
     // ---- Side-by-side diff. Both sides are real runs now. ----
     const sideBySideMarkdown = [
-      `🔀 **[TIME-TRAVEL FORK — real re-run on ${forked.provider}/${forked.model}]**`,
+      `🔀 **[TIME-TRAVEL FORK: real re-run on ${forked.provider}/${forked.model}]**`,
       `Re-executed decision for request \`${requestId}\` in #sandbox with alternative parameters.`,
       '',
       `| Dimension | Original Run (\`${originalDecisionId}\`) | Forked Re-Run (\`${sandboxRequestId}\`) |`,

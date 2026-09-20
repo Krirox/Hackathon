@@ -105,7 +105,7 @@ export function renderReviewIndexPage(
       : `<div class="v-table-wrap"><table class="v-table"><thead><tr><th>Mission</th><th>Status</th><th>Baseline</th><th>Working tree</th><th>Comments</th><th>Updated</th></tr></thead><tbody>${reviews
           .map(
             (r) =>
-              `<tr><td><a class="v-strong" href="/console/review/${esc(encodeURIComponent(r.missionId))}">${esc(r.missionId)}</a></td><td>${statusBadge(r.status)}</td><td><code class="v-code-pill">${esc(r.baselineRev)}</code></td><td><code class="v-code-pill">${esc(r.workdir)}</code></td><td class="v-num">${r.openComments > 0 ? `${r.openComments} open` : '—'}</td><td class="v-meta">${sinceLabel(r.updatedAt, opts.now)}</td></tr>`,
+              `<tr><td><a class="v-strong" href="/console/review/${esc(encodeURIComponent(r.missionId))}">${esc(r.missionId)}</a></td><td>${statusBadge(r.status)}</td><td><code class="v-code-pill">${esc(r.baselineRev)}</code></td><td><code class="v-code-pill">${esc(r.workdir)}</code></td><td class="v-num">${r.openComments > 0 ? `${r.openComments} open` : 'none'}</td><td class="v-meta">${sinceLabel(r.updatedAt, opts.now)}</td></tr>`,
           )
           .join('')}</tbody></table></div>`;
 
@@ -122,7 +122,7 @@ ${opts.notice ? `<p class="sub" role="status">${esc(opts.notice)}</p>` : ''}
 <section class="v-card v-card-flush">
 <div style="padding:18px 22px 0">
 <h2 class="v-card-title">Open reviews${reviews.length > 0 ? ` · ${reviews.length}` : ''}</h2>
-<p class="v-lede">A review is keyed by mission id and recomputed from the repository on every load — decisions, comments and verification outcomes are what persist.</p>
+<p class="v-lede">A review is keyed by mission id and recomputed from the repository on every load. Decisions, comments and verification outcomes are what persist.</p>
 </div>
 ${rows}
 </section>
@@ -157,7 +157,7 @@ export function reviewRoutes(): RouteDef<ReviewEnv>[] {
       capability: 'session',
       surface: 'html',
       activation: 'required',
-      note: 'Code-review index: every opened review for this tenant, plus the form that opens one. Session-only — a review binds a working tree on this host to tenant-scoped data.',
+      note: 'Code-review index: every opened review for this tenant, plus the form that opens one. Session-only. A review binds a working tree on this host to tenant-scoped data.',
       async handler(ctx) {
         const auth = requireAuth(ctx);
         // One read for the request; the page is short-lived and showable as-is.

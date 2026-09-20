@@ -56,7 +56,7 @@ function trustGapsFor(
     }
   }
   if (drift?.drifting === true) trustGaps.push('drifting: live success below validated baseline');
-  if (drift?.demoted === true) trustGaps.push('auto-demoted — see drift ticket');
+  if (drift?.demoted === true) trustGaps.push('auto-demoted: see drift ticket');
   return trustGaps;
 }
 
@@ -202,6 +202,6 @@ export async function cardEvaluationEvidence(
     evalRef: described.card.evalRef,
     runs,
     latest: runs.length > 0 ? (runs[0] as CardEvaluationEvidence['latest']) : null,
-    evidenceOnly: 'evidence only — linking a gap to its eval runs never promotes the card',
+    evidenceOnly: 'evidence only: linking a gap to its eval runs never promotes the card',
   };
 }

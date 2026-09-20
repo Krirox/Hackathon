@@ -165,7 +165,7 @@ export function assertFreshReview(request: CoordinationRequest, expectedRequestU
   if (expectedRequestUpdatedAt && expectedRequestUpdatedAt !== request.updatedAt) {
     throw new ExecutionSpecError(
       'STALE_REVIEW',
-      'the request changed since this page was loaded — review the current version and submit again',
+      'the request changed since this page was loaded: review the current version and submit again',
       {
         expected: expectedRequestUpdatedAt,
         current: request.updatedAt,
@@ -227,7 +227,7 @@ export async function validateApprovalBoundary(
     }
     throw new ExecutionSpecError(
       'STALE_EVIDENCE',
-      `evidence changed since this page was loaded: ${dropped.join(', ')} — review the current evidence and submit again`,
+      `evidence changed since this page was loaded: ${dropped.join(', ')}: review the current evidence and submit again`,
       { dropped, requiresReReview: true, diff },
     );
   }
@@ -327,7 +327,7 @@ export async function validateExecutionAgainstSpec(
   if (drifted.length > 0) {
     throw new ExecutionSpecError(
       'DRIFTED_APPROVAL',
-      `approved evidence drifted since authorization (${drifted.map((d) => d.id).join(', ')}) — re-review required`,
+      `approved evidence drifted since authorization (${drifted.map((d) => d.id).join(', ')}): re-review required`,
       { drifted: drifted.map((d) => d.id) },
     );
   }

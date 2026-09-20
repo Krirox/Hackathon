@@ -321,7 +321,7 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
           command: 'ledger',
           scope,
           error: `ledger search failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
-          output: `📜 **Ledger Search**: search failed — ${String((e as Error).message ?? e).slice(0, 120)}`,
+          output: `📜 **Ledger Search**: search failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
         };
       }
     }
@@ -347,7 +347,7 @@ export async function executeRoomCommand(rawText: string, ctx: CommandContext): 
           command: 'requests',
           scope,
           error: `coordinator read failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
-          output: `📋 **Requests**: coordinator read failed — ${String((e as Error).message ?? e).slice(0, 120)}`,
+          output: `📋 **Requests**: coordinator read failed: ${String((e as Error).message ?? e).slice(0, 120)}`,
         };
       }
     }

@@ -408,7 +408,7 @@ async function answerDeterministic(
     const day = dayMatch ? dayMatch[1]! : 'Friday';
     const capDay = day.charAt(0).toUpperCase() + day.slice(1);
     const ts = launchHit.metadata.startTime !== undefined ? formatTimestamp(launchHit.metadata.startTime) : '00:00';
-    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle} — ${ts}`;
+    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle}: ${ts}`;
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
       tenant,
@@ -430,7 +430,7 @@ async function answerDeterministic(
     const day = dayMatch ? dayMatch[1]! : 'Friday';
     const capDay = day.charAt(0).toUpperCase() + day.slice(1);
     const ts = decisionHit.metadata.startTime !== undefined ? formatTimestamp(decisionHit.metadata.startTime) : '00:00';
-    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle} — ${ts}`;
+    const answer = `The team agreed to target ${capDay}.\n\nSource: ${meetingTitle}: ${ts}`;
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
       tenant,
@@ -449,7 +449,7 @@ async function answerDeterministic(
   const actionHit = hits.find((h) => /deployment|deploy/i.test(h.text));
   if (actionHit && /who|deploy|deployment|handle/i.test(q)) {
     const ts = actionHit.metadata.startTime !== undefined ? formatTimestamp(actionHit.metadata.startTime) : '00:00';
-    const answer = `Krishiv (or Speaker B) will handle deployment.\n\nSource: ${meetingTitle} — ${ts}`;
+    const answer = `Krishiv (or Speaker B) will handle deployment.\n\nSource: ${meetingTitle}: ${ts}`;
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
       tenant,
@@ -488,7 +488,7 @@ async function answerDeterministic(
   // Generic best hit
   const best = hits[0]!;
   const ts = best.metadata.startTime !== undefined ? formatTimestamp(best.metadata.startTime) : '00:00';
-  const answer = `Based on the meeting: ${best.text}\n\nSource: ${meetingTitle} — ${ts}`;
+  const answer = `Based on the meeting: ${best.text}\n\nSource: ${meetingTitle}: ${ts}`;
   const qRecord: MeetingQuestion = {
     id: `que_${randomUUID().slice(0, 8)}`,
     tenant,

@@ -128,7 +128,7 @@ function hunkHtml(doc: CodeReviewDoc, f: ChangedFile, h: ChangedFile['hunks'][nu
     // clicking it did nothing at all. A control that cannot act is worse than a
     // sentence that explains which control does; the real affordance is Reject
     // All, which restores the baseline.
-    if (f.status === 'D') right = `<div class="ln"><span class="no"></span><span class="tx mut">FILE DELETED — restoring the baseline means rejecting the whole set (Reject All below); a single deleted file cannot be restored on its own.</span></div>`;
+    if (f.status === 'D') right = `<div class="ln"><span class="no"></span><span class="tx mut">FILE DELETED: restoring the baseline means rejecting the whole set (Reject All below); a single deleted file cannot be restored on its own.</span></div>`;
   }
   const decided = h.decision !== 'pending' ? ` <span class="mut">(${h.decision})</span>` : '';
   const attr = h.agentId ? esc(h.agentId) : 'Agent attribution unavailable';
@@ -145,7 +145,7 @@ export async function renderReviewPage(db: AsyncDb, tenant: string, missionId: s
     const mission = await getMission(db, tenant, missionId).catch(() => null);
     return shell(`Review ${missionId}`, `<div class="top"><b>VITAL</b><span>${esc(missionId)}</span><span class="mut">no review opened</span></div>
 <main style="padding:20px;max-width:720px"><div class="card"><h3>Open code review</h3>
-<p class="mut">${mission ? `Mission: ${esc(mission.request.slice(0, 200))}` : 'Mission record not found — you can still review a working directory against a git baseline.'}</p>
+<p class="mut">${mission ? `Mission: ${esc(mission.request.slice(0, 200))}` : 'Mission record not found. You can still review a working directory against a git baseline.'}</p>
 <form method="post"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="open">
 <label>Working directory <input name="workdir" required placeholder="/path/to/repo" style="width:100%"></label><br><br>
 <label>Baseline git rev <input name="baseline" value="HEAD" style="width:100%"></label><br><br>
@@ -179,7 +179,7 @@ export async function renderReviewPage(db: AsyncDb, tenant: string, missionId: s
     const selHits = secretHits.get(sel.path) ?? [];
     main += `<div class="card"><b style="font-family:var(--mono)">${esc(sel.path)}</b> <span class="st ${sel.status}">${sel.status} ${sel.status === 'M' ? 'Modified' : sel.status === 'A' ? 'Added' : sel.status === 'D' ? 'Deleted' : 'Renamed'}</span>
 <span class="mut">+${sel.insertions} −${sel.deletions} · ${esc(lang)} · ${sel.hunks.length} hunks</span>
-${selHits.length > 0 ? `<div class="bad" style="margin-top:6px">⚠ SECRET SCAN: ${selHits.map(esc).join(' · ')} — resolve before snapshot</div>` : ''}
+${selHits.length > 0 ? `<div class="bad" style="margin-top:6px">⚠ SECRET SCAN: ${selHits.map(esc).join(' · ')}. Resolve before snapshot</div>` : ''}
 <div class="tabs"><a class="btn" href="?file=${sel.id}&mode=side">Side-by-Side</a> <a class="btn" href="?file=${sel.id}&mode=inline">Inline</a>
 <button class="btn" onclick="gotoHunk(-1)">↑ Prev</button> <button class="btn" onclick="gotoHunk(1)">↓ Next</button>
 <a class="btn" href="?file=${sel.id}&mode=${mode}&edit=${sel.id}">✎ Edit file</a>
@@ -187,7 +187,7 @@ ${selHits.length > 0 ? `<div class="bad" style="margin-top:6px">⚠ SECRET SCAN:
 <form method="post" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="file-reject"><input type="hidden" name="file" value="${esc(sel.id)}"><button class="btn dan" type="submit">Reject file</button></form></div></div>`;
     if (q.edit === sel.id) {
       const cur = readTree(doc.workdir, [sel.path]).get(sel.path) ?? '';
-      main += `<div class="card"><h3>Edit ${esc(sel.path)} <span class="mut">(agent version — baseline stays immutable)</span></h3>
+      main += `<div class="card"><h3>Edit ${esc(sel.path)} <span class="mut">(agent version; baseline stays immutable)</span></h3>
 <form method="post"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="save-edit"><input type="hidden" name="file" value="${esc(sel.id)}">
 <textarea class="code" name="content">${esc(cur)}</textarea><br><span id="dirty" class="bad" style="display:none">● Unsaved changes</span><br>
 <button class="btn pri" type="submit">Save to working tree</button> <a class="btn" href="?file=${sel.id}&mode=${mode}">Cancel</a></form></div>`;
@@ -201,10 +201,10 @@ ${selHits.length > 0 ? `<div class="bad" style="margin-top:6px">⚠ SECRET SCAN:
   }
   const ver = doc.verification.slice(-5).map((v) => `<div>${v.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>'} <b>${esc(v.suite)}</b> ${v.passed}/${v.passed + v.failed} <span class="mut">${esc(v.at)}</span><div class="term">${esc(v.output.slice(0, 2000))}</div></div>`).join('') || '<p class="mut">Not run</p>';
   const right = `<div class="card"><h3>Change details</h3>${sel ? `<table class="meta"><tr><td>File</td><td style="font-family:var(--mono)">${esc(sel.path)}</td></tr><tr><td>Agent</td><td>${sel.agentIds.length ? esc(sel.agentIds.join(', ')) : 'Agent attribution unavailable'}</td></tr><tr><td>Hunks</td><td>${sel.hunks.length}</td></tr><tr><td>Human edits</td><td>${doc.humanEdits.filter((e) => e.file === sel.path).length}</td></tr></table>` : '<p class="mut">No file selected.</p>'}</div>
-<div class="card"><h3>Timeline</h3>${doc.iterations.map((i) => `<div>v${i.n} ${esc(i.label)} <span class="mut">${esc(i.at)} · ${i.files}f +${i.insertions} −${i.deletions}</span></div>`).join('') || '<p class="mut">Review v1 — agent implementation.</p>'}${doc.humanEdits.slice(-6).map((e) => `<div>✎ ${esc(e.file)} <span class="mut">${esc(e.author)} ${esc(e.at)}</span></div>`).join('')}</div>
+<div class="card"><h3>Timeline</h3>${doc.iterations.map((i) => `<div>v${i.n} ${esc(i.label)} <span class="mut">${esc(i.at)} · ${i.files}f +${i.insertions} −${i.deletions}</span></div>`).join('') || '<p class="mut">Review v1: agent implementation.</p>'}${doc.humanEdits.slice(-6).map((e) => `<div>✎ ${esc(e.file)} <span class="mut">${esc(e.author)} ${esc(e.at)}</span></div>`).join('')}</div>
 <div class="card"><h3>Tests / verification</h3>${ver}
 <form method="post"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="run-tests"><button class="btn pri" type="submit">Run Tests</button></form></div>
-<div class="card"><h3>Snapshot</h3><p class="mut">${doc.snapshotId ? `✓ ${esc(doc.snapshotId)} VERIFIED` : 'Not yet created — created only after review + verification.'}</p>
+<div class="card"><h3>Snapshot</h3><p class="mut">${doc.snapshotId ? `✓ ${esc(doc.snapshotId)} VERIFIED` : 'Not yet created. Created only after review + verification.'}</p>
 ${!doc.snapshotId ? `<form method="post"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="action" value="create-snapshot"><button class="btn pri" type="submit">Create Verified Snapshot</button></form>` : `<a class="btn" href="?file=${sel?.id ?? ''}">New task from snapshot</a>`}</div>`;
   const dirty = `<span id="dirty" class="bad" style="display:none">● Unsaved changes</span>`;
   const body = `${noticeHtml}<div class="top"><b>VITAL</b><span style="font-family:var(--mono)">${esc(doc.missionId)}</span><b class="ok">✓ READY FOR REVIEW</b> ${dirty}
@@ -256,7 +256,7 @@ export async function handleReviewAction(
       const hunk = (fields.hunk ?? '').trim();
       if (!hunk) throw new Error('missing hunk');
       await setHunkDecision(db, tenant, missionId, hunk, action === 'hunk-accept' ? 'accepted' : 'rejected');
-      return { redirect: at(action === 'hunk-accept' ? 'Hunk accepted.' : 'Hunk rejected — file will be restored on save.') };
+      return { redirect: at(action === 'hunk-accept' ? 'Hunk accepted.' : 'Hunk rejected. The file will be restored on save.') };
     }
     case 'file-accept':
     case 'file-reject': {
@@ -293,8 +293,8 @@ export async function handleReviewAction(
           writeFileSafe(doc.workdir, f.path, restored);
         }
       }
-      await recordIteration(db, tenant, missionId, 'reject-all — baseline restored', { files: files.length, insertions: 0, deletions: 0 });
-      return { redirect: at('All agent changes rejected — working tree restored to baseline.') };
+      await recordIteration(db, tenant, missionId, 'reject-all: baseline restored', { files: files.length, insertions: 0, deletions: 0 });
+      return { redirect: at('All agent changes rejected. Working tree restored to baseline.') };
     }
     case 'save-edit': {
       const file = (fields.file ?? '').trim();
@@ -328,7 +328,7 @@ export async function handleReviewAction(
       const passed = Number((r.stdout.match(/^# pass (\d+)/m) ?? [])[1] ?? 0);
       const failed = Number((r.stdout.match(/^# fail (\d+)/m) ?? [])[1] ?? 0) + (r.status === 0 ? 0 : 1);
       await recordVerification(db, tenant, missionId, { suite: 'npm test', passed, failed, output: `${r.stdout.slice(-4000)}\n${r.stderr.slice(-1000)}`, ok: r.status === 0 });
-      if (r.status !== 0) return { redirect: at(`Tests FAILED (${failed} failed) — see verification panel.`) };
+      if (r.status !== 0) return { redirect: at(`Tests FAILED (${failed} failed). See verification panel.`) };
       return { redirect: at(`Tests passed (${passed} passed).`) };
     }
     case 'create-snapshot': {
@@ -337,7 +337,7 @@ export async function handleReviewAction(
       if (hits.size > 0) throw new Error(`resolve secret scan findings first: ${[...hits.keys()].join(', ')}`);
       if (doc.verification.length === 0) throw new Error('run tests before creating a snapshot');
       const last = doc.verification[doc.verification.length - 1]!;
-      if (!last.ok) throw new Error('last verification failed — snapshot refused');
+      if (!last.ok) throw new Error('last verification failed: snapshot refused');
       const snap = await createSnapshot(db, tenant, {
         missionId, groupId: 'review', projectId: missionId, repo: basename(doc.workdir), branch: 'review',
         commit: doc.baselineRev, parentId: null, type: 'VERIFIED',

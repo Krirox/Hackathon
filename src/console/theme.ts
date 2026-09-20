@@ -68,15 +68,19 @@ export const THEME_TOGGLE_SCRIPT = `(() => {
   const sync = (theme) => btns.forEach((b) => {
     b.setAttribute('aria-pressed', String(theme === 'light'));
     b.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
-    const label = b.querySelector('[data-theme-label]');
-    if (label) label.textContent = theme === 'dark' ? 'Dark' : 'Light';
-    const icon = b.querySelector('[data-theme-icon]');
-    if (icon) icon.textContent = theme === 'dark' ? '●' : '○';
+    b.setAttribute('title', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
   });
   btns.forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (e) => {
       const root = document.documentElement;
-      const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+      const target = e.target && e.target.closest ? e.target.closest('[data-theme-target]') : null;
+      const current = root.dataset.theme === 'dark' ? 'dark' : 'light';
+      let next = current === 'dark' ? 'light' : 'dark';
+      if (target) {
+        const desired = target.getAttribute('data-theme-target');
+        if (desired === current) return;
+        next = desired;
+      }
       root.dataset.theme = next;
       root.style.colorScheme = next;
       try { localStorage.setItem('vital-theme', next); } catch {}
@@ -84,6 +88,29 @@ export const THEME_TOGGLE_SCRIPT = `(() => {
     });
   });
   try { sync(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'); } catch {}
+})();`;
+
+/**
+ * Pointer atmosphere tracking script: updates --mx and --my on :root
+ * so the interactive spotlight (.v-spot) tracks the cursor seamlessly
+ * across all pages in the console. Passive listener + rAF guard.
+ */
+export const THEME_SPOT_SCRIPT = `(() => {
+  if (window.__vitalSpotWired) return;
+  window.__vitalSpotWired = true;
+  let queued = false;
+  const setPos = (x, y) => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      const root = document.documentElement.style;
+      root.setProperty('--mx', x + 'px');
+      root.setProperty('--my', y + 'px');
+    });
+  };
+  window.addEventListener('pointermove', (e) => setPos(e.clientX, e.clientY), { passive: true });
+  window.addEventListener('pointerdown', (e) => setPos(e.clientX, e.clientY), { passive: true });
 })();`;
 
 /** Google Fonts, preconnected — Outfit for text (brand face), JetBrains Mono for identifiers. */
@@ -113,15 +140,15 @@ export function themeCss(): string {
 --v-code-bg:#101418;--v-code-ink:#D7DCE0;
 --v-card-shadow:0 1px 2px rgba(17,19,21,.04);
 --v-card-shadow-hover:0 6px 20px rgba(17,19,21,.08);
---v-glass:rgba(0,0,0,.015);
+--v-glass:rgba(255,255,255,.62);
 /* Brand textures, paper-subdued: the same motifs as the site, dialed down so
    light mode reads as paper instead of glass. Dark overrides all of them. */
 --v-glass-2:rgba(0,0,0,.03);--v-glass-3:rgba(255,255,255,.65);
 --v-glass-border:rgba(17,19,21,.08);--v-glass-border-2:rgba(17,19,21,.14);
---v-glass-blur:16px;--v-glass-blur-sm:12px;
---v-canvas-dots:radial-gradient(rgba(17,19,21,.05) .7px,transparent .85px);
+--v-glass-blur:14px;--v-glass-blur-sm:10px;
+--v-canvas-dots:radial-gradient(rgba(17,19,21,.08) .8px,transparent .95px);
 --v-vignette:radial-gradient(ellipse at 50% 32%,rgba(17,19,21,.02),transparent 42%),radial-gradient(ellipse at 50% 110%,rgba(17,19,21,.05),transparent 50%);
---v-spot:radial-gradient(520px circle at var(--mx) var(--my),rgba(17,19,21,.03),transparent 58%);
+--v-spot:radial-gradient(600px circle at var(--mx,50%) var(--my,35%),rgba(18,107,82,.13),rgba(0,0,0,.035) 40%,transparent 68%);
 --v-shadow-bar:0 18px 40px rgba(17,19,21,.08);
 --v-glow-accent:rgba(18,107,82,.35);
 --v-grain-opacity:.025;
@@ -133,7 +160,7 @@ export function themeCss(): string {
    The meeting room is a dark stage in BOTH themes, the way a terminal is: it is
    a video surface, not a document, and a light meeting room would wash out the
    tiles around it. These are declared once, outside the dark block, because they
-    must not flip with data-theme — the room has its own palette and one theme.
+    must not flip with data-theme: the room has its own palette and one theme.
 
    Values are the ones the room shipped with, moved here unchanged so nothing is
    repainted: the point of the move is that a change to the stage is a change in
@@ -167,9 +194,9 @@ export function themeCss(): string {
 --v-stage-good-30:rgba(16, 185, 129, 0.3);--v-stage-good-15:rgba(16, 185, 129, 0.15);
 --v-stage-good-8:rgba(16, 185, 129, 0.08);--v-stage-good-0:rgba(16, 185, 129, 0);
 --ease-out:cubic-bezier(0.16,1,0.3,1);
---radius-sm:8px;--radius-md:10px;--radius-lg:14px;--radius-card:16px;--radius-xl:20px;--radius-pill:999px;--radius-input:10px}
+--radius-sm:8px;--radius-md:12px;--radius-lg:16px;--radius-card:18px;--radius-xl:22px;--radius-pill:9999px;--radius-input:12px}
 [data-theme="dark"]{color-scheme:dark;
-/* Brand glass palette — the values the marketing site ships, mapped onto the
+/* Brand glass palette: the values the marketing site ships, mapped onto the
    console token names so every component inherits the entry-point look. */
 --v-bg-0:#111111;--v-bg-1:rgba(22,22,22,.82);--v-bg-2:rgba(255,255,255,.05);--v-bg-3:rgba(255,255,255,.09);
 --v-ink:#F3F3F3;--v-ink-strong:#FFFFFF;--v-ink-2:#D6D6D6;--v-muted:#9A9A9A;--v-faint:#6A6A6A;
@@ -186,16 +213,16 @@ export function themeCss(): string {
 --v-code-bg:rgba(0,0,0,.42);--v-code-ink:#D7DCE0;
 --v-card-shadow:0 12px 36px rgba(0,0,0,.6);
 --v-card-shadow-hover:0 18px 44px rgba(0,0,0,.7);
---v-glass:rgba(16,16,16,.72);--v-glass-2:rgba(28,28,28,.9);--v-glass-3:rgba(255,255,255,.04);
+--v-glass:rgba(16,16,16,.58);--v-glass-2:rgba(28,28,28,.88);--v-glass-3:rgba(255,255,255,.05);
 --v-glass-border:rgba(255,255,255,.12);--v-glass-border-2:rgba(255,255,255,.28);
---v-canvas-dots:radial-gradient(rgba(255,255,255,.16) .7px,transparent .85px);
+--v-canvas-dots:radial-gradient(rgba(255,255,255,.22) .85px,transparent 1px);
 --v-vignette:radial-gradient(ellipse at 50% 32%,rgba(255,255,255,.05),transparent 42%),radial-gradient(ellipse at 50% 110%,rgba(0,0,0,.55),transparent 50%);
---v-spot:radial-gradient(520px circle at var(--mx) var(--my),rgba(255,255,255,.08),transparent 58%);
+--v-spot:radial-gradient(640px circle at var(--mx,50%) var(--my,30%),rgba(217,255,168,.18),rgba(255,255,255,.07) 36%,transparent 68%);
 --v-shadow-bar:0 18px 40px rgba(0,0,0,.35);
 --v-glow-accent:rgba(217,255,168,.4);
 --v-grain-opacity:.045}
 html,body{overflow-x:clip}
-body{background:var(--v-bg-0)!important;background-image:var(--v-canvas-dots)!important;background-size:9px 9px!important;color:var(--v-ink)!important;font-family:var(--font-body);font-size:14px;font-weight:300;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
+body{background:var(--v-bg-0)!important;background-image:var(--v-spot),var(--v-canvas-dots)!important;background-size:100% 100%,9px 9px!important;background-attachment:fixed,fixed!important;color:var(--v-ink)!important;font-family:var(--font-body);font-size:14px;font-weight:300;line-height:1.5;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
 /* Brand texture stack, same layering as the site: vignette sits under the
    content, grain over it, spotlight tracks the pointer (--mx/--my are set by
    the shell script). Both pseudo-elements are fixed and non-interactive. */
@@ -216,7 +243,7 @@ img,svg{max-width:100%}
 .v-pulse-dot{width:6px;height:6px;border-radius:50%;background:var(--v-accent);box-shadow:0 0 10px var(--v-glow-accent);flex-shrink:0;animation:v-pulse 2.4s var(--ease-out) infinite}
 @keyframes v-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 /* Pointer-tracked spotlight layer; the shell sets --mx/--my on :root. */
-.v-spot{position:fixed;inset:0;z-index:0;pointer-events:none;background:var(--v-spot)}
+.v-spot{position:fixed;inset:0;z-index:0;pointer-events:none;background:var(--v-spot);will-change:background}
 .v-meta{font-size:12px;color:var(--v-faint)}
 .v-mono{font-family:var(--font-mono)}
 .v-num{font-variant-numeric:tabular-nums}
@@ -427,8 +454,21 @@ button{font-family:var(--font-body)}
 ::selection{background:var(--v-accent-dim);color:var(--v-ink)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.15s!important;transition-duration:.15s!important}.v-card-hover:hover{transform:none}.v-pulse-dot{animation:none}}
 @media (max-width:900px){.v-page{padding:16px}.v-card{padding:16px 16px}}
-[data-vital-theme-toggle]{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--v-line-strong);background:var(--v-bg-1);color:var(--v-ink);border-radius:var(--radius-pill);padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
-[data-vital-theme-toggle]:hover{border-color:var(--v-accent)}
+@media (max-width:600px){table.stacked thead{display:none}table.stacked tr{display:block;border:1px solid var(--v-line);border-radius:var(--radius-sm);margin-bottom:8px}table.stacked td{display:block;border:0}}
+[data-vital-theme-toggle]{position:relative;display:inline-flex;align-items:center;width:60px;height:30px;padding:2px;border-radius:var(--radius-pill);border:1px solid var(--v-line-strong);background:var(--v-glass-3);backdrop-filter:var(--v-glass-blur-sm);-webkit-backdrop-filter:var(--v-glass-blur-sm);cursor:pointer;user-select:none;box-sizing:border-box;transition:border-color .18s var(--ease-out),box-shadow .18s var(--ease-out);flex-shrink:0}
+[data-vital-theme-toggle]:hover{border-color:var(--v-accent);box-shadow:0 0 12px var(--v-glow-accent)}
+[data-vital-theme-toggle]:focus-visible{outline:2px solid var(--v-focus)!important;outline-offset:2px}
+.v-theme-track{position:relative;display:flex;align-items:center;justify-content:space-between;width:100%;height:100%;pointer-events:none}
+.v-theme-thumb{position:absolute;top:0;left:0;width:24px;height:24px;border-radius:50%;transition:transform .24s cubic-bezier(0.16,1,0.3,1),background .24s var(--ease-out),box-shadow .24s var(--ease-out);z-index:1}
+.v-theme-option{position:relative;z-index:2;width:26px;height:24px;display:flex;align-items:center;justify-content:center;pointer-events:auto;transition:color .2s var(--ease-out),opacity .2s var(--ease-out),transform .15s var(--ease-out)}
+.v-theme-option:hover{transform:scale(1.1)}
+.v-theme-option svg{width:13.5px;height:13.5px;display:block;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+[data-theme="dark"] [data-vital-theme-toggle] .v-theme-thumb{transform:translateX(30px);background:var(--v-bg-3);box-shadow:0 2px 8px rgba(0,0,0,.5),inset 0 0 0 1px var(--v-line)}
+[data-theme="dark"] [data-vital-theme-toggle] .v-theme-sun{color:var(--v-faint);opacity:0.5}
+[data-theme="dark"] [data-vital-theme-toggle] .v-theme-moon{color:var(--v-accent);opacity:1;filter:drop-shadow(0 0 6px var(--v-glow-accent))}
+[data-theme="light"] [data-vital-theme-toggle] .v-theme-thumb,:root:not([data-theme="dark"]) [data-vital-theme-toggle] .v-theme-thumb{transform:translateX(0);background:var(--v-bg-1);box-shadow:0 1px 4px rgba(0,0,0,.14),0 0 1px rgba(0,0,0,.12)}
+[data-theme="light"] [data-vital-theme-toggle] .v-theme-sun,:root:not([data-theme="dark"]) [data-vital-theme-toggle] .v-theme-sun{color:var(--v-hypo);opacity:1;filter:drop-shadow(0 0 4px rgba(217,154,50,.35))}
+[data-theme="light"] [data-vital-theme-toggle] .v-theme-moon,:root:not([data-theme="dark"]) [data-vital-theme-toggle] .v-theme-moon{color:var(--v-faint);opacity:0.5}
 /* ============================================================ agent tasks ==
    The "Ongoing Tasks" monitor for long-running Jcode executions. Every class
    is token-only (var(--v-*)) so it inherits dark-glass default + light opt-in
@@ -451,7 +491,7 @@ button{font-family:var(--font-body)}
 .v-task-count{font-family:var(--font-mono);font-size:11px;color:var(--v-muted)}
 .v-task-detail{border-top:1px solid var(--v-line);padding:14px 18px 16px;display:grid;gap:12px;animation:v-rise .24s var(--ease-out) both}
 .v-task-detail-actions{display:flex;gap:8px}
-/* Per-agent derived state dot — the honest substitute for a status column that
+/* Per-agent derived state dot: the honest substitute for a status column that
    does not exist in the schema. Shape + label always accompany color. */
 .v-agent-dot{width:9px;height:9px;border-radius:50%;background:var(--v-faint);flex-shrink:0;display:inline-block}
 .v-agent-dot[data-state="processing"]{background:var(--v-accent);box-shadow:0 0 8px var(--v-glow-accent);animation:v-pulse 1.4s var(--ease-out) infinite}
@@ -524,7 +564,7 @@ export function stageTokensCss(): string {
 
 /** Small pill toggle rendered in every top bar / account cluster. */
 export function themeToggleButton(): string {
-  return `<button type="button" data-vital-theme-toggle aria-pressed="true" aria-label="Switch to light theme" title="Toggle light / dark theme"><span data-theme-icon aria-hidden="true">●</span><span data-theme-label>Dark</span></button>`;
+  return `<button type="button" class="v-theme-toggle" data-vital-theme-toggle aria-pressed="true" aria-label="Toggle theme" title="Switch to light theme"><span class="v-theme-track"><span class="v-theme-thumb" aria-hidden="true"></span><span class="v-theme-option v-theme-sun" data-theme-target="light" title="Light mode" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span><span class="v-theme-option v-theme-moon" data-theme-target="dark" title="Dark mode" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></span></span></button>`;
 }
 
 /** Everything a document head needs before first paint: fonts, theme, tokens. */
@@ -567,7 +607,16 @@ export function themeDocument(html: string): string {
         `${m}<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${payload}</head>`,
     );
   }
-  // 3. Toggle wiring, once, before </body> — only when a toggle is rendered.
+  // 3. Ambient interactive spotlight layer: inject .v-spot right after <body> if missing.
+  if (!out.includes('class="v-spot"') && /<body[^>]*>/i.test(out)) {
+    out = out.replace(/(<body[^>]*>)/i, '$1\n<div class="v-spot" aria-hidden="true"></div>');
+  }
+  // 4. Pointer atmosphere script: tracks --mx and --my on :root across all console pages.
+  if (!out.includes('data-vital-spot-wired')) {
+    const spotScript = `<script data-vital-spot-wired>${THEME_SPOT_SCRIPT}</script>`;
+    out = out.includes('</body>') ? out.replace('</body>', `${spotScript}</body>`) : `${out}${spotScript}`;
+  }
+  // 5. Toggle wiring, once, before </body> — only when a toggle is rendered.
   if (!out.includes('data-vital-theme-toggle') || out.includes(THEME_TOGGLE_MARKER)) return out;
   const script = `<script ${THEME_TOGGLE_MARKER}>${THEME_TOGGLE_SCRIPT}</script>`;
   return out.includes('</body>') ? out.replace('</body>', `${script}</body>`) : `${out}${script}`;

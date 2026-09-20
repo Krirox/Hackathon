@@ -157,7 +157,7 @@ export const createGovernedPermissionPolicy =
       ) {
         return {
           decision: 'deny',
-          reason: `kill switch engaged for ${scope}/${actionClass} — execution halted`,
+          reason: `kill switch engaged for ${scope}/${actionClass}: execution halted`,
           actionClass,
         };
       }
@@ -531,7 +531,7 @@ export class JcodeRunner extends EventEmitter {
       const killed =
         (await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'));
       if (killed) {
-        const reason = `kill switch engaged for scope "${req.targetScope}" — mid-turn execution halted`;
+        const reason = `kill switch engaged for scope "${req.targetScope}": mid-turn execution halted`;
         permissions.push({
           toolName,
           decision: 'deny',
@@ -670,7 +670,7 @@ export class JcodeRunner extends EventEmitter {
         const killed =
           (await checkKill(this.db, tenant, req.targetScope, '*')) || (await checkKill(this.db, tenant, '*', '*'));
         if (killed && turnError === null) {
-          turnError = `kill switch engaged for scope "${req.targetScope}" — mid-turn execution halted`;
+          turnError = `kill switch engaged for scope "${req.targetScope}": mid-turn execution halted`;
           void client.cancel(sessionId).catch(() => {});
         }
         await this.coord.renewExecutionLease(tenant, requestId, task.onBehalfOf, new Date().toISOString());

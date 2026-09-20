@@ -157,7 +157,7 @@ export interface ReauthResume {
 export function reauthResume(returnPath?: string): ReauthResume {
   const next = safeReturnPath(returnPath);
   return {
-    notice: 'Sign in to continue. Review the form and submit it again — approvals are never replayed automatically.',
+    notice: 'Sign in to continue. Review the form and submit it again. Approvals are never replayed automatically.',
     loginUrl: loginPath({ next, reason: 'expired' }),
     requiresResubmission: true,
     replaysApprovals: false,
@@ -173,8 +173,8 @@ export interface PreSessionGuidance {
 export function preSessionGuidance(): PreSessionGuidance {
   return {
     pattern: 'sign-in forms use a double-submit cookie token issued per page load',
-    multiTab: 'several open sign-in tabs stay valid — each form carries its own token',
-    expiredForm: 'a form that lost its token says the form expired — reload for a fresh form and try again',
+    multiTab: 'several open sign-in tabs stay valid: each form carries its own token',
+    expiredForm: 'a form that lost its token says the form expired: reload for a fresh form and try again',
   };
 }
 
@@ -193,7 +193,7 @@ export function formErrorShape(kind: FormErrorKind, opts: { retryAfterMs?: numbe
     return {
       status: 429,
       code: 'RATE_LIMITED',
-      message: 'too many attempts — wait before trying again',
+      message: 'too many attempts; wait before trying again',
       retryAfterMs: opts.retryAfterMs ?? 10 * 60 * 1000,
       retainValues: true,
     };
@@ -201,7 +201,7 @@ export function formErrorShape(kind: FormErrorKind, opts: { retryAfterMs?: numbe
     return {
       status: 400,
       code: 'FORM_EXPIRED',
-      message: 'this form expired — reload the page for a fresh form and try again',
+      message: 'this form expired; reload the page for a fresh form and try again',
       retryAfterMs: null,
       retainValues: true,
     };

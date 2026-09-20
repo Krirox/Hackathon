@@ -25,7 +25,7 @@ const FINANCE_CANARY: CanaryDefinition = {
   scope: 'finance',
   anomalyType: 'reconciliation_discrepancy',
   syntheticPayload:
-    'BILLING_SYNC_PROBE: Stripe invoice in_99182 ($4,850.00) differs from Ledger entry ($4,725.50) — variance +$124.50.',
+    'BILLING_SYNC_PROBE: Stripe invoice in_99182 ($4,850.00) differs from Ledger entry ($4,725.50): variance +$124.50.',
   detectionExpectation: 'PROBE: Agent must identify $124.50 reconciliation mismatch and open contradiction gate.',
 };
 

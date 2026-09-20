@@ -194,7 +194,7 @@ export function renderHtml(r: ConsoleReport, live = false): string {
   const roomsCapped = r.rooms.slice(0, MAX_ROOMS);
   const cards = (state: string): string => {
     const col = r.compiler.find((c) => c.state === state);
-    if (!col || col.cards.length === 0) return '<p style="color:' + MUTED + ';font-size:12px">—</p>';
+    if (!col || col.cards.length === 0) return '';
     return col.cards
       .slice(0, MAX_CARDS_PER_STATE)
       .map(
@@ -236,7 +236,7 @@ export function renderHtml(r: ConsoleReport, live = false): string {
     if (r.omitted.cards > 0) parts.push(`${r.omitted.cards} cards beyond the compiler columns`);
     return parts.length > 0 ? `<p class="sub">Also beyond this view: ${parts.join(' · ')}</p>` : '';
   };
-  return `<!DOCTYPE html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vital Console — ${esc(r.tenant)}</title>
+  return `<!DOCTYPE html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vital Console: ${esc(r.tenant)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script>${THEME_INIT_SCRIPT}</script>
 ${themeStyleBlock()}
@@ -246,20 +246,20 @@ ${themeStyleBlock()}
 <h1>Reality health</h1>
 <div class="grid">
 <div class="card"><div class="sub">stale-fact rate</div><div class="big">${(h.staleFactRate * 100).toFixed(1)}%</div><div class="bar"><i style="width:${Math.min(100, (h.staleFactRate / h.staleFactGate) * 100).toFixed(0)}%"></i></div><div class="sub">gate &lt; ${(h.staleFactGate * 100).toFixed(0)}%</div></div>
-<div class="card"><div class="sub">contradictions open</div><div class="big">${h.contradictions.open}</div><div class="sub">MTTR ${h.contradictions.mttrHours === null ? 'unmeasured — resolution timestamps pending' : h.contradictions.mttrHours.toFixed(0) + 'h'} · SLA ${h.contradictions.slaHours}h</div></div>
+<div class="card"><div class="sub">contradictions open</div><div class="big">${h.contradictions.open}</div><div class="sub">MTTR ${h.contradictions.mttrHours === null ? 'unmeasured (resolution timestamps pending)' : h.contradictions.mttrHours.toFixed(0) + 'h'} · SLA ${h.contradictions.slaHours}h</div></div>
 <div class="card"><div class="sub">provenance complete</div><div class="big">${(h.provenanceComplete * 100).toFixed(0)}%</div><div class="sub">FACT + MEASUREMENT with ground provenance</div></div>
 <div class="card"><div class="sub">orphan claims</div><div class="big">${h.orphanClaims}</div><div class="sub">target 0</div></div>
-<div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? '—' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}${r.approvalLatency.byHuman.length === 0 ? '' : ` · slowest: ${esc(r.approvalLatency.byHuman[0]!.human)} ${fmtDuration(r.approvalLatency.byHuman[0]!.medianSeconds)}`}</div></div>
-<div class="card"><div class="sub">cost per signal</div>${r.costPerSignal === null ? '<div class="big">—</div><div class="sub">no router configured</div>' : `<div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div>`}</div>
+<div class="card"><div class="sub">approval latency</div><div class="big">${r.approvalLatency.medianSeconds === null ? 'n/a' : fmtDuration(r.approvalLatency.medianSeconds)}</div><div class="sub">median · n=${r.approvalLatency.n}${r.approvalLatency.p90Seconds === null ? '' : ` · p90 ${fmtDuration(r.approvalLatency.p90Seconds)}`}${r.approvalLatency.byHuman.length === 0 ? '' : ` · slowest: ${esc(r.approvalLatency.byHuman[0]!.human)} ${fmtDuration(r.approvalLatency.byHuman[0]!.medianSeconds)}`}</div></div>
+<div class="card"><div class="sub">cost per signal</div>${r.costPerSignal === null ? '<div class="big">n/a</div><div class="sub">no router configured</div>' : `<div class="big">${(r.costPerSignal.modelShare * 100).toFixed(2)}%</div><div class="sub">model share of ${r.costPerSignal.arrivals} arrivals · gate &lt; ${(r.costPerSignal.gate * 100).toFixed(0)}%${r.costPerSignal.withinGate ? ' · within gate' : ' · OVER GATE'}</div>`}</div>
 </div>
  <h2>Intelligence cost per good decision</h2>
- <div class="sub" style="margin-bottom:8px">Observed spend per good decision (descriptive — see caveats for causal attribution)</div>
+ <div class="sub" style="margin-bottom:8px">Observed spend per good decision (descriptive; see caveats for causal attribution)</div>
  <div class="card">${lineChart(curve, r.costTarget)}</div>
 <h2>Tier mix</h2>
 <div class="card">${tierStack(r.tierMix)}</div>
 <h2>Needs a human (${needsHuman.length} shown${r.omitted.needsHuman > 0 ? ` of ${needsHuman.length + r.omitted.needsHuman}` : ''} · ${r.health.escalations.open}/${r.health.escalations.cap} slots · ${live ? `<a href="/console/digest">${r.digestCount} notices → digest</a>` : `${r.digestCount} notices → digest`})</h2>
 <div class="grid">${needsHuman.map((n) => needsHumanCard(n, live)).join('') || '<p class="sub">queue clear</p>'}</div>
-<h2>Compiler — why not trusted yet</h2>
+<h2>Compiler: why not trusted yet</h2>
 <div class="cols">${['CANDIDATE', 'QUARANTINE', 'SHADOW', 'BOUNDED_PILOT', 'PROMOTED', 'DEMOTED'].map((s) => `<div><div class="sub">${s}</div>${cards(s)}</div>`).join('')}</div>
 <h2>Rooms</h2>
 ${rooms || '<p class="sub">no rooms yet</p>'}

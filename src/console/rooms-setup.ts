@@ -31,7 +31,7 @@ export const INDUSTRY_PRESETS: PresetDefinition[] = [
     // not run. The rooms are real; the pipeline is not wired.
     name: 'Research scopes (pipeline not wired)',
     description:
-      'Creates the fact-checking and research room scopes. The deep-research and market-crawl workflows are not wired yet — this preset lays out the rooms, not the pipeline.',
+      'Creates the fact-checking and research room scopes. The deep-research and market-crawl workflows are not wired yet. This preset lays out the rooms, not the pipeline.',
     scopes: ['core', 'facts', 'research', 'experimental'],
   },
   {
@@ -120,7 +120,7 @@ export async function renderRoomsSetupPage(
 
         <details style="background:var(--v-bg-2);border-radius:var(--radius-md);padding:11px 14px;border:1px solid var(--v-line);">
           <summary style="font-size:12.5px;color:var(--v-accent);cursor:pointer;font-weight:600;user-select:none;">
-            Tune room behaviour &amp; mandate — mission, autonomy, quotas and data feeds
+            Tune room behaviour &amp; mandate: mission, autonomy, quotas and data feeds
           </summary>
           
           <div style="margin-top:16px;display:grid;grid-template-columns:1fr;gap:16px;">
@@ -139,9 +139,9 @@ export async function renderRoomsSetupPage(
                 Autonomy level
               </label>
               <select class="v-input v-select" name="autonomy_${esc(cfg.scope)}" style="font-size:13px;">
-                <option value="autonomous" ${cfg.autonomy === 'autonomous' ? 'selected' : ''}>Autonomous — Agents execute end-to-end without pausing.</option>
-                <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default) — Routine work is autonomous; yellow review gates (🟡) trigger on budget pressure, sensitive actions, or low confidence.</option>
-                <option value="supervised" ${cfg.autonomy === 'supervised' ? 'selected' : ''}>Supervised — Every state change requires explicit human sign-off (coord.settle).</option>
+                <option value="autonomous" ${cfg.autonomy === 'autonomous' ? 'selected' : ''}>Autonomous: agents execute end-to-end without pausing.</option>
+                <option value="guarded" ${cfg.autonomy === 'guarded' ? 'selected' : ''}>Guarded (Default): routine work is autonomous; yellow review gates (🟡) trigger on budget pressure, sensitive actions, or low confidence.</option>
+                <option value="supervised" ${cfg.autonomy === 'supervised' ? 'selected' : ''}>Supervised: every state change requires explicit human sign-off (coord.settle).</option>
               </select>
             </div>
 
@@ -256,7 +256,7 @@ export async function renderRoomsSetupPage(
             <option value="launch">Launch &amp; risk</option>
           </select>
         </div>
-        <p class="v-meta" style="margin-top:6px;">Leave every field blank to skip. Fill the room fields to create it on save — category picks its sidebar group.</p>
+        <p class="v-meta" style="margin-top:6px;">Leave every field blank to skip. Fill the room fields to create it on save. Category picks its sidebar group.</p>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:28px;padding-top:18px;border-top:1px solid var(--v-line);flex-wrap:wrap;">

@@ -116,13 +116,13 @@ export async function recordTrustOutcome(
         'trust',
         'TRUST_FROZEN',
         `${scope}/${actionClass}`,
-        'honeytask miss — automatic freeze',
+        'honeytask miss: automatic freeze',
         now,
       );
       // FLOW-022: the operator is notified of every automation self-halt.
       // The notification persists as an AUTOMATION_SELF_HALT audit row in
       // the same transaction — the audit log is the delivery fallback.
-      await recordSelfHalt(db, tenant, scope, actionClass, 'honeytask miss — automatic freeze', 'trust', [], now);
+      await recordSelfHalt(db, tenant, scope, actionClass, 'honeytask miss: automatic freeze', 'trust', [], now);
       // Also persist a durable outbox row so the outbox worker can deliver
       // the notification with retries, backoff, and lease-based restart recovery.
       await enqueueOutbox(
@@ -132,7 +132,7 @@ export async function recordTrustOutcome(
         {
           scope,
           actionClass,
-          reason: outcome.honeyMiss ? 'honeytask miss — automatic freeze' : 'automation self-halt',
+          reason: outcome.honeyMiss ? 'honeytask miss: automatic freeze' : 'automation self-halt',
           affected: [],
         },
         { now },
@@ -500,7 +500,7 @@ export type GuardedInput = AuthorizeInput & { tenant: string };
 /** The single call sites use: kill check → trust load → matrix. */
 export async function guardedAuthorize(db: AsyncDb, input: GuardedInput): Promise<AuthorizeResult> {
   if (await checkKill(db, input.tenant, input.scope, input.actionClass)) {
-    return { verdict: 'denied', reasons: [`kill switch engaged for ${input.scope}/${input.actionClass} — halted`] };
+    return { verdict: 'denied', reasons: [`kill switch engaged for ${input.scope}/${input.actionClass}: halted`] };
   }
   const trust = input.trust ?? (await trustFor(db, input.tenant, input.scope, input.actionClass));
   return authorize({ ...input, trust });
@@ -551,9 +551,9 @@ export async function evaluateFreeze(
   now?: string,
 ): Promise<{ frozen: boolean; reason: string }> {
   if (detectionRate >= threshold) {
-    return { frozen: false, reason: `detection ${detectionRate} ≥ ${threshold} — oversight is alive` };
+    return { frozen: false, reason: `detection ${detectionRate} ≥ ${threshold}: oversight is alive` };
   }
-  const reason = `human detection ${detectionRate} < ${threshold} — autonomy frozen until review`;
+  const reason = `human detection ${detectionRate} < ${threshold}: autonomy frozen until review`;
   await setFreeze(db, tenant, scope, actionClass, reason, by, now);
   return { frozen: true, reason };
 }
@@ -713,7 +713,7 @@ export async function describeStops(db: AsyncDb, tenant: string): Promise<StopDi
   return stops.map((stop) => ({
     ...stop,
     affected:
-      `scope "${stop.scope}" × class "${stop.actionClass}" — new authorizations denied; ` +
+      `scope "${stop.scope}" × class "${stop.actionClass}": new authorizations denied; ` +
       `in-flight work is not force-terminated; queued work is held at admission`,
     recovery:
       stop.recoveryRequires ??
@@ -790,7 +790,7 @@ export function buildSelfHaltNotification(input: {
     affected: input.affected ?? [],
     recovery: input.recovery ?? 'authorized recovery with a recorded reason via recoverStop',
     fallback:
-      'audit-log AUTOMATION_SELF_HALT row — the notification payload is always persisted even if delivery fails',
+      'audit-log AUTOMATION_SELF_HALT row: the notification payload is always persisted even if delivery fails',
   };
 }
 
@@ -869,7 +869,7 @@ export async function runtimeHaltDrill(
   const key = killKey(tenant, kill.scope, kill.actionClass);
   await db
     .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, JSON.stringify({ by, at, reason: 'runtime halt drill — real engagement, released immediately' }));
+    .run(key, JSON.stringify({ by, at, reason: 'runtime halt drill: real engagement, released immediately' }));
   const probeScope = kill.scope === '*' ? 'drill-probe' : kill.scope;
   const probeClass = kill.actionClass === '*' ? 'READ' : kill.actionClass;
   const effects = haltEffects(kill.scope, kill.actionClass);
@@ -1046,7 +1046,7 @@ export function describeExecutorHealth(
       at: beat.at,
       adapter: beat.adapter ?? null,
       baseline: beat.baseline === true,
-      detail: `Executor ${beat.workerId} is stale — last checked in ${age}. Approved work may sit unexecuted until it returns.`,
+      detail: `Executor ${beat.workerId} is stale: last checked in ${age}. Approved work may sit unexecuted until it returns.`,
     };
   }
   if (beat.baseline === true) {
@@ -1056,7 +1056,7 @@ export function describeExecutorHealth(
       at: beat.at,
       adapter: beat.adapter ?? null,
       baseline: true,
-      detail: `Executor ${beat.workerId} is running the ${beat.adapter ?? 'test-baseline'} harness — a test-baseline adapter, not a real executor (last check-in ${age}). Runs report COMPLETED without doing real work and leave no deliverable to review; attach a real executor (for example JCODE_API_SOCKET) before treating any of this as production execution.`,
+      detail: `Executor ${beat.workerId} is running the ${beat.adapter ?? 'test-baseline'} harness: a test-baseline adapter, not a real executor (last check-in ${age}). Runs report COMPLETED without doing real work and leave no deliverable to review; attach a real executor (for example JCODE_API_SOCKET) before treating any of this as production execution.`,
     };
   }
   return {

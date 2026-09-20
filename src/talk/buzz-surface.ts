@@ -196,13 +196,13 @@ export function createBuzzSurface(opts: CreateBuzzSurfaceOptions): BuzzSurface {
   }
 
   function resolveChannel(reference: string): string {
-    if (!reference) throw new BuzzError('NO_CHANNEL', 'a progress post without a channel is noise — pass channel');
+    if (!reference) throw new BuzzError('NO_CHANNEL', 'a progress post without a channel is noise: pass channel');
     if (isChannelUuid(reference)) return reference;
     const resolved = opts.channelIdFor?.(reference);
     if (!resolved) {
       throw new BuzzError(
         'CHANNEL_NOT_PROVISIONED',
-        `no relay channel for "${reference}" — provision the room before publishing (channel ids are UUIDs)`,
+        `no relay channel for "${reference}": provision the room before publishing (channel ids are UUIDs)`,
       );
     }
     if (!isChannelUuid(resolved)) {
@@ -244,7 +244,7 @@ export function createBuzzSurface(opts: CreateBuzzSurfaceOptions): BuzzSurface {
     publish,
     async post(post: BuzzProgressPost): Promise<BuzzNostrEvent> {
       if (!post.requestId) {
-        throw new BuzzError('NO_REQUEST', 'a progress post without a request id is unbound — pass requestId');
+        throw new BuzzError('NO_REQUEST', 'a progress post without a request id is unbound: pass requestId');
       }
       const channel = resolveChannel(post.channel);
       const tags: string[][] = [['h', channel]];

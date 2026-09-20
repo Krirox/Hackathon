@@ -217,7 +217,7 @@ export function decideEgress(host: string, policy: EgressPolicy): EgressDecision
       return decision;
     }
   }
-  return { verdict: 'deny', reason: `"${host}" matches no allowed host — fail closed` };
+  return { verdict: 'deny', reason: `"${host}" matches no allowed host: fail closed` };
 }
 
 export type DnsLookup = (host: string) => Promise<Array<{ address: string; family: number }>>;
@@ -243,10 +243,10 @@ export async function resolveAndDecideEgress(
   try {
     addrs = await lookup(h);
   } catch {
-    return { verdict: 'deny', reason: `DNS resolution failed for "${host}" — fail closed` };
+    return { verdict: 'deny', reason: `DNS resolution failed for "${host}": fail closed` };
   }
   if (addrs.length === 0) {
-    return { verdict: 'deny', reason: `DNS returned no addresses for "${host}" — fail closed` };
+    return { verdict: 'deny', reason: `DNS returned no addresses for "${host}": fail closed` };
   }
   // Classify every resolved address first: a MIXED set (some public, some
   // private) is DNS rebinding in progress and always denies, no matter the
@@ -273,7 +273,7 @@ export async function resolveAndDecideEgress(
     else publicCount += 1;
   }
   if (privateCount > 0 && publicCount > 0) {
-    return { verdict: 'deny', reason: `"${host}" resolves to mixed public/private addresses (DNS rebinding) — refused` };
+    return { verdict: 'deny', reason: `"${host}" resolves to mixed public/private addresses (DNS rebinding): refused` };
   }
   if (privateCount > 0) {
     const denied = deniedByList(h, policy);

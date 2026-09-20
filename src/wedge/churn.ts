@@ -55,7 +55,7 @@ async function validateChurnRiskClaims(
   if (bad.length > 0) {
     throw new WedgeError(
       'UNVERIFIABLE_CITATION',
-      `churn risk cites ${bad.join(', ')} — stale, disputed, superseded, or unknown`,
+      `churn risk cites ${bad.join(', ')}: stale, disputed, superseded, or unknown`,
     );
   }
 }
@@ -157,7 +157,7 @@ export async function churnRespond(
     'customer',
     'product',
     'QUERY',
-    `does this match a known pain pattern? — ${brief}`,
+    `does this match a known pain pattern?: ${brief}`,
     'pain-link.v1',
     0,
   );
@@ -165,7 +165,7 @@ export async function churnRespond(
     'product',
     'customer',
     'REQUEST',
-    `save play for ${input.segment} — ${brief}`,
+    `save play for ${input.segment}: ${brief}`,
     'save-play.v1',
     10,
   );
@@ -173,7 +173,7 @@ export async function churnRespond(
     'product',
     'marketing',
     'REQUEST',
-    `retention offer copy for ${input.segment} — ${brief}`,
+    `retention offer copy for ${input.segment}: ${brief}`,
     'offer-copy.v1',
     10,
   );

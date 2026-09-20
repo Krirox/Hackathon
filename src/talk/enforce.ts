@@ -60,7 +60,7 @@ export async function evaluateDispatch(
     return {
       allowed: false,
       code: 'ROOM_INACTIVE',
-      reason: `#${config.name} is disabled — enable it in room settings before dispatching work to ${config.scope}`,
+      reason: `#${config.name} is disabled: enable it in room settings before dispatching work to ${config.scope}`,
     };
   }
 
@@ -71,7 +71,7 @@ export async function evaluateDispatch(
     return {
       allowed: false,
       code: 'BUDGET_EXCEEDED',
-      reason: `#${config.name} has spent $${spend.dollars.toFixed(2)} of its $${config.budgetCeilingDollars.toFixed(0)} ceiling — raise the ceiling to resume`,
+      reason: `#${config.name} has spent $${spend.dollars.toFixed(2)} of its $${config.budgetCeilingDollars.toFixed(0)} ceiling: raise the ceiling to resume`,
     };
   }
   if (config.budgetCeilingTokens > 0 && spend.tokens >= config.budgetCeilingTokens) {
@@ -88,14 +88,14 @@ export async function evaluateDispatch(
       return {
         allowed: false,
         code: 'SUPERVISED',
-        reason: `#${config.name} is supervised — every dispatch needs a human approval`,
+        reason: `#${config.name} is supervised: every dispatch needs a human approval`,
       };
     case 'guarded':
       if (threshold > 0 && spend.dollars >= threshold) {
         return {
           allowed: false,
           code: 'GUARDED_GATE',
-          reason: `#${config.name} is guarded and has reached $${spend.dollars.toFixed(2)} of its $${threshold.toFixed(0)} approval threshold — approve to continue`,
+          reason: `#${config.name} is guarded and has reached $${spend.dollars.toFixed(2)} of its $${threshold.toFixed(0)} approval threshold: approve to continue`,
         };
       }
       return { allowed: true };

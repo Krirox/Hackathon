@@ -226,7 +226,7 @@ export class AmbientMorningBriefingSynthesizer {
           tokens: 0,
           state: 'HUDDLE_BRIEFING',
           text: [
-            `🎙️ **[MORNING BRIEFING — transcript; audio is a placeholder, no TTS wired yet]**`,
+            `🎙️ **[MORNING BRIEFING: transcript; audio is a placeholder, no TTS wired yet]**`,
             `> "${transcript}"`,
             '',
             `⏱️ \`${durationSeconds}s\` · 🟢 Health: \`${overallHealth.toUpperCase()}\``,

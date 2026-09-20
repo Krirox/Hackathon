@@ -210,7 +210,7 @@ export class CognitiveRouter {
     if (this.cfg.knownTaskTypes && !this.cfg.knownTaskTypes.has(input.taskType)) {
       throw new RouterError(
         'UNKNOWN_TASK_TYPE',
-        `task "${input.taskType}" declares no type — register it or refuse the work`,
+        `task "${input.taskType}" declares no type: register it or refuse the work`,
       );
     }
     const base = this.basePolicy(input);

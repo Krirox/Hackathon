@@ -950,7 +950,7 @@ T('FLOW-016: changed Serper snippet creates revised observation while duplicates
     const second = await runIngestionWorker(db, ledger, c, { tenant: TEN, scope: 'market', artifactDir: dir });
     eq([first.claimIds.length, second.claimIds.length], [1, 1]);
     eq(first.claimIds[0] !== second.claimIds[0], true);
-    eq((await ledger.get(TEN, second.claimIds[0]!))?.statement, 'Stable title — second');
+    eq((await ledger.get(TEN, second.claimIds[0]!))?.statement, 'Stable title: second');
     eq((await pollCollectorWithHealth(db, TEN, c, DAY_LATER)).staged, 0);
     eq((await getIntegrationHealth(db, TEN, c.name, { configured: true })).inbox.total, 2);
   } finally {

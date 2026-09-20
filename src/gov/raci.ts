@@ -67,7 +67,7 @@ export function authorize(input: AuthorizeInput): AuthorizeResult {
   const pinned = input.pinnedScopes ?? DEFAULT_PINNED_SCOPES;
 
   if (!['READ', 'ANALYZE', 'RECOMMEND', 'ACT_REVERSIBLE', 'ACT_IRREVERSIBLE'].includes(input.actionClass)) {
-    return { verdict: 'denied', reasons: [`unknown action class "${input.actionClass}" — fail closed`] };
+    return { verdict: 'denied', reasons: [`unknown action class "${input.actionClass}": fail closed`] };
   }
   const cls = input.actionClass as ActionClass;
 
@@ -100,18 +100,18 @@ export function authorize(input: AuthorizeInput): AuthorizeResult {
       const trust = input.trust;
       if (trust?.frozen === true) {
         verdict = 'approval';
-        reasons.push('trust frozen — approval max until cleared');
+        reasons.push('trust frozen: approval max until cleared');
       } else if (
         trust?.granted === true ||
         (trust?.cleanInstances ?? 0) >= (trust?.cleanThreshold ?? REVERSIBLE_CLEAN_THRESHOLD)
       ) {
         if (pinned.includes(input.scope)) {
           verdict = 'approval';
-          reasons.push(`scope "${input.scope}" is pinned Strict — ACT_REVERSIBLE never goes autonomous there`);
+          reasons.push(`scope "${input.scope}" is pinned Strict: ACT_REVERSIBLE never goes autonomous there`);
         } else if ((trust?.overrideRate ?? 0) > 0.1 && (trust?.total ?? 0) >= 10) {
           verdict = 'approval';
           reasons.push(
-            `override rate ${(trust?.overrideRate ?? 0).toFixed(2)} exceeds 0.10 threshold — approval required`,
+            `override rate ${(trust?.overrideRate ?? 0).toFixed(2)} exceeds 0.10 threshold: approval required`,
           );
         } else {
           verdict = 'autonomous';
@@ -128,7 +128,7 @@ export function authorize(input: AuthorizeInput): AuthorizeResult {
     case 'ACT_IRREVERSIBLE':
       return {
         verdict: 'human-command',
-        reasons: ['ACT_IRREVERSIBLE is human-command, always — legal review + named officer; not offered in year 1'],
+        reasons: ['ACT_IRREVERSIBLE is human-command, always: legal review + named officer; not offered in year 1'],
       };
   }
 
@@ -137,17 +137,17 @@ export function authorize(input: AuthorizeInput): AuthorizeResult {
     if (!input.shipLoop) {
       return {
         verdict: 'denied',
-        reasons: [...reasons, `ship action "${input.shipAction}" has no declared loop — denied`],
+        reasons: [...reasons, `ship action "${input.shipAction}" has no declared loop: denied`],
       };
     }
     const ship = decideShip(input.shipLoop, { shipAction: input.shipAction }, input.shipGrants ?? []);
     if (ship.outcome === 'undeclared') {
-      return { verdict: 'denied', reasons: [...reasons, `ship action "${input.shipAction}" is undeclared — denied`] };
+      return { verdict: 'denied', reasons: [...reasons, `ship action "${input.shipAction}" is undeclared: denied`] };
     }
     if (ship.outcome === 'hold') {
       if (verdict === 'autonomous') {
         verdict = 'approval';
-        reasons.push(`ship gate holds "${input.shipAction}" — a human holds the gate`);
+        reasons.push(`ship gate holds "${input.shipAction}": a human holds the gate`);
       } else {
         reasons.push(`ship gate holds "${input.shipAction}"`);
       }

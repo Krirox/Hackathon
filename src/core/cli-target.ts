@@ -106,7 +106,7 @@ export function resolveDbTarget(opts: ResolveDbOptions = {}): ResolvedDbTarget {
   if (opts.requirePersistent && path === ':memory:') {
     throw new CliTargetError(
       'PERSISTENT_DB_REQUIRED',
-      'this command requires an explicit database — pass --db <path|postgres-url> or set DATABASE_URL / SQLITE_PATH (not :memory:)',
+      'this command requires an explicit database: pass --db <path|postgres-url> or set DATABASE_URL / SQLITE_PATH (not :memory:)',
     );
   }
   const engine = isPostgresUrl(path) ? 'postgres' : 'sqlite';

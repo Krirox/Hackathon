@@ -83,7 +83,7 @@ export async function renderReview(coord: Coordinator, ledger: Ledger, opts: Rev
       evidence.push(
         c
           ? `<li><a href="/console/claims/${esc(encodeURIComponent(id))}"><code>${esc(id)}</code></a> · ${esc(c.kind)} · ${esc(c.status)}<br>${esc(c.statement)}<br><small>Source: ${esc(c.provenance.sourceUri)}</small></li>`
-          : `<li><code>${esc(id)}</code> — unavailable evidence; review before approving</li>`,
+          : `<li><code>${esc(id)}</code>: unavailable evidence; review before approving</li>`,
       );
     }
     const forms = opts.canApprove
@@ -102,7 +102,7 @@ ${operatorFields(opts, r.id, action)}
       : `<p>Review requires the ${esc(opts.requiredRole)} role or higher.</p>`;
     const sampleBanner =
       r.id.startsWith(SAMPLE_REQUEST_PREFIX) || r.originScope === SAMPLE_SCOPE
-        ? `<p style="background:var(--v-tint-warn-bg);color:var(--v-tint-warn-ink);padding:8px 10px;border-radius:8px;font-weight:700;font-size:12px;border:1px solid var(--v-line);">SAMPLE WALKTHROUGH — labeled demo data in scope ${esc(SAMPLE_SCOPE)}, not customer evidence.</p>`
+        ? `<p style="background:var(--v-tint-warn-bg);color:var(--v-tint-warn-ink);padding:8px 10px;border-radius:8px;font-weight:700;font-size:12px;border:1px solid var(--v-line);">SAMPLE WALKTHROUGH: labeled demo data in scope ${esc(SAMPLE_SCOPE)}, not customer evidence.</p>`
         : '';
     cards.push(`<article class="rv-card" data-review-request="${esc(r.id)}">
 ${sampleBanner}
@@ -117,7 +117,7 @@ ${sampleBanner}
 <p class="rv-note">Approval records a decision to BEGIN work, not final-deliverable authorization or evidence of execution or measurement.</p>
 <nav class="rv-pager" aria-label="Review pages">${page > 0 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page - 1}#pending-review">Previous reviews</a>` : ''}<span>Page ${page + 1} of ${Math.max(1, Math.ceil(pending.length / 100))}</span>${pending.length > (page + 1) * 100 ? `<a href="${esc(opts.home ?? '/')}?reviewPage=${page + 1}#pending-review">Next reviews</a>` : ''}</nav>
 <noscript><p class="sub">JavaScript disabled: standard full-page form submission is active.</p></noscript>
-<div class="rv-grid">${cards.join('') || '<div class="rv-empty">Queue clear — no admitted requests awaiting human review.</div>'}</div>
+<div class="rv-grid">${cards.join('') || '<div class="rv-empty">Queue clear. No admitted requests awaiting human review.</div>'}</div>
 <p><a class="rv-refresh" href="#" data-review-refresh>Refresh review queue</a></p></section>
 <script>${REVIEW_SCRIPT}</script>`;
 }
@@ -211,7 +211,7 @@ export const REVIEW_SCRIPT = `
           link.textContent = 'Sign in to continue';
           status.textContent = (result.error || 'Your session expired.') + ' ';
           status.appendChild(link);
-          status.appendChild(document.createTextNode(' — your draft is preserved. Submit again after signing in.'));
+          status.appendChild(document.createTextNode('. Your draft is preserved. Submit again after signing in.'));
           return;
         }
         if (action === 'correct' && result.conflict) {
@@ -228,7 +228,7 @@ export const REVIEW_SCRIPT = `
             status.textContent = parts.join(' ') + ' Your draft is preserved. ';
             status.appendChild(winner);
           } else {
-            status.textContent = parts.join(' ') + ' Your draft is preserved — refresh, then retry on the current claim.';
+            status.textContent = parts.join(' ') + ' Your draft is preserved. Refresh, then retry on the current claim.';
           }
           return;
         }
@@ -244,7 +244,7 @@ export const REVIEW_SCRIPT = `
             const reason = form.querySelector('[name="reason"]');
             if (reason) reason.value = result.preservedDraft.reason;
           }
-          status.textContent = parts.join(' ') + ' Your input is preserved — refresh, review the changes, and submit again.';
+          status.textContent = parts.join(' ') + ' Your input is preserved. Refresh, review the changes, and submit again.';
           return;
         }
         throw new Error(result.error || 'Request failed (' + response.status + ')');
@@ -282,13 +282,13 @@ export const REVIEW_SCRIPT = `
       }
       if (action === 'request-changes') {
         card.dataset.settled = 'true';
-        status.textContent = 'Revision requested — submit an updated deliverable tied to this workflow before final approval.';
+        status.textContent = 'Revision requested. Submit an updated deliverable tied to this workflow before final approval.';
         return;
       }
       if (action === 'verify') {
         if (!result.ok || typeof result.id !== 'string') throw new Error('Unexpected verification response. Refresh to check the claim.');
         card.dataset.settled = 'true';
-        status.textContent = 'Evidence verified as human-curated. Cited work can now proceed to approval — refresh to see the updated status. ';
+        status.textContent = 'Evidence verified as human-curated. Cited work can now proceed to approval. Refresh to see the updated status. ';
         const link = document.createElement('a');
         link.href = '/console/claims/' + encodeURIComponent(result.id);
         link.textContent = 'View verified claim';
@@ -298,7 +298,7 @@ export const REVIEW_SCRIPT = `
       const expected = action === 'approve' ? 'ACCEPTED' : 'DECLINED';
       if (result.state !== expected) throw new Error('Unexpected state. Refresh to check the request.');
       card.dataset.settled = 'true';
-      status.textContent = action === 'approve' ? 'Approved to BEGIN work — not final-deliverable authorization or evidence of execution or measurement. Refresh for updated status. ' : 'Declined. Refresh to update the queue.';
+      status.textContent = action === 'approve' ? 'Approved to BEGIN work. This is not final-deliverable authorization or evidence of execution or measurement. Refresh for updated status. ' : 'Declined. Refresh to update the queue.';
       if (action === 'approve' && typeof result.decisionId === 'string') {
         const link = document.createElement('a');
         link.href = '/console/decisions/' + encodeURIComponent(result.decisionId);

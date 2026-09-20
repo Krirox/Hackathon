@@ -99,7 +99,7 @@ export function integrityScreen(signal: WorldSignal): IntegrityResult {
       verdict: 'CANDIDATE',
       reasons: [
         ...reasons,
-        `only ${independent} independent authority path(s) [${authorities.join(', ')}] — needs >= ${minRequired} before strategic escalation`,
+        `only ${independent} independent authority path(s) [${authorities.join(', ')}]: needs >= ${minRequired} before strategic escalation`,
       ],
       selfServingDiscount,
       discountFactor,
@@ -115,7 +115,7 @@ export function integrityScreen(signal: WorldSignal): IntegrityResult {
       verdict: 'CANDIDATE',
       reasons: [
         ...reasons,
-        `mention-spike anomaly (mean age ${m.meanAccountAgeDays}d, cluster ${m.clusterSize}) — possible astroturf`,
+        `mention-spike anomaly (mean age ${m.meanAccountAgeDays}d, cluster ${m.clusterSize}): possible astroturf`,
       ],
       selfServingDiscount,
       discountFactor,

@@ -50,7 +50,7 @@ ${errorHtml}
   <p class="v-sub" style="margin:8px 0 0;max-width:78ch;line-height:1.55;">
     Backups are <strong>operator-managed infrastructure</strong>, not a console feature in this build.
     The supported disaster-recovery path is a point-in-time copy of the database file (with artifact
-    store) taken by your platform operator — restoring is a file restore, verified by the
+    store) taken by your platform operator. Restoring is a file restore, verified by the
     backup/restore drill, <em>not</em> an in-app import. The export below is a portable evidence
     record and is explicitly <strong>not a backup</strong> and cannot be restored by import.
   </p>
@@ -73,7 +73,7 @@ ${errorHtml}
 </div>
 
 <div class="v-card" style="border-color:var(--v-risk);background:var(--v-tint-risk-bg);margin-bottom:16px;">
-  <h2 class="v-card-title" style="color:var(--v-tint-risk-ink);">Danger Zone — Permanent Tenant Erasure</h2>
+  <h2 class="v-card-title" style="color:var(--v-tint-risk-ink);">Danger Zone: Permanent Tenant Erasure</h2>
   <p class="v-sub" style="margin:8px 0 0;max-width:78ch;line-height:1.55;">
     Permanently delete all claims, decisions, outcomes, credentials, and member sessions for <strong>${esc(tenant)}</strong>.
     An in-memory export is verified before deletion commits, and an immutable proof receipt is recorded under <code>erased:${esc(tenant)}</code>.

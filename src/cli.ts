@@ -529,7 +529,7 @@ if (cmd === 'status') {
   const probe = await server.ready();
   if (probe.status === 'ready') {
     console.log(
-      `vital console ready — ${localUrl} (${probe.detail}; ${JSON.stringify(formatTargetHeader(target, tenant))}${site ? ', site ./site' : ''})`,
+      `vital console ready: ${localUrl} (${probe.detail}; ${JSON.stringify(formatTargetHeader(target, tenant))}${site ? ', site ./site' : ''})`,
     );
   } else if (probe.status === 'blocked') {
     console.log(
@@ -652,7 +652,7 @@ if (cmd === 'status') {
   console.log(
     `vital worker started for tenant "${tenant}" (${JSON.stringify(formatTargetHeader(target, tenant))})` +
       (executorLane === 'cloud'
-        ? ' — MODEL-tier work is queued for the cloud executor lane (durable executor-job rows)'
+        ? ': MODEL-tier work is queued for the cloud executor lane (durable executor-job rows)'
         : ''),
   );
   const buzz = await workerBuzzSurface(db, tenant);

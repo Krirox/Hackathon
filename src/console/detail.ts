@@ -48,9 +48,9 @@ function lineageTag(id: string, status: string, currentId: string | undefined): 
 /** Human phase label for a request state without nested ternaries. */
 export function requestPhase(state: string, humanMinutes: number): string {
   if (state === 'ADMITTED' && humanMinutes > 0) return 'Pending human review';
-  if (state === 'ACCEPTED') return 'Approved — awaiting execution';
+  if (state === 'ACCEPTED') return 'Approved: awaiting execution';
   if (state === 'IN_FLIGHT') return 'Executing';
-  if (state === 'COMPLETED') return 'Executed — measurement may still be pending';
+  if (state === 'COMPLETED') return 'Executed; measurement may still be pending';
   return state;
 }
 
@@ -61,7 +61,7 @@ export function detailDocument(title: string, body: string, opts: ReviewOptions)
   const header = opts.hideHeader
     ? ''
     : `<h1>${esc(title)}</h1><p class="v-sub" style="font-size:13px">Signed in as <strong style="color:var(--v-ink)">${esc(opts.actorLabel ?? opts.actor)}</strong></p>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Vital</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Vital</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>body{font-family:var(--font-body);font-size:14px;line-height:1.5;background:var(--v-bg-0);color:var(--v-ink);margin:0 auto;padding:28px 20px;max-width:960px;letter-spacing:-0.011em;-webkit-font-smoothing:antialiased}
 h1{font-size:30px;font-weight:700;letter-spacing:-0.02em;font-style:normal}
@@ -138,7 +138,7 @@ export async function requestDetail(
     if (c && ['SUPERSEDED', 'RETIRED', 'STALE'].includes(c.status)) {
       statusNote = ' · <strong>historical</strong>';
       if (replacement && replacement.id !== cid) {
-        statusNote += ` — current: <a href="${esc(claimDetailUrl(replacement.id, claimCtx))}">${esc(replacement.id)}</a>`;
+        statusNote += ` · current: <a href="${esc(claimDetailUrl(replacement.id, claimCtx))}">${esc(replacement.id)}</a>`;
       }
     }
     if (c) {
@@ -146,7 +146,7 @@ export async function requestDetail(
         `<article><h2><a href="${esc(claimDetailUrl(cid, claimCtx))}">${esc(cid)}</a></h2><p>${esc(c.kind)} · ${esc(c.status)}${statusNote}</p><pre>${esc(c.statement)}</pre><p><a href="${esc(claimDetailUrl(cid, claimCtx))}">Full provenance, history and correction</a></p></article>`,
       );
     } else {
-      claims.push(`<p>${esc(cid)} — evidence unavailable</p>`);
+      claims.push(`<p>${esc(cid)}: evidence unavailable</p>`);
     }
   }
   const refreshable = ['ADMITTED', 'DEFERRED', 'ACCEPTED'].includes(r.state);
@@ -173,7 +173,7 @@ export async function requestDetail(
   return detailDocument(
     'Request evidence',
     `${opts.notice ? `<div class="success" role="status"><p><strong>${esc(opts.notice)}</strong></p></div>` : ''}<h2>${esc(r.goal)}</h2><p><strong>${esc(phase)}</strong> · ${esc(r.state)} · ${esc(r.id)}</p>
-${decision ? `<p><a href="/console/decisions/${esc(encodeURIComponent(decision.id))}">View approval receipt</a> — approval to begin work, not final-deliverable authorization or evidence of execution or measurement.</p>` : ''}
+${decision ? `<p><a href="/console/decisions/${esc(encodeURIComponent(decision.id))}">View approval receipt</a>. This is approval to begin work, not final-deliverable authorization or evidence of execution or measurement.</p>` : ''}
 ${deliverable}
 ${refreshForm}
 <details><summary>Request, budget and execution metadata</summary><pre>${dump(r)}</pre></details>
@@ -308,10 +308,10 @@ ${operatorFields(opts, id, 'verify')}
   }
   let statusBanner = '';
   if (isCurrent) {
-    statusBanner = '<p><strong>Current claim</strong> — this is the live replacement in the supersession chain.</p>';
+    statusBanner = '<p><strong>Current claim</strong>: this is the live replacement in the supersession chain.</p>';
   } else if (isHistorical) {
     statusBanner =
-      '<p><strong>Historical claim</strong> — frozen for replay; decisions that cited this version stay unchanged.</p>';
+      '<p><strong>Historical claim</strong>: frozen for replay; decisions that cited this version stay unchanged.</p>';
   }
   return detailDocument(
     'Claim evidence',

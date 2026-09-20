@@ -222,7 +222,7 @@ export async function settleOutbox(
       if (!row) continue; // row vanished: nothing to settle
       if (row.status === 'CLAIMED' && row.owner !== owner) {
         throw new Error(
-          `[outbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'} — settlement refused`,
+          `[outbox:NOT_OWNER] row ${id} is claimed by ${row.owner ?? 'someone else'}: settlement refused`,
         );
       }
       // Already DONE/FAILED by a legitimate earlier settlement: idempotent no-op.

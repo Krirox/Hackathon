@@ -142,7 +142,7 @@ function checkModelEgress(baseUrl: string, env: NodeJS.ProcessEnv): void {
   try {
     host = new URL(baseUrl).hostname;
   } catch {
-    throw new Error(`[executor:EGRESS] unparseable model baseUrl "${baseUrl}" — refusing`);
+    throw new Error(`[executor:EGRESS] unparseable model baseUrl "${baseUrl}": refusing`);
   }
   const verdict = decideEgress(host, { allowedHosts, deniedHosts: [] });
   if (verdict.verdict !== 'allow') throw new Error(`[executor:EGRESS] ${verdict.reason}`);
@@ -173,7 +173,7 @@ export async function runJob(
     // naming a finished id would read as success.
     if (job.idempotencyKey !== undefined && job.idempotencyKey !== req.idempotencyKey) {
       throw new Error(
-        `[executor] request ${job.requestId} already COMPLETED under a different idempotency key — refusing to ack`,
+        `[executor] request ${job.requestId} already COMPLETED under a different idempotency key: refusing to ack`,
       );
     }
     return { status: 'COMPLETED', claimIds: [...req.chainClaimIds], usage: { input: 0, output: 0 } };
@@ -224,7 +224,7 @@ export async function runJob(
       );
     } catch {
       throw new Error(
-        `[executor:CLAIM_LOST] request ${job.requestId} is being executed by another worker — refusing to double-spend`,
+        `[executor:CLAIM_LOST] request ${job.requestId} is being executed by another worker: refusing to double-spend`,
       );
     }
   }
@@ -240,7 +240,7 @@ export async function runJob(
   const holder = current?.execOwner ?? null;
   if (holder && holder !== (job.onBehalfOf ?? 'lambda-executor')) {
     throw new Error(
-      `[executor:CLAIM_LOST] request ${job.requestId} is claimed by ${holder} — refusing to double-spend`,
+      `[executor:CLAIM_LOST] request ${job.requestId} is claimed by ${holder}: refusing to double-spend`,
     );
   }
 
@@ -249,7 +249,7 @@ export async function runJob(
   const contextText =
     context.length > 0
       ? context.map((c) => `- [${c.kind}] ${c.subject}: ${c.statement}`).join('\n')
-      : '(no grounded context — generic task)';
+      : '(no grounded context: generic task)';
 
   const messages: ChatMessage[] = [
     {
@@ -275,7 +275,7 @@ export async function runJob(
     .run();
   if (out.text.length > 1_000_000) {
     throw new Error(
-      '[executor:ARTIFACT_TOO_LARGE] deliverable exceeds the 1MiB artifact bound — refusing to store a silent truncation',
+      '[executor:ARTIFACT_TOO_LARGE] deliverable exceeds the 1MiB artifact bound: refusing to store a silent truncation',
     );
   }
   await db

@@ -769,7 +769,7 @@ export function createLedger(db: AsyncDb): Ledger {
       .update([rec.bundle.frozenAt, ...rec.bundle.claims.map((e) => e.hash)].join('|'))
       .digest('hex');
     if (recomputed !== rec.bundle.bundleHash) {
-      throw new LedgerError('TAMPERED_BUNDLE', `context bundle for ${id} fails its hash — do not trust this replay`);
+      throw new LedgerError('TAMPERED_BUNDLE', `context bundle for ${id} fails its hash: do not trust this replay`);
     }
     for (const e of rec.bundle.claims) {
       const eh = hashEntry(e.id, e.seq, e.kind, e.statement, e.status, e.confidence);
@@ -1123,7 +1123,7 @@ export function createLedger(db: AsyncDb): Ledger {
         const detail = await conflictFor(tenant, old, by, statement, expectedSeq, now);
         throw new LedgerError(
           'VERSION_CONFLICT',
-          `claim ${id} is ${old.status} — refresh and correct its current replacement`,
+          `claim ${id} is ${old.status}: refresh and correct its current replacement`,
           detail,
         );
       }
@@ -1147,7 +1147,7 @@ export function createLedger(db: AsyncDb): Ledger {
         const detail = await conflictFor(tenant, current, by, statement, expectedSeq, now);
         throw new LedgerError(
           'VERSION_CONFLICT',
-          `claim ${id} was corrected by another editor — refresh and reconcile`,
+          `claim ${id} was corrected by another editor: refresh and reconcile`,
           detail,
         );
       }
@@ -1265,7 +1265,7 @@ export function createLedger(db: AsyncDb): Ledger {
       if (owner && String(owner.subject_id) !== subjectId) {
         throw new LedgerError(
           'AMBIGUOUS_ALIAS',
-          `alias "${norm}" already resolves to another subject — refusing to merge two identities`,
+          `alias "${norm}" already resolves to another subject: refusing to merge two identities`,
         );
       }
       await db

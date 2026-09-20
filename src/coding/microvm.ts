@@ -64,10 +64,10 @@ export async function stopMicroVM(db: AsyncDb, tenant: string, groupId: string, 
   await db.prepare('DELETE FROM meta WHERE key = ?').run(`microvm:${tenant}:${id}`).catch(() => {});
 }
 export function renderEnvPanel(o: { vm?: MicroVM; baseSnap?: string; curSnap?: string; branch?: string }): string {
-  return `<section class="env"><h2>Environment</h2><p>MicroVM ${o.vm ? `${o.vm.id} (${o.vm.kind}, ${o.vm.status})` : '—'} | Base ${o.baseSnap ?? '—'} | Current ${o.curSnap ?? '—'} | Branch ${o.branch ?? '—'}</p></section>`;
+  return `<section class="env"><h2>Environment</h2><p>MicroVM ${o.vm ? `${o.vm.id} (${o.vm.kind}, ${o.vm.status})` : 'n/a'} | Base ${o.baseSnap ?? 'n/a'} | Current ${o.curSnap ?? 'n/a'} | Branch ${o.branch ?? 'n/a'}</p></section>`;
 }
 export function renderSnapshotList(snaps: { id: string; status: string; missionId: string }[]): string {
-  const rows = snaps.map((s) => `<li>${s.id} — ${s.status} (${s.missionId}) [INSPECT] [RESTORE] [BRANCH]</li>`).join('');
+  const rows = snaps.map((s) => `<li>${s.id}: ${s.status} (${s.missionId}) [INSPECT] [RESTORE] [BRANCH]</li>`).join('');
   return `<section class="snapshots"><h2>Environment Snapshots</h2><ul>${rows || '<li>none</li>'}</ul></section>`;
 }
 export function newId(prefix: string): string { return `${prefix}_${randomUUID().slice(0, 8)}`; }

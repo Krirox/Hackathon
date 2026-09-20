@@ -488,7 +488,7 @@ export function renderBuzzRoster(data: BuzzRosterData, _home: string, _csrf: str
   let relayLine: string;
   if (!data.relay) {
     relayLine =
-      '<p style="font-size:13px;color:var(--buzz-ink-3);background:var(--buzz-inset);border:1px solid var(--buzz-border);border-radius:8px;padding:8px 12px;">Relay not configured — working locally. Messages stay on this workspace.</p>';
+      '<p style="font-size:13px;color:var(--buzz-ink-3);background:var(--buzz-inset);border:1px solid var(--buzz-border);border-radius:8px;padding:8px 12px;">Relay not configured; working locally. Messages stay on this workspace.</p>';
   } else if (data.relay.ok) {
     relayLine = `<p style="font-size:13px;color:var(--buzz-good);">Relay connected: ${esc(data.relay.detail)}</p>`;
   } else {
@@ -752,7 +752,7 @@ export async function renderBuzzRoom(
         ? ''
         : `<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;align-items:center;position:relative;">${floatingHearts}${seedReaction}${reactionForms}</div>`;
 
-      const doneMatch = /^Work done — v(\d+)/.exec(m.content);
+      const doneMatch = /^Work done(?: — |: )v(\d+)/.exec(m.content);
       const doneArrow = doneMatch
         ? `<div style="margin-top:8px;"><a href="/console/deliverables/by-request/${esc(m.requestId ?? '')}" style="display:inline-flex;gap:6px;align-items:center;font-size:12px;font-weight:600;color:var(--buzz-accent);text-decoration:none;border:1px solid var(--buzz-good);background:var(--buzz-good-soft);border-radius:8px;padding:6px 10px;">→ View diff (v${esc(doneMatch[1]!)})</a></div>`
         : ``;
@@ -845,7 +845,7 @@ export async function renderBuzzRoom(
     <li class="buzz-welcome" style="list-style:none;">
       <div class="buzz-welcome__mascot">${getMascotAvatar(config.agentName, 44)}</div>
       <h2 class="buzz-welcome__title">Welcome to #${esc(def.name)}</h2>
-      <p class="buzz-welcome__sub">${esc(config.mission ? config.mission.slice(0, 140) : `Collaborate with your team and @${config.agentName} — all in one place.`)}</p>
+      <p class="buzz-welcome__sub">${esc(config.mission ? config.mission.slice(0, 140) : `Collaborate with your team and @${config.agentName}. All in one place.`)}</p>
       <div class="buzz-welcome__grid">${welcomeChipHtml}</div>
     </li>`;
 
@@ -1093,7 +1093,7 @@ export async function renderBuzzRoom(
       <div class="buzz-header__stack">
         <div class="buzz-header__row">
           <h1 class="buzz-header__title"># ${esc(roomDisplayName)}</h1>
-          <span class="buzz-health" title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ' — ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
+          <span class="buzz-health" title="Room health: ${esc(health.status)}${health.reasons.length > 0 ? ': ' + esc(health.reasons.join('; ')) : ''}">${esc(health.badge)}</span>
           <span class="buzz-budget" title="Live budget: real spend from the coordinator (${gauge.percentage}% of ceiling)">
             <span class="buzz-budget__track"><span class="buzz-budget__fill${budgetFillClass}" style="width:${budgetFillPct}%;"></span></span>
             <span class="buzz-budget__label">$${esc(gauge.dollarsSpent.toFixed(0))} / $${esc(gauge.dollarsCeiling.toFixed(0))}</span>
@@ -1106,7 +1106,7 @@ export async function renderBuzzRoom(
     </div>
     <div class="buzz-header__actions">
       <span class="buzz-header__meta-item" title="Distinct authors who have posted in this room">
-        ${svgIcon('users', 14)} <span>${memberCount > 0 ? memberCount : '—'}</span>
+        ${svgIcon('users', 14)} <span>${memberCount > 0 ? memberCount : '0'}</span>
       </span>
       <button type="button" class="buzz-icon-btn" onclick="window.openBuzzDrawer('/console/compiler?drawer=1', 'Compiler Board')" title="Huddle / Audio">${svgIcon('mic', 16)}</button>
       <button type="button" class="buzz-icon-btn" onclick="window.openBuzzDrawer('/console/requests?drawer=1', 'Review Queue')" title="Toggle Panel">${svgIcon('panel', 16)}</button>
@@ -1142,7 +1142,7 @@ export async function renderBuzzRoom(
           <option value="/compiler" label="Open Compiler board in drawer"></option>
           <option value="/ledger " label="Search Evidence Ledger"></option>
           <option value="/requests" label="Open Review Requests in drawer"></option>
-          <option value="/halt " label="Halt room — engage kill switch"></option>
+          <option value="/halt " label="Halt room: engage kill switch"></option>
           <option value="/recover " label="Recover room"></option>
           <option value="/status" label="Room health & spend"></option>
           <option value="/cost" label="Budget gauge"></option>

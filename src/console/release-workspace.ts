@@ -97,14 +97,14 @@ export function describeLegStall(
     const expiresAt = claimedAtMs + (lease.leaseMs ?? 60_000);
     if (expiresAt > nowMs) return null;
     const over = Math.max(0, Math.round((nowMs - expiresAt) / 1000));
-    return `the executor claimed this request ${Math.round((nowMs - claimedAtMs) / 1000)}s ago and its ${Math.round((lease.leaseMs ?? 60_000) / 1000)}s lease expired ${over}s ago — the worker holding it is gone.`;
+    return `the executor claimed this request ${Math.round((nowMs - claimedAtMs) / 1000)}s ago and its ${Math.round((lease.leaseMs ?? 60_000) / 1000)}s lease expired ${over}s ago; the worker holding it is gone.`;
   }
   if (requestState === 'ACCEPTED') {
     const sinceMs = Date.parse(lease.updatedAt);
     if (!Number.isFinite(sinceMs)) return null;
     const waitedMs = nowMs - sinceMs;
     if (waitedMs < (opts.unclaimedMs ?? UNCLAIMED_STALL_MS)) return null;
-    return `accepted ${Math.round(waitedMs / 60_000)}m ago and never claimed by an executor — no worker is picking up work.`;
+    return `accepted ${Math.round(waitedMs / 60_000)}m ago and never claimed by an executor. No worker is picking up work.`;
   }
   return null;
 }
@@ -273,7 +273,7 @@ function deriveBlockerAndNext(
   const stalled = legs.filter((l) => l.stalled);
   if (stalled.length > 0) {
     return {
-      blocker: `${stalled.map((l) => l.key).join(', ')} stalled — ${stalled[0]!.stallDetail ?? 'no executor is advancing it'}`,
+      blocker: `${stalled.map((l) => l.key).join(', ')} stalled: ${stalled[0]!.stallDetail ?? 'no executor is advancing it'}`,
       nextAction: 'Reclaim the stalled legs, then resume fan-out',
     };
   }
@@ -780,7 +780,7 @@ export function renderWorkflowListPage(
 ): string {
   const rows =
     items.length === 0
-      ? '<div class="v-empty"><h3>No release workflows yet</h3><p>Configure an evidence source, then start your first release workflow — its fan-out legs appear here.</p><p><a class="v-btn v-btn-secondary v-btn-sm" href="/setup">Configure a source</a></p></div>'
+      ? '<div class="v-empty"><h3>No release workflows yet</h3><p>Configure an evidence source, then start your first release workflow. Its fan-out legs appear here.</p><p><a class="v-btn v-btn-secondary v-btn-sm" href="/setup">Configure a source</a></p></div>'
       : `<table><thead><tr><th>Release</th><th>Kind</th><th>State</th><th>Owner</th><th>Updated</th></tr></thead><tbody>${items
           .map(
             (w) =>
@@ -804,13 +804,13 @@ export function renderWorkflowDetailPage(
   opts: { home: string; csrf: string; actor: string },
 ): string {
   const sources = view.sourceReceipts
-    .map((s) => `<li><a href="${esc(s.url)}">${esc(s.id)}</a> · ${esc(s.status)} — ${esc(s.statement)}</li>`)
+    .map((s) => `<li><a href="${esc(s.url)}">${esc(s.id)}</a> · ${esc(s.status)}: ${esc(s.statement)}</li>`)
     .join('');
   const legs = view.legs
     .map(
       (l) =>
-        `<tr><td>${esc(l.key)}</td><td>${esc(l.status)}${l.stalled ? ' <span class="v-badge v-badge-risk"><span class="dot"></span>stalled</span>' : ''}</td><td>${l.url ? `<a href="${esc(l.url)}">${esc(l.requestId ?? '')}</a>` : '—'}</td>
-<td>${esc(l.requestState ?? '—')}</td><td>${l.decisionId ? `<a href="/console/decisions/${esc(encodeURIComponent(l.decisionId))}">${esc(l.decisionId)}</a>` : '—'}</td>
+        `<tr><td>${esc(l.key)}</td><td>${esc(l.status)}${l.stalled ? ' <span class="v-badge v-badge-risk"><span class="dot"></span>stalled</span>' : ''}</td><td>${l.url ? `<a href="${esc(l.url)}">${esc(l.requestId ?? '')}</a>` : ''}</td>
+<td>${esc(l.requestState ?? '')}</td><td>${l.decisionId ? `<a href="/console/decisions/${esc(encodeURIComponent(l.decisionId))}">${esc(l.decisionId)}</a>` : ''}</td>
 <td>${esc(l.reason ?? '')}</td></tr>`,
     )
     .join('');
@@ -818,8 +818,8 @@ export function renderWorkflowDetailPage(
     view.stalledLegs.length === 0
       ? ''
       : `<div class="card" id="stalled-legs"><h2>Stalled legs</h2>
-<p class="sub">These legs were approved and will not advance on their own — the executor that held them is gone, or none ever claimed them. Reclaiming releases the claim back to ADMITTED so an executor can pick the work up again.</p>
-<ul>${view.stalledLegs.map((l) => `<li><strong>${esc(l.key)}</strong> — ${esc(l.detail ?? 'not advancing')}</li>`).join('')}</ul></div>`;
+<p class="sub">These legs were approved and will not advance on their own: the executor that held them is gone, or none ever claimed them. Reclaiming releases the claim back to ADMITTED so an executor can pick the work up again.</p>
+<ul>${view.stalledLegs.map((l) => `<li><strong>${esc(l.key)}</strong>: ${esc(l.detail ?? 'not advancing')}</li>`).join('')}</ul></div>`;
   const outcomes = view.outcomes.length
     ? view.outcomes
         .map(
@@ -837,7 +837,7 @@ export function renderWorkflowDetailPage(
       (r) =>
         `<article><h3><a href="/console/decisions/${esc(encodeURIComponent(r.decisionId))}">${esc(r.decisionId)}</a></h3>
 <p>${esc(r.goal)}</p>
-<h4>Frozen evidence</h4><ul>${r.frozenClaims.map((c) => `<li>${esc(c.id)} · ${esc(c.status)} — ${esc(c.statement)}</li>`).join('')}</ul>
+<h4>Frozen evidence</h4><ul>${r.frozenClaims.map((c) => `<li>${esc(c.id)} · ${esc(c.status)}: ${esc(c.statement)}</li>`).join('')}</ul>
 <h4>Drift since approval</h4><ul>${r.drift.map((d) => `<li>${esc(d.id)}: ${esc(d.frozenStatus)} → ${esc(d.currentStatus ?? 'missing')}${d.drifted ? ' <strong>drifted</strong>' : ''}</li>`).join('')}</ul></article>`,
     )
     .join('');
@@ -850,7 +850,7 @@ export function renderWorkflowDetailPage(
         .join('')}</ul>`
     : '<p class="sub">No execution traces yet.</p>';
   const candidates = view.compilerCandidates.length
-    ? `<ul>${view.compilerCandidates.map((c) => `<li>${esc(c.intent)} · ${c.repeats} successes · ${(c.successRate * 100).toFixed(0)}% rate — quarantine/transfer gates still apply</li>`).join('')}</ul>`
+    ? `<ul>${view.compilerCandidates.map((c) => `<li>${esc(c.intent)} · ${c.repeats} successes · ${(c.successRate * 100).toFixed(0)}% rate (quarantine/transfer gates still apply)</li>`).join('')}</ul>`
     : '<p class="sub">No compiler candidates from this workflow yet.</p>';
 
   const forms: string[] = [];
@@ -894,9 +894,9 @@ export function renderWorkflowDetailPage(
   if (view.measurementState === 'verified') {
     measurementNote = 'Business outcome verified';
   } else if (view.measurementState === 'pending') {
-    measurementNote = 'Execution complete — measurement pending';
+    measurementNote = 'Execution complete; measurement pending';
   } else if (view.measurementState === 'unknown') {
-    measurementNote = 'Outcome state unknown — pre-register before measuring';
+    measurementNote = 'Outcome state unknown; pre-register before measuring';
   }
 
   return pageShell(
@@ -923,7 +923,7 @@ ${forms.join('\n')}`,
 }
 
 function pageShell(title: string, body: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Vital</title>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Vital</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* Layout only — color, radius and shadow come from the token system. */

@@ -599,7 +599,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
           admitted: false,
           state: existing.state,
           reason: terminal
-            ? `identical request already ${existing.state} — replayed ${existing.id}`
+            ? `identical request already ${existing.state}: replayed ${existing.id}`
             : `deduped onto in-flight request ${existing.id}`,
           request: existing,
           dedupedTo: existing.id,
@@ -730,7 +730,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
             return {
               admitted: false,
               state: 'DENIED',
-              reason: `parent ${parent.id} is ${parent.state} — child work denied`,
+              reason: `parent ${parent.id} is ${parent.state}: child work denied`,
               request: req,
             };
           }
@@ -807,7 +807,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
         return {
           admitted: false,
           state: 'DENIED',
-          reason: `human escalation cap (${limits.maxHumanEscalationsPerDay}/day) reached — no further human interrupts today`,
+          reason: `human escalation cap (${limits.maxHumanEscalationsPerDay}/day) reached: no further human interrupts today`,
           request: req,
         };
       }
@@ -861,7 +861,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
           // Redelivery recovery: a genuinely failed run completed on retry.
           // A preserved refusal is never resurrected.
           if (refusalPreserved) {
-            throw new CoordinationError('TERMINAL', `request ${id} was refused — refusal is not recoverable`);
+            throw new CoordinationError('TERMINAL', `request ${id} was refused: refusal is not recoverable`);
           }
           await db
             .prepare('UPDATE requests SET state = ?, refusal_reason = ?, updated_at = ? WHERE id = ? AND tenant = ?')
@@ -1026,7 +1026,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     if (out.changes === 0) {
       const r = await load(tenant, id);
       if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
-      throw new CoordinationError('CLAIM_LOST', `request ${id} is ${r.state} — another worker holds the claim`, {
+      throw new CoordinationError('CLAIM_LOST', `request ${id} is ${r.state}: another worker holds the claim`, {
         state: r.state,
       });
     }
@@ -1053,7 +1053,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       if (!r) throw new CoordinationError('NOT_FOUND', `request ${id}`);
       throw new CoordinationError(
         'LEASE_EXPIRED',
-        `request ${id} is no longer owned by ${owner} (current state: ${r.state}, owner: ${r.execOwner}) — cannot renew lease`,
+        `request ${id} is no longer owned by ${owner} (current state: ${r.state}, owner: ${r.execOwner}): cannot renew lease`,
       );
     }
     return (await load(tenant, id))!;
@@ -1091,7 +1091,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
         )
         .run(now, String(row.id), tenant, String(row.claimed_at));
       if (out.changes === 0) continue;
-      await audit('scheduler', 'EXECUTION_RECLAIMED', String(row.id), tenant, 'lease expired — back to ADMITTED');
+      await audit('scheduler', 'EXECUTION_RECLAIMED', String(row.id), tenant, 'lease expired: back to ADMITTED');
       released.push(String(row.id));
     }
     return released;
@@ -1107,7 +1107,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       const parent = await load(tenant, parentId);
       if (!parent) throw new CoordinationError('NOT_FOUND', `request ${parentId}`);
       if (parent.state !== 'ADMITTED' && parent.state !== 'IN_FLIGHT') {
-        throw new CoordinationError('BAD_PARENT', `request ${parentId} is ${parent.state} — only live work decomposes`);
+        throw new CoordinationError('BAD_PARENT', `request ${parentId} is ${parent.state}: only live work decomposes`);
       }
       if (steps.length === 0)
         throw new CoordinationError('EMPTY_DECOMPOSE', 'decomposing into zero steps splits nothing');
@@ -1165,7 +1165,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
       if (totalStepDollars > remainingDollars) {
         throw new CoordinationError(
           'BUDGET_SPLIT',
-          `children bid $${totalStepDollars.toFixed(3)} against $${remainingDollars.toFixed(3)} unspent on ${parentId} — decomposition never prints money`,
+          `children bid $${totalStepDollars.toFixed(3)} against $${remainingDollars.toFixed(3)} unspent on ${parentId}: decomposition never prints money`,
         );
       }
 
@@ -1176,7 +1176,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
         if (totalStepTokens > remainingTokens) {
           throw new CoordinationError(
             'BUDGET_SPLIT',
-            `children bid ${totalStepTokens} tokens against ${remainingTokens} unspent tokens on ${parentId} — decomposition never prints tokens`,
+            `children bid ${totalStepTokens} tokens against ${remainingTokens} unspent tokens on ${parentId}: decomposition never prints tokens`,
           );
         }
       }
@@ -1188,7 +1188,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
         if (totalStepHumanMinutes > remainingHumanMinutes) {
           throw new CoordinationError(
             'BUDGET_SPLIT',
-            `children bid ${totalStepHumanMinutes} human minutes against ${remainingHumanMinutes} unspent human minutes on ${parentId} — attention budget exhausted`,
+            `children bid ${totalStepHumanMinutes} human minutes against ${remainingHumanMinutes} unspent human minutes on ${parentId}: attention budget exhausted`,
           );
         }
       }
@@ -1434,7 +1434,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
     if (!PENDING_EVIDENCE_STATES.includes(r.state)) {
       throw new CoordinationError(
         'NOT_REFRESHABLE',
-        `request ${requestId} is ${r.state} — only pending review/work may refresh evidence`,
+        `request ${requestId} is ${r.state}: only pending review/work may refresh evidence`,
         { state: r.state },
       );
     }

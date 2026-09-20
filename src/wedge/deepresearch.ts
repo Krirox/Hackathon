@@ -187,7 +187,7 @@ export function createResearchRun(
   if (subs.length === 0)
     throw new WedgeError(
       'EMPTY_PLAN',
-      'a research plan with no sub-questions is not a plan — review and edit before it begins',
+      'a research plan with no sub-questions is not a plan: review and edit before it begins',
     );
   const now = opts.now ?? new Date().toISOString();
   return {
@@ -219,7 +219,7 @@ export function createResearchRun(
 /** The plan is reviewed and edited BEFORE anything runs. */
 export function approveResearchPlan(run: ResearchRun, by: string): ResearchRun {
   if (run.status !== 'PLANNED')
-    throw new WedgeError('BAD_PLAN_STATE', `plan is ${run.status}, not PLANNED — only a fresh plan is approved`);
+    throw new WedgeError('BAD_PLAN_STATE', `plan is ${run.status}, not PLANNED: only a fresh plan is approved`);
   if (!by) throw new WedgeError('NO_APPROVER', 'a research plan without a named approver never runs');
   return { ...run, status: 'APPROVED', approvedBy: by };
 }
@@ -481,7 +481,7 @@ export async function executeResearchRun(
     if (stored) run = stored;
   }
   if (run.status !== 'APPROVED' && run.status !== 'RUNNING') {
-    throw new WedgeError('UNAPPROVED_RESEARCH', `run is ${run.status} — approve the plan before it executes`);
+    throw new WedgeError('UNAPPROVED_RESEARCH', `run is ${run.status}: approve the plan before it executes`);
   }
 
   const normalized: ResearchRun = {
@@ -661,7 +661,7 @@ export async function executeResearchRun(
             tenant: run.tenant,
             subject,
             kind: 'OBSERVATION',
-            statement: `${h.title} — ${h.snippet.slice(0, 500)}`,
+            statement: `${h.title}: ${h.snippet.slice(0, 500)}`,
             confidence: 0.6,
             owner: opts.by,
             scope: opts.scope,
@@ -843,12 +843,12 @@ export async function attachResearchReport(
   opts?: { db?: AsyncDb },
 ): Promise<ResearchRun> {
   if (run.status !== 'COMPLETED')
-    throw new WedgeError('UNFINISHED_RUN', `run is ${run.status} — execute before reporting`);
+    throw new WedgeError('UNFINISHED_RUN', `run is ${run.status}: execute before reporting`);
   const v = await verifyResearchReport(ledger, tenant, run, sections, now);
   if (!v.ok) {
     throw new WedgeError(
       'UNSUPPORTED_REPORT',
-      `bullets [${v.unsupported.join(', ')}] cite nothing live — flag as testable inferences or cut them`,
+      `bullets [${v.unsupported.join(', ')}] cite nothing live: flag as testable inferences or cut them`,
     );
   }
 
@@ -1021,15 +1021,15 @@ export async function proposeSubquestions(
     throw new WedgeError('PROPOSAL_FAILED', `planner assist failed: ${(e as Error).message}`);
   }
   const match = raw.match(/\[[\s\S]*\]/);
-  if (!match) throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner did not return a JSON array — plan manually');
+  if (!match) throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner did not return a JSON array: plan manually');
   let list: unknown;
   try {
     list = JSON.parse(match[0]) as unknown;
   } catch {
-    throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner returned malformed JSON — plan manually');
+    throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner returned malformed JSON: plan manually');
   }
   if (!Array.isArray(list))
-    throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner did not return a JSON array — plan manually');
+    throw new WedgeError('PROPOSAL_UNPARSEABLE', 'planner did not return a JSON array: plan manually');
   const subs = [
     ...new Set(
       list
@@ -1038,6 +1038,6 @@ export async function proposeSubquestions(
         .filter((s) => s.length > 0),
     ),
   ].slice(0, max);
-  if (subs.length === 0) throw new WedgeError('EMPTY_PROPOSAL', 'planner proposed nothing usable — plan manually');
+  if (subs.length === 0) throw new WedgeError('EMPTY_PROPOSAL', 'planner proposed nothing usable: plan manually');
   return subs;
 }

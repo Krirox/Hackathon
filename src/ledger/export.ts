@@ -195,7 +195,7 @@ export async function verifyArchivalDelivery(
   if (!bucket) {
     return {
       status: 'unconfigured',
-      detail: 'no archival bucket configured (VITAL_ARCHIVE_BUCKET) — delivery is not claimed',
+      detail: 'no archival bucket configured (VITAL_ARCHIVE_BUCKET): delivery is not claimed',
     };
   }
   const key = opts.key ?? process.env.VITAL_ARCHIVE_KEY ?? localFile.split(/[\\/]/).pop() ?? localFile;
@@ -210,7 +210,7 @@ export async function verifyArchivalDelivery(
       status: 'error',
       bucket,
       key,
-      detail: 'bucket is configured but no archive probe was supplied — cannot verify delivery without a read-back',
+      detail: 'bucket is configured but no archive probe was supplied: cannot verify delivery without a read-back',
     };
   }
   let remote: Buffer | null;
@@ -230,7 +230,7 @@ export async function verifyArchivalDelivery(
       bucket,
       key,
       expectedSha256: want,
-      detail: `archived bytes hash to ${got}, expected ${want} — object is missing, partial, or crossed`,
+      detail: `archived bytes hash to ${got}, expected ${want}: object is missing, partial, or crossed`,
     };
   }
   return {
@@ -542,7 +542,7 @@ const EXPORT_CONTENTS: Record<ExportKind, string[]> = {
 
 const EXPORT_OMISSIONS = [
   'sessions, users, and credentials are never exported',
-  'raw artifact bytes are not embedded — only content-addressed refs with ownership metadata',
+  'raw artifact bytes are not embedded: only content-addressed refs with ownership metadata',
   'external object stores and backups are out of scope',
   'other tenants are never included',
 ];

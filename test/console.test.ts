@@ -2738,7 +2738,7 @@ T('FLOW-009: role change, ownership succession, disable and reactivate over HTTP
     eq(wrongConfirm.status, 400);
     const disabled = await teamPost(owner, '/team/disable', `userId=${member.id}&confirmEmail=member%40acme.test`);
     eq(disabled.status, 200);
-    eq((await disabled.text()).includes('every live session was revoked'), true);
+    eq((await disabled.text()).includes('Every live session was revoked'), true);
     const relogin = await formSession(server.port, 'member@acme.test', memberPassword).then(
       () => 'signed-in',
       () => 'refused',
@@ -3669,7 +3669,7 @@ T('E2E-10: session expiry during review preserves safe draft and requires explic
     const base_ = `http://127.0.0.1:${server.port}`;
     const session = await ownerSession(server.port);
     eq(REVIEW_SCRIPT.includes('SESSION_EXPIRED'), true);
-    eq(REVIEW_SCRIPT.includes('your draft is preserved'), true);
+    eq(REVIEW_SCRIPT.includes('Your draft is preserved'), true);
     // expire the session server-side, then attempt the sensitive action
     await db.prepare('DELETE FROM auth_sessions').run();
     const res = await fetch(`${base_}/api/requests/e2e10-r/approve`, {
@@ -3684,7 +3684,7 @@ T('E2E-10: session expiry during review preserves safe draft and requires explic
     eq(body.loginUrl.includes('reason=expired'), true);
     // browser login page explains resubmission, never auto-replay
     const login = await (await fetch(`${base_}${body.loginUrl}`)).text();
-    eq(login.includes('approvals are never replayed'), true);
+    eq(login.includes('Approvals are never replayed'), true);
     eq(login.includes('submit it again'), true);
     // the request is untouched — nothing auto-approved
     const current = await coord.get(TEN, 'e2e10-r');
@@ -3776,7 +3776,7 @@ T('FINAL-007: self-serve data export, typed erasure, and public erasure receipt 
     const ownerDataHtml = await ownerData.text();
     eq(ownerDataHtml.includes('Data &amp; retention'), true);
     eq(ownerDataHtml.includes('Export Reality Ledger'), true);
-    eq(ownerDataHtml.includes('Danger Zone — Permanent Tenant Erasure'), true);
+    eq(ownerDataHtml.includes('Danger Zone: Permanent Tenant Erasure'), true);
     // FLOW-013: backup scope is stated plainly so operators are not surprised.
     eq(ownerDataHtml.includes('Backup &amp; restore'), true, 'data page documents backup scope:');
     eq(ownerDataHtml.includes('not a backup'), true, 'export explicitly disclaims restore-by-import:');

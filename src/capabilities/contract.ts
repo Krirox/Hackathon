@@ -75,14 +75,14 @@ export function evaluateKill(
 ): { dead: boolean; reason: string } {
   const v = measured[killMetric];
   if (v === undefined)
-    return { dead: false, reason: `kill metric "${killMetric}" not measured yet — cannot declare death` };
+    return { dead: false, reason: `kill metric "${killMetric}" not measured yet: cannot declare death` };
   if (v < killBelow) {
     return {
       dead: true,
-      reason: `kill condition met (${contract.killCondition}): ${killMetric}=${v} < ${killBelow} — retire, do not rebrand`,
+      reason: `kill condition met (${contract.killCondition}): ${killMetric}=${v} < ${killBelow}: retire, do not rebrand`,
     };
   }
-  return { dead: false, reason: `${killMetric}=${v} ≥ ${killBelow} — survives this review` };
+  return { dead: false, reason: `${killMetric}=${v} ≥ ${killBelow}: survives this review` };
 }
 
 export interface SilenceRow {

@@ -70,14 +70,14 @@ export async function advanceStage(
   const cur = await readStage(db, tenant, target);
   if (cur.stage === 'promoted') {
     const rerun = await runSuite(db, tenant, gate.suite, targetName, fn, { now: at });
-    return { advanced: false, run: rerun, reasons: ['already promoted — nothing to advance'] };
+    return { advanced: false, run: rerun, reasons: ['already promoted: nothing to advance'] };
   }
   if (gate.stage !== cur.stage) {
     const wrong = await runSuite(db, tenant, gate.suite, targetName, fn, { now: at });
     return {
       advanced: false,
       run: wrong,
-      reasons: [`at stage ${cur.stage}, gate is for ${gate.stage} — advance one step at a time`],
+      reasons: [`at stage ${cur.stage}, gate is for ${gate.stage}: advance one step at a time`],
     };
   }
   const run = await runSuite(db, tenant, gate.suite, targetName, fn, { now: at });
@@ -87,7 +87,7 @@ export async function advanceStage(
     return {
       advanced: false,
       run,
-      reasons: [`pass rate ${rate.toFixed(2)} < ${gate.minPassRate} — leaving ${gate.stage} refused`],
+      reasons: [`pass rate ${rate.toFixed(2)} < ${gate.minPassRate}: leaving ${gate.stage} refused`],
     };
   }
   const advanceTo: PromoStage = STAGE_ORDER[STAGE_ORDER.indexOf(cur.stage) + 1]!;
@@ -107,7 +107,7 @@ export async function advanceStage(
   if (out.changes === 0) {
     throw new PromotionError(
       'STATE_CONFLICT',
-      `stage for ${target} moved under this advance (was ${cur.stage}) — re-read and gate again`,
+      `stage for ${target} moved under this advance (was ${cur.stage}): re-read and gate again`,
     );
   }
   await db

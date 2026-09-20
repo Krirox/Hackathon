@@ -119,7 +119,7 @@ export function watchRun(
     if (summary.deliverableId) tags.push(`[deliverable:${summary.deliverableId}]`);
     const head =
       state === 'COMPLETED' && summary.deliverableVersion !== undefined
-        ? `Work done — v${summary.deliverableVersion}${summary.prUrl ? ` · ${summary.prUrl}` : ''}`
+        ? `Work done: v${summary.deliverableVersion}${summary.prUrl ? ` · ${summary.prUrl}` : ''}`
         : undefined;
     return fire({
       channel: opts.channel,

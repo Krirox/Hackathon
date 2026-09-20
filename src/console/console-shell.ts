@@ -36,8 +36,8 @@ export interface ConsoleShellRooms {
   category: string;
 }
 
-/** Renders as an em dash whenever a real value is unavailable. */
-const DASH = '—';
+/** Renders as "n/a" whenever a real value is unavailable. */
+const DASH = 'n/a';
 function fmtDollars(n: number): string {
   return `$${n.toFixed(2)}`;
 }
@@ -147,7 +147,7 @@ export function renderConsoleShell(opts: {
   navKey?: string;
   /** Real telemetry. Callers that cannot compute it pass metrics: null → dashes. */
   metrics: ShellMetrics | null;
-  /** Real per-room recency (minutes) keyed by scope; missing rooms render "—". */
+  /** Real per-room recency (minutes) keyed by scope; missing rooms render "n/a". */
   roomRecency: Record<string, number | null>;
 }): string {
   const {
@@ -298,6 +298,7 @@ export function renderConsoleShell(opts: {
       label: 'Workflows',
       href: '/console/dashboard?tab=workflows',
       icon: ICONS.workflows,
+      id: 'console-workflows-btn',
       title: 'Compiler and skill cards (g w)',
     },
     {
@@ -375,11 +376,11 @@ export function renderConsoleShell(opts: {
   * { box-sizing: border-box; }
   /* The shell document inherits the page's own <head> (serve.ts
    * wrapInWorkspaceShell), and detailDocument's standalone stylesheet rules
-   * body{max-width:960px;margin:0 auto;padding:28px 20px} — meant for
-   * unshelled detail pages — would otherwise clamp the whole shell to a
+   * body{max-width:960px;margin:0 auto;padding:28px 20px}, meant for
+   * unshelled detail pages, would otherwise clamp the whole shell to a
    * half-screen column. This block ships after any carried-over head style,
    * so equal-specificity body rules here win the cascade. */
-  html, body { height: 100%; margin: 0; padding: 0; max-width: none; font-size: 13.5px; color: var(--v-ink); background: var(--v-bg-0); overflow: hidden; }
+  html, body { height: 100%; margin: 0; padding: 0; max-width: none; font-size: 13.5px; color: var(--v-ink); background: var(--v-bg-0); background-image: var(--v-spot), var(--v-canvas-dots); background-size: 100% 100%, 9px 9px; background-attachment: fixed, fixed; overflow: hidden; }
   a { color: inherit; text-decoration: none; }
   a:hover { text-decoration: none; }
 
@@ -387,7 +388,7 @@ export function renderConsoleShell(opts: {
   /* Floating glass panels on the brand canvas: the window is transparent so
      the dot-matrix, vignette and spotlight from theme.ts read through, and
      the rail / topbar / surface are separate glass layers with air between
-     them — the same composition as the marketing pages, tuned for a
+     them: the same composition as the marketing pages, tuned for a
      full-viewport workbench. */
   .vc-window { display: flex; gap: 14px; height: 100vh; width: 100%; padding: 14px; position: relative; z-index: 1; background: transparent; }
 
@@ -418,7 +419,7 @@ export function renderConsoleShell(opts: {
   .vc-rail-group { margin-bottom: 10px; }
   .vc-rail-label { font-family: var(--font-mono); font-size: 9.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .16em; color: var(--v-faint); margin: 12px 8px 5px; }
   .vc-rail-item {
-    display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: var(--radius-sm);
+    display: flex; align-items: center; gap: 9px; padding: 7px 11px; border-radius: 9999px;
     color: var(--v-ink-2); font-size: 13px; font-weight: 400; position: relative;
     transition: background .12s var(--ease-out), color .12s var(--ease-out);
   }
@@ -451,7 +452,7 @@ export function renderConsoleShell(opts: {
     box-shadow: var(--v-shadow-bar);
   }
   .vc-topbar-title { min-width: 0; display: flex; align-items: center; gap: 10px; }
-  /* Chrome, not the page's heading — the content owns the document heading
+  /* Chrome, not the page's heading: the content owns the document heading
      (renderListPage / detailDocument / the page module). Keeping this a plain
      element is what guarantees one heading per page rather than two. */
   .vc-topbar-title-text { display: block; font-size: 16px; font-weight: 500; letter-spacing: -0.015em; color: var(--v-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -493,9 +494,9 @@ export function renderConsoleShell(opts: {
      reach it. Re-apply the pill here so the escape hatch looks intentional. */
   .ws-scroll > a:first-of-type,
   .vc-scroll > a:first-of-type {
-    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; margin-bottom: 16px;
-    background: var(--v-bg-1); border: 1px solid var(--v-line); border-radius: var(--radius-md);
-    font-size: 13px; font-weight: 500; color: var(--v-accent); box-shadow: var(--v-card-shadow);
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; margin-bottom: 16px;
+    background: var(--v-bg-1); border: 1px solid var(--v-line); border-radius: 9999px;
+    font-size: 12.5px; font-weight: 550; color: var(--v-accent); box-shadow: var(--v-card-shadow);
     transition: background .15s var(--ease-out), border-color .15s var(--ease-out);
   }
   .ws-scroll > a:first-of-type:hover,
@@ -542,7 +543,7 @@ export function renderConsoleShell(opts: {
 <div class="v-spot" aria-hidden="true"></div>
 <div class="vc-window">
   <aside class="vc-rail" id="console-rail" aria-label="Console navigation">
-    <a class="vc-brand" href="/console/dashboard" title="Vital Console — home">
+    <a class="vc-brand" href="/console/dashboard" title="Vital Console: home">
       <span class="v-wordmark">Vital<sup>®</sup></span>
       <span class="vc-brand-sub">${esc(tenantName)}</span>
     </a>
@@ -565,7 +566,7 @@ export function renderConsoleShell(opts: {
     <div class="vc-rail-foot">
       ${telemetryStrip}
       <div class="vc-profile">
-        <a href="/account" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;" title="${esc(emailStr)} (${esc(roleStr)}) — account and security">
+        <a href="/account" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;" title="${esc(emailStr)} (${esc(roleStr)}) · account and security">
           <span class="vc-profile-avatar">${esc(initials)}</span>
           <span class="vc-profile-info">
             <span class="vc-profile-name" style="display:block;">${esc(userName)}</span>
@@ -600,7 +601,7 @@ export function renderConsoleShell(opts: {
         <kbd>⌘K</kbd>
       </form>
       <a class="vc-topbar-chat" href="/console/buzz/engineering" id="go-to-chat-btn" title="Open the Workspace chat (g c)"><span class="vc-chat-icon">${ICONS.chat}</span><span>Chat</span></a>
-      <a class="vc-icon-btn" href="/console/dashboard?tab=approvals" aria-label="Approvals${pendingTotal > 0 ? ` — ${pendingTotal} waiting` : ''}" data-vtip="Approvals">${ICONS.approvals}${pendingTotal > 0 ? '<span class="vc-dot"></span>' : ''}</a>
+      <a class="vc-icon-btn" href="/console/dashboard?tab=approvals" aria-label="Approvals${pendingTotal > 0 ? ` (${pendingTotal} waiting)` : ''}" data-vtip="Approvals">${ICONS.approvals}${pendingTotal > 0 ? '<span class="vc-dot"></span>' : ''}</a>
       <a class="vc-icon-btn" href="/setup" aria-label="Help and setup" data-vtip="Help">${ICONS.help}</a>
       <span style="display:flex;align-items:center;gap:8px;">${themeToggleButton()}<a href="/account" class="vc-profile-avatar" style="width:32px;height:32px;" title="${esc(emailStr)} (${esc(roleStr)})">${esc(initials)}</a></span>
     </header>
@@ -637,16 +638,18 @@ export function renderConsoleShell(opts: {
   /* Brand spotlight: --mx/--my feed the .v-spot gradient, same as the
      marketing pages. Passive + rAF-throttled so it never blocks scrolling. */
   let queued = false;
-  document.addEventListener('mousemove', (event) => {
+  const setPos = (e) => {
     if (queued) return;
     queued = true;
     requestAnimationFrame(() => {
       queued = false;
       const root = document.documentElement.style;
-      root.setProperty('--mx', event.clientX + 'px');
-      root.setProperty('--my', event.clientY + 'px');
+      root.setProperty('--mx', e.clientX + 'px');
+      root.setProperty('--my', e.clientY + 'px');
     });
-  }, { passive: true });
+  };
+  window.addEventListener('pointermove', setPos, { passive: true });
+  window.addEventListener('pointerdown', setPos, { passive: true });
 })();
 </script>
 <script>${THEME_TOGGLE_SCRIPT}</script>`;

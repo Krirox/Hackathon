@@ -325,7 +325,7 @@ export async function updateIssue(
   const existing = await getIssue(db, tenant, issueId);
   if (!existing) return null;
   if (input.expectedUpdatedAt && input.expectedUpdatedAt !== existing.updatedAt) {
-    throw new Error('[issues:STALE_WRITE] this card changed while you were editing — reload and retry');
+    throw new Error('[issues:STALE_WRITE] this card changed while you were editing. Reload and retry');
   }
   const title = input.title !== undefined ? input.title.trim().slice(0, 300) : existing.title;
   if (!title) throw new Error('[issues:BAD_TITLE] title is required');
@@ -440,14 +440,14 @@ export async function getGitHubSyncConfig(db: AsyncDb, tenant: string): Promise<
     const key = secretsKeyFromEnv();
     if (!key) {
       throw new Error(
-        '[github:TOKEN_SEALED] stored GitHub token is sealed but VITAL_SECRETS_KEY is not set — set it (or re-link the repository) to resume sync',
+        '[github:TOKEN_SEALED] stored GitHub token is sealed but VITAL_SECRETS_KEY is not set: set it (or re-link the repository) to resume sync',
       );
     }
     try {
       token = openSecret(stored, key);
     } catch (e) {
       throw new Error(
-        `[github:TOKEN_UNSEALABLE] stored GitHub token did not open: ${(e as Error).message} — re-link the repository with a fresh token`,
+        `[github:TOKEN_UNSEALABLE] stored GitHub token did not open: ${(e as Error).message}. Re-link the repository with a fresh token`,
         { cause: e },
       );
     }
@@ -825,7 +825,7 @@ export async function pushCreateToGitHub(
 ): Promise<{ ok: boolean; ghNumber?: number; error?: string }> {
   const cfg = await getGitHubSyncConfig(db, tenant);
   if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
-  if (!cfg.token?.trim()) return { ok: false, error: 'no token — push requires a PAT for private repos and write access' };
+  if (!cfg.token?.trim()) return { ok: false, error: 'no token: push requires a PAT for private repos and write access' };
   const parsed = parseGitHubRepoPath(cfg.repo);
   if (!parsed) return { ok: false, error: 'invalid repo path' };
   const fetchFn = opts?.fetchFn ?? fetch;
@@ -835,7 +835,7 @@ export async function pushCreateToGitHub(
       headers: githubHeaders(cfg.token),
       body: JSON.stringify({
         title: issue.title,
-        body: issue.description || `Created from Vital board — ${issue.id}`,
+        body: issue.description || `Created from Vital board · ${issue.id}`,
         labels: issueToGitHubLabels(issue),
       }),
     });
@@ -1299,7 +1299,7 @@ function renderIssuesList(byState: Map<IssueState, IssueRow[]>, comments: IssueC
         <span class="iss-list-chevron">▼</span>
         <span class="iss-dot" style="background:${STATE_DOT[state]}"></span>
         <span class="iss-list-group-title">${esc(state)}</span>
-        <span class="iss-col-dash">—</span>
+        <span class="iss-col-dash"></span>
         <span class="iss-list-group-count">${issues.length}</span>
       </div>
       <div class="iss-list-rows" data-state="${esc(state)}">
@@ -1314,7 +1314,7 @@ function columnHeader(state: IssueState, issues: IssueRow[]): string {
   return `<header class="iss-col-head">
   <span class="iss-dot" style="background:${STATE_DOT[state]}"></span>
   <h2 class="iss-col-title">${esc(state)}</h2>
-  <span class="iss-col-dash">—</span>
+  <span class="iss-col-dash"></span>
   <span class="iss-col-count">${count}</span>
   <span class="iss-col-dots" aria-hidden="true">···</span>
 </header>`;
@@ -2587,7 +2587,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
 /** Standalone document for drawer fetches — same chrome, no workspace shell. */
 export function issuesDocument(title: string, inner: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Issues</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Issues</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head><body style="margin:0;height:100%;overflow:hidden;">${inner}</body></html>`;
 }

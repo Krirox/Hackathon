@@ -572,7 +572,7 @@ export const MEETING_ROOM_JS = String.raw`(() => {
   function pinPeer(peerId) {
     if (pinnedPeerId === peerId) {
       pinnedPeerId = null; // unpin returns control to auto-raise
-      toast('Unpinned — back to active speaker');
+      toast('Unpinned. Back to active speaker');
     } else {
       pinnedPeerId = peerId;
       setHero(peerId);
@@ -867,7 +867,7 @@ export const MEETING_ROOM_JS = String.raw`(() => {
         var muted2 = actions.querySelector('.notes-muted');
         if (muted2) muted2.remove();
         var li2 = document.createElement('li');
-        li2.textContent = speaker + ' — ' + text;
+        li2.textContent = speaker + ': ' + text;
         actions.appendChild(li2);
       }
     }

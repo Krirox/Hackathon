@@ -480,7 +480,7 @@ export class OrganizationalCompiler {
 
     switch (to) {
       case 'QUARANTINE':
-        break; // entry is always allowed — quarantine is where scrutiny happens, not a reward.
+        break; // entry is always allowed: quarantine is where scrutiny happens, not a reward.
       case 'SHADOW':
         if (!has('regression')) reasons.push('regression tests not passing');
         if (!card.evalRef) reasons.push('card has no eval suite reference (evals are the spec)');
@@ -501,7 +501,7 @@ export class OrganizationalCompiler {
         break;
       case 'DEMOTED':
       case 'RETIRED':
-        break; // always allowed downward — that is the point.
+        break; // always allowed downward: that is the point.
       default:
         reasons.push(`no gate defined for ${to}`);
     }
@@ -520,7 +520,7 @@ export class OrganizationalCompiler {
     if (out.changes === 0) {
       throw new CompilerError(
         'STATE_CONFLICT',
-        `card ${cardId} moved under this advance (was ${card.state}) — re-read and gate again`,
+        `card ${cardId} moved under this advance (was ${card.state}): re-read and gate again`,
       );
     }
     const next = (await this.get(tenant, cardId))!;
@@ -561,7 +561,7 @@ export class OrganizationalCompiler {
         ok: false,
         card,
         reasons: [
-          `cross_role transfer test for "${role}" has not passed — a skill that only works where it was born stays there`,
+          `cross_role transfer test for "${role}" has not passed: a skill that only works where it was born stays there`,
         ],
       };
     }
@@ -574,7 +574,7 @@ export class OrganizationalCompiler {
       if (!fresh || fresh.state !== 'PROMOTED' || fresh.version !== card.version) {
         throw new CompilerError(
           'STATE_CONFLICT',
-          `card ${cardId} moved during scope expansion — re-read and gate again`,
+          `card ${cardId} moved during scope expansion: re-read and gate again`,
         );
       }
       if (fresh.scopeRoles.includes(role)) return { ok: false, card: fresh, reasons: ['role already in scope'] };
@@ -596,7 +596,7 @@ export class OrganizationalCompiler {
       if (out.changes === 0) {
         throw new CompilerError(
           'STATE_CONFLICT',
-          `card ${cardId} moved during scope expansion — re-read and gate again`,
+          `card ${cardId} moved during scope expansion: re-read and gate again`,
         );
       }
       await this.recordRevision(

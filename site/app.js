@@ -130,7 +130,7 @@
           paint(
             'live',
             `console reachable · ${j.engine} · ${new Date(j.at).toLocaleTimeString()}`,
-            'Reachability only — the process answered. Ingestion, execution, and measurement readiness are reported inside the console.',
+            'Reachability only: the process answered. Ingestion, execution, and measurement readiness are reported inside the console.',
           ),
         () => paint('down', 'console not reachable')
       );

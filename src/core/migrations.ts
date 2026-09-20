@@ -69,7 +69,7 @@ export async function rollbackMigration(db: AsyncDb, migrations: Migration[], na
   if (!m) throw new MigrationError('UNKNOWN_MIGRATION', `no migration named "${name}"`);
   const row = (await db.prepare('SELECT name FROM schema_migrations WHERE name = ?').get(name)) as
     { name: string } | undefined;
-  if (!row) throw new MigrationError('NOT_APPLIED', `migration "${name}" is not applied — nothing to roll back`);
+  if (!row) throw new MigrationError('NOT_APPLIED', `migration "${name}" is not applied: nothing to roll back`);
   await db.transaction(async () => {
     await db.exec(m.down);
     await db.prepare('DELETE FROM schema_migrations WHERE name = ?').run(name);
