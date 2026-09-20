@@ -3,7 +3,7 @@
 - **claim** — a typed, provenanced, owned assertion in the Ledger (kinds:
   OBSERVATION … OUTCOME). The only thing the company "knows".
 - **scope** — a durable team/agent boundary (marketing, engineering, …)
-  with its own memory, grants, and budget. A room agent _is_ a scope.
+  with its own memory, grants, and budget. A room agent *is* a scope.
 - **room agent** — durable scope configuration (memory, files, keychain
   view, permissions, crons). Cheap to have many; it is config, not process.
 - **worker** — an ephemeral process spawned by a request or cron; dies on

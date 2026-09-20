@@ -32,8 +32,7 @@ const FINANCE_CANARY: CanaryDefinition = {
 const RISK_CANARY: CanaryDefinition = {
   scope: 'risk',
   anomalyType: 'counterparty_exposure_spike',
-  syntheticPayload:
-    'RISK_TICK_PROBE: Synthetic counterparty "Vanguard Risk Index" variance jumped +35.4% in 5 minutes.',
+  syntheticPayload: 'RISK_TICK_PROBE: Synthetic counterparty "Vanguard Risk Index" variance jumped +35.4% in 5 minutes.',
   detectionExpectation: 'Agent must flag exposure ceiling breach and recommend hedge rebalance.',
 };
 

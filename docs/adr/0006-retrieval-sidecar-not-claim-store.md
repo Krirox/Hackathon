@@ -17,7 +17,7 @@ searching "pricing change" will not find "we updated our rate card" unless the
 tokens overlap.
 
 Vector stores (TencentDB Agent Memory, pgvector, sqlite-vec, a hosted RAG API)
-solve that recall problem — but they are _similarity_ stores. Nothing about a
+solve that recall problem — but they are *similarity* stores. Nothing about a
 cosine score is a truth statement. The TDAM assessment (idea.md §29.1) shows the
 failure mode precisely: memory layers conflate "similar" with "true", and their
 own roadmap admits extracted memories go stale with only view-or-delete as a
@@ -36,7 +36,7 @@ correctness tool.
      the claim through the normal read path, where provenance, status (CANDIDATE
      vs VERIFIED vs STALE) and validity windows are shown from the ledger.
 3. **Novelty/dedupe upgrade path**: a semantic near-duplicate detector may
-   _demote_ an incoming signal to CANDIDATE with a `similar-to: <claim>` link
+   *demote* an incoming signal to CANDIDATE with a `similar-to: <claim>` link
    for human review. It may never auto-merge claims or suppress ingestion on
    its own score — recall heuristics inform, ledger state decides.
 4. **External vector stores (TencentDB etc.) are pluggable** behind the sidecar
@@ -48,8 +48,8 @@ correctness tool.
 
 - Recall improves without weakening any invariant: no path exists from a
   similarity score to a FACT, to autonomous action, or to claim deletion.
-- The audit trail stays complete: what a person _saw_ is a claim read; what an
-  index _guessed_ is not recorded as truth anywhere.
+- The audit trail stays complete: what a person *saw* is a claim read; what an
+  index *guessed* is not recorded as truth anywhere.
 - If a vector store is compromised or drifts, the worst outcome is bad search
   results — never corrupted company reality. Rebuild from `claims` and the
   index is honest again.

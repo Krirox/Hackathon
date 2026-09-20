@@ -115,14 +115,7 @@ export function verifyReviewToken(
     if (a.length !== b.length || !timingSafeEqual(a, b)) {
       return { valid: false };
     }
-    return {
-      valid: true,
-      tenant: parsed.tenant,
-      requestId: parsed.requestId,
-      action: parsed.action,
-      expiresAt,
-      requestUpdatedAt,
-    };
+    return { valid: true, tenant: parsed.tenant, requestId: parsed.requestId, action: parsed.action, expiresAt, requestUpdatedAt };
   } catch {
     return { valid: false };
   }

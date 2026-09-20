@@ -1,5 +1,9 @@
 import type { AsyncDb } from '../core/db.ts';
-import type { MeetingProcessingStatus, SttProvider, EmbeddingProvider } from './types.ts';
+import type {
+  MeetingProcessingStatus,
+  SttProvider,
+  EmbeddingProvider,
+} from './types.ts';
 import {
   getMeetingById,
   updateMeetingProcessingStatus,

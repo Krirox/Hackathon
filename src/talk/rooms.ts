@@ -10,8 +10,7 @@ export interface CanonicalRoomDefinition {
   readonly name: string;
   readonly scope: string;
   readonly channel: string;
-  readonly agentName: string;
-  readonly duties: string;
+  readonly agentName: string;  readonly duties: string;
   readonly triggers: string;
   readonly healthMetric: string;
   readonly defaultMission: string;

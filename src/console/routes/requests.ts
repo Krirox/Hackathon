@@ -78,7 +78,12 @@ export function requestsRoutes(): RouteDef<RequestsEnv>[] {
               return current && current.id !== claimId ? current.id : null;
             },
           );
-          await ctx.env.audit(ctx.env.actorOf(auth), 'console.refresh_evidence', `request:${requestId}`, ctx.at);
+          await ctx.env.audit(
+            ctx.env.actorOf(auth),
+            'console.refresh_evidence',
+            `request:${requestId}`,
+            ctx.at,
+          );
           jsonOut(200, {
             ok: true,
             id: requestId,
@@ -101,6 +106,9 @@ export function requestsRoutes(): RouteDef<RequestsEnv>[] {
 }
 
 /** Capability + surface of each route, for the manifest test and reviewers. */
-export const REQUESTS_CAPABILITIES: Record<string, { capability: Capability; surface: 'api' | 'html' }> = {
+export const REQUESTS_CAPABILITIES: Record<
+  string,
+  { capability: Capability; surface: 'api' | 'html' }
+> = {
   'POST /api/requests/:id/refresh-evidence': { capability: 'session', surface: 'api' },
 };

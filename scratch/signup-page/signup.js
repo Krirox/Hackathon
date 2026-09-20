@@ -31,18 +31,10 @@
   dots.forEach((dot, i) => dot.addEventListener('click', () => show(i)));
 
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  visual.addEventListener('mouseenter', () => {
-    hovering = true;
-  });
-  visual.addEventListener('mouseleave', () => {
-    hovering = false;
-  });
-  visual.addEventListener('focusin', () => {
-    hovering = true;
-  });
-  visual.addEventListener('focusout', () => {
-    hovering = false;
-  });
+  visual.addEventListener('mouseenter', () => { hovering = true; });
+  visual.addEventListener('mouseleave', () => { hovering = false; });
+  visual.addEventListener('focusin', () => { hovering = true; });
+  visual.addEventListener('focusout', () => { hovering = false; });
   timer = window.setInterval(() => {
     if (!hovering && !document.hidden) show((index + 1) % dots.length);
   }, 6500);
@@ -101,7 +93,7 @@
     lastName: document.getElementById('last-name'),
     email: document.getElementById('email'),
     password: document.getElementById('password'),
-    consent: document.getElementById('consent'),
+    consent: document.getElementById('consent')
   };
 
   const fail = (field, message) => {
@@ -143,8 +135,7 @@
   document.querySelectorAll('.social-btn').forEach((button) => {
     button.addEventListener('click', () => {
       const provider = button.dataset.provider || 'This provider';
-      alert.textContent =
-        '● ' + provider.toLowerCase() + ' sign-up completes on your organization’s console — continue with email here.';
+      alert.textContent = '● ' + provider.toLowerCase() + ' sign-up completes on your organization’s console — continue with email here.';
       alert.className = 'signup-alert info';
       alert.hidden = false;
     });

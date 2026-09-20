@@ -191,7 +191,10 @@ export async function runJob(
   // this, an operator's stop halts the worker and leaves Lambda spending money
   // on the same scope. Checked here rather than deeper so the refusal also
   // precedes `assertApproved` and the model call.
-  if ((await checkKill(db, job.tenant, req.targetScope, '*')) || (await checkKill(db, job.tenant, '*', '*'))) {
+  if (
+    (await checkKill(db, job.tenant, req.targetScope, '*')) ||
+    (await checkKill(db, job.tenant, '*', '*'))
+  ) {
     const reason = `kill switch engaged for scope "${req.targetScope}"`;
     // Terminal refusal, not a retry: a stop is an operator decision, and an
     // SQS redelivery would spend exactly the money the stop was protecting. A

@@ -99,7 +99,9 @@ const sampleKey = (tenant: string): string => `activation:sample:${tenant}`;
  */
 async function metaGet(db: AsyncDb, key: string): Promise<string | null> {
   return memo(`activation:meta:${key}`, async () => {
-    const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as { value: string } | undefined;
+    const r = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(key)) as
+      | { value: string }
+      | undefined;
     return r ? String(r.value) : null;
   });
 }

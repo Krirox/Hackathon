@@ -1,12 +1,4 @@
-import {
-  CANONICAL_ROOMS,
-  loadRoomConfig,
-  saveRoomConfig,
-  ROOM_BUDGET_MAX_DOLLARS,
-  ROOM_BUDGET_MAX_TOKENS,
-  type RoomConfig,
-  type RoomAutonomy,
-} from '../talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, saveRoomConfig, ROOM_BUDGET_MAX_DOLLARS, ROOM_BUDGET_MAX_TOKENS, type RoomConfig, type RoomAutonomy } from '../talk/rooms.ts';
 import type { AsyncDb } from '../core/db.ts';
 
 export interface PresetDefinition {

@@ -1,520 +1,360 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>VITAL — Governed Ship-to-Result</title>
-    <meta
-      name="description"
-      content="Vital closes the release loop with cited assets, human approval, frozen decisions, and measured outcomes — the grounding layer for production agents, not an autonomous company OS."
-    />
-    <!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
-    <meta name="vital-console-url" content="" />
-    <!-- Replace vital.company with your own domain before deploying. -->
-    <link rel="canonical" href="https://vital.company/" />
-    <meta name="robots" content="index,follow" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#111111" />
-    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="manifest" href="manifest.json" />
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="VITAL" />
-    <meta property="og:url" content="https://vital.company/" />
-    <meta property="og:title" content="VITAL — Governed Ship-to-Result" />
-    <meta
-      property="og:description"
-      content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work, not an autonomous company OS."
-    />
-    <meta property="og:image" content="https://vital.company/og-cover.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="VITAL — governed release workflow" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="VITAL — Governed Ship-to-Result" />
-    <meta
-      name="twitter:description"
-      content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work."
-    />
-    <meta name="twitter:image" content="https://vital.company/og-cover.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="styles.css" />
-    <!-- Three.js 3D Engine (served locally from assets/three.min.js) -->
-    <script src="app.js" defer></script>
-    <script src="assets/three.min.js" defer></script>
-    <script src="graphics.js" defer></script>
-  </head>
-  <body>
-    <!-- Matrix Background Canvas -->
-    <a class="skip-link" href="#top">Skip to content</a>
-    <noscript
-      ><div class="noscript-note">
-        <p>
-          <strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval
-          &#8594; measured outcome. Vital is the accountability layer for agent work.
-        </p>
-        <p>
-          <a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a>
-          &middot; <a href="/login">Sign in to your console (existing members)</a> &middot;
-          <a href="mailto:hello@vital.company">Contact us</a>
-        </p>
-        <p>
-          All content and contact paths on this page work without JavaScript. Sign in is invite-only and names its bound
-          organization on login.
-        </p>
-      </div></noscript
-    >
-    <canvas id="bg-canvas" aria-hidden="true"></canvas>
-    <div class="bg-vignette" aria-hidden="true"></div>
-    <div class="fx-grain" aria-hidden="true"></div>
-    <div class="fx-spotlight" aria-hidden="true"></div>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VITAL — Governed Ship-to-Result</title>
+<meta name="description" content="Vital closes the release loop with cited assets, human approval, frozen decisions, and measured outcomes — the grounding layer for production agents, not an autonomous company OS."/>
+<!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
+<meta name="vital-console-url" content=""/>
+<!-- Replace vital.company with your own domain before deploying. -->
+<link rel="canonical" href="https://vital.company/"/>
+<meta name="robots" content="index,follow"/>
+<meta name="color-scheme" content="dark"/>
+<meta name="theme-color" content="#111111"/>
+<link rel="icon" href="favicon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="apple-touch-icon.png"/>
+<link rel="manifest" href="manifest.json"/>
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="VITAL"/>
+<meta property="og:url" content="https://vital.company/"/>
+<meta property="og:title" content="VITAL — Governed Ship-to-Result"/>
+<meta property="og:description" content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work, not an autonomous company OS."/>
+<meta property="og:image" content="https://vital.company/og-cover.png"/>
+<meta property="og:image:width" content="1200"/>
+<meta property="og:image:height" content="630"/>
+<meta property="og:image:alt" content="VITAL — governed release workflow"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="VITAL — Governed Ship-to-Result"/>
+<meta name="twitter:description" content="Detect a change → cited assets → human approval → measured outcome. The accountability layer for agent work."/>
+<meta name="twitter:image" content="https://vital.company/og-cover.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css"/>
+<!-- Three.js 3D Engine (served locally from assets/three.min.js) -->
+<script src="app.js" defer></script>
+<script src="assets/three.min.js" defer></script>
+<script src="graphics.js" defer></script>
+</head>
+<body>
+<!-- Matrix Background Canvas -->
+<a class="skip-link" href="#top">Skip to content</a>
+<noscript><div class="noscript-note"><p><strong>Governed release workflow.</strong> Detect a change &#8594; cited assets &#8594; human approval &#8594; measured outcome. Vital is the accountability layer for agent work.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="/login">Sign in to your console (existing members)</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>All content and contact paths on this page work without JavaScript. Sign in is invite-only and names its bound organization on login.</p></div></noscript>
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
+<div class="bg-vignette" aria-hidden="true"></div>
+<div class="fx-grain" aria-hidden="true"></div>
+<div class="fx-spotlight" aria-hidden="true"></div>
 
-    <!-- Header Navigation Bar -->
-    <header id="site-header">
-      <div class="header-bar">
-        <a class="pill" href="#top">‹ HOME ›</a>
-        <button
-          class="brand"
-          id="menu-btn"
-          type="button"
-          aria-label="Open menu"
-          aria-controls="overlay"
-          aria-haspopup="dialog"
-          aria-expanded="false"
-          hidden
-        >
-          <span>vital ›</span>
-          <span class="burger"><i></i><i></i></span>
-        </button>
-        <nav class="header-nav" aria-label="Account and contact">
-          <a
-            data-console
-            data-console-path="/login"
-            href="/login"
-            class="nav-signin"
-            data-cta="console-signin"
-            aria-label="Sign in to your console, existing members, invite-only"
-            >Sign in</a
-          >
-          <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
-            <span>Contact</span>
-            <span class="cta-accent-icon">›</span>
-          </a>
-        </nav>
+<!-- Header Navigation Bar -->
+<header id="site-header">
+  <div class="header-bar">
+    <a class="pill" href="#top">‹ HOME ›</a>
+    <button class="brand" id="menu-btn" type="button" aria-label="Open menu" aria-controls="overlay" aria-haspopup="dialog" aria-expanded="false" hidden>
+      <span>vital ›</span>
+      <span class="burger"><i></i><i></i></span>
+    </button>
+    <nav class="header-nav" aria-label="Account and contact">
+      <a data-console data-console-path="/login" href="/login" class="nav-signin" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
+      <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+        <span>Contact</span>
+        <span class="cta-accent-icon">›</span>
+      </a>
+    </nav>
+  </div>
+</header>
+
+<!-- Fullscreen Menu Overlay -->
+<dialog id="overlay" aria-label="Site menu">
+  <button id="overlay-close" type="button" aria-label="Close menu" autofocus>CLOSE ×</button>
+  <nav class="overlay-links" aria-label="Main navigation">
+    <a href="#top">Home</a>
+    <a href="#statement">Thesis</a>
+    <a href="#platform">Platform</a>
+    <a href="#systems">Subsystems</a>
+    <a href="#wedge">The Wedge</a>
+    <a data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in</a>
+    <a href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry" data-cta="contact">Contact</a>
+  </nav>
+  <div class="overlay-foot">VITAL — GOVERNED SHIP-TO-RESULT · MIT CORE</div>
+</dialog>
+
+<main id="top" tabindex="-1">
+<div class="story-experience-track" id="story-track">
+  <div class="story-sticky-viewport" id="story-viewport">
+
+    <div class="hero-overlay" id="hero-overlay">
+      <div class="orbit-field" aria-hidden="true">
+        <svg viewBox="-280 -40 560 340" preserveAspectRatio="xMidYMid slice">
+          <g fill="none" stroke="currentColor" stroke-width="0.55">
+            <ellipse rx="250" ry="92" transform="rotate(-14)"/>
+            <ellipse rx="228" ry="84" transform="rotate(16)"/>
+            <ellipse rx="206" ry="76" transform="rotate(-32)"/>
+            <ellipse rx="184" ry="68" transform="rotate(38)"/>
+            <ellipse rx="162" ry="60" transform="rotate(-50)"/>
+            <ellipse rx="262" ry="98" transform="rotate(6)"/>
+            <ellipse rx="140" ry="52" transform="rotate(58)"/>
+          </g>
+        </svg>
       </div>
-    </header>
+      <div class="hero-content">
+        <div class="badge-wrap">
+          <div class="eyebrow-badge">
+            <span class="badge-pulse-dot"></span>
+            <span>VITAL / SHIP-TO-RESULT WEDGE</span>
+          </div>
+        </div>
+        
+        <h1 class="hero-title">Governed release workflow</h1>
+        <p class="hero-subtitle">Detect a change → cited assets → human approval → measured outcome. Vital is the accountability layer for agent work — not an autonomous company OS.</p>
+        <div class="cta-actions hero-actions">
+          <a class="cta-btn" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">Sign in to your console</a>
+        </div>
+        <p class="signin-note" data-signin-note>Sign in is for existing members of a provisioned console, which names its bound organization on login. Membership is invite-only — new pilots start via a walkthrough request.</p>
+      </div>
 
-    <!-- Fullscreen Menu Overlay -->
-    <dialog id="overlay" aria-label="Site menu">
-      <button id="overlay-close" type="button" aria-label="Close menu" autofocus>CLOSE ×</button>
-      <nav class="overlay-links" aria-label="Main navigation">
-        <a href="#top">Home</a>
-        <a href="#statement">Thesis</a>
-        <a href="#platform">Platform</a>
-        <a href="#systems">Subsystems</a>
-        <a href="#wedge">The Wedge</a>
-        <a
-          data-console
-          data-console-path="/login"
-          href="/login"
-          data-cta="console-signin"
-          aria-label="Sign in to your console, existing members, invite-only"
-          >Sign in</a
-        >
-        <a href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry" data-cta="contact">Contact</a>
-      </nav>
-      <div class="overlay-foot">VITAL — GOVERNED SHIP-TO-RESULT · MIT CORE</div>
-    </dialog>
+      <!-- Scroll Down Indicator -->
+      <div class="scroll-wrap">
+        <a class="scroll-hint" href="#statement" id="hero-scroll-hint">
+          <span>Keep Scrolling</span>
+          <svg class="chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M6 9l6 6 6-6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </a>
+      </div>
 
-    <main id="top" tabindex="-1">
-      <div class="story-experience-track" id="story-track">
-        <div class="story-sticky-viewport" id="story-viewport">
-          <div class="hero-overlay" id="hero-overlay">
-            <div class="orbit-field" aria-hidden="true">
-              <svg viewBox="-280 -40 560 340" preserveAspectRatio="xMidYMid slice">
-                <g fill="none" stroke="currentColor" stroke-width="0.55">
-                  <ellipse rx="250" ry="92" transform="rotate(-14)" />
-                  <ellipse rx="228" ry="84" transform="rotate(16)" />
-                  <ellipse rx="206" ry="76" transform="rotate(-32)" />
-                  <ellipse rx="184" ry="68" transform="rotate(38)" />
-                  <ellipse rx="162" ry="60" transform="rotate(-50)" />
-                  <ellipse rx="262" ry="98" transform="rotate(6)" />
-                  <ellipse rx="140" ry="52" transform="rotate(58)" />
-                </g>
-              </svg>
-            </div>
-            <div class="hero-content">
-              <div class="badge-wrap">
-                <div class="eyebrow-badge">
-                  <span class="badge-pulse-dot"></span>
-                  <span>VITAL / SHIP-TO-RESULT WEDGE</span>
-                </div>
-              </div>
+      <div class="hero-meta">
+        <span>LEDGER OF CLAIMS</span>
+        <span class="meta-dot">·</span>
+        <span>SCHEDULER OF ATTENTION</span>
+        <span class="meta-dot">·</span>
+        <span>COMPILER OF PROCEDURES</span>
+      </div>
+    </div>
 
-              <h1 class="hero-title">Governed release workflow</h1>
-              <p class="hero-subtitle">
-                Detect a change → cited assets → human approval → measured outcome. Vital is the accountability layer
-                for agent work — not an autonomous company OS.
-              </p>
-              <div class="cta-actions hero-actions">
-                <a
-                  class="cta-btn"
-                  data-cta="pilot-walkthrough"
-                  href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough"
-                  >Request a pilot walkthrough <span class="arrow" aria-hidden="true">→</span></a
-                >
-                <a
-                  class="secondary-btn"
-                  data-console
-                  data-console-path="/login"
-                  href="/login"
-                  data-cta="console-signin"
-                  aria-label="Sign in to your console, existing members, invite-only"
-                  >Sign in to your console</a
-                >
-              </div>
-              <p class="signin-note" data-signin-note>
-                Sign in is for existing members of a provisioned console, which names its bound organization on login.
-                Membership is invite-only — new pilots start via a walkthrough request.
-              </p>
-            </div>
+    <!-- 2. Second Story Section Overlay (Left Text + Right 3D Anchor) -->
+    <div class="story-overlay" id="story-overlay">
+      <div class="story-overlay-inner">
+        <!-- Left Side: Authoritative Story Content from idea.md -->
+        <div class="story-text-col">
+          <p class="section-label">02 — THE CORE INSIGHT</p>
+          <h2 class="story-heading">One intelligence,<br/>three layers<span class="dot">.</span></h2>
+          <p class="story-lede">
+            Companies have information systems, not an intelligence-and-action system. The gap is not "AI that can think" — it is AI whose thinking is <em>grounded, budgeted, attributable, and safely executable</em>.
+          </p>
 
-            <!-- Scroll Down Indicator -->
-            <div class="scroll-wrap">
-              <a class="scroll-hint" href="#statement" id="hero-scroll-hint">
-                <span>Keep Scrolling</span>
-                <svg class="chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path d="M6 9l6 6 6-6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              </a>
-            </div>
-
-            <div class="hero-meta">
-              <span>LEDGER OF CLAIMS</span>
-              <span class="meta-dot">·</span>
-              <span>SCHEDULER OF ATTENTION</span>
-              <span class="meta-dot">·</span>
-              <span>COMPILER OF PROCEDURES</span>
-            </div>
+          <div class="interactive-prompt" hidden>
+            <span>Click Each Layer to Find Out More</span>
+            <span class="prompt-arrow">›</span>
           </div>
 
-          <!-- 2. Second Story Section Overlay (Left Text + Right 3D Anchor) -->
-          <div class="story-overlay" id="story-overlay">
-            <div class="story-overlay-inner">
-              <!-- Left Side: Authoritative Story Content from idea.md -->
-              <div class="story-text-col">
-                <p class="section-label">02 — THE CORE INSIGHT</p>
-                <h2 class="story-heading">One intelligence,<br />three layers<span class="dot">.</span></h2>
-                <p class="story-lede">
-                  Companies have information systems, not an intelligence-and-action system. The gap is not "AI that can
-                  think" — it is AI whose thinking is <em>grounded, budgeted, attributable, and safely executable</em>.
-                </p>
+          <div class="layer-selector-tabs" id="layer-tabs">
+            <button class="layer-tab" data-layer="1" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
+              <span class="layer-num">01</span>
+              <span class="layer-info">
+                <span class="layer-title">CLAIM · Reality Ledger</span>
+                <span class="layer-description">Append-only typed claims. No model may create FACT. Contradiction is an event, never silence.</span>
+              </span>
+              <span class="tab-indicator">◈</span>
+            </button>
 
-                <div class="interactive-prompt" hidden>
-                  <span>Click Each Layer to Find Out More</span>
-                  <span class="prompt-arrow">›</span>
-                </div>
+            <button class="layer-tab" data-layer="2" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
+              <span class="layer-num">02</span>
+              <span class="layer-info">
+                <span class="layer-title">COMPUTE · Router &amp; Compiler</span>
+                <span class="layer-description">REFLEX → WORKFLOW → MODEL → HUMAN. Procedures graduate quarantine → shadow → pilot → promoted.</span>
+              </span>
+              <span class="tab-indicator">◈</span>
+            </button>
 
-                <div class="layer-selector-tabs" id="layer-tabs">
-                  <button
-                    class="layer-tab"
-                    data-layer="1"
-                    type="button"
-                    aria-controls="floating-layer-card"
-                    aria-pressed="false"
-                    disabled
-                  >
-                    <span class="layer-num">01</span>
-                    <span class="layer-info">
-                      <span class="layer-title">CLAIM · Reality Ledger</span>
-                      <span class="layer-description"
-                        >Append-only typed claims. No model may create FACT. Contradiction is an event, never
-                        silence.</span
-                      >
-                    </span>
-                    <span class="tab-indicator">◈</span>
-                  </button>
+            <button class="layer-tab" data-layer="3" type="button" aria-controls="floating-layer-card" aria-pressed="false" disabled>
+              <span class="layer-num">03</span>
+              <span class="layer-info">
+                <span class="layer-title">TALK · Coordination Surface</span>
+                <span class="layer-description">Typed QUERY / REQUEST / NOTICE. Budgeted, refusable, replayable. Chat is a projection — never the store.</span>
+              </span>
+              <span class="tab-indicator">◈</span>
+            </button>
+          </div>
+        </div>
 
-                  <button
-                    class="layer-tab"
-                    data-layer="2"
-                    type="button"
-                    aria-controls="floating-layer-card"
-                    aria-pressed="false"
-                    disabled
-                  >
-                    <span class="layer-num">02</span>
-                    <span class="layer-info">
-                      <span class="layer-title">COMPUTE · Router &amp; Compiler</span>
-                      <span class="layer-description"
-                        >REFLEX → WORKFLOW → MODEL → HUMAN. Procedures graduate quarantine → shadow → pilot →
-                        promoted.</span
-                      >
-                    </span>
-                    <span class="tab-indicator">◈</span>
-                  </button>
-
-                  <button
-                    class="layer-tab"
-                    data-layer="3"
-                    type="button"
-                    aria-controls="floating-layer-card"
-                    aria-pressed="false"
-                    disabled
-                  >
-                    <span class="layer-num">03</span>
-                    <span class="layer-info">
-                      <span class="layer-title">TALK · Coordination Surface</span>
-                      <span class="layer-description"
-                        >Typed QUERY / REQUEST / NOTICE. Budgeted, refusable, replayable. Chat is a projection — never
-                        the store.</span
-                      >
-                    </span>
-                    <span class="tab-indicator">◈</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="story-stage-anchor" id="story-stage-anchor">
-                <div class="stage-3d-wrapper" id="stage-3d-wrapper" aria-hidden="true">
-                  <div id="canvas-3d-container"></div>
-                </div>
-                <div id="floating-layer-card" class="floating-layer-card" role="status" aria-atomic="true">
-                  <div class="card-status-line">
-                    <span class="card-pulse-dot"></span>
-                    <span class="card-tag" id="card-tag">Governed workflow</span>
-                  </div>
-                  <p class="card-description" id="card-description">
-                    Human approval, frozen decisions, and replayable evidence on every release.
-                  </p>
-                </div>
-              </div>
+        <div class="story-stage-anchor" id="story-stage-anchor">
+          <div class="stage-3d-wrapper" id="stage-3d-wrapper" aria-hidden="true">
+            <div id="canvas-3d-container"></div>
+          </div>
+          <div id="floating-layer-card" class="floating-layer-card" role="status" aria-atomic="true">
+            <div class="card-status-line">
+              <span class="card-pulse-dot"></span>
+              <span class="card-tag" id="card-tag">Governed workflow</span>
             </div>
+            <p class="card-description" id="card-description">Human approval, frozen decisions, and replayable evidence on every release.</p>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- 01 — THESIS -->
-      <section class="dark statement" id="statement">
-        <div class="section-container">
-          <p class="section-label">01 — THESIS</p>
-          <h2 class="reveal">Ground specific changes.<br /><strong>Approve. Execute. Measure.</strong></h2>
-          <p class="lede reveal">
-            Companies have information systems, not an intelligence-and-action system. Vital closes the loop on specific
-            changes — <em>grounded, budgeted, attributable, safely executable</em> — and tracks
-            <span class="num">intelligence cost per good decision.</span>
-          </p>
-          <p class="proof-legend reveal">
-            <span class="proof-tag shipped">Shipped</span> core invariants in code ·
-            <span class="proof-tag demo">Demo</span> illustration below ·
-            <span class="proof-tag pilot">Pilot target</span> pre-registered metric ·
-            <span class="proof-tag roadmap">Roadmap</span> planned surface
-          </p>
-          <div class="stats-grid">
-            <div class="stat-box reveal">
-              <b class="stat-num">95%</b>
-              <span class="proof-note">market research · GenAI pilots with no P&amp;L return — MIT</span>
-            </div>
-            <div class="stat-box reveal">
-              <b class="stat-num">40%</b>
-              <span class="proof-note">market research · agentic projects facing cancellation — Gartner</span>
-            </div>
-            <div class="stat-box reveal">
-              <b class="stat-num lime">Core</b>
-              <span class="proof-note"
-                >engineering tests verify ledger/coord invariants — not business lift or pilot outcomes</span
-              >
-            </div>
-          </div>
-        </div>
-      </section>
+  </div>
+</div>
 
-      <!-- MEDIA SHOWCASE -->
-      <section class="dark media-sec">
-        <div class="media reveal-scale">
-          <img
-            src="https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?q=80&w=1800&auto=format&fit=crop"
-            alt="City infrastructure at night"
-            loading="lazy"
-          />
-          <div class="media-cap">
-            <span>SHIP-TO-RESULT · ILLUSTRATED WALKTHROUGH</span>
-            <span class="demo-label">DEMO · NOT LIVE DATA</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- PLATFORM OPERATIONAL HIGHLIGHTS (Preserved from idea.md) -->
-      <section class="dark platform-highlights" id="platform">
-        <div class="section-container">
-          <div class="grid3">
-            <div class="grid-card reveal">
-              <h4>Ship faster with human gates.</h4>
-              <p>
-                <span class="proof-tag shipped">Shipped</span> Deterministic reflexes carry the bulk of traffic.
-                Frontier models see only what passes the materiality gate — under 1% of arrivals.
-              </p>
-            </div>
-            <div class="grid-card reveal">
-              <h4>From pilots to governed operations.</h4>
-              <p>
-                <span class="proof-tag shipped">Shipped</span> Every decision freezes a Context Bundle. Replay why it
-                was made, what it cost, and what happened — queryable, not archaeology.
-              </p>
-            </div>
-            <div class="grid-card reveal">
-              <h4>Built Around Outcomes, Not Use Cases.</h4>
-              <p>
-                <span class="proof-tag shipped">Shipped</span> No OUTCOME without a comparison basis. Holdouts,
-                pre-registration, and cost roll-up per decision.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 03 — SUBSYSTEMS -->
-      <section class="dark systems" id="systems">
-        <div class="section-container">
-          <p class="section-label">03 — SUBSYSTEMS</p>
-          <h2 class="reveal">Grounded. Budgeted.<br /><strong>Attributable.</strong></h2>
-          <div class="sys-list">
-            <div class="sys reveal">
-              <span class="sys-index">04</span>
-              <div>
-                <h3>Reality Ledger</h3>
-                <p>
-                  FACT · MEASUREMENT · BELIEF · DECISION · ACTION · OUTCOME. Provenance tiers, expiry sweeps, dispute
-                  tickets.
-                </p>
-              </div>
-              <em class="sys-arrow">→</em>
-            </div>
-            <div class="sys reveal">
-              <span class="sys-index">05</span>
-              <div>
-                <h3>World Sense <span class="proof-tag roadmap">Roadmap</span></h3>
-                <p>Genome → Watch Contract. L0 collect, L1 triage, L2 reason. Corroboration ≥ 2 before escalation.</p>
-              </div>
-              <em class="sys-arrow">→</em>
-            </div>
-            <div class="sys reveal">
-              <span class="sys-index">06</span>
-              <div>
-                <h3>Governance</h3>
-                <p>
-                  <span class="proof-tag shipped">Shipped</span> R/A/I matrix per action × scope. Honeytasks, sampling,
-                  kill switches drilled quarterly. Designed for effective human oversight — not a compliance
-                  certification.
-                </p>
-              </div>
-              <em class="sys-arrow">→</em>
-            </div>
-            <div class="sys reveal">
-              <span class="sys-index">07</span>
-              <div>
-                <h3>Economics</h3>
-                <p>
-                  Cost per good decision, tier mix, human minutes reclaimed vs. consumed — reported monthly, honestly.
-                </p>
-              </div>
-              <em class="sys-arrow">→</em>
-            </div>
-          </div>
-          <div class="progress"><span id="progress-bar"></span></div>
-        </div>
-      </section>
-
-      <!-- 04 — THE WEDGE -->
-      <section class="dark wedge" id="wedge">
-        <div class="section-container">
-          <p class="section-label">04 — THE WEDGE</p>
-          <h2 class="reveal">Ship-to-Result.<br /><strong>One loop. One number.</strong></h2>
-          <p class="lede reveal">
-            <span class="proof-tag shipped">Shipped</span> A product change is detected → verified summary → affected
-            segments → drafted assets → human approval → execution → measured outcome → ledger.
-          </p>
-          <p class="lede reveal pilot-targets">
-            <span class="proof-tag pilot">Pilot targets</span> −50% ship-to-launch time · −40% human hours per launch ·
-            customer-facing claim error &lt;1%. Agreed before each pilot — not guaranteed results.
-          </p>
-          <ol class="steps-list reveal">
-            <li class="active"><span class="step-num">01</span> Detect</li>
-            <li><span class="step-num">02</span> Verify</li>
-            <li><span class="step-num">03</span> Approve</li>
-            <li><span class="step-num">04</span> Execute</li>
-            <li><span class="step-num">05</span> Measure</li>
-          </ol>
-        </div>
-      </section>
-
-      <!-- CONTACT & RUN LOOP CTA -->
-      <section class="dark contact" id="contact">
-        <div class="section-container">
-          <div class="cta-box reveal">
-            <h2>Run one loop.<br />Prove it with a number.</h2>
-            <p class="lede">
-              Self-hosted Ship-to-Result on your infrastructure. We help you deploy, wire sources, and run a measured
-              pilot — not a hosted subscription product.
-            </p>
-            <div class="cta-actions">
-              <a
-                class="cta-btn big"
-                data-cta="pilot-walkthrough"
-                href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough"
-              >
-                <span>Request a pilot walkthrough</span>
-                <span class="arrow">→</span>
-              </a>
-              <a
-                class="secondary-btn"
-                data-console
-                data-console-path="/login"
-                href="/login"
-                data-cta="console-signin"
-                aria-label="Sign in to your console, existing members, invite-only"
-              >
-                Sign in to your console
-              </a>
-            </div>
-            <p class="signin-note" data-signin-note>
-              Existing members sign in to a provisioned console that names its bound organization — membership is
-              invite-only, with no public registration.
-            </p>
-            <p id="console-status" role="status">● console status unknown</p>
-            <p class="contact-mono">
-              Questions or deployment planning? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no
-              delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. That is a finding, not a failure.
-            </p>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <footer class="dark-footer">
-      <div class="foot-grid">
-        <div class="f-brand">
-          VITAL<sup>®</sup>
-          <p>The grounding and reflex layer for the sovereign agent stack.</p>
-        </div>
-        <div class="foot-nav">
-          <a href="#top">Top</a>
-          <a href="#statement">Thesis</a>
-          <a href="#platform">Platform</a>
-          <a href="#systems">Subsystems</a>
-          <a href="#wedge">Wedge</a>
-        </div>
-        <div class="foot-meta mono">
-          LEDGER · ROUTER · COMPILER<br />
-          BUZZ · JCODE · QM-ABSORB<br />
-          © 2026 VITAL — ALL RIGHTS RESERVED
-        </div>
+<!-- 01 — THESIS -->
+<section class="dark statement" id="statement">
+  <div class="section-container">
+    <p class="section-label">01 — THESIS</p>
+    <h2 class="reveal">Ground specific changes.<br/><strong>Approve. Execute. Measure.</strong></h2>
+    <p class="lede reveal">Companies have information systems, not an intelligence-and-action system. Vital closes the loop on specific changes — <em>grounded, budgeted, attributable, safely executable</em> — and tracks <span class="num">intelligence cost per good decision.</span></p>
+    <p class="proof-legend reveal"><span class="proof-tag shipped">Shipped</span> core invariants in code · <span class="proof-tag demo">Demo</span> illustration below · <span class="proof-tag pilot">Pilot target</span> pre-registered metric · <span class="proof-tag roadmap">Roadmap</span> planned surface</p>
+    <div class="stats-grid">
+      <div class="stat-box reveal">
+        <b class="stat-num">95%</b>
+        <span class="proof-note">market research · GenAI pilots with no P&amp;L return — MIT</span>
       </div>
-    </footer>
-  </body>
+      <div class="stat-box reveal">
+        <b class="stat-num">40%</b>
+        <span class="proof-note">market research · agentic projects facing cancellation — Gartner</span>
+      </div>
+      <div class="stat-box reveal">
+        <b class="stat-num lime">Core</b>
+        <span class="proof-note">engineering tests verify ledger/coord invariants — not business lift or pilot outcomes</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MEDIA SHOWCASE -->
+<section class="dark media-sec">
+  <div class="media reveal-scale">
+    <img src="https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?q=80&w=1800&auto=format&fit=crop" alt="City infrastructure at night" loading="lazy"/>
+    <div class="media-cap">
+      <span>SHIP-TO-RESULT · ILLUSTRATED WALKTHROUGH</span>
+      <span class="demo-label">DEMO · NOT LIVE DATA</span>
+    </div>
+  </div>
+</section>
+
+<!-- PLATFORM OPERATIONAL HIGHLIGHTS (Preserved from idea.md) -->
+<section class="dark platform-highlights" id="platform">
+  <div class="section-container">
+    <div class="grid3">
+      <div class="grid-card reveal">
+        <h4>Ship faster with human gates.</h4>
+        <p><span class="proof-tag shipped">Shipped</span> Deterministic reflexes carry the bulk of traffic. Frontier models see only what passes the materiality gate — under 1% of arrivals.</p>
+      </div>
+      <div class="grid-card reveal">
+        <h4>From pilots to governed operations.</h4>
+        <p><span class="proof-tag shipped">Shipped</span> Every decision freezes a Context Bundle. Replay why it was made, what it cost, and what happened — queryable, not archaeology.</p>
+      </div>
+      <div class="grid-card reveal">
+        <h4>Built Around Outcomes, Not Use Cases.</h4>
+        <p><span class="proof-tag shipped">Shipped</span> No OUTCOME without a comparison basis. Holdouts, pre-registration, and cost roll-up per decision.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 03 — SUBSYSTEMS -->
+<section class="dark systems" id="systems">
+  <div class="section-container">
+    <p class="section-label">03 — SUBSYSTEMS</p>
+    <h2 class="reveal">Grounded. Budgeted.<br/><strong>Attributable.</strong></h2>
+    <div class="sys-list">
+      <div class="sys reveal">
+        <span class="sys-index">04</span>
+        <div>
+          <h3>Reality Ledger</h3>
+          <p>FACT · MEASUREMENT · BELIEF · DECISION · ACTION · OUTCOME. Provenance tiers, expiry sweeps, dispute tickets.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">05</span>
+        <div>
+          <h3>World Sense <span class="proof-tag roadmap">Roadmap</span></h3>
+          <p>Genome → Watch Contract. L0 collect, L1 triage, L2 reason. Corroboration ≥ 2 before escalation.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">06</span>
+        <div>
+          <h3>Governance</h3>
+          <p><span class="proof-tag shipped">Shipped</span> R/A/I matrix per action × scope. Honeytasks, sampling, kill switches drilled quarterly. Designed for effective human oversight — not a compliance certification.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+      <div class="sys reveal">
+        <span class="sys-index">07</span>
+        <div>
+          <h3>Economics</h3>
+          <p>Cost per good decision, tier mix, human minutes reclaimed vs. consumed — reported monthly, honestly.</p>
+        </div>
+        <em class="sys-arrow">→</em>
+      </div>
+    </div>
+    <div class="progress"><span id="progress-bar"></span></div>
+  </div>
+</section>
+
+<!-- 04 — THE WEDGE -->
+<section class="dark wedge" id="wedge">
+  <div class="section-container">
+    <p class="section-label">04 — THE WEDGE</p>
+    <h2 class="reveal">Ship-to-Result.<br/><strong>One loop. One number.</strong></h2>
+    <p class="lede reveal"><span class="proof-tag shipped">Shipped</span> A product change is detected → verified summary → affected segments → drafted assets → human approval → execution → measured outcome → ledger.</p>
+    <p class="lede reveal pilot-targets"><span class="proof-tag pilot">Pilot targets</span> −50% ship-to-launch time · −40% human hours per launch · customer-facing claim error &lt;1%. Agreed before each pilot — not guaranteed results.</p>
+    <ol class="steps-list reveal">
+      <li class="active"><span class="step-num">01</span> Detect</li>
+      <li><span class="step-num">02</span> Verify</li>
+      <li><span class="step-num">03</span> Approve</li>
+      <li><span class="step-num">04</span> Execute</li>
+      <li><span class="step-num">05</span> Measure</li>
+    </ol>
+  </div>
+</section>
+
+<!-- CONTACT & RUN LOOP CTA -->
+<section class="dark contact" id="contact">
+  <div class="section-container">
+    <div class="cta-box reveal">
+      <h2>Run one loop.<br/>Prove it with a number.</h2>
+      <p class="lede">Self-hosted Ship-to-Result on your infrastructure. We help you deploy, wire sources, and run a measured pilot — not a hosted subscription product.</p>
+      <div class="cta-actions">
+        <a class="cta-btn big" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">
+          <span>Request a pilot walkthrough</span>
+          <span class="arrow">→</span>
+        </a>
+        <a class="secondary-btn" data-console data-console-path="/login" href="/login" data-cta="console-signin" aria-label="Sign in to your console, existing members, invite-only">
+          Sign in to your console
+        </a>
+      </div>
+      <p class="signin-note" data-signin-note>Existing members sign in to a provisioned console that names its bound organization — membership is invite-only, with no public registration.</p>
+      <p id="console-status" role="status">● console status unknown</p>
+      <p class="contact-mono">Questions or deployment planning? <a href="mailto:hello@vital.company">Contact us</a> — kill criterion: no delta on ≥3 of top-5 metrics at day 90 ⇒ the wedge is wrong. That is a finding, not a failure.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="dark-footer">
+  <div class="foot-grid">
+    <div class="f-brand">
+      VITAL<sup>®</sup>
+      <p>The grounding and reflex layer for the sovereign agent stack.</p>
+    </div>
+    <div class="foot-nav">
+      <a href="#top">Top</a>
+      <a href="#statement">Thesis</a>
+      <a href="#platform">Platform</a>
+      <a href="#systems">Subsystems</a>
+      <a href="#wedge">Wedge</a>
+    </div>
+    <div class="foot-meta mono">
+      LEDGER · ROUTER · COMPILER<br/>
+      BUZZ · JCODE · QM-ABSORB<br/>
+      © 2026 VITAL — ALL RIGHTS RESERVED
+    </div>
+  </div>
+</footer>
+
+</body>
 </html>

@@ -1221,47 +1221,35 @@ T('ADR 0006: ingest appends near-duplicate but demotes the PRIOR claim to provis
   };
 
   // Event 1: the original signal.
-  await stageToInbox(
-    db,
-    TEN,
-    probe.name,
-    [
-      {
-        source: 'test:dup:1',
-        uri: 'https://example.test/pricing/1',
-        fingerprint: 'fp-original-1',
-        eventId: 'e1',
-        revision: 'r1',
-        occurredAt: NOW,
-        summary: 'Competitor slashed enterprise pricing by twenty percent on Q3 renewals for large accounts',
-        payload: { note: 'original' },
-      },
-    ],
-    NOW,
-  );
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:1',
+      uri: 'https://example.test/pricing/1',
+      fingerprint: 'fp-original-1',
+      eventId: 'e1',
+      revision: 'r1',
+      occurredAt: NOW,
+      summary: 'Competitor slashed enterprise pricing by twenty percent on Q3 renewals for large accounts',
+      payload: { note: 'original' },
+    },
+  ], NOW);
   const first = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
   eq(first.claimIds.length, 1, 'first event ingested:');
 
   // Event 2: same fact, reworded — different identity (not exact dedupe) but a
   // near-duplicate by shingle similarity.
-  await stageToInbox(
-    db,
-    TEN,
-    probe.name,
-    [
-      {
-        source: 'test:dup:2',
-        uri: 'https://example.test/pricing/2',
-        fingerprint: 'fp-paraphrase-2',
-        eventId: 'e2',
-        revision: 'r2',
-        occurredAt: NOW,
-        summary: 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts',
-        payload: { note: 'paraphrase' },
-      },
-    ],
-    NOW,
-  );
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:2',
+      uri: 'https://example.test/pricing/2',
+      fingerprint: 'fp-paraphrase-2',
+      eventId: 'e2',
+      revision: 'r2',
+      occurredAt: NOW,
+      summary: 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts',
+      payload: { note: 'paraphrase' },
+    },
+  ], NOW);
   const second = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
   eq(second.claimIds.length, 1, 'near-duplicate is still appended (append-only, never suppressed):');
 
@@ -1289,24 +1277,18 @@ T('ADR 0006: ingest appends near-duplicate but demotes the PRIOR claim to provis
   eq(ctx.length, 0, 'demoted claim excluded from reasoning context:');
 
   // Unrelated follow-up signal: no demotion, no link.
-  await stageToInbox(
-    db,
-    TEN,
-    probe.name,
-    [
-      {
-        source: 'test:dup:3',
-        uri: 'https://example.test/other/3',
-        fingerprint: 'fp-other-3',
-        eventId: 'e3',
-        revision: 'r3',
-        occurredAt: NOW,
-        summary: 'The design team shipped the new onboarding flow documentation today',
-        payload: { note: 'unrelated' },
-      },
-    ],
-    NOW,
-  );
+  await stageToInbox(db, TEN, probe.name, [
+    {
+      source: 'test:dup:3',
+      uri: 'https://example.test/other/3',
+      fingerprint: 'fp-other-3',
+      eventId: 'e3',
+      revision: 'r3',
+      occurredAt: NOW,
+      summary: 'The design team shipped the new onboarding flow documentation today',
+      payload: { note: 'unrelated' },
+    },
+  ], NOW);
   const third = await ingestInboxBatch(db, ledger, TEN, probe, { owner: 'human:ana', scope: 'research', now: NOW });
   eq(third.claimIds.length, 1);
   // One demotion event, two audit rows by design: ledger.link() audits the

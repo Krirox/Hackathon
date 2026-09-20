@@ -64,7 +64,7 @@
   const layers = {
     1: ['The Reality Ledger', 'Append-only ground truth. No model may mint a FACT.'],
     2: ['Cognitive Router', 'REFLEX → WORKFLOW → MODEL → HUMAN with escalation caps.'],
-    3: ['Coordination Surface', 'Typed QUERY / REQUEST / NOTICE over signed talk bindings.'],
+    3: ['Coordination Surface', 'Typed QUERY / REQUEST / NOTICE over signed talk bindings.']
   };
   if (!tag || !description) return;
   const buttons = [...document.querySelectorAll('.layer-tab')];
@@ -87,9 +87,7 @@
 })();
 
 (function initConsoleWiring() {
-  const configured = (document.querySelector('meta[name="vital-console-url"]')?.content || '')
-    .trim()
-    .replace(/\/$/, '');
+  const configured = (document.querySelector('meta[name="vital-console-url"]')?.content || '').trim().replace(/\/$/, '');
   // Empty meta = same-origin console routes when co-hosted via `vital serve --site`.
   const consoleBase = configured && configured !== '.' && configured !== '/' ? configured : '';
   const consolePath = (p) => (consoleBase ? `${consoleBase}${p}` : p);
@@ -134,7 +132,7 @@
             `console reachable · ${j.engine} · ${new Date(j.at).toLocaleTimeString()}`,
             'Reachability only — the process answered. Ingestion, execution, and measurement readiness are reported inside the console.',
           ),
-        () => paint('down', 'console not reachable'),
+        () => paint('down', 'console not reachable')
       );
   }
 })();
@@ -169,12 +167,8 @@
 (function initPointerAtmosphere() {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const root = document.documentElement;
-  window.addEventListener(
-    'pointermove',
-    (event) => {
-      root.style.setProperty('--mx', event.clientX + 'px');
-      root.style.setProperty('--my', event.clientY + 'px');
-    },
-    { passive: true },
-  );
+  window.addEventListener('pointermove', (event) => {
+    root.style.setProperty('--mx', event.clientX + 'px');
+    root.style.setProperty('--my', event.clientY + 'px');
+  }, { passive: true });
 })();

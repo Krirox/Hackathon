@@ -5,7 +5,10 @@ import { enqueueExecutorJob } from '../src/aws/executor.ts';
 import { setKill, clearKill } from '../src/gov/trust.ts';
 import type { BuzzSurface } from '../src/talk/buzz-surface.ts';
 import type { HarnessAdapter } from '../src/substrate/harness.ts';
-import { loadDeliverableByRequest, listDeliverableVersions } from '../src/wedge/deliverable-artifact.ts';
+import {
+  loadDeliverableByRequest,
+  listDeliverableVersions,
+} from '../src/wedge/deliverable-artifact.ts';
 
 console.log('\n\x1b[1mApplication Worker — background sweeps, outbox relay, and request dispatch\x1b[0m');
 
@@ -263,7 +266,9 @@ T('an engaged stop refuses the custom requestExecutor path before it claims', as
     authorType: 'system',
     provenance: sor(),
   });
-  const { request } = await coord.submit(base({ id: 'custom-kill-1', goal: 'must not run', claimRefs: [clm.id] }));
+  const { request } = await coord.submit(
+    base({ id: 'custom-kill-1', goal: 'must not run', claimRefs: [clm.id] }),
+  );
   await setKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'operator:killprobe', NOW);
 
   let calls = 0;
@@ -346,7 +351,11 @@ T('an outbox row nobody can deliver is never settled as delivered', async () => 
     'FAILED',
     'an undeliverable self-halt is not recorded as delivered:',
   );
-  eq(afterUnbound.get('kind-nobody-handles')?.status, 'FAILED', 'an unknown kind is not recorded as delivered:');
+  eq(
+    afterUnbound.get('kind-nobody-handles')?.status,
+    'FAILED',
+    'an unknown kind is not recorded as delivered:',
+  );
   eq(
     (afterUnbound.get('automation-self-halt')?.attempts ?? 0) > 0,
     true,
@@ -381,21 +390,33 @@ T('an outbox row nobody can deliver is never settled as delivered', async () => 
   const later = new Date(Date.parse(NOW) + 120_000).toISOString();
   await bound.tick(later);
   const afterBound = await statusOf();
-  eq(published.length, 2, `both governance notices are published (${published.map((p) => p.content).join(' | ')}):`);
+  eq(
+    published.length,
+    2,
+    `both governance notices are published (${published.map((p) => p.content).join(' | ')}):`,
+  );
   eq(
     published.some((p) => p.content.includes('Honeytask canary missed')),
     true,
     'the canary SLA miss is delivered, not swallowed:',
   );
   const halt = published.find((p) => p.content.includes('Automation frozen'))!;
-  eq(halt.content.includes('engineering'), true, `the notice names the frozen scope (${halt.content}):`);
+  eq(
+    halt.content.includes('engineering'),
+    true,
+    `the notice names the frozen scope (${halt.content}):`,
+  );
   eq(
     halt.tags.some(([k, v]) => k === 'vital-scope' && v === 'engineering'),
     true,
     'and carries the scope as a filterable tag:',
   );
   eq(afterBound.get('automation-self-halt')?.status, 'DONE', 'delivered rows settle DONE:');
-  eq(afterBound.get('canary-sla-miss')?.status, 'DONE', 'the delivered canary notice settles DONE:');
+  eq(
+    afterBound.get('canary-sla-miss')?.status,
+    'DONE',
+    'the delivered canary notice settles DONE:',
+  );
   // `recordSchedulerOccurrence` documents this row as the durable record that a
   // cron fired — the record itself is the whole point, so acknowledging it is
   // correct rather than a silent swallow.
@@ -430,7 +451,9 @@ T('a completed run leaves a reviewable draft deliverable', async () => {
     authorType: 'system',
     provenance: sor(),
   });
-  const { request } = await coord.submit(base({ id: 'draft-1', goal: 'produce the artifact', claimRefs: [clm.id] }));
+  const { request } = await coord.submit(
+    base({ id: 'draft-1', goal: 'produce the artifact', claimRefs: [clm.id] }),
+  );
   await coord.accept(TEN, request.id);
 
   const body = `${clm.id}: the claim holds under load. Next step: run the pilot.`;
@@ -478,7 +501,11 @@ T('a completed run leaves a reviewable draft deliverable', async () => {
   });
   await redelivered.tick(NOW);
   eq(runs, 2, 'the redelivered run executed:');
-  eq((await listDeliverableVersions(db, TEN, draft!.id)).length, 1, 'and did not stack a second draft version:');
+  eq(
+    (await listDeliverableVersions(db, TEN, draft!.id)).length,
+    1,
+    'and did not stack a second draft version:',
+  );
 });
 
 T('runApplicationWorker respects AbortSignal and shuts down gracefully', async () => {
@@ -575,9 +602,7 @@ T('the local lane still runs MODEL-tier work itself', async () => {
   const worker = new ApplicationWorker(db, ledger, coord, { tenant: TEN, relayOutbox: false });
   const result = await worker.tick(NOW);
   eq(result.requestsQueuedForCloud, 0, 'the default lane queues nothing:');
-  const jobs = (await db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'executor-job'").get()) as {
-    n: number;
-  };
+  const jobs = (await db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'executor-job'").get()) as { n: number };
   eq(Number(jobs.n), 0);
   await db.close();
 });

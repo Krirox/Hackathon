@@ -420,7 +420,11 @@ export async function getRecordingByMeetingId(
 
 // ------------------------------------------------------------- Transcripts ----
 
-export async function insertTranscriptSegment(db: AsyncDb, tenant: string, segment: TranscriptSegment): Promise<void> {
+export async function insertTranscriptSegment(
+  db: AsyncDb,
+  tenant: string,
+  segment: TranscriptSegment,
+): Promise<void> {
   await db
     .prepare(
       `INSERT INTO meeting_transcript_segments (
@@ -639,9 +643,7 @@ export async function deleteMeetingCascading(
     await db.prepare('DELETE FROM meeting_embeddings WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
     await db.prepare('DELETE FROM meeting_chunks WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
     await db.prepare('DELETE FROM meeting_notes WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
-    await db
-      .prepare('DELETE FROM meeting_transcript_segments WHERE tenant = ? AND meeting_id = ?')
-      .run(tenant, meetingId);
+    await db.prepare('DELETE FROM meeting_transcript_segments WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
     await db.prepare('DELETE FROM meeting_recordings WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
     await db.prepare('DELETE FROM meeting_participants WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
     await db.prepare('DELETE FROM meetings WHERE tenant = ? AND id = ?').run(tenant, meetingId);

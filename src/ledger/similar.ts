@@ -23,11 +23,7 @@ const SHINGLE_SIZE = 4;
 const MIN_TOKENS = 8;
 
 export function normalizeForSimilarity(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function shingles(text: string): Set<string> {

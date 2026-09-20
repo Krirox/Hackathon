@@ -15,7 +15,7 @@ REQUEST (real work with a full bid: owner, deadline, $, rounds, stop
 condition — refusable, and refusal is a logged outcome), NOTICE (digest
 only, never interrupts). What crosses a scope boundary is a **typed REQUEST
 object through the scheduler** (`src/coord/coordinator.ts`), which ADMITS /
-DEFERS / DENIES. It _renders_ as a thread; it is _invoked_ as an object.
+DEFERS / DENIES. It *renders* as a thread; it is *invoked* as an object.
 
 ## Consequences
 

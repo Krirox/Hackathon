@@ -111,10 +111,10 @@ With the lane on, a MODEL-tier request is **written as a durable
 `executor-job` row** instead of being run in the worker process. The outbox relay
 then delivers it:
 
-| relay configuration                    | where the work runs                                             |
-| -------------------------------------- | --------------------------------------------------------------- |
+| relay configuration | where the work runs |
+| --- | --- |
 | `sqsSender` supplied by the deployment | sent to SQS → the Lambda executor (its own Firecracker microVM) |
-| no sender                              | the same Lambda container handler runs in-process (`runJob`)    |
+| no sender | the same Lambda container handler runs in-process (`runJob`) |
 
 Both halves matter:
 
@@ -198,8 +198,8 @@ First-time bootstrap:
    `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`, `TF_VAR_BUZZ_AGENT_MASTER_KEY`,
    `TF_VAR_VITAL_REVIEW_SECRET`, `TF_VAR_BOOTSTRAP_EMAIL`,
    `TF_VAR_BOOTSTRAP_PASSWORD`, `TF_VAR_SETUP_SECRET` — the full table with
-   what each one is lives under _Deploy — GitHub Actions_ below).
-3. Run the `deploy-aws` workflow (see _Deploy — GitHub Actions_ below). A local
+   what each one is lives under *Deploy — GitHub Actions* below).
+3. Run the `deploy-aws` workflow (see *Deploy — GitHub Actions* below). A local
    `terraform apply` works too, but the images must exist first: `core_image` and
    `executor_image` are validated as non-empty ECR URIs and the busybox fallback
    is gone, so the order is **create the repositories → push → apply**, not
@@ -213,8 +213,8 @@ this order — each step consumes something the previous one produced.
 
 1. Account prerequisites and the deploy identity (§1)
 2. Domain + certificate (§2)
-3. Images and the apply (_Deploy_ — GitHub Actions, or from your machine)
-4. First login (_Connect — first login_)
+3. Images and the apply (*Deploy* — GitHub Actions, or from your machine)
+4. First login (*Connect — first login*)
 
 ### 1. Account prerequisites
 
@@ -257,7 +257,7 @@ Terraform manage them.
    `eu-central-1`.
 2. **Request a certificate → Request a public certificate → Next.**
 3. Fully qualified domain name: `console.example.com`. Add `www.example.com` in
-   _Add another name to this certificate_ only if you want it — every name added
+   *Add another name to this certificate* only if you want it — every name added
    here must live in the zone you own (see the certificate-coverage note below).
 4. Validation method: **DNS validation**. Key algorithm: leave the default
    (RSA 2048). **Request.**
@@ -265,8 +265,8 @@ Terraform manage them.
    writes the validation CNAME(s) itself when the zone is in this account. If the
    zone is elsewhere, copy each CNAME/value pair into your provider and come back
    once they resolve.
-6. Wait for **Status: Issued** (minutes, not hours — if it sits at _Pending
-   validation_, the CNAME is not resolving yet). Copy the **ARN**.
+6. Wait for **Status: Issued** (minutes, not hours — if it sits at *Pending
+   validation*, the CNAME is not resolving yet). Copy the **ARN**.
 
 **Point the name at the ALB (Route 53).**
 
@@ -282,8 +282,8 @@ Terraform manage them.
 
 Then hand the ARN to the stack — `acm_certificate_arn = "arn:aws:acm:eu-central-1:..."
 in `terraform.tfvars`, or the two-variable Terraform path above — and apply. The
-listener changes are automatic: `:80`becomes a`301`to`:443`and the task
-starts with`SECURE_COOKIES=1`. Confirm with
+listener changes are automatic: `:80` becomes a `301` to `:443` and the task
+starts with `SECURE_COOKIES=1`. Confirm with
 `terraform -chdir=deploy/aws output -raw console_url`.
 
 Do **not** add an AAAA record to match. The ALB is IPv4-only, so an AAAA alias
@@ -299,10 +299,10 @@ stack that never had a domain.
 
 **Two routes, and they compose** — pick one:
 
-| Route                            | Use when                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------------------ |
+| Route | Use when |
+| --- | --- |
 | `domain_name` + `hosted_zone_id` | Terraform should create the certificate, validate it by DNS, and alias the name to the ALB |
-| `acm_certificate_arn`            | You already hold a validated certificate (another account, another region, hand-validated) |
+| `acm_certificate_arn` | You already hold a validated certificate (another account, another region, hand-validated) |
 
 Set both and the explicit ARN wins for the certificate while the DNS records are
 still created: naming the host and holding the certificate are independent
@@ -350,7 +350,7 @@ above.
 
 ### Secure cookies follow the listener, not a checklist
 
-Attaching a certificate flips port 80 to an HTTPS redirect _and_ runs the task
+Attaching a certificate flips port 80 to an HTTPS redirect *and* runs the task
 with `SECURE_COOKIES=1`, so the session cookie carries `Secure` and cannot ride a
 plaintext `http://` downgrade. Both come from the same flag that decides whether
 the HTTPS listener exists, so the cookie policy cannot drift from the listener it
@@ -384,37 +384,37 @@ infrastructure is never a side effect of a test push.
 
 GitHub → repo → **Settings → Secrets and variables → Actions**.
 
-_Secrets_ (New repository secret). Everything except the first is a `TF_VAR_*`:
+*Secrets* (New repository secret). Everything except the first is a `TF_VAR_*`:
 
-| Secret                          | What it is                                                  |
-| ------------------------------- | ----------------------------------------------------------- |
-| `AWS_ROLE_TO_ASSUME`            | the OIDC role ARN from §1 — not a `TF_VAR_*`                |
-| `TF_VAR_TENANT_HMAC_SECRET`     | signs the talk surface. Required; no placeholder passes     |
-| `TF_VAR_VITAL_CORE_SECRET`      | mints scope tokens. Required                                |
-| `TF_VAR_WEBHOOK_SECRET`         | authenticates webhook intake. Required                      |
-| `TF_VAR_SERPER_API_KEY`         | search plane — required                                     |
-| `TF_VAR_BEDROCK_API_KEY`        | Bedrock console API key — same region as `AWS_REGION`       |
-| `TF_VAR_OPERATOR_SECRET`        | gates console mutations; empty = ungated (dev only)         |
-| `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | secp256k1 relay key, 64 hex chars                           |
-| `TF_VAR_BUZZ_AGENT_MASTER_KEY`  | 32+ hex chars; empty = no publishing identity               |
-| `TF_VAR_VITAL_REVIEW_SECRET`    | 16+ random chars; empty = dead webhook-approve path         |
-| `TF_VAR_BOOTSTRAP_EMAIL`        | day-0 owner address (§ Connect)                             |
-| `TF_VAR_BOOTSTRAP_PASSWORD`     | day-0 owner password (§ Connect)                            |
-| `TF_VAR_SETUP_SECRET`           | web-claim authorization on a public bind                    |
-| `TF_BACKEND_BUCKET`             | state bucket from `bootstrap-state.sh`; empty = local state |
+| Secret | What it is |
+| --- | --- |
+| `AWS_ROLE_TO_ASSUME` | the OIDC role ARN from §1 — not a `TF_VAR_*` |
+| `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface. Required; no placeholder passes |
+| `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens. Required |
+| `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake. Required |
+| `TF_VAR_SERPER_API_KEY` | search plane — required |
+| `TF_VAR_BEDROCK_API_KEY` | Bedrock console API key — same region as `AWS_REGION` |
+| `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
+| `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | secp256k1 relay key, 64 hex chars |
+| `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex chars; empty = no publishing identity |
+| `TF_VAR_VITAL_REVIEW_SECRET` | 16+ random chars; empty = dead webhook-approve path |
+| `TF_VAR_BOOTSTRAP_EMAIL` | day-0 owner address (§ Connect) |
+| `TF_VAR_BOOTSTRAP_PASSWORD` | day-0 owner password (§ Connect) |
+| `TF_VAR_SETUP_SECRET` | web-claim authorization on a public bind |
+| `TF_BACKEND_BUCKET` | state bucket from `bootstrap-state.sh`; empty = local state |
 
 The six "Required" values fail validation when empty or left as the literal
 placeholder, so a half-filled deploy stops at `terraform plan` instead of
 shipping a known HMAC secret or a model plane that cannot run. Requirements
 first, placeholders never.
 
-_Variables_ (New repository variable): `AWS_REGION` (`eu-central-1`),
+*Variables* (New repository variable): `AWS_REGION` (`eu-central-1`),
 `TF_BACKEND_KEY` (default `vital/terraform.tfstate`),
 `TF_BACKEND_DYNAMODB_TABLE` (default `vital-tfstate-locks`).
 
 ### Run it
 
-**Actions → deploy-aws → Run workflow →** branch `main` → _optional_ `image_tag`
+**Actions → deploy-aws → Run workflow →** branch `main` → *optional* `image_tag`
 → **Run workflow**.
 
 In order the job: typechecks → runs the test suite → assumes the OIDC role → logs
@@ -429,12 +429,12 @@ succeed — keys, DNS and the first login are still yours to confirm.
 
 ### When the smoke check goes red
 
-| Symptom                               | Likely cause                                                                                                                                                                            |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Symptom | Likely cause |
+| --- | --- |
 | TLS verification failed on `/healthz` | the probe uses `console_url`; if the certificate was added by hand and covers your hostname, put it in the stack (`domain_name` or `acm_certificate_arn`) so the output names that host |
-| `services-stable` times out           | ECS → Clusters → `vital` → Services → `vital-core` → **Events** shows the stopped-task reason                                                                                           |
-| `/healthz` 503 after stability        | task is up but not answering on 3100 — check `/vital/core` in CloudWatch Logs                                                                                                           |
-| `core_image must be a real ECR URI`   | the image variables are validated; see the local path below for the create → push → apply order                                                                                         |
+| `services-stable` times out | ECS → Clusters → `vital` → Services → `vital-core` → **Events** shows the stopped-task reason |
+| `/healthz` 503 after stability | task is up but not answering on 3100 — check `/vital/core` in CloudWatch Logs |
+| `core_image must be a real ECR URI` | the image variables are validated; see the local path below for the create → push → apply order |
 
 ## Deploy — from your machine
 
@@ -508,7 +508,7 @@ So you don't hunt for a switch that is not there:
   ECS task ARN it never created (there is no `RunTask` call, and the task role has
   no `ecs:RunTask` to make one). `VITAL_VM_BACKEND` is unset too, resolving to
   `local`: process-level directory isolation, not a microVM boundary.
-  `VITAL_LAMBDA_FUNCTION` _is_ set, only so audit records name an executor that
+  `VITAL_LAMBDA_FUNCTION` *is* set, only so audit records name an executor that
   exists rather than the built-in `vital-coding-executor` phantom.
 - **Snapshots live on EFS, not S3.** `VITAL_SNAPSHOT_DIR` points at the mounted
   sandbox volume (the default is `data/snapshots` relative to the container's

@@ -104,12 +104,7 @@ async function runMultiPartyMeshTest() {
     const wsUrl = `ws://127.0.0.1:${port}/api/meetings/signal?meetingId=${encodeURIComponent(meetingId)}&tenant=${TEN}&userId=${encodeURIComponent(userId)}&name=${encodeURIComponent(name)}&role=${role}`;
     const ws = new WebSocket(wsUrl);
     const messages: SignalingMessage[] = [];
-    const waiters: Array<{
-      predicate: (m: SignalingMessage) => boolean;
-      resolve: (m: SignalingMessage) => void;
-      reject: (err: Error) => void;
-      timer: any;
-    }> = [];
+    const waiters: Array<{ predicate: (m: SignalingMessage) => boolean; resolve: (m: SignalingMessage) => void; reject: (err: Error) => void; timer: any }> = [];
 
     ws.onmessage = (event) => {
       try {
@@ -148,11 +143,7 @@ async function runMultiPartyMeshTest() {
         const timer = setTimeout(() => {
           const idx = waiters.findIndex((w) => w.timer === timer);
           if (idx !== -1) waiters.splice(idx, 1);
-          reject(
-            new Error(
-              `[${name}] Timed out waiting for message matching predicate. Received: ${JSON.stringify(messages.map((m) => m.type))}`,
-            ),
-          );
+          reject(new Error(`[${name}] Timed out waiting for message matching predicate. Received: ${JSON.stringify(messages.map((m) => m.type))}`));
         }, timeoutMs);
         waiters.push({ predicate, resolve, reject, timer });
       });
@@ -184,46 +175,36 @@ async function runMultiPartyMeshTest() {
   console.log('  ✔ Host received peer-joined notification for Alice.');
 
   // Alice sends SDP offer to Host
-  alice.ws.send(
-    JSON.stringify({
-      type: 'offer',
-      meetingId,
-      targetId: host.peerId,
-      payload: { type: 'offer', sdp: 'v=0\r\no=alice_offer_to_host\r\ns=webrtc' },
-    }),
-  );
+  alice.ws.send(JSON.stringify({
+    type: 'offer',
+    meetingId,
+    targetId: host.peerId,
+    payload: { type: 'offer', sdp: 'v=0\r\no=alice_offer_to_host\r\ns=webrtc' },
+  }));
 
   // Host receives offer from Alice
   const hostGotAliceOffer = await host.waitForMessage((m) => m.type === 'offer' && m.senderId === alice.peerId);
   assert.equal(hostGotAliceOffer.payload.type, 'offer');
 
   // Host answers Alice
-  host.ws.send(
-    JSON.stringify({
-      type: 'answer',
-      meetingId,
-      targetId: alice.peerId,
-      payload: { type: 'answer', sdp: 'v=0\r\no=host_answer_to_alice\r\ns=webrtc' },
-    }),
-  );
+  host.ws.send(JSON.stringify({
+    type: 'answer',
+    meetingId,
+    targetId: alice.peerId,
+    payload: { type: 'answer', sdp: 'v=0\r\no=host_answer_to_alice\r\ns=webrtc' },
+  }));
 
   // Alice receives answer from Host
   const aliceGotHostAnswer = await alice.waitForMessage((m) => m.type === 'answer' && m.senderId === host.peerId);
   assert.equal(aliceGotHostAnswer.payload.type, 'answer');
 
   // Alice & Host exchange ICE candidates
-  alice.ws.send(
-    JSON.stringify({
-      type: 'ice-candidate',
-      meetingId,
-      targetId: host.peerId,
-      payload: {
-        candidate: 'candidate:1 1 UDP 2122260223 192.168.1.100 54321 typ host',
-        sdpMid: '0',
-        sdpMLineIndex: 0,
-      },
-    }),
-  );
+  alice.ws.send(JSON.stringify({
+    type: 'ice-candidate',
+    meetingId,
+    targetId: host.peerId,
+    payload: { candidate: 'candidate:1 1 UDP 2122260223 192.168.1.100 54321 typ host', sdpMid: '0', sdpMLineIndex: 0 },
+  }));
   const hostGotIce = await host.waitForMessage((m) => m.type === 'ice-candidate' && m.senderId === alice.peerId);
   assert.ok(hostGotIce.payload.candidate.includes('192.168.1.100'));
 
@@ -241,43 +222,35 @@ async function runMultiPartyMeshTest() {
   console.log('  ✔ Host and Alice both received peer-joined notifications for Bob.');
 
   // Bob sends offer to Host
-  bob.ws.send(
-    JSON.stringify({
-      type: 'offer',
-      meetingId,
-      targetId: host.peerId,
-      payload: { type: 'offer', sdp: 'v=0\r\no=bob_offer_to_host' },
-    }),
-  );
+  bob.ws.send(JSON.stringify({
+    type: 'offer',
+    meetingId,
+    targetId: host.peerId,
+    payload: { type: 'offer', sdp: 'v=0\r\no=bob_offer_to_host' },
+  }));
   await host.waitForMessage((m) => m.type === 'offer' && m.senderId === bob.peerId);
-  host.ws.send(
-    JSON.stringify({
-      type: 'answer',
-      meetingId,
-      targetId: bob.peerId,
-      payload: { type: 'answer', sdp: 'v=0\r\no=host_answer_to_bob' },
-    }),
-  );
+  host.ws.send(JSON.stringify({
+    type: 'answer',
+    meetingId,
+    targetId: bob.peerId,
+    payload: { type: 'answer', sdp: 'v=0\r\no=host_answer_to_bob' },
+  }));
   await bob.waitForMessage((m) => m.type === 'answer' && m.senderId === host.peerId);
 
   // Bob sends offer to Alice
-  bob.ws.send(
-    JSON.stringify({
-      type: 'offer',
-      meetingId,
-      targetId: alice.peerId,
-      payload: { type: 'offer', sdp: 'v=0\r\no=bob_offer_to_alice' },
-    }),
-  );
+  bob.ws.send(JSON.stringify({
+    type: 'offer',
+    meetingId,
+    targetId: alice.peerId,
+    payload: { type: 'offer', sdp: 'v=0\r\no=bob_offer_to_alice' },
+  }));
   await alice.waitForMessage((m) => m.type === 'offer' && m.senderId === bob.peerId);
-  alice.ws.send(
-    JSON.stringify({
-      type: 'answer',
-      meetingId,
-      targetId: bob.peerId,
-      payload: { type: 'answer', sdp: 'v=0\r\no=alice_answer_to_bob' },
-    }),
-  );
+  alice.ws.send(JSON.stringify({
+    type: 'answer',
+    meetingId,
+    targetId: bob.peerId,
+    payload: { type: 'answer', sdp: 'v=0\r\no=alice_answer_to_bob' },
+  }));
   await bob.waitForMessage((m) => m.type === 'answer' && m.senderId === alice.peerId);
 
   console.log('  ✔ 3-Way mesh (Host <-> Alice <-> Bob) fully interconnected.');
@@ -298,36 +271,30 @@ async function runMultiPartyMeshTest() {
 
   // Charlie initiates offers to all 3 existing peers
   for (const peer of [host, alice, bob]) {
-    charlie.ws.send(
-      JSON.stringify({
-        type: 'offer',
-        meetingId,
-        targetId: peer.peerId,
-        payload: { type: 'offer', sdp: `v=0\r\no=charlie_to_${peer.name.toLowerCase()}` },
-      }),
-    );
+    charlie.ws.send(JSON.stringify({
+      type: 'offer',
+      meetingId,
+      targetId: peer.peerId,
+      payload: { type: 'offer', sdp: `v=0\r\no=charlie_to_${peer.name.toLowerCase()}` },
+    }));
     await peer.waitForMessage((m) => m.type === 'offer' && m.senderId === charlie.peerId);
-    peer.ws.send(
-      JSON.stringify({
-        type: 'answer',
-        meetingId,
-        targetId: charlie.peerId,
-        payload: { type: 'answer', sdp: `v=0\r\no=${peer.name.toLowerCase()}_to_charlie` },
-      }),
-    );
+    peer.ws.send(JSON.stringify({
+      type: 'answer',
+      meetingId,
+      targetId: charlie.peerId,
+      payload: { type: 'answer', sdp: `v=0\r\no=${peer.name.toLowerCase()}_to_charlie` },
+    }));
     await charlie.waitForMessage((m) => m.type === 'answer' && m.senderId === peer.peerId);
   }
   console.log('  ✔ 4-Way full mesh (6 bidirectional peer connections) successfully negotiated.');
 
   // 9. In-room Chat Broadcast Test
   console.log('[Step 9] Testing multi-peer chat broadcast...');
-  charlie.ws.send(
-    JSON.stringify({
-      type: 'chat-message',
-      meetingId,
-      payload: { text: 'Hello team, audio and video are working great!' },
-    }),
-  );
+  charlie.ws.send(JSON.stringify({
+    type: 'chat-message',
+    meetingId,
+    payload: { text: 'Hello team, audio and video are working great!' },
+  }));
 
   const [hostChat, aliceChat, bobChat] = await Promise.all([
     host.waitForMessage((m) => m.type === 'chat-message' && m.payload?.text?.includes('audio and video')),
@@ -342,44 +309,30 @@ async function runMultiPartyMeshTest() {
   // 10. Media State Updates (Mute/Unmute/Camera)
   console.log('[Step 10] Testing media state updates propagation across the mesh...');
   // Alice mutes her microphone
-  alice.ws.send(
-    JSON.stringify({
-      type: 'media-state',
-      meetingId,
-      payload: { audioMuted: true, videoMuted: false, screenSharing: false },
-    }),
-  );
+  alice.ws.send(JSON.stringify({
+    type: 'media-state',
+    meetingId,
+    payload: { audioMuted: true, videoMuted: false, screenSharing: false },
+  }));
 
   await Promise.all([
-    host.waitForMessage(
-      (m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true,
-    ),
-    bob.waitForMessage(
-      (m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true,
-    ),
-    charlie.waitForMessage(
-      (m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true,
-    ),
+    host.waitForMessage((m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true),
+    bob.waitForMessage((m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true),
+    charlie.waitForMessage((m) => m.type === 'media-state' && m.senderId === alice.peerId && m.payload?.audioMuted === true),
   ]);
   console.log('  ✔ Alice mic mute propagated to Host, Bob, and Charlie.');
 
   // Bob disables camera
-  bob.ws.send(
-    JSON.stringify({
-      type: 'media-state',
-      meetingId,
-      payload: { audioMuted: false, videoMuted: true, screenSharing: false },
-    }),
-  );
+  bob.ws.send(JSON.stringify({
+    type: 'media-state',
+    meetingId,
+    payload: { audioMuted: false, videoMuted: true, screenSharing: false },
+  }));
 
   await Promise.all([
     host.waitForMessage((m) => m.type === 'media-state' && m.senderId === bob.peerId && m.payload?.videoMuted === true),
-    alice.waitForMessage(
-      (m) => m.type === 'media-state' && m.senderId === bob.peerId && m.payload?.videoMuted === true,
-    ),
-    charlie.waitForMessage(
-      (m) => m.type === 'media-state' && m.senderId === bob.peerId && m.payload?.videoMuted === true,
-    ),
+    alice.waitForMessage((m) => m.type === 'media-state' && m.senderId === bob.peerId && m.payload?.videoMuted === true),
+    charlie.waitForMessage((m) => m.type === 'media-state' && m.senderId === bob.peerId && m.payload?.videoMuted === true),
   ]);
   console.log('  ✔ Bob camera disable propagated to Host, Alice, and Charlie.');
 
@@ -393,13 +346,11 @@ async function runMultiPartyMeshTest() {
     text: 'We decided to ship the production release on October 15th.',
     confidence: 0.98,
   };
-  host.ws.send(
-    JSON.stringify({
-      type: 'live-transcript',
-      meetingId,
-      payload: transcriptSeg,
-    }),
-  );
+  host.ws.send(JSON.stringify({
+    type: 'live-transcript',
+    meetingId,
+    payload: transcriptSeg,
+  }));
 
   await Promise.all([
     alice.waitForMessage((m) => m.type === 'live-transcript' && m.payload?.text?.includes('October 15th')),
@@ -427,16 +378,12 @@ async function runMultiPartyMeshTest() {
   console.log('  ✔ Bob departure cleanly notified. Host and Alice remain connected.');
 
   // Verify Host and Alice can still communicate
-  alice.ws.send(
-    JSON.stringify({
-      type: 'chat-message',
-      meetingId,
-      payload: { text: 'Still here with you Krishiv!' },
-    }),
-  );
-  const hostReceivedFinal = await host.waitForMessage(
-    (m) => m.type === 'chat-message' && m.payload?.text?.includes('Still here'),
-  );
+  alice.ws.send(JSON.stringify({
+    type: 'chat-message',
+    meetingId,
+    payload: { text: 'Still here with you Krishiv!' },
+  }));
+  const hostReceivedFinal = await host.waitForMessage((m) => m.type === 'chat-message' && m.payload?.text?.includes('Still here'));
   assert.equal(hostReceivedFinal.senderName, 'Alice');
   console.log('  ✔ Remaining mesh peers (Host & Alice) continue communicating without interruption.');
 

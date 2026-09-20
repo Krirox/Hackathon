@@ -292,34 +292,17 @@ T('non-engineer owner gets 403; engineer member gets the board', async () => {
     eq(mktHomeHtml.includes('id="sidebar-issues-dashboard-link"'), false, 'no #dashboard channel for non-engineers');
 
     // But marketing member has full standard member access to other features:
-    const mktCompiler = await fetch(`${url}/console/compiler`, {
-      headers: { cookie: mktSession.cookie },
-      redirect: 'manual',
-    });
+    const mktCompiler = await fetch(`${url}/console/compiler`, { headers: { cookie: mktSession.cookie }, redirect: 'manual' });
     eq(mktCompiler.status, 200, 'marketer can access projects/compiler');
-    const mktAgents = await fetch(`${url}/console/human-work`, {
-      headers: { cookie: mktSession.cookie },
-      redirect: 'manual',
-    });
+    const mktAgents = await fetch(`${url}/console/human-work`, { headers: { cookie: mktSession.cookie }, redirect: 'manual' });
     eq(mktAgents.status, 200, 'marketer can access agents');
     const mktAccount = await fetch(`${url}/account`, { headers: { cookie: mktSession.cookie }, redirect: 'manual' });
     eq(mktAccount.status, 200, 'marketer can access account');
-    const mktDash = await fetch(`${url}/console/dashboard`, {
-      headers: { cookie: mktSession.cookie },
-      redirect: 'manual',
-    });
+    const mktDash = await fetch(`${url}/console/dashboard`, { headers: { cookie: mktSession.cookie }, redirect: 'manual' });
     eq(mktDash.status, 200, 'marketer can access vital dashboard');
     const mktDashHtml = await mktDash.text();
-    eq(
-      mktDashHtml.includes('id="sidebar-issues-dashboard-link"'),
-      false,
-      'non-engineer does not see issues in dashboard sidebar',
-    );
-    eq(
-      mktDashHtml.includes('issues-sidebar-section'),
-      false,
-      'non-engineer has no issues section in view dashboard sidebar',
-    );
+    eq(mktDashHtml.includes('id="sidebar-issues-dashboard-link"'), false, 'non-engineer does not see issues in dashboard sidebar');
+    eq(mktDashHtml.includes('issues-sidebar-section'), false, 'non-engineer has no issues section in view dashboard sidebar');
 
     // And engineer member has standard member access PLUS extra Issues capability:
     const engHome = await fetch(`${url}/`, { headers: { cookie: engSession.cookie }, redirect: 'manual' });
@@ -328,29 +311,16 @@ T('non-engineer owner gets 403; engineer member gets the board', async () => {
     eq(engHomeHtml.includes('href="/console/issues"'), true, 'engineer sees Issues link in sidebar');
     eq(engHomeHtml.includes('id="sidebar-issues-dashboard-link"'), true, 'engineer sees #dashboard link in sidebar');
 
-    const engCompiler = await fetch(`${url}/console/compiler`, {
-      headers: { cookie: engSession.cookie },
-      redirect: 'manual',
-    });
+    const engCompiler = await fetch(`${url}/console/compiler`, { headers: { cookie: engSession.cookie }, redirect: 'manual' });
     eq(engCompiler.status, 200, 'engineer can access projects/compiler');
-    const engAgents = await fetch(`${url}/console/human-work`, {
-      headers: { cookie: engSession.cookie },
-      redirect: 'manual',
-    });
+    const engAgents = await fetch(`${url}/console/human-work`, { headers: { cookie: engSession.cookie }, redirect: 'manual' });
     eq(engAgents.status, 200, 'engineer can access agents');
     const engAccount = await fetch(`${url}/account`, { headers: { cookie: engSession.cookie }, redirect: 'manual' });
     eq(engAccount.status, 200, 'engineer can access account');
-    const engDash = await fetch(`${url}/console/dashboard`, {
-      headers: { cookie: engSession.cookie },
-      redirect: 'manual',
-    });
+    const engDash = await fetch(`${url}/console/dashboard`, { headers: { cookie: engSession.cookie }, redirect: 'manual' });
     eq(engDash.status, 200, 'engineer can access vital dashboard');
     const engDashHtml = await engDash.text();
-    eq(
-      engDashHtml.includes('id="sidebar-issues-dashboard-link"'),
-      true,
-      'engineer sees issues link in view dashboard sidebar',
-    );
+    eq(engDashHtml.includes('id="sidebar-issues-dashboard-link"'), true, 'engineer sees issues link in view dashboard sidebar');
     eq(engDashHtml.includes('issues-sidebar-section'), true, 'engineer sees issues section in view dashboard sidebar');
     eq(engDashHtml.includes('Board task'), true, 'engineer sees the created issue listed in the dashboard sidebar');
 

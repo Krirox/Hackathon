@@ -19,10 +19,7 @@ async function seed() {
   const tenant = 'acme';
 
   console.log('[1/5] Cleaning up old fake meetings...');
-  const allMeetings = (await db.prepare('SELECT id, title FROM meetings WHERE tenant = ?').all(tenant)) as {
-    id: string;
-    title: string;
-  }[];
+  const allMeetings = await db.prepare('SELECT id, title FROM meetings WHERE tenant = ?').all(tenant) as { id: string; title: string }[];
   for (const m of allMeetings) {
     if (m.id !== 'meet_93b3e4b8') {
       console.log(`  Deleting fake meeting: ${m.id} (${m.title})`);
@@ -41,9 +38,7 @@ async function seed() {
 
   const existing = await db.prepare('SELECT id FROM meetings WHERE tenant = ? AND id = ?').get(tenant, meetingId);
   if (existing) {
-    await db
-      .prepare(
-        `
+    await db.prepare(`
       UPDATE meetings SET
         title = ?,
         status = 'ENDED',
@@ -56,27 +51,25 @@ async function seed() {
         processing_status_json = ?,
         updated_at = ?
       WHERE tenant = ? AND id = ?
-    `,
-      )
-      .run(
-        meetingTitle,
-        startedAt,
-        endedAt,
-        durationSeconds,
-        `/api/meetings/${meetingId}/recording`,
-        JSON.stringify({
-          recording: 'done',
-          transcript: 'done',
-          summary: 'done',
-          decisions: 'done',
-          actionItems: 'done',
-          indexing: 'done',
-          error: null,
-        }),
-        now,
-        tenant,
-        meetingId,
-      );
+    `).run(
+      meetingTitle,
+      startedAt,
+      endedAt,
+      durationSeconds,
+      `/api/meetings/${meetingId}/recording`,
+      JSON.stringify({
+        recording: 'done',
+        transcript: 'done',
+        summary: 'done',
+        decisions: 'done',
+        actionItems: 'done',
+        indexing: 'done',
+        error: null,
+      }),
+      now,
+      tenant,
+      meetingId,
+    );
   } else {
     await insertMeeting(db, {
       id: meetingId,
@@ -153,9 +146,7 @@ async function seed() {
 
   // Transcripts
   console.log('[5/5] Seeding transcripts, notes, and RAG knowledge...');
-  await db
-    .prepare('DELETE FROM meeting_transcript_segments WHERE tenant = ? AND meeting_id = ?')
-    .run(tenant, meetingId);
+  await db.prepare('DELETE FROM meeting_transcript_segments WHERE tenant = ? AND meeting_id = ?').run(tenant, meetingId);
   const transcriptSegments = [
     {
       speakerId: 'usr_owner',
@@ -275,7 +266,9 @@ async function seed() {
         completed: false,
       },
     ],
-    openQuestions: ['What is the optimal chunk overlap percentage for long-duration transcripts exceeding 2 hours?'],
+    openQuestions: [
+      'What is the optimal chunk overlap percentage for long-duration transcripts exceeding 2 hours?',
+    ],
     keyPoints: [
       'Multi-peer signaling mesh verified with 14/14 automated test steps',
       'RFC 6455 native upgrade handler maintains zero-overhead peer connectivity',
@@ -292,9 +285,7 @@ async function seed() {
   const indexResult = await chunkAndIndexMeeting(db, tenant, meetingId);
   console.log(`  Indexed ${indexResult.chunkCount} chunks into vector knowledge base.`);
 
-  console.log(
-    '✔ Successfully seeded single past meeting "E2E Model Testing 1" with full intelligence, recording, transcript, decisions, and RAG chunks!',
-  );
+  console.log('✔ Successfully seeded single past meeting "E2E Model Testing 1" with full intelligence, recording, transcript, decisions, and RAG chunks!');
 }
 
 seed().catch(console.error);

@@ -100,7 +100,9 @@ export async function listCompileCandidates(
   const out: CompileCandidate[] = [];
   for (const candidate of mined) {
     const rows = await evidenceFor(db, tenant, candidate.intent);
-    const usable = rows.filter((r) => r.outcome !== 'UNRESOLVED' && Number(r.router_confidence) >= 0.5);
+    const usable = rows.filter(
+      (r) => r.outcome !== 'UNRESOLVED' && Number(r.router_confidence) >= 0.5,
+    );
     const scopes = [...new Set(usable.map((r) => String(r.scope)))].sort();
     const tiers = [
       ...new Set(
@@ -116,8 +118,7 @@ export async function listCompileCandidates(
     if (usable.length < minRepeats) {
       blocked = `${usable.length} of ${minRepeats} required resolved successes`;
     } else if (originModels.length === 0) {
-      blocked =
-        'no executor provenance on these traces — the compiler will not guess which models the procedure came from';
+      blocked = 'no executor provenance on these traces — the compiler will not guess which models the procedure came from';
     } else if (tiers.length === 0) {
       blocked = 'no routing tier recorded for these traces';
     }

@@ -6,7 +6,7 @@ Status: accepted · 2026-09-09 · Supersedes: any private-fork packaging discuss
 
 QM (`yc-software/qm`, MIT) proved the scoped-agent shape and ships policy
 code worth reusing (loop governor, ship gate, idempotency, command policy).
-Running Vital _on_ QM would make us a deployment layer with fork/sync/drift
+Running Vital *on* QM would make us a deployment layer with fork/sync/drift
 discipline; absorbing its substrate (sandboxes, scheduler, egress proxy,
 harnesses, Slack/E2B/Modal/AWS deps) would make us a fork, not a startup.
 
@@ -15,7 +15,7 @@ harnesses, Slack/E2B/Modal/AWS deps) would make us a fork, not a startup.
 Vital is its own package and repo. We vendor **leaf modules only** under
 `src/vendor/qm/`, each with a provenance header (URL, SHA, date, upstream
 path, what changed and why), recorded in `LICENSE-THIRD-PARTY.md`. We copy
-_designs_ (egress policy, skill-registry shape, security-screen contract)
+*designs* (egress policy, skill-registry shape, security-screen contract)
 and build the substrate ourselves.
 
 ## Consequences

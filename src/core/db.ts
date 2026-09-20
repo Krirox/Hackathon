@@ -73,7 +73,8 @@ export function withStatementCount(db: AsyncDb): AsyncDb {
       noteStatement();
       return db.exec(sql);
     },
-    transaction: <T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T> => db.transaction(fn, options),
+    transaction: <T>(fn: () => Promise<T> | T, options?: TransactionOptions): Promise<T> =>
+      db.transaction(fn, options),
     close: () => db.close(),
   };
 }

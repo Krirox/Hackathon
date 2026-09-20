@@ -4,12 +4,12 @@ Cloned under `.upstream/` (gitignored, never enters our history).
 Absorbed code additionally records its SHA per-file in provenance headers;
 `LICENSE-THIRD-PARTY.md` is the binding record.
 
-| Repo         | Clone URL                                                | Pinned SHA                                 | Date       | Why                                                                                                                                                           |
-| ------------ | -------------------------------------------------------- | ------------------------------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| QM           | `https://github.com/yc-software/qm`                      | `60ba79195dc84aa85a23f238749656e11c88696c` | 2026-09-08 | absorb-from source (leaf modules only, MIT)                                                                                                                   |
-| Buzz         | `https://github.com/block/buzz.git`                      | `218633b8fd6ee41aee8eb18ba9806e8d90694751` | 2026-09-08 | talk-layer surface (Apache-2.0)                                                                                                                               |
-| jcode (real) | `https://github.com/1jehuang/jcode`                      | `e65e47c31af2ab79346458ff1511bea533930b59` | 2026-09-09 | Rust harness API we drive (MIT v0.84.0)                                                                                                                       |
-| TDAM         | `https://github.com/TencentCloud/TencentDB-Agent-Memory` | `8f2dc830317934e54548472bf62c5999f9bb1202` | 2026-09-15 | read-only reference for the §29 moat-scope correction (MIT, LICENSE text verified). **No code absorbed, no dependency — so no `LICENSE-THIRD-PARTY.md` row.** |
+| Repo | Clone URL | Pinned SHA | Date | Why |
+|---|---|---|---|---|
+| QM | `https://github.com/yc-software/qm` | `60ba79195dc84aa85a23f238749656e11c88696c` | 2026-09-08 | absorb-from source (leaf modules only, MIT) |
+| Buzz | `https://github.com/block/buzz.git` | `218633b8fd6ee41aee8eb18ba9806e8d90694751` | 2026-09-08 | talk-layer surface (Apache-2.0) |
+| jcode (real) | `https://github.com/1jehuang/jcode` | `e65e47c31af2ab79346458ff1511bea533930b59` | 2026-09-09 | Rust harness API we drive (MIT v0.84.0) |
+| TDAM | `https://github.com/TencentCloud/TencentDB-Agent-Memory` | `8f2dc830317934e54548472bf62c5999f9bb1202` | 2026-09-15 | read-only reference for the §29 moat-scope correction (MIT, LICENSE text verified). **No code absorbed, no dependency — so no `LICENSE-THIRD-PARTY.md` row.** |
 
 Name-collision warning: `cnjack/jcode` is a **different, Go** project that
 shares the name. We cloned it once, then rewrote our own correct docs to

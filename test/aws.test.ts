@@ -107,7 +107,9 @@ T('an engaged stop refuses a serverless job before it can spend', async () => {
     authorType: 'system',
     provenance: sor(),
   });
-  const { request } = await coord.submit(base({ id: 'kill1', goal: 'must not run under a stop', claimRefs: [clm.id] }));
+  const { request } = await coord.submit(
+    base({ id: 'kill1', goal: 'must not run under a stop', claimRefs: [clm.id] }),
+  );
   // The stop covers this request's target scope ('engineering').
   await setKill(db, TEN, { scope: 'engineering', actionClass: '*' }, 'operator:killprobe', NOW);
 

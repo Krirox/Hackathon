@@ -13,7 +13,7 @@ const types = {
   '.json': 'application/json',
   '.xml': 'application/xml',
   '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8'
 };
 
 createServer((req, res) => {

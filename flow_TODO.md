@@ -38,7 +38,6 @@ Effort: `S` <1 day · `M` 1–4 days · `L` 1–2 weeks.
 ---
 
 ### [P1] `M` — Activation reports a "bound" address, not a "ready" result — **IMPLEMENTED**
-
 **Flow:** Activation / server start → port select → browser → console load.
 **Problem:** `vital serve` resolved after the HTTP server bound (`server.listen`
 resolves with the bound address), but the CLI/user was not told whether the
@@ -58,7 +57,6 @@ classifies a healthy console as ready, not just bound`.
 ---
 
 ### [P1] `M` — Readiness/health state is not surfaced inside the authenticated console UI — **IMPLEMENTED**
-
 **Flow:** Operator opens console → wants to confirm DB, worker, integrations,
 and activation health at a glance.
 **Problem:** `/api/metrics` readiness existed (FLOW-023) but as a JSON API.
@@ -76,7 +74,6 @@ strip`.
 ---
 
 ### [P1] `M` — Login/session-expiry recovery guidance for GET navigation — **VERIFIED ALREADY HANDLED**
-
 **Flow:** Session expires or absent mid-navigation → refresh → re-login.
 **Problem check:** A session-less GET route could dead-end at login with no
 return-to-task path.
@@ -90,7 +87,6 @@ work needed for GET navigations.
 ---
 
 ### [P1] `M` — Backup/restore is operator/CLI-documented but not a discoverable console journey — **SCOPE CLARIFIED**
-
 **Flow:** Operator/enterprise user needs: create backup → verify → restore →
 confirm.
 **Problem:** Backup/restore was a tested **file-copy drill**
@@ -100,7 +96,7 @@ was no product surface telling a non-CLI user what backups cover.
 this milestone; the supported portable record is the verified snapshot export.
 **Fix (done):** `/console/data` now renders a **Backup &amp; restore** card that
 states backups are operator-managed infrastructure, points to
-`vital status --readiness` for health, and re-confirms the export is _not_ a
+`vital status --readiness` for health, and re-confirms the export is *not* a
 backup and cannot be restored by import. No surprise for an enterprise operator
 looking for a "Backup" tile.
 **Ideal flow:** `/console/data` shows "Backups: operator-managed out of scope —
@@ -112,7 +108,6 @@ restore surface is later desired, promote this card to a full flow.
 ---
 
 ### [P1] `S` — Every console mutation path audit: confirm success/empty/error copy is consistent
-
 **Flow:** All mutations (setup, team, data, review, workflows, rooms).
 **Problem:** Succesful/empty/error states are implemented per-surface but vary in
 tone and placement (some inline `.success`, some redirect + notice, some just a
@@ -124,7 +119,6 @@ with a recoverable next step + correlation id. No silent redirects.
 ---
 
 ### [P2] `S` — Missing entering-flag for "source configured but never synced" on home readiness
-
 **Flow:** Operator configures source in setup → home should reflect "pending
 first sync".
 **Problem:** `integrationReadinessState` marks `configured` healthy; a configuredbut-never-synced source can read as healthy when the user actually is mid-onboarding.
@@ -135,7 +129,6 @@ with `sourceState != unconfigured`.
 ---
 
 ### [P2] `S` — Empty-state list copy on dashboard/rooms should be user-actionable
-
 **Flow:** New org opens Console home; no sessions/rooms/workflows yet.
 **Problem:** Board views render "no results" text but not always a primary action
 ("Start first workflow" exists only in the activation panel and setup).
@@ -146,20 +139,18 @@ bare empty count.
 ---
 
 ### [P2] `M` — Import: no user-visible file-import journey (scope decision needed)
-
 **Flow:** User has structured external data → wants it into the ledger.
 **Problem:** Ingestion is collector-based (files via directory collector, GitHub,
 Serper). There is no general "upload file → map → validate → preview → import"
 as evidence, and `export.ts` explicitly documents import as unsupported for
 history (append-only). That is a **deliberate** design decision.
 **Fix:** Decision needed: (a) keep import unsupported and say so loudly on Data &
-Export (recommended for history integrity), and/or (b) add a _new-record_ import
+Export (recommended for history integrity), and/or (b) add a *new-record* import
 as OBSERVATION with validation/preview. Record the decision; do not silently omit.
 
 ---
 
 ### [P2] `S` — Terminology drift audit (scope/room, request/workflow, review/approval)
-
 **Flow:** Cross-page naming.
 **Problem:** Product uses "scope" and "room", "request" and "workflow",
 "review" and "approval" somewhat interchangeably across surfaces; new users
@@ -170,7 +161,6 @@ concept, keep aliases in `docs/glossary.md`.
 ---
 
 ### [P3] `S` — Re-auth (15-min) banner on sensitive ops give no countdown expectation
-
 **Flow:** Role change/disable require recent auth; rejection is clear but abrupt.
 **Fix:** On the Team page, note which actions require a fresh sign-in and that
 the user will be returned to the task (reuse `reauthResume` copy).
@@ -194,7 +184,7 @@ the user will be returned to the task (reuse `reauthResume` copy).
 ## Suggested overall product-flow score
 
 **7.8 / 10.** Core auth, team, onboarding, export, audit, and resilience flows are
-real and tested; the prior gaps in _visibility and continuity_ (activation
+real and tested; the prior gaps in *visibility and continuity* (activation
 ready-state, in-UI readiness, backup out-of-scope clarity) are closed. Remaining
 work is consistency and polish: uniform success/empty/error copy, "configured-but-
 never-synced" surfacing, a possible managed backup surface, and terminology
