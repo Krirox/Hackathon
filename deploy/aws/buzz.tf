@@ -327,10 +327,17 @@ resource "aws_ecs_service" "buzz" {
     security_groups  = [aws_security_group.ecs.id]
     assign_public_ip = false
   }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.buzz[0].arn
-    container_name   = "buzz-relay"
-    container_port   = 3000
+  # Attach the ALB target group only when the relay has a public hostname.
+  # Without a listener rule the TG has no load balancer, and ECS rejects
+  # CreateService for a TG that isn't attached to one. Hostname-less buzz is
+  # still reachable from core via the Cloud Map registry below.
+  dynamic "load_balancer" {
+    for_each = var.buzz_hostname == "" ? [] : [1]
+    content {
+      target_group_arn = aws_lb_target_group.buzz[0].arn
+      container_name   = "buzz-relay"
+      container_port   = 3000
+    }
   }
   service_registries {
     registry_arn = aws_service_discovery_service.buzz[0].arn

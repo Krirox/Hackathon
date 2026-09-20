@@ -1039,7 +1039,9 @@ resource "aws_lambda_function" "executor" {
       BEDROCK_MODEL         = var.bedrock_prod_model_id
       APPROVED_PROD_MODELS  = var.bedrock_prod_model_id
       APPROVED_DEV_MODELS   = var.bedrock_dev_model_id
-      AWS_REGION            = var.region
+      # No AWS_REGION here: Lambda reserves AWS_* keys and rejects the create
+      # call outright. The runtime injects AWS_REGION itself, which is exactly
+      # what models.ts' bedrockBaseUrl reads.
       ARTIFACT_BUCKET       = aws_s3_bucket.artifacts.bucket
       DATABASE_URL          = aws_secretsmanager_secret_version.db_url.secret_string
       BEDROCK_API_KEY       = aws_secretsmanager_secret_version.bedrock.secret_string

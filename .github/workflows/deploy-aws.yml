@@ -99,6 +99,20 @@ jobs:
           else
             terraform init -input=false
           fi
+          # The build steps above create the ECR repositories before this
+          # apply (the Lambda image must exist when the function is created),
+          # so on a fresh account they live outside the state file and the
+          # aws_ecr_repository creates would fail with AlreadyExists. Adopt
+          # them once; later runs find them in state and skip the import.
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          for pair in core:vital-core executor:vital-executor; do
+            ADDR="aws_ecr_repository.${pair%%:*}"
+            NAME="${pair##*:}"
+            if ! terraform state list | grep -qF "$ADDR"; then
+              terraform import -input=false "$ADDR" \
+                "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$NAME"
+            fi
+          done
           # terraform.tfvars is git-ignored (it can carry secrets), so CI reads
           # the non-secret domain wiring from repo *variables* instead. Unset
           # = empty = the variables.tf default (HTTP-only, no DNS) — a stack
