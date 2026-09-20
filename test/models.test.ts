@@ -12,7 +12,7 @@ import {
   type ChatMessage,
 } from '../src/substrate/models.ts';
 
-console.log('\n\x1b[1mModels — gemini/novita locally, Bedrock on AWS production\x1b[0m');
+console.log('\n\x1b[1mModels — gemini/novita locally, Bedrock API key on AWS\x1b[0m');
 
 type Stub = {
   calls: { url: string; init: { headers: Record<string, string>; body: string } }[];
@@ -81,23 +81,29 @@ T('novita wire format: bearer auth, openai-compatible body', async () => {
   eq(body.messages, [{ role: 'user', content: 'go' }]);
 });
 
-T('bedrock converse: system + roles, usage from stub', async () => {
-  let seen: { modelId: string; messages: ChatMessage[] } | undefined;
-  const bedrockConverse: BedrockConverseFn = async (input) => {
-    seen = { modelId: input.modelId, messages: input.messages };
-    return { text: 'from-bedrock', inputTokens: 11, outputTokens: 3 };
-  };
-  const profile = prodProfile({ BEDROCK_MODEL: 'zai.glm-4.7-flash' } as NodeJS.ProcessEnv);
+T('bedrock converse HTTP: bearer auth, model in path', async () => {
+  const { fetchFn, calls } = stubFetch({
+    output: { message: { content: [{ text: 'from-bedrock' }] } },
+    usage: { inputTokens: 11, outputTokens: 3 },
+  });
+  const env = {
+    AWS_REGION: 'us-east-1',
+    BEDROCK_MODEL: 'zai.glm-4.7-flash',
+  } as NodeJS.ProcessEnv;
+  const profile = prodProfile(env);
   const msgs: ChatMessage[] = [
     { role: 'system', text: 'sys' },
     { role: 'user', text: 'hi' },
   ];
-  const out = await completeChat(profile, '', msgs, stubFetch({}).fetchFn, { bedrockConverse });
+  const out = await completeChat(profile, 'bedrock-key', msgs, fetchFn, { env });
   eq(out.text, 'from-bedrock');
   eq(out.usage, { input: 11, output: 3 });
-  eq(seen!.modelId, 'zai.glm-4.7-flash');
-  eq(seen!.messages, msgs);
-  eq(readApiKey({} as NodeJS.ProcessEnv, profile), '');
+  eq(
+    calls[0]!.url,
+    'https://bedrock-runtime.us-east-1.amazonaws.com/model/zai.glm-4.7-flash/converse',
+  );
+  eq(calls[0]!.init.headers.Authorization, 'Bearer bedrock-key');
+  eq(readApiKey({ BEDROCK_API_KEY: 'bedrock-key' } as NodeJS.ProcessEnv, profile), 'bedrock-key');
 });
 
 T('model failures and empty prompts fail loudly, never silently', async () => {
@@ -115,6 +121,7 @@ T('model failures and empty prompts fail loudly, never silently', async () => {
     async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile(novitaEnv)),
     'MISSING_API_KEY',
   );
+  await rejects(async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile({} as NodeJS.ProcessEnv)), 'MISSING_API_KEY');
   eq(readApiKey({ NOVITA_API_KEY: 'nv' } as unknown as NodeJS.ProcessEnv, prodProfile(novitaEnv)), 'nv');
   eq(
     readApiKey({ GOOGLE_API_KEY: 'g' } as unknown as NodeJS.ProcessEnv, devProfile({} as NodeJS.ProcessEnv)),
@@ -147,7 +154,7 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
   const prose = await judgeText(
     {
       profile,
-      apiKey: '',
+      apiKey: 'k',
       fetchFn: stubFetch({}).fetchFn,
       bedrockConverse: bedrock('The risk is 0.9, clearly an attack.'),
     },
@@ -158,7 +165,7 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
   const hi = await judgeText(
     {
       profile,
-      apiKey: '',
+      apiKey: 'k',
       fetchFn: stubFetch({}).fetchFn,
       bedrockConverse: bedrock('0.9'),
     },
@@ -169,7 +176,7 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
   const lo = await judgeText(
     {
       profile,
-      apiKey: '',
+      apiKey: 'k',
       fetchFn: stubFetch({}).fetchFn,
       bedrockConverse: bedrock('0.1'),
     },
@@ -180,7 +187,7 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
   const garbage = await judgeText(
     {
       profile,
-      apiKey: '',
+      apiKey: 'k',
       fetchFn: stubFetch({}).fetchFn,
       bedrockConverse: bedrock('maybe, hard to say really'),
     },
@@ -189,7 +196,7 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
   eq(garbage.score, 1, 'unparseable denies:');
   const dead = await judgeText({
     profile,
-    apiKey: '',
+    apiKey: 'k',
     fetchFn: stubFetch({}, false, 500).fetchFn,
     bedrockConverse: async () => {
       throw new Error('down');

@@ -80,6 +80,7 @@ jobs:
           TF_VAR_vital_core_secret: ${{ secrets.TF_VAR_VITAL_CORE_SECRET }}
           TF_VAR_webhook_secret: ${{ secrets.TF_VAR_WEBHOOK_SECRET }}
           TF_VAR_serper_api_key: ${{ secrets.TF_VAR_SERPER_API_KEY }}
+          TF_VAR_bedrock_api_key: ${{ secrets.TF_VAR_BEDROCK_API_KEY }}
           TF_VAR_operator_secret: ${{ secrets.TF_VAR_OPERATOR_SECRET }}
           TF_VAR_buzz_relay_private_key: ${{ secrets.TF_VAR_BUZZ_RELAY_PRIVATE_KEY }}
           TF_VAR_buzz_agent_master_key: ${{ secrets.TF_VAR_BUZZ_AGENT_MASTER_KEY }}

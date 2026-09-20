@@ -198,6 +198,18 @@ variable "serper_api_key" {
   }
 }
 
+variable "bedrock_api_key" {
+  description = "Amazon Bedrock API key (Converse HTTP, Bearer auth). Create in Bedrock console → API keys. Must match var.region."
+  type        = string
+  sensitive   = true
+  default     = ""
+
+  validation {
+    condition     = length(var.bedrock_api_key) > 0 && var.bedrock_api_key != "CHANGEME"
+    error_message = "bedrock_api_key must be a real key — pass TF_VAR_bedrock_api_key."
+  }
+}
+
 variable "bedrock_prod_model_id" {
   description = "Bedrock foundation model ID for the production lane (Converse API). Default: Z.AI GLM 4.7 Flash (zai.glm-4.7-flash). Enable model access in the account before apply."
   type        = string

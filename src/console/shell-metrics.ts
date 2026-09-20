@@ -25,13 +25,10 @@ export interface ShellMetrics {
   dailyBudgetCeiling: number;
 }
 
-/** Real per-room recency read from the buzz_messages table (minutes ago). */
-async function roomRecency(db: AsyncDb, tenant: string, scope: string, nowMs: number): Promise<number | null> {
-  const row = (await db
-    .prepare('SELECT MAX(created_at) AS last FROM buzz_messages WHERE tenant = ? AND scope = ?')
-    .get(tenant, scope)) as { last: number | string | null } | undefined;
-  if (!row?.last) return null;
-  const lastMs = typeof row.last === 'number' ? row.last : Date.parse(String(row.last));
+/** Minutes since a room's last buzz message, or null when it has none. */
+function minutesSince(last: number | string | null, nowMs: number): number | null {
+  if (!last) return null;
+  const lastMs = typeof last === 'number' ? last : Date.parse(String(last));
   if (!Number.isFinite(lastMs)) return null;
   return Math.max(0, Math.floor((nowMs - lastMs) / 60_000));
 }
@@ -100,6 +97,11 @@ export async function computeShellMetrics(
 /**
  * Real per-room recency (minutes since last buzz message) for the sidebar.
  * Rooms with no messages map to null → rendered as "—".
+ *
+ * One grouped read for every scope, not one read per scope: the rail asks this
+ * for every room on every page, so a per-room query made the chrome's cost grow
+ * with the tenant's room count. Scopes with no messages have no row and answer
+ * null, which is what the per-room `get()` returned for them too.
  */
 export async function computeRoomRecency(
   db: AsyncDb,
@@ -109,8 +111,19 @@ export async function computeRoomRecency(
 ): Promise<Record<string, number | null>> {
   const nowMs = Date.parse(now());
   const out: Record<string, number | null> = {};
-  for (const scope of scopes) {
-    out[scope] = await roomRecency(db, tenant, scope, nowMs);
+  const wanted = [...new Set(scopes)];
+  for (const scope of wanted) out[scope] = null;
+  if (wanted.length === 0) return out;
+  const rows = (await db
+    .prepare(
+      `SELECT scope, MAX(created_at) AS last FROM buzz_messages
+       WHERE tenant = ? AND scope IN (${wanted.map(() => '?').join(', ')})
+       GROUP BY scope`,
+    )
+    .all(tenant, ...wanted)) as { scope: string; last: number | string | null }[];
+  for (const row of rows) {
+    if (!(row.scope in out)) continue;
+    out[row.scope] = minutesSince(row.last, nowMs);
   }
   return out;
 }

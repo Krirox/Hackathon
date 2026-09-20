@@ -76,9 +76,7 @@ agents and people talk; both ride the same deployment and database.
    §5 covers both ways to connect it.
 3. **GitHub repo** with `main` protected by `ci.yml`, plus Docker and the
    AWS CLI available locally if you take the from-your-machine path (§6b).
-4. **Bedrock model access**: enable the foundation models named in
-   `bedrock_prod_model_id` / `bedrock_dev_model_id` (defaults in
-   `deploy/aws/variables.tf`) in the target region before the first apply.
+4. **Bedrock API key**: create a key in **Bedrock → API keys** in the same region as the stack (`AWS_REGION`, default `eu-central-1`). Store it as GitHub secret **`TF_VAR_BEDROCK_API_KEY`** (not a console “model access” flow).
 5. **Quotas**: Fargate vCPU, RDS, ElastiCache in the target region —
    request increases before the pilot if the account is new.
 
@@ -209,7 +207,7 @@ as **repository secrets** (Settings → Secrets and variables → Actions):
 | `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens — required |
 | `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake — required |
 | `TF_VAR_SERPER_API_KEY` | search plane — required |
-| *(models)* | ECS + Lambda use **Amazon Bedrock** (Converse API) via task role IAM — no `TF_VAR_*` keys. Enable `bedrock_prod_model_id` / `bedrock_dev_model_id` in the account (see `deploy/aws/variables.tf`) before apply. |
+| *(models)* | **`TF_VAR_BEDROCK_API_KEY`** — Bedrock console API key (region must match `AWS_REGION`). Model: GLM 4.7 Flash (`zai.glm-4.7-flash`) via `bedrock_*_model_id` in Terraform. |
 | `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
 | `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | relay identity (64 hex) |
 | `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex; empty = no publishing identity |

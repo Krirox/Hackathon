@@ -231,7 +231,7 @@ export async function runJob(
 
   const profile = job.lane === 'dev' ? devProfile(env) : prodProfile(env);
   assertApproved(profile, job.lane ?? 'production', env);
-  if (profile.provider !== 'bedrock') checkModelEgress(profile.baseUrl, env);
+  checkModelEgress(profile.baseUrl, env);
   const apiKey = readApiKey(env, profile);
 
   // F05: even on the IN_FLIGHT retry path, another worker may hold the

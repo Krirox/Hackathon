@@ -61,10 +61,6 @@ locals {
   azs            = slice(data.aws_availability_zones.available.names, 0, var.az_count)
   core_image     = var.core_image
   executor_image = var.executor_image
-  bedrock_model_arns = [
-    "arn:aws:bedrock:${var.region}::foundation-model/${var.bedrock_prod_model_id}",
-    "arn:aws:bedrock:${var.region}::foundation-model/${var.bedrock_dev_model_id}",
-  ]
   bedrock_model_env = [
     { name = "DEV_MODEL_PROVIDER", value = "bedrock" },
     { name = "PROD_MODEL_PROVIDER", value = "bedrock" },
@@ -73,6 +69,8 @@ locals {
     { name = "APPROVED_DEV_MODELS", value = var.bedrock_dev_model_id },
     { name = "APPROVED_PROD_MODELS", value = var.bedrock_prod_model_id },
   ]
+  # Bedrock API keys are region-scoped — egress allowlist must match var.region.
+  allowed_egress = "${var.allowed_egress_hosts},bedrock-runtime.${var.region}.amazonaws.com"
 }
 
 # ------------------------------------------------------------- networking ----
@@ -305,6 +303,11 @@ resource "aws_secretsmanager_secret" "serper" { name = "${local.name}/serper-api
 resource "aws_secretsmanager_secret_version" "serper" {
   secret_id     = aws_secretsmanager_secret.serper.id
   secret_string = var.serper_api_key
+}
+resource "aws_secretsmanager_secret" "bedrock" { name = "${local.name}/bedrock-api-key" }
+resource "aws_secretsmanager_secret_version" "bedrock" {
+  secret_id     = aws_secretsmanager_secret.bedrock.id
+  secret_string = var.bedrock_api_key
 }
 # Operator secret is optional (empty var = no secret, mutations ungated):
 # count-gated so dev applies create nothing to rotate or leak.
@@ -557,7 +560,8 @@ resource "aws_iam_policy" "ecs_execution_secrets" {
           aws_secretsmanager_secret.tenant_hmac.arn,
           aws_secretsmanager_secret.core_secret.arn,
           aws_secretsmanager_secret.webhook.arn,
-          aws_secretsmanager_secret.serper.arn
+          aws_secretsmanager_secret.serper.arn,
+          aws_secretsmanager_secret.bedrock.arn
           ], aws_secretsmanager_secret.operator[*].arn,
           aws_secretsmanager_secret.agent_master_key[*].arn,
           aws_secretsmanager_secret.review_secret[*].arn,
@@ -594,18 +598,9 @@ resource "aws_iam_policy" "ecs_task" {
       { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([
         aws_secretsmanager_secret.db_url.arn,
         aws_secretsmanager_secret.tenant_hmac.arn, aws_secretsmanager_secret.core_secret.arn,
-        aws_secretsmanager_secret.webhook.arn, aws_secretsmanager_secret.serper.arn
+        aws_secretsmanager_secret.webhook.arn, aws_secretsmanager_secret.serper.arn,
+        aws_secretsmanager_secret.bedrock.arn
       ], aws_secretsmanager_secret.operator[*].arn) },
-      {
-        Effect = "Allow"
-        Action = [
-          "bedrock:InvokeModel",
-          "bedrock:InvokeModelWithResponseStream",
-          "bedrock:Converse",
-          "bedrock:ConverseStream",
-        ]
-        Resource = local.bedrock_model_arns
-      },
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = [
         "${aws_s3_bucket.artifacts.arn}/*", "${aws_s3_bucket.audit.arn}/*"
       ] },
@@ -646,17 +641,7 @@ resource "aws_iam_policy" "lambda" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource = [aws_sqs_queue.requests.arn] },
-      {
-        Effect = "Allow"
-        Action = [
-          "bedrock:InvokeModel",
-          "bedrock:InvokeModelWithResponseStream",
-          "bedrock:Converse",
-          "bedrock:ConverseStream",
-        ]
-        Resource = local.bedrock_model_arns
-      },
+      { Effect = "Allow", Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource = [aws_sqs_queue.requests.arn] }
     ]
   })
 }
@@ -824,7 +809,7 @@ resource "aws_ecs_task_definition" "core" {
         # the task role has no ecs:RunTask to make one. Leave it unset until the
         # driver actually launches tasks — see the staged note in variables.tf.
         { name = "AWS_REGION", value = var.region },
-        { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
+        { name = "ALLOWED_EGRESS_HOSTS", value = local.allowed_egress }
         ], local.bedrock_model_env, local.tls_enabled == 1 ? [
         # Only with a certificate attached (dns.tf): the ALB then terminates
         # TLS and redirects :80, so the session cookie must carry `Secure` or
@@ -841,7 +826,8 @@ resource "aws_ecs_task_definition" "core" {
           { name = "TENANT_HMAC_SECRET", valueFrom = aws_secretsmanager_secret.tenant_hmac.arn },
           { name = "VITAL_CORE_SECRET", valueFrom = aws_secretsmanager_secret.core_secret.arn },
           { name = "WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.webhook.arn },
-          { name = "SERPER_API_KEY", valueFrom = aws_secretsmanager_secret.serper.arn }
+          { name = "SERPER_API_KEY", valueFrom = aws_secretsmanager_secret.serper.arn },
+          { name = "BEDROCK_API_KEY", valueFrom = aws_secretsmanager_secret.bedrock.arn }
         ],
         var.operator_secret == "" ? [] : [
           { name = "VITAL_OPERATOR_SECRET", valueFrom = aws_secretsmanager_secret.operator[0].arn }
@@ -1046,7 +1032,7 @@ resource "aws_lambda_function" "executor" {
     variables = {
       VITAL_TENANT          = "acme"
       VITAL_MIGRATE_ON_BOOT = "0"
-      ALLOWED_EGRESS_HOSTS  = var.allowed_egress_hosts
+      ALLOWED_EGRESS_HOSTS  = local.allowed_egress
       DEV_MODEL_PROVIDER    = "bedrock"
       PROD_MODEL_PROVIDER   = "bedrock"
       BEDROCK_DEV_MODEL     = var.bedrock_dev_model_id
@@ -1055,9 +1041,8 @@ resource "aws_lambda_function" "executor" {
       APPROVED_DEV_MODELS   = var.bedrock_dev_model_id
       AWS_REGION            = var.region
       ARTIFACT_BUCKET       = aws_s3_bucket.artifacts.bucket
-      # Without DATABASE_URL the handler falls back to sqlite :memory: — every
-      # job fails at coord.get. Model calls use the task role (Bedrock Converse).
-      DATABASE_URL = aws_secretsmanager_secret_version.db_url.secret_string
+      DATABASE_URL          = aws_secretsmanager_secret_version.db_url.secret_string
+      BEDROCK_API_KEY       = aws_secretsmanager_secret_version.bedrock.secret_string
     }
   }
   logging_config {

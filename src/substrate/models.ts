@@ -9,11 +9,9 @@
  *   Gemini   POST …/generateContent, x-goog-api-key (optional local)
  *
  * Third-party keys are read at the boundary via `readApiKey` (never logged).
- * Bedrock uses the default credential chain (ECS/Lambda task role). `fetchFn`
- * is injected for HTTP providers so tests stub the network and CI spends nothing.
+ * Bedrock uses a console API key (`BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`)
+ * via the Converse HTTP API. `fetchFn` is injected so tests stub the network.
  */
-
-import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export class ModelError extends Error {
   constructor(
@@ -31,7 +29,7 @@ export interface ModelProfile {
   name: string;
   provider: ModelProvider;
   model: string;
-  /** Env var holding the key for HTTP providers — empty for Bedrock (IAM). */
+  /** Env var holding the provider key (Bedrock: `BEDROCK_API_KEY`). */
   apiKeyEnv: string;
   baseUrl: string;
   maxOutputTokens: number;
@@ -91,7 +89,7 @@ function bedrockProfile(name: string, env: NodeJS.ProcessEnv): ModelProfile {
     name,
     provider: 'bedrock',
     model,
-    apiKeyEnv: '',
+    apiKeyEnv: 'BEDROCK_API_KEY',
     baseUrl: bedrockBaseUrl(env),
     maxOutputTokens: name === 'production' ? 2048 : 1024,
     temperature: 0.2,
@@ -112,11 +110,12 @@ export function prodProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile 
   return novitaProfile('production', env);
 }
 
-/** Read the key at the boundary. Bedrock uses IAM — no API key env. */
+/** Read the key at the boundary. Never log or persist the value. */
 export function readApiKey(env: NodeJS.ProcessEnv, profile: ModelProfile): string {
-  if (profile.provider === 'bedrock') return '';
   const resolved =
-    env[profile.apiKeyEnv] ?? (profile.apiKeyEnv === 'GEMINI_API_KEY' ? env.GOOGLE_API_KEY : undefined);
+    env[profile.apiKeyEnv] ??
+    (profile.provider === 'bedrock' ? env.AWS_BEARER_TOKEN_BEDROCK : undefined) ??
+    (profile.apiKeyEnv === 'GEMINI_API_KEY' ? env.GOOGLE_API_KEY : undefined);
   if (!resolved) {
     throw new ModelError(
       'MISSING_API_KEY',
@@ -168,6 +167,11 @@ interface NovitaResponse {
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
+interface BedrockConverseResponse {
+  output?: { message?: { content?: { text?: string }[] } };
+  usage?: { inputTokens?: number; outputTokens?: number };
+}
+
 export async function completeChat(
   profile: ModelProfile,
   apiKey: string,
@@ -175,13 +179,13 @@ export async function completeChat(
   fetchFn: FetchFn,
   opts: CompleteChatOptions = {},
 ): Promise<ChatResult> {
-  if (profile.provider !== 'bedrock' && !apiKey) {
+  if (!apiKey) {
     throw new ModelError('MISSING_API_KEY', 'refusing an unauthenticated model call');
   }
   if (messages.length === 0) throw new ModelError('EMPTY_PROMPT', 'a model call with no messages predicts nothing');
   if (profile.provider === 'gemini') return completeGemini(profile, apiKey, messages, fetchFn);
   if (profile.provider === 'novita') return completeNovita(profile, apiKey, messages, fetchFn);
-  return completeBedrock(profile, messages, opts);
+  return completeBedrock(profile, apiKey, messages, fetchFn, opts);
 }
 
 async function completeGemini(
@@ -239,7 +243,9 @@ async function completeNovita(
 
 async function completeBedrock(
   profile: ModelProfile,
+  apiKey: string,
   messages: ChatMessage[],
+  fetchFn: FetchFn,
   opts: CompleteChatOptions,
 ): Promise<ChatResult> {
   const env = opts.env ?? process.env;
@@ -258,28 +264,27 @@ async function completeBedrock(
   const converseMessages = messages
     .filter((m) => m.role !== 'system')
     .map((m) => ({
-      role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+      role: m.role === 'assistant' ? 'assistant' : 'user',
       content: [{ text: m.text }],
     }));
-  const client = new BedrockRuntimeClient({ region });
-  try {
-    const out = await client.send(
-      new ConverseCommand({
-        modelId: profile.model,
-        system: system.length > 0 ? [{ text: system.join('\n') }] : undefined,
-        messages: converseMessages,
-        inferenceConfig: { maxTokens: profile.maxOutputTokens, temperature: profile.temperature },
-      }),
-    );
-    const text = (out.output?.message?.content ?? []).map((p) => p.text ?? '').join('');
-    return {
-      text,
-      usage: { input: out.usage?.inputTokens ?? 0, output: out.usage?.outputTokens ?? 0 },
-    };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new ModelError('MODEL_FETCH', `bedrock ${profile.model} → ${msg}`);
-  }
+  const body: Record<string, unknown> = {
+    messages: converseMessages,
+    inferenceConfig: { maxTokens: profile.maxOutputTokens, temperature: profile.temperature },
+  };
+  if (system.length > 0) body.system = [{ text: system.join('\n') }];
+  const url = `${profile.baseUrl}/model/${encodeURIComponent(profile.model)}/converse`;
+  const res = await fetchFn(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ModelError('MODEL_FETCH', `bedrock ${profile.model} → ${res.status}`);
+  const data = (await res.json()) as BedrockConverseResponse;
+  const text = (data.output?.message?.content ?? []).map((p) => p.text ?? '').join('');
+  return {
+    text,
+    usage: { input: data.usage?.inputTokens ?? 0, output: data.usage?.outputTokens ?? 0 },
+  };
 }
 
 // ------------------------------------------------- approved-model registry ----

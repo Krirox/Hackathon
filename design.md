@@ -116,6 +116,14 @@ Shared telemetry is decoupled from both shells: `ShellMetrics`,
 shell (or vice versa) to draw a number. `test/routes.test.ts` budgets it under
 the module key `console/shell-metrics`.
 
+Chrome costs the same at ten rooms as at one. Every reading the rail and the
+shell header need — room health (`ScopeHealthEvaluator.evaluateAll`), the room
+set (`loadTenantRooms`), the budget gauges and the per-room recency — is a
+grouped read over the tenant, never a loop of reads over its rooms. A new shell
+reading that must run per room is a design error, not a measurement to update:
+`test/routes.test.ts` renders `/console/rooms` before and after adding six team
+rooms and fails if any shell module's statement count moves.
+
 Scope exception — the Workspace/chat is exempt from the token law, not merely
 non-compliant. Its literal Buzz hexes (`#1C1E21`, `#E8EAE6`, `#616061`,
 `#DDDDDD`, `#2BAC76`, `#E01E5A`, `#ECB22E`, `#CD2553`, `#F8FAFC`, `#E2E8F0`,

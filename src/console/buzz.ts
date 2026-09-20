@@ -1,7 +1,8 @@
 import type { AsyncDb } from '../core/db.ts';
-import { CANONICAL_ROOMS, loadRoomConfig, normalizeScope, resolveRoomDef } from '../talk/rooms.ts';
+import { CANONICAL_ROOMS, loadRoomConfig, loadTenantRooms, normalizeScope, resolveRoomDef } from '../talk/rooms.ts';
 import { ScopeHealthEvaluator, type RoomHealthEvaluation } from '../talk/health.ts';
 import { RoomBudgetTracker, type BudgetGasGauge } from '../talk/budget-gauge.ts';
+import { roomHealth } from './shell-reads.ts';
 import type { BuzzSurface } from '../talk/buzz.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import { listUsers } from '../core/auth.ts';
@@ -39,19 +40,28 @@ export interface BuzzRosterData {
   relay: { ok: boolean; detail: string } | null;
 }
 
-/** Assemble everything the roster needs. Reuses the evaluators the APIs use. */
+/**
+ * Assemble everything the roster needs. Reuses the evaluators the APIs use.
+ *
+ * Everything here is a whole-tenant read, shared with the shell that wraps this
+ * page: the health rollup, the room set and the gauges are each asked for once
+ * per request. Drawing the roster one room at a time used to cost the page a
+ * config read, a health evaluation and two budget aggregates *per room* — which
+ * is why `/console/buzz` was the console's most expensive page.
+ */
 export async function buildBuzzRoster(
   db: AsyncDb,
   tenant: string,
   surface?: BuzzSurface | null,
 ): Promise<BuzzRosterData> {
-  const evaluator = new ScopeHealthEvaluator(db, tenant, {});
   const tracker = new RoomBudgetTracker(db, tenant);
-  const evaluations = await evaluator.evaluateAll();
+  const evaluations = await roomHealth(db, tenant);
+  const configs = await loadTenantRooms(db, tenant);
+  const gauges = await tracker.computeGauges(evaluations.map((h) => h.scope));
   const rooms: BuzzRoomRow[] = [];
   for (const health of evaluations) {
-    const config = await loadRoomConfig(db, tenant, health.scope);
-    const gauge = await tracker.computeGauge(health.scope);
+    const config = configs.get(health.scope)?.config ?? (await loadRoomConfig(db, tenant, health.scope));
+    const gauge = gauges.get(health.scope)!;
     rooms.push({
       scope: health.scope,
       roomName: health.roomName,

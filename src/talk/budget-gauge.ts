@@ -1,6 +1,13 @@
 import type { AsyncDb } from '../core/db.ts';
 import { type BuzzSurface } from './buzz.ts';
-import { roomForScope, normalizeScope, loadRoomConfig, saveRoomConfig, resolveRoomDef, type RoomConfig } from './rooms.ts';
+import {
+  roomForScope,
+  normalizeScope,
+  loadRoomConfig,
+  loadTenantRooms,
+  saveRoomConfig,
+  type RoomConfig,
+} from './rooms.ts';
 import { STATUS_BADGES } from './health.ts';
 
 export interface BudgetGasGauge {
@@ -42,66 +49,98 @@ export class RoomBudgetTracker {
   /** Computes the live gas gauge for a room */
   async computeGauge(rawScope: string): Promise<BudgetGasGauge> {
     const scope = normalizeScope(rawScope);
-    const room = (await resolveRoomDef(this.db, this.tenant, scope)) ?? roomForScope(scope);
-    const config = await loadRoomConfig(this.db, this.tenant, scope);
+    const gauges = await this.computeGauges([scope]);
+    // `computeGauges` answers every scope it was asked about, normalized.
+    return gauges.get(scope)!;
+  }
+
+  /**
+   * Live gas gauges for many rooms from two grouped reads.
+   *
+   * The roster drew one gauge per room, and each gauge was two aggregates plus a
+   * config read of its own — so the page cost grew with the tenant's room count.
+   * Grouping by scope makes the same numbers cost two statements in total. Rooms
+   * with no spend have no row and report zero, which is what the per-room
+   * aggregate returned for them.
+   */
+  async computeGauges(rawScopes: readonly string[]): Promise<Map<string, BudgetGasGauge>> {
+    const scopes = [...new Set(rawScopes.map(normalizeScope))].filter(Boolean);
+    const out = new Map<string, BudgetGasGauge>();
+    if (scopes.length === 0) return out;
+
+    const rooms = await loadTenantRooms(this.db, this.tenant);
     const at = this.now();
     const oneHourAgo = new Date(Date.parse(at) - 3600 * 1000).toISOString();
+    const inList = scopes.map(() => '?').join(', ');
 
     // 1. All-time/month spend
-    const spendRow = (await this.db
+    const spendRows = (await this.db
       .prepare(
-        `SELECT COALESCE(SUM(spent_dollars), 0) as dollars,
+        `SELECT target_scope AS scope,
+                COALESCE(SUM(spent_dollars), 0) as dollars,
                 COALESCE(SUM(spent_tokens), 0) as tokens
-         FROM requests WHERE tenant = ? AND target_scope = ?`,
+         FROM requests WHERE tenant = ? AND target_scope IN (${inList})
+         GROUP BY target_scope`,
       )
-      .get(this.tenant, scope)) as { dollars: number; tokens: number } | undefined;
-
-    const dollarsSpent = Number(spendRow?.dollars ?? 0);
-    const tokensSpent = Number(spendRow?.tokens ?? 0);
+      .all(this.tenant, ...scopes)) as { scope: string; dollars: number; tokens: number }[];
 
     // 2. Tokens in last 1 hour
-    const rateRow = (await this.db
+    const rateRows = (await this.db
       .prepare(
-        `SELECT COALESCE(SUM(spent_tokens), 0) as hourlyTokens
-         FROM requests WHERE tenant = ? AND target_scope = ? AND created_at >= ?`,
+        `SELECT target_scope AS scope, COALESCE(SUM(spent_tokens), 0) as hourlyTokens
+         FROM requests WHERE tenant = ? AND target_scope IN (${inList}) AND created_at >= ?
+         GROUP BY target_scope`,
       )
-      .get(this.tenant, scope, oneHourAgo)) as { hourlyTokens: number } | undefined;
+      .all(this.tenant, ...scopes, oneHourAgo)) as { scope: string; hourlyTokens: number }[];
 
-    // Real throughput only. A quiet room reports 0 — inventing a floor
-    // (the old 84k "realistic default") fabricated load that never ran
-    // and would have made budget headroom look consumed when it was not.
-    const tokensPerHour = Number(rateRow?.hourlyTokens ?? 0);
+    const spend = new Map(spendRows.map((r) => [r.scope, r]));
+    const rate = new Map(rateRows.map((r) => [r.scope, Number(r.hourlyTokens ?? 0)]));
 
-    const dollarPct = config.budgetCeilingDollars > 0 ? (dollarsSpent / config.budgetCeilingDollars) * 100 : 0;
-    const tokenPct = config.budgetCeilingTokens > 0 ? (tokensSpent / config.budgetCeilingTokens) * 100 : 0;
-    const percentage = Math.round(Math.max(dollarPct, tokenPct));
+    for (const scope of scopes) {
+      const entry = rooms.get(scope);
+      // A scope the tenant has no room for still gauges against its defaults,
+      // exactly as `loadRoomConfig` alone answered before.
+      const config = entry?.config ?? (await loadRoomConfig(this.db, this.tenant, scope));
+      const room = entry?.room ?? roomForScope(scope);
+      const dollarsSpent = Number(spend.get(scope)?.dollars ?? 0);
+      const tokensSpent = Number(spend.get(scope)?.tokens ?? 0);
+      // Real throughput only. A quiet room reports 0 — inventing a floor
+      // (the old 84k "realistic default") fabricated load that never ran
+      // and would have made budget headroom look consumed when it was not.
+      const tokensPerHour = Number(rate.get(scope) ?? 0);
 
-    const isWarning = percentage >= 80;
-    const isBreached = percentage >= 100;
-    const bar = renderProgressBar(percentage, 8);
+      const dollarPct = config.budgetCeilingDollars > 0 ? (dollarsSpent / config.budgetCeilingDollars) * 100 : 0;
+      const tokenPct = config.budgetCeilingTokens > 0 ? (tokensSpent / config.budgetCeilingTokens) * 100 : 0;
+      const percentage = Math.round(Math.max(dollarPct, tokenPct));
 
-    let badge = STATUS_BADGES.healthy;
-    if (isBreached) {
-      badge = STATUS_BADGES.halted;
-    } else if (isWarning) {
-      badge = STATUS_BADGES.degraded;
+      const isWarning = percentage >= 80;
+      const isBreached = percentage >= 100;
+      const bar = renderProgressBar(percentage, 8);
+
+      let badge = STATUS_BADGES.healthy;
+      if (isBreached) {
+        badge = STATUS_BADGES.halted;
+      } else if (isWarning) {
+        badge = STATUS_BADGES.degraded;
+      }
+      const headerString = `${badge} #${room.name} ${bar} $${dollarsSpent.toFixed(0)} / $${config.budgetCeilingDollars.toFixed(0)} · ${formatTokenRate(tokensPerHour)}`;
+
+      out.set(scope, {
+        scope,
+        roomName: room.name,
+        dollarsSpent,
+        dollarsCeiling: config.budgetCeilingDollars,
+        tokensSpent,
+        tokensCeiling: config.budgetCeilingTokens,
+        tokensPerHour,
+        percentage,
+        bar,
+        headerString,
+        isWarning,
+        isBreached,
+      });
     }
-    const headerString = `${badge} #${room.name} ${bar} $${dollarsSpent.toFixed(0)} / $${config.budgetCeilingDollars.toFixed(0)} · ${formatTokenRate(tokensPerHour)}`;
-
-    return {
-      scope,
-      roomName: room.name,
-      dollarsSpent,
-      dollarsCeiling: config.budgetCeilingDollars,
-      tokensSpent,
-      tokensCeiling: config.budgetCeilingTokens,
-      tokensPerHour,
-      percentage,
-      bar,
-      headerString,
-      isWarning,
-      isBreached,
-    };
+    return out;
   }
 
   /**

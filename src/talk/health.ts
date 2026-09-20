@@ -3,8 +3,17 @@ import { jsonNumber } from '../core/db.ts';
 import type { Coordinator } from '../coord/coordinator.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
 import type { Ledger } from '../ledger/ledger.ts';
-import { listStops } from '../gov/trust.ts';
-import { CANONICAL_ROOMS, normalizeScope, roomForScope, loadRoomConfig, listCustomRooms, resolveRoomDef, categoryForScope, type RoomCategory } from './rooms.ts';
+import { listStops, type StopRecord } from '../gov/trust.ts';
+import {
+  normalizeScope,
+  roomForScope,
+  loadRoomConfig,
+  loadTenantRooms,
+  resolveRoomDef,
+  categoryForScope,
+  type RoomCategory,
+  type TenantRoom,
+} from './rooms.ts';
 import { type BuzzSurface, type BuzzNostrEvent } from './buzz.ts';
 
 export type RoomHealthStatus = 'healthy' | 'degraded' | 'halted' | 'idle';
@@ -48,6 +57,45 @@ export interface HealthEvaluatorOptions {
   now?: () => string;
 }
 
+/** One room's budget rollup, read for every room in a single grouped query. */
+interface SpendReading {
+  dollars: number;
+  tokens: number;
+  totalRequests: number;
+}
+
+/** One room's trust row. The first row per scope wins, matching the single read. */
+interface TrustReading {
+  frozen: number;
+  honeyMisses: number;
+}
+
+/**
+ * Everything the composite status is built from, for a set of rooms.
+ *
+ * Every field is filled by a query that spans all the rooms at once: the health
+ * of one room is never worth a round trip of its own. `evaluateAll` on a
+ * thirteen-room tenant used to issue five statements per room per render, which
+ * is how the shell's cost grew with the tenant instead of with the page.
+ */
+interface RoomReadings {
+  stops: StopRecord[];
+  spend: Map<string, SpendReading>;
+  pending: Map<string, number>;
+  contradictions: Map<string, number>;
+  trust: Map<string, TrustReading>;
+  drifting: Map<string, number>;
+}
+
+const EMPTY_READINGS: RoomReadings = {
+  stops: [],
+  spend: new Map(),
+  pending: new Map(),
+  contradictions: new Map(),
+  trust: new Map(),
+  drifting: new Map(),
+};
+
 export class ScopeHealthEvaluator {
   private readonly now: () => string;
 
@@ -62,10 +110,120 @@ export class ScopeHealthEvaluator {
   async evaluateScope(rawScope: string): Promise<RoomHealthEvaluation> {
     const scope = normalizeScope(rawScope);
     const customDef = await resolveRoomDef(this.db, this.tenant, scope);
-    const room = customDef ?? roomForScope(scope);
-    const category: RoomCategory = customDef?.category ?? categoryForScope(scope);
     const config = await loadRoomConfig(this.db, this.tenant, scope);
-    const at = this.now();
+    const entry: TenantRoom = {
+      config,
+      room: customDef ?? roomForScope(scope),
+      category: customDef?.category ?? categoryForScope(scope),
+    };
+    const readings = await this.readAll([scope]);
+    return this.compose(scope, entry, readings, this.now());
+  }
+
+  /**
+   * The tenant-wide reads behind every room's status, in one pass each.
+   *
+   * The scope list is built here rather than by the caller because a batched
+   * query needs it: one grouped rollup answers every room, instead of one
+   * aggregate query per room. `IN (…)` keeps the index usable and the result set
+   * to the rooms actually being evaluated.
+   */
+  private async readAll(scopes: string[]): Promise<RoomReadings> {
+    if (scopes.length === 0) return EMPTY_READINGS;
+    const stops = await listStops(this.db, this.tenant);
+    const inList = scopes.map(() => '?').join(', ');
+
+    const spendRows = (await this.db
+      .prepare(
+        `SELECT target_scope AS scope,
+                COALESCE(SUM(spent_dollars), 0) AS dollars,
+                COALESCE(SUM(spent_tokens), 0) AS tokens,
+                COUNT(*) AS totalRequests
+         FROM requests WHERE tenant = ? AND target_scope IN (${inList})
+         GROUP BY target_scope`,
+      )
+      .all(this.tenant, ...scopes)) as { scope: string; dollars: number; tokens: number; totalRequests: number }[];
+
+    const pendingRows = (await this.db
+      .prepare(
+        `SELECT target_scope AS scope, COUNT(*) AS n FROM requests
+         WHERE tenant = ? AND target_scope IN (${inList})
+         AND state IN ('PROPOSED', 'ADMITTED')
+         AND ${jsonNumber(this.db.engine, 'bid_json', 'humanMinutes')} > 0
+         GROUP BY target_scope`,
+      )
+      .all(this.tenant, ...scopes)) as { scope: string; n: number }[];
+
+    const contraRows = (await this.db
+      .prepare(
+        `SELECT c.scope AS scope, COUNT(*) AS n FROM claims c
+         JOIN claim_links l ON c.id = l.from_id
+         WHERE c.tenant = ? AND c.scope IN (${inList}) AND l.link = 'contradicts' AND c.status = 'ACCEPTED'
+         GROUP BY c.scope`,
+      )
+      .all(this.tenant, ...scopes)) as { scope: string; n: number }[];
+
+    // Ordered so "the first row" is the lowest action class, which is the row a
+    // single-scope read returns today (the primary key orders scope, then class).
+    const trustRows = (await this.db
+      .prepare(
+        `SELECT scope, frozen, honey_misses FROM trust_scores
+         WHERE tenant = ? AND scope IN (${inList}) ORDER BY scope, action_class`,
+      )
+      .all(this.tenant, ...scopes)) as { scope: string; frozen: number; honey_misses: number }[];
+
+    const spend = new Map<string, SpendReading>();
+    for (const r of spendRows) {
+      spend.set(r.scope, {
+        dollars: Number(r.dollars ?? 0),
+        tokens: Number(r.tokens ?? 0),
+        totalRequests: Number(r.totalRequests ?? 0),
+      });
+    }
+    const pending = new Map<string, number>(pendingRows.map((r) => [r.scope, Number(r.n ?? 0)]));
+    const contradictions = new Map<string, number>(contraRows.map((r) => [r.scope, Number(r.n ?? 0)]));
+    const trust = new Map<string, TrustReading>();
+    for (const r of trustRows) {
+      if (!trust.has(r.scope)) trust.set(r.scope, { frozen: Number(r.frozen), honeyMisses: Number(r.honey_misses) });
+    }
+    const drifting = await this.readDrift(scopes);
+
+    return { stops, spend, pending, contradictions, trust, drifting };
+  }
+
+  /**
+   * Drifting or demoted cards per scope. `list` is one read for the tenant — not
+   * one per scope — and the per-card drift check stays per card, because that is
+   * what the compiler's own API asks for.
+   */
+  private async readDrift(scopes: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (!this.opts.compiler) return out;
+    try {
+      const wanted = new Set(scopes);
+      for (const card of await this.opts.compiler.list(this.tenant)) {
+        if (!wanted.has(card.originScope)) continue;
+        if (card.state === 'DEMOTED') {
+          out.set(card.originScope, (out.get(card.originScope) ?? 0) + 1);
+        } else if (card.state === 'PROMOTED') {
+          const drift = await this.opts.compiler.checkDrift(this.tenant, card.id);
+          if (drift.drifting) out.set(card.originScope, (out.get(card.originScope) ?? 0) + 1);
+        }
+      }
+    } catch {
+      // compiler check is best-effort
+    }
+    return out;
+  }
+
+  /**
+   * One room's status from the readings already in hand. Pure, so the batched
+   * and single-scope paths cannot disagree about what a reading means.
+   */
+  private compose(scope: string, entry: TenantRoom, readings: RoomReadings, at: string): RoomHealthEvaluation {
+    const room = entry.room;
+    const category: RoomCategory = entry.category;
+    const config = entry.config;
     const reasons: string[] = [];
 
     // 1. Check if room is deactivated
@@ -93,8 +251,7 @@ export class ScopeHealthEvaluator {
     }
 
     // 2. Active stops check (governance kill switch)
-    const allStops = await listStops(this.db, this.tenant);
-    const matchingStops = allStops.filter((s) => s.scope === '*' || s.scope === scope);
+    const matchingStops = readings.stops.filter((s) => s.scope === '*' || s.scope === scope);
     if (matchingStops.length > 0) {
       for (const stop of matchingStops) {
         reasons.push(`Active stop engaged: ${stop.scope}/${stop.actionClass}${stop.reason ? ` (${stop.reason})` : ''}`);
@@ -102,15 +259,7 @@ export class ScopeHealthEvaluator {
     }
 
     // 3. Budget spend rollup
-    const spendRow = (await this.db
-      .prepare(
-        `SELECT COALESCE(SUM(spent_dollars), 0) as dollars,
-                COALESCE(SUM(spent_tokens), 0) as tokens,
-                COUNT(*) as totalRequests
-         FROM requests WHERE tenant = ? AND target_scope = ?`,
-      )
-      .get(this.tenant, scope)) as { dollars: number; tokens: number; totalRequests: number } | undefined;
-
+    const spendRow = readings.spend.get(scope);
     const spendDollars = Number(spendRow?.dollars ?? 0);
     const spendTokens = Number(spendRow?.tokens ?? 0);
     const totalRequests = Number(spendRow?.totalRequests ?? 0);
@@ -127,59 +276,27 @@ export class ScopeHealthEvaluator {
     }
 
     // 4. Pending approvals check
-    const pRow = (await this.db
-      .prepare(
-        `SELECT COUNT(*) as n FROM requests
-         WHERE tenant = ? AND target_scope = ? AND state IN ('PROPOSED', 'ADMITTED')
-         AND ${jsonNumber(this.db.engine, 'bid_json', 'humanMinutes')} > 0`,
-      )
-      .get(this.tenant, scope)) as { n: number } | undefined;
-    const pendingApprovals = Number(pRow?.n ?? 0);
+    const pendingApprovals = Number(readings.pending.get(scope) ?? 0);
     if (pendingApprovals > 0) {
       reasons.push(`${pendingApprovals} workflow request(s) awaiting human approval`);
     }
 
     // 5. Cognitive procedure drift check
-    let driftingCards = 0;
-    if (this.opts.compiler) {
-      try {
-        const cards = await this.opts.compiler.list(this.tenant);
-        const scoped = cards.filter((c) => c.originScope === scope);
-        for (const card of scoped) {
-          if (card.state === 'DEMOTED') {
-            driftingCards += 1;
-          } else if (card.state === 'PROMOTED') {
-            const drift = await this.opts.compiler.checkDrift(this.tenant, card.id);
-            if (drift.drifting) driftingCards += 1;
-          }
-        }
-      } catch {
-        // compiler check is best-effort
-      }
-    }
+    const driftingCards = Number(readings.drifting.get(scope) ?? 0);
     if (driftingCards > 0) {
       reasons.push(`${driftingCards} procedure card(s) in drift or demoted state`);
     }
 
     // 6. Contradictions check
-    const contraRow = (await this.db
-      .prepare(
-        `SELECT COUNT(*) as n FROM claims c
-         JOIN claim_links l ON c.id = l.from_id
-         WHERE c.tenant = ? AND c.scope = ? AND l.link = 'contradicts' AND c.status = 'ACCEPTED'`,
-      )
-      .get(this.tenant, scope)) as { n: number } | undefined;
-    const contradictions = Number(contraRow?.n ?? 0);
+    const contradictions = Number(readings.contradictions.get(scope) ?? 0);
     if (contradictions > 0) {
       reasons.push(`${contradictions} open epistemic contradiction(s) in scope`);
     }
 
     // 7. Trust freeze check
-    const trustRow = (await this.db
-      .prepare(`SELECT frozen, honey_misses FROM trust_scores WHERE tenant = ? AND scope = ?`)
-      .get(this.tenant, scope)) as { frozen: number; honey_misses: number } | undefined;
+    const trustRow = readings.trust.get(scope);
     if (trustRow && Number(trustRow.frozen) === 1) {
-      reasons.push(`Trust ledger is frozen (honey misses: ${trustRow.honey_misses})`);
+      reasons.push(`Trust ledger is frozen (honey misses: ${trustRow.honeyMisses})`);
     }
 
     // Determine composite status
@@ -220,33 +337,16 @@ export class ScopeHealthEvaluator {
     };
   }
 
+  /**
+   * Every room this tenant has, evaluated against one pass of tenant-wide
+   * reads: six statements for the whole rollup, whatever the room count.
+   */
   async evaluateAll(): Promise<RoomHealthEvaluation[]> {
-    const results: RoomHealthEvaluation[] = [];
-    const configs = (await this.db
-      .prepare(`SELECT key FROM meta WHERE key LIKE 'room:config:${this.tenant}:%'`)
-      .all()) as { key: string }[];
-
-    // Ensure all canonical scopes are evaluated
-    const scopesToEval = new Set<string>();
-    for (const r of CANONICAL_ROOMS) {
-      scopesToEval.add(r.scope);
-    }
-    for (const r of configs) {
-      const parts = r.key.split(':');
-      if (parts[3]) scopesToEval.add(parts[3]);
-    }
-    try {
-      for (const c of await listCustomRooms(this.db, this.tenant)) {
-        scopesToEval.add(c.scope);
-      }
-    } catch {
-      // custom rooms are best-effort in health rollups
-    }
-
-    for (const s of scopesToEval) {
-      results.push(await this.evaluateScope(s));
-    }
-    return results;
+    const rooms = await loadTenantRooms(this.db, this.tenant);
+    const scopes = [...rooms.keys()];
+    const readings = await this.readAll(scopes);
+    const at = this.now();
+    return scopes.map((scope) => this.compose(scope, rooms.get(scope)!, readings, at));
   }
 }
 

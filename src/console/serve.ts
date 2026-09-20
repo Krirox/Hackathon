@@ -252,9 +252,9 @@ import {
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import {
   CANONICAL_ROOMS,
-  loadRoomConfig,
   normalizeScope,
   saveRoomConfig,
+  loadTenantRooms,
   ROOM_BUDGET_MAX_DOLLARS,
   ROOM_BUDGET_MAX_TOKENS,
 } from '../talk/rooms.ts';
@@ -7317,12 +7317,17 @@ export function startConsoleServer(
             const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
             const gaugeTracker = new RoomBudgetTracker(db, tenant);
             const allHealth = await evaluator.evaluateAll();
-            const rooms = [];
-            for (const h of allHealth) {
-              const cfg = await loadRoomConfig(db, tenant, h.scope);
-              const gauge = await gaugeTracker.computeGauge(h.scope);
-              rooms.push({ ...h, config: cfg, gauge });
-            }
+            // Config and gauge are whole-tenant reads, not per-room ones: this
+            // endpoint used to issue three statements for each room it listed.
+            // Both lookups hit by construction: `evaluateAll` enumerates the
+            // same room set, and a gauge is computed for every scope it lists.
+            const configs = await loadTenantRooms(db, tenant);
+            const gauges = await gaugeTracker.computeGauges(allHealth.map((h) => h.scope));
+            const rooms = allHealth.map((h) => ({
+              ...h,
+              config: configs.get(h.scope)!.config,
+              gauge: gauges.get(h.scope)!,
+            }));
             return json(res, 200, { ok: true, rooms });
           }
 

@@ -31,6 +31,7 @@ db_max_allocated_storage = 100
 # vital_core_secret  = ""
 # webhook_secret     = ""
 # serper_api_key     = ""
+# bedrock_api_key      = ""   # TF_VAR_bedrock_api_key — Bedrock console → API keys
 # Bedrock model IDs (Converse API). Enable each model in the account/region first.
 # bedrock_prod_model_id = "zai.glm-4.7-flash"
 # bedrock_dev_model_id  = "zai.glm-4.7-flash"

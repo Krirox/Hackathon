@@ -21,6 +21,7 @@ import { learningRoutes, LEARNING_CAPABILITIES } from '../src/console/routes/lea
 import { agentTasksRoutes, AGENT_TASKS_CAPABILITIES } from '../src/console/routes/agent-tasks.ts';
 import { reviewRoutes, REVIEW_CAPABILITIES } from '../src/console/routes/review.ts';
 import { issuesRoutes, ISSUES_CAPABILITIES } from '../src/console/routes/issues.ts';
+import { createCustomRoom } from '../src/talk/rooms.ts';
 import type { Role } from '../src/core/auth.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
@@ -506,6 +507,10 @@ T('one page view evaluates the room set once, not once per consumer', async () =
   // the tenant's stop list once per room (13×). This test fails if either comes
   // back, because a duplicate read is invisible in a screenshot and invisible in
   // a functional test — it only shows up as a latency regression nobody owns.
+  //
+  // The second assertion moved when the configs were batched: the rollup no
+  // longer asks for one `meta` row per room, so the read is matched on its
+  // argument — the tenant's config prefix — instead of on the old statement.
   const { db, ledger, coord, comp } = await fresh();
   await installAuthSchema(db, NOW);
   await signupTenant(
@@ -546,11 +551,86 @@ T('one page view evaluates the room set once, not once per consumer', async () =
       ['SELECT * FROM users WHERE id = ?'],
       'no read is issued twice within a page view:',
     );
-    // And the room health rollup itself ran once.
-    const rollups = [...counted.byKey().keys()].filter((id) =>
-      id.startsWith("SELECT key FROM meta WHERE key LIKE 'room:config:"),
+    // And the room set itself is enumerated once, not once per room and not once
+    // per consumer. A page that grew with the tenant's room count is what this
+    // whole measurement exists to prevent.
+    const roomSetReads = [...counted.byKey().entries()].filter(
+      ([id]) => id.startsWith('SELECT key, value FROM meta WHERE key LIKE ?') && id.includes('room:config:'),
     );
-    eq(rollups.length, 1, 'room health evaluated once per request:');
+    eq(roomSetReads.length, 1, 'one room-set read per request (args asked for):');
+    eq(roomSetReads[0]?.[1], 1, 'the room set is read exactly once:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('a shelled page costs the same at nine rooms and at fifteen', async () => {
+  // The property the shell's reads were rebuilt for, asserted as a property
+  // rather than as a number: chrome must not be a function of how many rooms a
+  // tenant has. Every one of these reads used to run once per room — five health
+  // statements, a config row, two budget aggregates and the stop list — so a
+  // tenant that added a team room made every page in the console heavier.
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    {
+      slug: TEN,
+      name: 'Acme',
+      email: 'owner@acme.test',
+      password: 'the-console-password',
+      ownerName: 'Ada',
+    },
+    NOW,
+  );
+  const counted = instrument(db);
+  const server = await startConsoleServer(counted.proxy, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  // The shell modules, by the name the meter attributes them to.
+  const SHELL_MODULES = ['talk/health', 'talk/rooms', 'console/shell-metrics', 'talk/budget-gauge', 'gov/trust'];
+  const shellReads = (): Record<string, number> =>
+    Object.fromEntries(SHELL_MODULES.map((m) => [m, counted.byModule().get(m) ?? 0]));
+  try {
+    const cookie = await login(origin);
+    const get = async (): Promise<string> => {
+      counted.reset();
+      const res = await fetch(`${origin}/console/rooms`, { headers: { cookie } });
+      eq(res.status, 200);
+      return await res.text();
+    };
+
+    const before = await get();
+    const beforeTotal = counted.statements();
+    const beforeShell = shellReads();
+
+    // Six team-made rooms, through the product's own store rather than by
+    // hand-writing `meta`: the definition *and* its config both have to land.
+    for (let i = 1; i <= 6; i += 1) {
+      await createCustomRoom(
+        db,
+        TEN,
+        { id: `team-${i}`, name: `team-${i}`, scope: `team-${i}`, agentName: `team-${i}-agent`, mission: '' },
+        'human:owner',
+      );
+    }
+
+    const after = await get();
+    const afterTotal = counted.statements();
+    const afterShell = shellReads();
+
+    // The fixture has to have actually grown, or the comparison proves nothing:
+    // the new room is rendered, and it was not there before.
+    eq(before.includes('team-6'), false, 'the sixth room is not on the page yet:');
+    eq(after.includes('team-6'), true, 'the page lists the rooms that were added:');
+
+    // Compared per module, so a failure names the read that started scaling
+    // instead of just reporting a bigger number.
+    eq(afterShell, beforeShell, `the shell issues the same reads at 15 rooms as at 9 (${JSON.stringify(afterShell)}):`);
+    eq(afterTotal, beforeTotal, 'and the page costs the same in total (rooms 9 → 15):');
   } finally {
     await server.close();
     await db.close();
@@ -618,8 +698,11 @@ T('every request logs its render cost', async () => {
     }
     const page = logged.find((r) => r.path === '/console/rooms');
     // A shelled page is not one query: this asserts a real count, so a meter that
-    // silently stopped counting (or stopped being wired) fails here.
-    eq((page?.sql ?? 0) > 20, true, `sql counted (${page?.sql}):`);
+    // silently stopped counting (or stopped being wired) fails here. The number
+    // is deliberately loose — the exact figure is the budget table's business —
+    // and it dropped from ~97 to ~15 when the shell's per-room reads were
+    // batched, which is the improvement this assertion must survive.
+    eq((page?.sql ?? 0) > 10, true, `sql counted (${page?.sql}):`);
     eq((page?.memo ?? 0) > 0, true, `memo hits logged (${page?.memo}):`);
     // And an identifier-free name: a request log is not a place for tenant data.
     eq(page?.path.includes(':id'), false, 'no raw identifiers in the log path:');
@@ -764,13 +847,24 @@ interface PageBudget {
  * legitimately costs more than the one-room tenant these numbers come from.
  * What must not scale is the number of times the same read is issued per render.
  *
- * What the first per-module measurement showed, and the reason the breakdown is
- * worth freezing: **the shell dominates every page**. `talk/health` (the stop
- * list) is 53 statements and `talk/rooms` 14 and `console/shell-metrics` 16 on
- * every shelled page, so ~83 of each page's ~90 statements belong to chrome, not
- * to the page. `/console/buzz` costs 208 because it asks for the same shell
- * reads per room (talk/health 106, talk/rooms 54). That is where the next
- * performance change should go, and it is visible here without a profiler.
+ * What the first per-module measurement showed — and what the batching change
+ * then fixed, which is why these numbers are worth freezing — is that **the
+ * shell dominated every page**: `talk/health` 53, `console/shell-metrics` 16,
+ * `talk/rooms` 14 and `gov/trust` 2 on *every* shelled page, so ~85 of each
+ * page's ~90 statements were chrome. `/console/buzz` cost 229 (talk/health 106,
+ * talk/rooms 54) because the roster asked for the same things per room again.
+ *
+ * Every one of those was a per-room loop: the health rollup evaluated each room
+ * with five statements of its own, the config read asked for one `meta` row per
+ * room, the gauge was two aggregates plus a config read per room, and the stop
+ * list was re-read per room. They are now one grouped read each, so the chrome
+ * is ~12 statements whatever the tenant's room count — `/console/dashboard` is
+ * the heaviest page at 35, and the shell is no longer why.
+ *
+ * What is still per-row, and would show up here if it grew: `/team` runs a
+ * confirmation read per member an admin could disable (see its `core/auth`
+ * count), and the drift check asks the compiler once per *promoted card* — both
+ * are real work at the granularity of the row, not a duplicated read.
  */
 const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
   // Still served by the legacy chain. Budgeted anyway: what a page costs is a
@@ -781,16 +875,18 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/dashboard',
     pattern: '/console/dashboard',
     dispatch: 'legacy',
-    total: 119,
+    total: 39,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'console/activation': 7,
       'core/auth': 6,
       'console/journey': 4,
+      // The whole shell, in four reads: the health rollup, the metrics and
+      // recency pair, the room set, and the stop list.
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
       'gov/trust': 2,
+      'talk/rooms': 2,
       'attrib/attribution': 1,
       'router/router': 1,
       'console/serve': 1,
@@ -801,13 +897,15 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/buzz',
     pattern: '/console/buzz',
     dispatch: 'legacy',
-    total: 229,
+    total: 20,
     modules: {
-      'talk/health': 106,
-      'talk/rooms': 54,
-      'talk/budget-gauge': 26,
-      'console/shell-metrics': 16,
       'core/auth': 5,
+      // The roster draws every room, and every room's readings come from the
+      // same shared pass the shell above it uses: health 4 + gauge 2 + rooms 2.
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
+      'talk/budget-gauge': 2,
       'gov/trust': 1,
     },
   },
@@ -815,12 +913,14 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/buzz/general',
     pattern: '/console/buzz/:room',
     dispatch: 'legacy',
-    total: 113,
+    total: 31,
     modules: {
-      'talk/health': 57,
-      'talk/rooms': 17,
-      'console/shell-metrics': 16,
+      // The one page that reads room health twice — once for the room it is
+      // showing, once for the shell's rail — which is 4 + 4, not a per-room loop.
+      'talk/health': 8,
       'core/auth': 6,
+      'talk/rooms': 4,
+      'console/shell-metrics': 4,
       'console/buzz': 3,
       'talk/budget-gauge': 2,
       'gov/trust': 1,
@@ -830,13 +930,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/workflows',
     pattern: '/console/workflows',
     dispatch: 'legacy',
-    total: 102,
+    total: 21,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/release-workspace': 3,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -844,12 +944,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/meetings',
     pattern: '/console/meetings',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
       'meetings/db': 1,
     },
@@ -858,12 +958,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/learning',
     pattern: '/console/learning',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'router/router': 1,
       'gov/trust': 1,
     },
@@ -872,12 +972,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/digest',
     pattern: '/console/digest',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
       'console/digest': 1,
     },
@@ -886,12 +986,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/compiler',
     pattern: '/console/compiler',
     dispatch: 'legacy',
-    total: 98,
+    total: 18,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -899,18 +999,16 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/team',
     pattern: '/team',
     dispatch: 'legacy',
-    total: 100,
+    total: 24,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
-      // 12, not 8: the fixture now carries two members, and this page runs
-      // `disableConfirmation` once per member an admin could disable — 4
-      // statements each. With one member that loop never ran, so the old 8 did
-      // not cover this page's most expensive per-member work. Flagged, not
-      // hidden: /team costs *more* per member, and the number below is
-      // calibrated to this fixture.
+      // The page's own per-member work, now batched at the source: this was 11
+      // with two members when `disableConfirmation` ran once per member, and it
+      // is 11 because the owner, the member list and the two engineers are all
+      // still read — the confirmations are the part that stopped scaling.
       'core/auth': 11,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -918,13 +1016,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/team/operations',
     pattern: '/team/operations',
     dispatch: 'legacy',
-    total: 99,
+    total: 20,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'gov/trust': 2,
+      'talk/rooms': 2,
       'console/serve': 1,
     },
   },
@@ -932,12 +1030,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/account',
     pattern: '/account',
     dispatch: 'legacy',
-    total: 102,
+    total: 21,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 8,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -948,12 +1046,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/rooms',
     pattern: '/console/rooms',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -961,13 +1059,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/requests',
     pattern: '/console/requests',
     dispatch: 'table',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -975,13 +1073,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/claims',
     pattern: '/console/claims',
     dispatch: 'table',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -989,12 +1087,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/human-work',
     pattern: '/console/human-work',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -1002,13 +1100,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/audit',
     pattern: '/console/audit',
     dispatch: 'table',
-    total: 101,
+    total: 20,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'ledger/export': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -1016,28 +1114,28 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/data',
     pattern: '/console/data',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
   // The code-review index. One statement of its own (`coding/review` reading the
-  // review documents); the other 88 belong to the shell, which is the honest
-  // picture of a console page today.
+  // review documents); the other 15 belong to the shell, which is still the
+  // honest picture of a console page today.
   {
     url: '/console/review',
     pattern: '/console/review',
     dispatch: 'table',
-    total: 99,
+    total: 18,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'coding/review': 1,
       'gov/trust': 1,
     },
@@ -1051,12 +1149,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/review/M-NONE',
     pattern: '/console/review/:missionId',
     dispatch: 'table',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'coding/review': 1,
       'coding/mission': 1,
       'gov/trust': 1,
@@ -1072,13 +1170,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     pattern: '/console/issues',
     dispatch: 'table',
     as: 'engineer',
-    total: 102,
+    total: 22,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
       'console/issues': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -1175,6 +1273,18 @@ T('every page stays inside its statement budget', async () => {
     // The per-module diff. This is the assertion meant to be *read*: it answers
     // "which statements grew", in the module that owns them, so the fix is
     // visible before opening a profiler.
+    // The measured breakdown, printed in full: both failures below are meant to
+    // be read and acted on, and rewriting a budget needs the numbers to copy.
+    const breakdown = measured
+      .map(
+        (m) =>
+          `${m.page.url}[${Object.entries(m.modules)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, v]) => `${k}:${v}`)
+            .join(' ')}]`,
+      )
+      .join(' ');
+
     const grown: string[] = [];
     for (const m of measured) {
       for (const [mod, n] of Object.entries(m.modules).sort((a, b) => b[1] - a[1])) {
@@ -1185,14 +1295,7 @@ T('every page stays inside its statement budget', async () => {
     eq(
       grown,
       [],
-      `statement counts that grew — if intended, update that page\u2019s module counts (breakdown: ${measured
-        .map(
-          (m) =>
-            `${m.page.url}[${Object.entries(m.modules)
-              .map(([k, v]) => `${k}:${v}`)
-              .join(' ')}]`,
-        )
-        .join(' ')}):`,
+      `statement counts that grew — if intended, update that page\u2019s module counts: ${grown}\n${breakdown}`,
     );
 
     // And a budget may not go slack: one more than half again over the measured
@@ -1201,7 +1304,7 @@ T('every page stays inside its statement budget', async () => {
     const slack = measured
       .filter((m) => m.page.total > m.total * 1.5)
       .map((m) => `${m.page.url} ${m.page.total} vs ${m.total}`);
-    eq(slack, [], `budgets stay tight (page budget vs measured):`);
+    eq(slack, [], `budgets stay tight (page budget vs measured: ${slack.join(', ')})\n${breakdown}`);
   } finally {
     await server.close();
     await db.close();
