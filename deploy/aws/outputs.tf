@@ -34,11 +34,11 @@ output "core_service" {
 }
 
 output "core_ecr" {
-  value = aws_ecr_repository.core.repository_url
+  value = local.core_repo_url
 }
 
 output "executor_ecr" {
-  value = aws_ecr_repository.executor.repository_url
+  value = local.executor_repo_url
 }
 
 output "rds_endpoint" {

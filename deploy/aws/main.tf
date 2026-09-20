@@ -18,6 +18,12 @@
 # backstop, never the policy.
 
 terraform {
+  # Partial backend configuration: the deploy workflow supplies bucket, key,
+  # region and lock table via -backend-config (the bucket name embeds the
+  # account id, unknown until bootstrap). This empty block is what makes
+  # those flags apply — without it terraform silently keeps LOCAL state and
+  # the runner throws the whole state away when the job ends.
+  backend "s3" {}
   required_version = ">= 1.6.0"
   required_providers {
     aws = {
@@ -258,28 +264,26 @@ resource "aws_security_group" "lambda" {
 }
 
 # ------------------------------------------------------------------ images ----
-resource "aws_ecr_repository" "core" {
-  name                 = "${local.name}-core"
-  image_tag_mutability = "IMMUTABLE"
-  image_scanning_configuration { scan_on_push = true }
-  encryption_configuration { encryption_type = "AES256" }
-}
-
-resource "aws_ecr_repository" "executor" {
-  name                 = "${local.name}-executor"
-  image_tag_mutability = "IMMUTABLE"
-  image_scanning_configuration { scan_on_push = true }
-  encryption_configuration { encryption_type = "AES256" }
+# The ECR repositories are created by the deploy workflow BEFORE terraform
+# runs (the Lambda image must already exist when the function is created),
+# so they are workflow-owned: terraform must not create them or every fresh
+# apply collides with RepositoryAlreadyExists. Terraform keeps the pruning
+# policy and references the repos by name/URL.
+locals {
+  core_repo_name     = "${local.name}-core"
+  executor_repo_name = "${local.name}-executor"
+  core_repo_url      = "${data.aws_caller_identity.self.account_id}.dkr.ecr.${var.region}.amazonaws.com/${local.core_repo_name}"
+  executor_repo_url  = "${data.aws_caller_identity.self.account_id}.dkr.ecr.${var.region}.amazonaws.com/${local.executor_repo_name}"
 }
 
 resource "aws_ecr_lifecycle_policy" "core" {
-  repository = aws_ecr_repository.core.name
+  repository = local.core_repo_name
   policy     = jsonencode({ rules = [{ rulePriority = 1, description = "keep last 20", selection = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 20 }, action = { type = "expire" } }] })
 }
 
 # The executor repo had no pruning: untagged Lambda builds accumulate forever.
 resource "aws_ecr_lifecycle_policy" "executor" {
-  repository = aws_ecr_repository.executor.name
+  repository = local.executor_repo_name
   policy     = jsonencode({ rules = [{ rulePriority = 1, description = "keep last 20", selection = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 20 }, action = { type = "expire" } }] })
 }
 
