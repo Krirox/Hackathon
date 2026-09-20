@@ -189,17 +189,22 @@ T('anonymous callers are refused everywhere on the board', async () => {
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   const url = `http://127.0.0.1:${server.port}`;
   try {
+    // The refusal follows the route's declared surface, not the board's taste:
+    // a browser is sent to the login form with a way back, an API caller gets a
+    // status it can act on. Both are asserted exactly — "303 or 403" would pass
+    // on the day one of them silently became the other.
     const page = await fetch(`${url}/console/issues`, { redirect: 'manual' });
     eq(page.status, 303, 'unauthenticated page → login redirect');
     const sync = await fetch(`${url}/console/issues/sync`, { redirect: 'manual' });
-    eq(sync.status === 303 || sync.status === 403, true);
+    eq(sync.status, 401, 'unauthenticated JSON sync → 401');
+    eq(((await sync.json()) as { code: string }).code, 'SESSION_EXPIRED', 'and says why:');
     const move = await fetch(`${url}/console/issues/move`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: 'issueId=iss_x&state=DONE',
       redirect: 'manual',
     });
-    eq(move.status === 303 || move.status === 403, true);
+    eq(move.status, 401, 'unauthenticated mutation → 401');
   } finally {
     await server.close();
   }
@@ -218,6 +223,12 @@ T('non-engineer owner gets 403; engineer member gets the board', async () => {
       redirect: 'manual',
     });
     eq(ownerPage.status, 403, 'owner without the engineering team is refused');
+    // And told why, in the console's own chrome — a refusal is a page, not a
+    // bare JSON body in a browser tab, which is what a page route owes a person
+    // who followed a link.
+    const refused = await ownerPage.text();
+    eq(refused.includes('engineering team only'), true, 'the refusal states the reason:');
+    eq(refused.includes('id="console-rail"'), true, 'the refusal keeps the console chrome:');
 
     const engSession = await engineerSession(server.port, engineer.email, 'a-long-enough-password')();
     const engPage = await fetch(`${url}/console/issues`, {
@@ -228,8 +239,24 @@ T('non-engineer owner gets 403; engineer member gets the board', async () => {
     const html = await engPage.text();
     eq(html.includes('iss-board'), true, 'board markup renders');
     eq(html.includes('BACKLOG') && html.includes('IN PROGRESS'), true, 'kanban columns render');
-    // The engineer's workspace shell shows the Issues link…
+    // The engineer's console rail shows the Issues link…
     eq(html.includes('href="/console/issues"'), true, 'engineer sees the Issues nav link in the shell');
+    // …and the board wears the Console chrome. It used to be wrapped in the
+    // *chat* shell, which deliberately injects no Console tokens (see
+    // wrapInWorkspaceShell) while every rule in issues.ts is written against
+    // `var(--v-*)`. Its stylesheet therefore resolved to nothing, and the rail
+    // highlighted Chat while you were reading Issues.
+    eq(html.includes('id="console-rail"'), true, 'the board renders the console rail');
+    // …and marks Issues as the current page. The board used to ask the shell for
+    // the `buzz` nav key, which the rail resolves to Chat — so reading Issues lit
+    // up the Chat item.
+    eq(
+      /class="vc-rail-item is-active"[^>]*id="sidebar-issues-dashboard-link"/.test(html),
+      true,
+      'the Issues rail item is the active one:',
+    );
+    eq(html.includes('data-vital-no-theme'), false, 'the board is not opted out of the design system');
+    eq(html.includes('--v-accent:'), true, 'the board page ships the tokens its stylesheet uses');
 
     // …and a marketing admin's shell (rendered on a page they CAN open) does not.
     // Mutations work with CSRF; sync returns JSON.

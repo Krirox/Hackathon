@@ -200,6 +200,7 @@ import { listsRoutes, type ListsEnv } from './routes/lists.ts';
 import { agentTasksRoutes, type AgentTasksEnv } from './routes/agent-tasks.ts';
 import { learningRoutes, type LearningEnv } from './routes/learning.ts';
 import { reviewRoutes, type ReviewEnv } from './routes/review.ts';
+import { issuesRoutes, type IssuesEnv } from './routes/issues.ts';
 import { createRequestStats, memo as memoize, withRequestCache } from '../core/request-cache.ts';
 // `shellMetrics as shellMetricsFor`: the page branches below keep local
 // `shellMetrics` / `teamMetrics` bindings, and shadowing the import there would
@@ -238,33 +239,15 @@ import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
 import { renderConsoleShell } from './console-shell.ts';
 import {
-  ISSUE_PRIORITIES,
-  ISSUE_STATES,
-  addComment,
-  createIssue,
-  deleteIssue,
   getGitHubPushError,
   getGitHubSyncConfig,
-  getIssue,
-  listComments,
   listIssues,
   markGitHubSyncError,
-  moveIssue,
   parseGitHubRepoPath,
   authorizeGitHubRepo,
-  pushCommentToGitHub,
-  pushCreateToGitHub,
-  pushDeleteToGitHub,
-  pushUpdateToGitHub,
-  renderIssuesBoard,
   saveGitHubSyncConfig,
   syncGitHubProject,
-  syncIssues,
   unlinkGitHubSyncConfig,
-  updateIssue,
-  type IssuePriority,
-  type IssueSnapshot,
-  type IssueState,
 } from './issues.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import {
@@ -2633,6 +2616,7 @@ export function startConsoleServer(
       ListsEnv &
       LearningEnv &
       ReviewEnv &
+      IssuesEnv &
       AgentTasksEnv;
     /** Shelled console page: the chrome stays here, the page body comes from the domain. */
     const shellPage: ListsEnv['shellPage'] = async (auth, page) => {
@@ -2677,7 +2661,10 @@ export function startConsoleServer(
       operatorMode,
       coord,
       ledger,
-      audit: (actor, action, target, at) => auditConsole(db, tenant, actor, action, target, at),
+      // `detail` is optional so this satisfies both the four-argument domains and
+      // the domains (review, issues) that record a detail line.
+      audit: (actor: string, action: string, target: string, at: string, detail?: string) =>
+        auditConsole(db, tenant, actor, action, target, at, detail),
       redirect: (res, location, opts) => redirect(res, location, opts?.clearSession ? CLEAR_SESSION_COOKIE : undefined),
       vitalVersion: '0.0.1',
       // Read at request time: the address is only known after listen().
@@ -2697,6 +2684,11 @@ export function startConsoleServer(
       approvalLatency: (t) => coord.approvalLatencyStats(t),
       costPerSignal: (t) => new CognitiveRouter(db).costPerSignal(t),
       comp,
+      // The board's outbound GitHub pushes. Same closure the legacy GitHub
+      // routes use, so "a push failure is recorded, never swallowed" has one
+      // implementation.
+      pushAfterLocalWrite,
+      fetchFn: opts.fetchFn ?? fetch,
     };
     const routes: RouteDef<ConsoleRouteEnv>[] = [
       ...observabilityRoutes(),
@@ -2705,6 +2697,7 @@ export function startConsoleServer(
       ...listsRoutes(),
       ...learningRoutes(),
       ...reviewRoutes(),
+      ...issuesRoutes(),
       ...agentTasksRoutes(),
     ];
     // Fail at boot, not at request time: a route that cannot register is a 404
@@ -4180,248 +4173,16 @@ export function startConsoleServer(
           // that pair — a reviewer whose session expired gets the login form.
 
           // ------------------------------------------------------------ Issues (engineers team only)
-          // The engineering Issues board: kanban over the `issues` table with
-          // live delta sync. Every route below gates on `isEngineer(auth.user)`
-          // — the SESSION user's department, never the request body — so the
-          // board is invisible and unwritable for every other team (owners
-          // included) and for anonymous callers. All mutations audit.
+          // The board itself moved to routes/issues.ts with a declared
+          // `engineer` capability. What stays here is the GitHub sub-surface,
+          // whose webhook GitHub calls anonymously once a repo is linked — a
+          // capability that depends on tenant state, not on the caller, so it
+          // cannot be stated as one declared value yet. `engineerOnly` is the
+          // same predicate the `engineer` capability applies.
           const engineerOnly = (auth: { user: User }): boolean => {
             return isEngineer(auth.user) && !auth.user.disabled;
           };
-          const engineerList = async (): Promise<{ email: string; name: string }[]> =>
-            (await listUsers(db, tenant))
-              .filter((u) => isEngineer(u) && !u.disabled)
-              .map((u) => ({ email: u.email, name: u.name }));
-          const issueSnapshot = async (since: string | null): Promise<IssueSnapshot> =>
-            since ? syncIssues(db, tenant, since) : listIssues(db, tenant);
 
-          const issuesPage = path === '/console/issues' && method === 'GET';
-          const issuesSync = path === '/console/issues/sync' && method === 'GET';
-          if (issuesPage || issuesSync) {
-            const auth = await sessionOf();
-            if (!auth) return redirectLogin();
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            if (activationDenied(res, auth, false)) return;
-            // Engineers-team gate: owners and every other department are refused.
-            if (!engineerOnly(auth)) {
-              if (issuesSync)
-                return json(res, 403, {
-                  ok: false,
-                  error: 'the Issues board is available to the engineering team only',
-                });
-              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(
-                page(
-                  'Vital Console — Issues',
-                  `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
-                ),
-              );
-              return;
-            }
-            const since = issuesSync ? url.searchParams.get('since') : null;
-            const snapshot = await issueSnapshot(since);
-            if (issuesSync) {
-              return json(res, 200, { ok: true, snapshot });
-            }
-            const engineers = await engineerList();
-            const body = renderIssuesBoard(snapshot, {
-              csrf: auth.session.csrfToken,
-              home,
-              engineers,
-              currentEmail: auth.user.email,
-              syncConfig: await getGitHubSyncConfig(db, tenant),
-              pushError: await getGitHubPushError(db, tenant),
-            });
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(
-              await wrapInWorkspaceShell(buzzDocument('Issues', body), db, tenant, home, auth, 'buzz', 'dashboard'),
-            );
-            return;
-          }
-          const issuesDetail = path === '/console/issues/detail' && method === 'GET';
-          const issuesMutations: [boolean, string][] = [
-            [path === '/console/issues/create' && method === 'POST', 'create'],
-            [path === '/console/issues/move' && method === 'POST', 'move'],
-            [path === '/console/issues/update' && method === 'POST', 'update'],
-            [path === '/console/issues/delete' && method === 'POST', 'delete'],
-            [path === '/console/issues/comment' && method === 'POST', 'comment'],
-          ];
-          const issuesMutation = issuesMutations.find(([match]) => match);
-          if (issuesDetail || issuesMutation) {
-            const auth = await sessionOf();
-            if (!auth) return redirectLogin();
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            if (activationDenied(res, auth, false)) return;
-            if (!engineerOnly(auth))
-              return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-            let call: Call | null = null;
-            if (issuesMutation) {
-              try {
-                call = await parseCall(req);
-              } catch (e) {
-                return json(res, 400, { ok: false, error: (e as Error).message });
-              }
-              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            }
-            const action = issuesMutation?.[1];
-            try {
-              if (issuesDetail) {
-                const id = (url.searchParams.get('id') ?? '').slice(0, 64);
-                const issue = id ? await getIssue(db, tenant, id) : null;
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                const comments = await listComments(db, tenant, issue.id);
-                return json(res, 200, { ok: true, issue, comments });
-              }
-              const fields = call!.fields;
-              if (action === 'create') {
-                const rawLabels = (call!.json?.labels ?? fields.labels) as unknown;
-                let labelList: string[] | undefined;
-                if (Array.isArray(rawLabels)) {
-                  labelList = rawLabels.map((l) => String(l));
-                } else if (typeof rawLabels === 'string' && rawLabels.trim()) {
-                  labelList = rawLabels
-                    .split(/[,;]+/)
-                    .map((l) => l.trim())
-                    .filter(Boolean);
-                }
-                const issue = await createIssue(
-                  db,
-                  tenant,
-                  {
-                    title: String(fields.title ?? ''),
-                    description: String(fields.description ?? ''),
-                    state: ISSUE_STATES.includes(String(fields.state ?? '') as IssueState)
-                      ? (String(fields.state) as IssueState)
-                      : undefined,
-                    priority: ISSUE_PRIORITIES.includes(String(fields.priority ?? '') as IssuePriority)
-                      ? (String(fields.priority) as IssuePriority)
-                      : undefined,
-                    labels: labelList,
-                    assigneeEmail: String(fields.assigneeEmail ?? '') || null,
-                  },
-                  { userId: auth.user.id, email: auth.user.email },
-                  at,
-                );
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.create',
-                  `issue:${issue.id}`,
-                  at,
-                  issue.title.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.create', `issue:${issue.id}`, by(auth.user), () =>
-                  pushCreateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'move') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const state = String(fields.state ?? '');
-                if (!ISSUE_STATES.includes(state as IssueState))
-                  return json(res, 400, { ok: false, error: 'unknown state' });
-                const issue = await moveIssue(
-                  db,
-                  tenant,
-                  id,
-                  {
-                    state: state as IssueState,
-                    beforeId: String(fields.beforeId ?? '') || null,
-                    afterId: String(fields.afterId ?? '') || null,
-                  },
-                  at,
-                );
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.move',
-                  `issue:${issue.id}`,
-                  at,
-                  `state=${issue.state}`,
-                );
-                pushAfterLocalWrite('issue.move', `issue:${issue.id}`, by(auth.user), () =>
-                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'update') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const progressRaw =
-                  fields.progress === undefined || fields.progress === '' ? undefined : Number(fields.progress);
-                const stateRaw =
-                  fields.state !== undefined && ISSUE_STATES.includes(String(fields.state) as IssueState)
-                    ? (String(fields.state) as IssueState)
-                    : undefined;
-                const issue = await updateIssue(
-                  db,
-                  tenant,
-                  id,
-                  {
-                    title: fields.title === undefined ? undefined : String(fields.title),
-                    description: fields.description === undefined ? undefined : String(fields.description),
-                    state: stateRaw,
-                    priority:
-                      fields.priority === undefined ||
-                      !ISSUE_PRIORITIES.includes(String(fields.priority) as IssuePriority)
-                        ? undefined
-                        : (String(fields.priority) as IssuePriority),
-                    progress: progressRaw !== undefined && Number.isFinite(progressRaw) ? progressRaw : undefined,
-                    expectedUpdatedAt: String(fields.expectedUpdatedAt ?? '') || null,
-                  },
-                  at,
-                );
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.update',
-                  `issue:${issue.id}`,
-                  at,
-                  issue.title.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.update', `issue:${issue.id}`, by(auth.user), () =>
-                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'delete') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const gone = await deleteIssue(db, tenant, id);
-                if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
-                pushAfterLocalWrite('issue.delete', `issue:${id}`, by(auth.user), () =>
-                  pushDeleteToGitHub(db, tenant, id, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true });
-              }
-              if (action === 'comment') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const comment = await addComment(db, tenant, id, auth.user.email, String(fields.content ?? ''), at);
-                if (!comment) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.comment',
-                  `issue:${id}`,
-                  at,
-                  comment.content.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.comment', `issue:${id}`, by(auth.user), () =>
-                  pushCommentToGitHub(db, tenant, id, comment.content, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, comment });
-              }
-            } catch (e) {
-              const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
-              const stale = (e as Error).message.includes('STALE_WRITE');
-              return json(res, stale ? 409 : 400, { ok: false, error: msg });
-            }
-          }
           // ------------------------------------------------------------ GitHub Project Sync (bidirectional)
           {
             const issuesGhConfig = path === '/console/issues/github/config' && method === 'GET';

@@ -541,7 +541,7 @@ npm install
 # Verify TypeScript type safety (must be 0 errors)
 npm run typecheck
 
-# Run the complete test suite (<!-- vital:testcount -->880/880 tests green<!-- /vital:testcount -->)
+# Run the complete test suite (<!-- vital:testcount -->882/882 tests green<!-- /vital:testcount -->)
 npm test
 ```
 
@@ -688,7 +688,7 @@ Vital's performance is falsifiable and measurable against pre-registered commitm
 
 ## Current State
 
-<!-- vital:testcount -->880/880 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
+<!-- vital:testcount -->882/882 tests green<!-- /vital:testcount --> across the complete suite running against real SQLite databases and real socket connections.
 
 - **Verified and reachable** (a console route, CLI command or worker handler runs it): Reality Ledger (Invariants I1–I7), Context Bundles, Replay, Attention Coordinator, Cognitive Router, R/A/I Matrix, Honeytasks, Emergency Stops, jcode Harness-API Protocol v1, Authenticated Web Console (Signup, Login, CSRF, RBAC, Review Queue, Rooms Setup, Team Roster, Audit Log, Learning Board, GDPR Erasure), and Marketing Site.
 - **Tested primitives, not wired to a product surface:** World Sense Funnel, Adversarial Integrity Gate, Ship-to-Result Wedge, Churn & Feature Loops, Agentic Deep Research, Talk Surface cryptographic binding, the egress forward proxy, cross-model transfer testing, and the serverless microVM labels. Each is covered by tests and documented as a prototype; none is reachable from a user path yet. AUDIT.md carries the per-module disposition, and this line is written to agree with it.

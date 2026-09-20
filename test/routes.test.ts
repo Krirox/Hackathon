@@ -20,6 +20,7 @@ import { listsRoutes, LISTS_CAPABILITIES } from '../src/console/routes/lists.ts'
 import { learningRoutes, LEARNING_CAPABILITIES } from '../src/console/routes/learning.ts';
 import { agentTasksRoutes, AGENT_TASKS_CAPABILITIES } from '../src/console/routes/agent-tasks.ts';
 import { reviewRoutes, REVIEW_CAPABILITIES } from '../src/console/routes/review.ts';
+import { issuesRoutes, ISSUES_CAPABILITIES } from '../src/console/routes/issues.ts';
 import type { Role } from '../src/core/auth.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
@@ -44,9 +45,13 @@ T('a route that cannot register fails loudly at boot, not as a 404', () => {
   // Surface is not optional either: it decides whether a browser is redirected
   // to the login form or handed a 401, and 'undefined' has no sane default.
   throws(() => validateRoutes([def({ surface: undefined as never })]), 'no surface');
-  // An owner-only *page* must declare what a non-owner sees. Without it the
+  // A restricted *page* must declare what everyone else sees. Without it the
   // dispatcher would have to invent user-facing copy.
   throws(() => validateRoutes([def({ capability: 'owner', surface: 'html' })]), 'must declare `denied`');
+  throws(() => validateRoutes([def({ capability: 'engineer', surface: 'html' })]), 'must declare `denied`');
+  // The unrestricted capabilities are not asked: nobody who reaches them is
+  // refused, so there is no refusal copy to state.
+  validateRoutes([def({ pattern: '/open', capability: 'session', surface: 'html' })]);
   // The valid case must not throw.
   validateRoutes([def({ pattern: '/a' }), def({ pattern: '/a/:id', method: 'POST', body: 'none' })]);
   validateRoutes([
@@ -101,6 +106,32 @@ T('capability is the whole policy, and it is a pure function', () => {
   eq(capabilityAllows('owner', session), false);
   eq(capabilityAllows('owner', owner), true);
   eq(capabilityAllows('owner', admin), true);
+});
+
+T('the engineer capability gates on department, not role', () => {
+  const who = (role: Role, team: string, disabled = false): AuthContext => ({
+    user: { role, team, disabled } as AuthContext['user'],
+    session: {} as AuthContext['session'],
+  });
+  // Anonymous is refused before any of this matters.
+  eq(capabilityAllows('engineer', null), false);
+  // The department decides, and this is the pair no role check can express: an
+  // engineering *member* is in, a marketing *admin* is out.
+  eq(capabilityAllows('engineer', who('member', 'engineering')), true);
+  eq(capabilityAllows('engineer', who('admin', 'marketing')), false);
+  eq(capabilityAllows('engineer', who('owner', 'finance')), false);
+  // Owners are deliberately not special-cased into it — an unassigned owner is
+  // refused, which is the board's behaviour since it had a board — while an
+  // engineering owner is admitted for the same reason a member is.
+  eq(capabilityAllows('engineer', who('owner', 'unassigned')), false);
+  eq(capabilityAllows('engineer', who('owner', 'engineering')), true);
+  // A deactivated engineer with a live session loses the board. This is the
+  // half of the original gate that a refactor is most likely to drop, because
+  // it looks redundant next to the role check and is not.
+  eq(capabilityAllows('engineer', who('member', 'engineering', true)), false);
+  // The capabilities are independent in both directions.
+  eq(capabilityAllows('owner', who('member', 'engineering')), false);
+  eq(capabilityAllows('engineer', who('owner', 'marketing')), false);
 });
 
 // ---------------------------------------------------- the migrated domain
@@ -1030,6 +1061,7 @@ T('every budgeted page is attributed to the mechanism that really serves it', ()
     ...Object.keys(REQUESTS_CAPABILITIES),
     ...Object.keys(LISTS_CAPABILITIES),
     ...Object.keys(REVIEW_CAPABILITIES),
+    ...Object.keys(ISSUES_CAPABILITIES),
   ]);
   const wrong = PAGE_SQL_BUDGETS.filter((p) => (p.dispatch === 'table') !== migrated.has(`GET ${p.pattern}`)).map(
     (p) => `${p.url} is marked ${p.dispatch}`,
@@ -1212,6 +1244,42 @@ T('the compliance domain is complete, and erasure checks its token', async () =>
   }
 });
 
+T('the issues board declares one gate — engineer — for every route it owns', () => {
+  const routes = issuesRoutes();
+  validateRoutes(routes);
+  const byId = new Map(routeManifest(routes).map((m) => [`${m.method} ${m.pattern}`, m]));
+  eq(byId.size, Object.keys(ISSUES_CAPABILITIES).length, 'issues route count:');
+  for (const [id, want] of Object.entries(ISSUES_CAPABILITIES)) {
+    eq(byId.get(id)?.capability, want.capability, `${id} capability:`);
+    eq(byId.get(id)?.surface, want.surface, `${id} surface:`);
+    eq((byId.get(id)?.note ?? '').length > 0, true, `${id} has a stated reason:`);
+  }
+  // One gate for the whole module. A `session` route hiding inside an
+  // engineer-gated domain is the exact shape this table exists to make
+  // impossible to read past.
+  eq(
+    routes.every((r) => r.capability === 'engineer'),
+    true,
+    'every board route is engineer-gated:',
+  );
+  // The board is a page, so a refused non-engineer must be told in the page's
+  // own words rather than handed a JSON body.
+  const page = routes.find((r) => r.surface === 'html');
+  eq(typeof page?.denied?.message, 'string', 'the board page declares its refusal copy:');
+  // "Every board write checks its token" is one column, not six branches.
+  eq(
+    routes.filter((r) => r.method === 'POST').every((r) => r.body === 'csrf'),
+    true,
+    'every board write is CSRF-checked by the dispatcher:',
+  );
+  // The board names goals, scopes and spend, and its JSON repeats the page.
+  eq(
+    routes.every((r) => r.activation === 'required'),
+    true,
+    'every board route needs an activated account:',
+  );
+});
+
 T('the code-review index lists what was opened, and refuses what cannot be read', async () => {
   // The bug this pins: `/console/review/:missionId` was a real page with no
   // inbound link. A review is keyed by mission id, nothing listed the keys, and
@@ -1371,6 +1439,7 @@ T('the migration boundary is explicit, not implied', () => {
       ...Object.keys(LISTS_CAPABILITIES),
       ...Object.keys(LEARNING_CAPABILITIES),
       ...Object.keys(REVIEW_CAPABILITIES),
+      ...Object.keys(ISSUES_CAPABILITIES),
     ].map((id) => `${id.split(' ')[0]} ${id.split(' ')[1]}`),
   );
   // The whole compliance domain now declares its capability, surface and body
@@ -1398,10 +1467,21 @@ T('the migration boundary is explicit, not implied', () => {
   eq(migrated.has('POST /console/review'), true, 'review open migrated:');
   eq(migrated.has('GET /console/review/:missionId'), true, 'the per-mission review page migrated:');
   eq(migrated.has('POST /console/review/:missionId'), true, 'review actions migrated:');
-  eq(migrated.size, 20, 'migrated route count (update deliberately):');
+  // The board: the page, its delta sync, its detail payload and its five writes.
+  // This is also the first domain whose gate is a department rather than a role,
+  // which is why `engineer` had to exist before any of it could move.
+  eq(migrated.has('GET /console/issues'), true, 'the board page migrated:');
+  eq(migrated.has('POST /console/issues/create'), true, 'issue create migrated:');
+  eq(migrated.has('POST /console/issues/comment'), true, 'issue comment migrated:');
+  eq(migrated.size, 28, 'migrated route count (update deliberately):');
   eq(migrated.has('GET /console/learning'), false, 'the learning read page is still legacy:');
   eq(migrated.has('GET /console/learning/:id'), false, 'the card page is still legacy:');
   eq(migrated.has('POST /console/learning/label'), false, 'the label write is still legacy:');
+  // The board's GitHub sub-surface is deliberately still legacy: its webhook is
+  // called anonymously by GitHub once a repo is linked, so its capability
+  // depends on tenant state and cannot be one declared value yet.
+  eq(migrated.has('GET /console/issues/github/config'), false, 'github config is still legacy:');
+  eq(migrated.has('POST /console/issues/github/webhook'), false, 'the github webhook is still legacy:');
   // Still on the legacy chain, with no declared capability. Named explicitly so
   // "migrated" cannot quietly mean "everything". These write a ledger decision
   // inside a transaction with a duplicate-submission receipt path — their own
