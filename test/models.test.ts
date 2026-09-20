@@ -31,7 +31,7 @@ const stubFetch = (reply: unknown, ok = true, status = 200) => {
 
 const stubBedrock =
   (reply: string, usage = { input: 4, output: 2 }): BedrockConverseFn =>
-  async (input) => ({
+  async (_input) => ({
     text: reply,
     inputTokens: usage.input,
     outputTokens: usage.output,
@@ -98,10 +98,7 @@ T('bedrock converse HTTP: bearer auth, model in path', async () => {
   const out = await completeChat(profile, 'bedrock-key', msgs, fetchFn, { env });
   eq(out.text, 'from-bedrock');
   eq(out.usage, { input: 11, output: 3 });
-  eq(
-    calls[0]!.url,
-    'https://bedrock-runtime.us-east-1.amazonaws.com/model/zai.glm-4.7-flash/converse',
-  );
+  eq(calls[0]!.url, 'https://bedrock-runtime.us-east-1.amazonaws.com/model/zai.glm-4.7-flash/converse');
   eq(calls[0]!.init.headers.Authorization, 'Bearer bedrock-key');
   eq(readApiKey({ BEDROCK_API_KEY: 'bedrock-key' } as NodeJS.ProcessEnv, profile), 'bedrock-key');
 });
@@ -117,11 +114,11 @@ T('model failures and empty prompts fail loudly, never silently', async () => {
   }
   eq(code.includes('MODEL_FETCH'), true);
   eq(code.includes('429'), true);
+  await rejects(async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile(novitaEnv)), 'MISSING_API_KEY');
   await rejects(
-    async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile(novitaEnv)),
+    async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile({} as NodeJS.ProcessEnv)),
     'MISSING_API_KEY',
   );
-  await rejects(async () => readApiKey({} as NodeJS.ProcessEnv, prodProfile({} as NodeJS.ProcessEnv)), 'MISSING_API_KEY');
   eq(readApiKey({ NOVITA_API_KEY: 'nv' } as unknown as NodeJS.ProcessEnv, prodProfile(novitaEnv)), 'nv');
   eq(
     readApiKey({ GOOGLE_API_KEY: 'g' } as unknown as NodeJS.ProcessEnv, devProfile({} as NodeJS.ProcessEnv)),
@@ -139,11 +136,7 @@ T('unapproved models never run — the registry is default-deny', async () => {
   assertApproved(prodProfile(env), 'production', env);
   await rejects(
     async () =>
-      assertApproved(
-        prodProfile({ ...env, BEDROCK_MODEL: 'zai.glm-4.7' } as NodeJS.ProcessEnv),
-        'production',
-        env,
-      ),
+      assertApproved(prodProfile({ ...env, BEDROCK_MODEL: 'zai.glm-4.7' } as NodeJS.ProcessEnv), 'production', env),
     'UNAPPROVED_MODEL',
   );
 });
@@ -194,14 +187,17 @@ T('the judge scores, and fails closed on garbage or errors', async () => {
     'x',
   );
   eq(garbage.score, 1, 'unparseable denies:');
-  const dead = await judgeText({
-    profile,
-    apiKey: 'k',
-    fetchFn: stubFetch({}, false, 500).fetchFn,
-    bedrockConverse: async () => {
-      throw new Error('down');
+  const dead = await judgeText(
+    {
+      profile,
+      apiKey: 'k',
+      fetchFn: stubFetch({}, false, 500).fetchFn,
+      bedrockConverse: async () => {
+        throw new Error('down');
+      },
     },
-  }, 'x');
+    'x',
+  );
   eq(dead.score, 1, 'dead judge denies:');
   eq(dead.flags, ['judge_error']);
 });

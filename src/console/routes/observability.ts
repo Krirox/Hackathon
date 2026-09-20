@@ -91,7 +91,9 @@ export function observabilityRoutes(): RouteDef<ObservabilityEnv>[] {
       note: 'Curation-cost clock. Session-gated: a latency distribution leaks who approves what, and how slowly.',
       async handler(ctx) {
         ctx.res.writeHead(200, { 'content-type': 'application/json', ...NO_STORE });
-        ctx.res.end(JSON.stringify(await ctx.memo.memo('approval-latency', () => ctx.env.approvalLatency(ctx.env.tenant))));
+        ctx.res.end(
+          JSON.stringify(await ctx.memo.memo('approval-latency', () => ctx.env.approvalLatency(ctx.env.tenant))),
+        );
       },
     },
     {
@@ -102,7 +104,9 @@ export function observabilityRoutes(): RouteDef<ObservabilityEnv>[] {
       note: 'Spend-side gate (MODEL share of arrivals). Read-only but leaks routing economics.',
       async handler(ctx) {
         ctx.res.writeHead(200, { 'content-type': 'application/json', ...NO_STORE });
-        ctx.res.end(JSON.stringify(await ctx.memo.memo('cost-per-signal', () => ctx.env.costPerSignal(ctx.env.tenant))));
+        ctx.res.end(
+          JSON.stringify(await ctx.memo.memo('cost-per-signal', () => ctx.env.costPerSignal(ctx.env.tenant))),
+        );
       },
     },
   ];

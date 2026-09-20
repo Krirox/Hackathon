@@ -23,26 +23,26 @@ and Data & retention reachable from one shared nav.
 
 ### Priority
 
-| Priority | Meaning |
-|---|---|
-| P0 | Dead end, broken link, or unreachable core action; fix first |
-| P1 | Required for a supported pilot or enterprise review |
-| P2 | Consistency, discoverability, and polish |
+| Priority | Meaning                                                      |
+| -------- | ------------------------------------------------------------ |
+| P0       | Dead end, broken link, or unreachable core action; fix first |
+| P1       | Required for a supported pilot or enterprise review          |
+| P2       | Consistency, discoverability, and polish                     |
 
 ---
 
 ## Progress
 
-| Item | Status |
-|---|---|
-| FINAL-001 cross-page back links | Done — `test/auth.test.ts` |
-| FINAL-002 persistent Settings nav | Done — `test/console.test.ts` |
-| FINAL-003 surface Rooms wizard | Done — `test/console.test.ts` (link) |
-| FINAL-004 learning review page (no JSON links) | Done — `test/console.test.ts` |
-| FINAL-005 MFA enroll + login | Done — `test/console.test.ts` |
-| FINAL-006 admin audit-log page | Done — `test/console.test.ts` |
-| FINAL-007 self-serve data export & erasure | Done — `test/console.test.ts` |
-| FINAL-008…014 | Done — `test/console.test.ts` (85/85), `npm test` (739/739) |
+| Item                                           | Status                                                      |
+| ---------------------------------------------- | ----------------------------------------------------------- |
+| FINAL-001 cross-page back links                | Done — `test/auth.test.ts`                                  |
+| FINAL-002 persistent Settings nav              | Done — `test/console.test.ts`                               |
+| FINAL-003 surface Rooms wizard                 | Done — `test/console.test.ts` (link)                        |
+| FINAL-004 learning review page (no JSON links) | Done — `test/console.test.ts`                               |
+| FINAL-005 MFA enroll + login                   | Done — `test/console.test.ts`                               |
+| FINAL-006 admin audit-log page                 | Done — `test/console.test.ts`                               |
+| FINAL-007 self-serve data export & erasure     | Done — `test/console.test.ts`                               |
+| FINAL-008…014                                  | Done — `test/console.test.ts` (85/85), `npm test` (739/739) |
 
 Full suite green at 739/739 (`npm test`), typecheck/lint/format clean for every file.
 
@@ -51,6 +51,7 @@ Full suite green at 739/739 (`npm test`), typecheck/lint/format clean for every 
 ## P0 — Broken links, dead ends, and unreachable core actions
 
 ### FINAL-001 — Fix cross-page back/return links (co-hosted & default modes)
+
 **Source:** Issue 8. `teamPage` does not receive `home` and hard-codes
 `<a href="/">← console</a>`; Buzz approval pages and the Rooms wizard hard-code
 `/console`, which 404s in default (non-`--site`) mode.
@@ -70,6 +71,7 @@ and `siteDir='site'`); no bare `href="/console"` remains in `src/`; typecheck cl
 plain serve and for `--site`.
 
 ### FINAL-002 — Make organization Setup reachable after activation
+
 **Source:** Issue 4. `/setup` is only linked from the activation panel, which
 hides once the checklist completes. `buildConsoleNav` omits Setup.
 **Done (2026-09-18):** `buildConsoleNav` gained a `settings` destination (`/setup`)
@@ -79,13 +81,14 @@ still renders).
 
 - [x] Add a persistent "Settings"/"Setup" entry to `buildConsoleNav` (admin-gated).
 - [x] Keep `/setup` functional and populated after activation.
-- [x] Link Settings from the shared console nav on every authenticated page. *(dashboard nav; FINAL-014 widens to all pages)*
+- [x] Link Settings from the shared console nav on every authenticated page. _(dashboard nav; FINAL-014 widens to all pages)_
 
 **Acceptance:** An admin can change source/scope/approval/budget at any time from the nav.
 
 **Tests:** console HTTP test that the dashboard nav contains the setup destination.
 
 ### FINAL-003 — Surface the orphaned Rooms provisioning wizard
+
 **Source:** Issue 7. `/setup/rooms` has zero inbound links and uses a dark theme
 inconsistent with the rest of the console.
 **Done (2026-09-18):** the setup page now links `/setup/rooms` ("Open room
@@ -102,6 +105,7 @@ setup link; FINAL-001 asserts the wizard back link).
 **Tests:** console HTTP test that the wizard is linked; source check for console palette.
 
 ### FINAL-004 — Stop linking humans to raw JSON endpoints
+
 **Source:** Issue 11. The Team page links to `/api/learning/cards/:id` and
 `.../evidence`, which return raw JSON in the browser.
 **Done (2026-09-18):** added `src/console/learning.ts` and routes
@@ -125,6 +129,7 @@ FINAL-002 nav gating, FLOW-025 updated) — no in-product href points at
 ## P1 — Enterprise-required surfaces
 
 ### FINAL-005 — Expose MFA (enroll / verify / recover) in the console
+
 **Source:** Issue 1. TOTP + recovery codes are implemented and tested in
 `src/core/auth.ts` but have no routes or UI; `mfaHint` is never passed.
 **Done (2026-09-18):** `login()` was split into `verifyLoginCredentials()` +
@@ -139,7 +144,7 @@ TOTP login, recovery-code login); auth/flow-007-010 suites still green.
 - [x] Add Account → Security section: enroll authenticator, confirm code, show save recovery codes.
 - [x] Add a second-factor step to `/login` when `isMfaEnabled`.
 - [x] Add factor list + remove factor, and recovery-code regeneration.
-- [x] Enforce recent-auth step-up consistently with the existing policy. *(unchanged policy; MFA is additive)*
+- [x] Enforce recent-auth step-up consistently with the existing policy. _(unchanged policy; MFA is additive)_
 
 **Acceptance:** An admin can enable MFA, sign in with it, and recover with a code.
 
@@ -148,6 +153,7 @@ TOTP login, recovery-code login); auth/flow-007-010 suites still green.
 **Starting points:** `src/core/auth.ts`, `src/console/serve.ts` (account/login routes).
 
 ### FINAL-006 — Add an admin Audit Log page
+
 **Source:** Issue 5. `GET /api/audit` exists; no page consumes it.
 **Done (2026-09-18):** added `src/console/audit.ts` and `GET /console/audit`
 (admin/owner-gated) with actor/action/from/to/request filters, pagination, and
@@ -155,7 +161,7 @@ links to referenced claims/requests/decisions; added an admin "Audit" nav entry.
 Reuses `queryAudit` + `auditLinks`. Verified: `test/console.test.ts` (FINAL-006 ×1).
 
 - [x] Add `/console/audit` (admin/owner-gated) with actor/action/date filters + pagination.
-- [x] Reuse `queryAudit`; render with the shared list shell. *(custom filter form, same query)*
+- [x] Reuse `queryAudit`; render with the shared list shell. _(custom filter form, same query)_
 - [x] Link from the nav.
 
 **Acceptance:** Admins can answer "who did X, when?" in-product.
@@ -163,6 +169,7 @@ Reuses `queryAudit` + `auditLinks`. Verified: `test/console.test.ts` (FINAL-006 
 **Tests:** console HTTP test for filtered audit listing.
 
 ### FINAL-007 — Self-serve data export & erasure from the console
+
 **Source:** Issue 6. Export and erasure are CLI/API only.
 **Done (2026-09-18):** added `src/console/data.ts` and routes `GET /console/data`,
 `GET /console/data/export` (JSON download attachment), `POST /console/data/erase`
@@ -180,6 +187,7 @@ and admin nav. Verified: `test/console.test.ts` (FINAL-007 ×1).
 **Tests:** console HTTP test for export download + erasure request gating.
 
 ### FINAL-008 — Make password reset & email verification truthful
+
 **Source:** Issue 2. No mailer; reset/verification cannot complete for a user.
 **Done (2026-09-18):** added mailer configuration detection (`hasMailerConfigured()`)
 in `src/console/serve.ts`; when no mailer is configured, relabels buttons to
@@ -198,6 +206,7 @@ mailer copy ("Send reset email"). Verified: `test/console.test.ts` (FINAL-008 ×
 **Tests:** console HTTP copy/behavior test per configured mode.
 
 ### FINAL-009 — Give deliverables a visible authoring path
+
 **Source:** Issue 3. Deliverables can be reviewed but not created/uploaded in-product.
 **Done (2026-09-18):** added deliverable authoring and empty/pending states in
 `src/console/deliverable.ts` and `POST /console/requests/:id/deliverable` in
@@ -218,6 +227,7 @@ Verified: `test/console.test.ts` (FINAL-009 ×1).
 **Tests:** console HTTP lifecycle from approved request to deliverable review.
 
 ### FINAL-010 — Team roster scale + bulk onboarding
+
 **Source:** Issue 9. `/team` has no search/filter/pagination; invites are one-at-a-time.
 **Done (2026-09-18):** added member search (`q`), role filter (`role`), status
 filter (`status`), and pagination (`page`, `pageSize`) to `teamPage` and
@@ -238,6 +248,7 @@ Verified: `test/console.test.ts` (FINAL-010 ×1).
 ## P2 — Consistency, resilience, and polish
 
 ### FINAL-011 — No-JS fallback for approval/correction
+
 **Source:** Issue 10. Core buttons ship `disabled` and require `REVIEW_SCRIPT`.
 **Done (2026-09-18):** removed `disabled` attribute from submit buttons across
 `src/console/review.ts`, `src/console/detail.ts`, and `src/console/deliverable.ts`.
@@ -251,6 +262,7 @@ Verified: `test/console.test.ts` (FINAL-011 ×1).
 - [x] Render plain HTML form POST fallbacks; keep JS as progressive enhancement.
 
 ### FINAL-012 — Standardize irreversible-action confirmations
+
 **Source:** Issue 14. External publish uses only a checkbox.
 **Done (2026-09-18):** when `version.externalPublish` is true, deliverable approval
 in `src/console/deliverable.ts` renders `destructiveConfirm` styling and requires
@@ -262,6 +274,7 @@ Verified: `test/console.test.ts` (FINAL-012 ×1).
 - [x] Apply `destructiveConfirm` + typed confirmation to irreversible actions.
 
 ### FINAL-013 — HTML error pages for browser GET validation failures
+
 **Source:** Issue 15. Malformed GET params return JSON in the browser.
 **Done (2026-09-18):** added `prefersHtml(req)` and `respondGetError(req, res, status, message)`
 in `src/console/serve.ts`. When a browser navigates to malformed GET routes
@@ -273,6 +286,7 @@ Verified: `test/console.test.ts` (FINAL-013 ×1).
 - [x] Render an HTML error page for browser requests; keep JSON for fetch/API callers.
 
 ### FINAL-014 — Shared nav + terminology pass
+
 **Source:** Issues 12, 13. Inconsistent shells, terminology drift (Rooms/scopes/Mission
 Control; approval variants; "Needs a human"/"Human work").
 **Done (2026-09-18):** updated `NavKey`, `NavAvailability`, and `buildConsoleNav`

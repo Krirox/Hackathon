@@ -66,7 +66,9 @@ try {
 }
 
 try {
-  const runs = await (await import('../src/compiler/transfer.ts')).runCrossModelEvidence(coord, comp, TEN, card.id, [model], {
+  const runs = await (
+    await import('../src/compiler/transfer.ts')
+  ).runCrossModelEvidence(coord, comp, TEN, card.id, [model], {
     originScope: 'marketing',
     targetScope: 'marketing',
     command: 'draft',

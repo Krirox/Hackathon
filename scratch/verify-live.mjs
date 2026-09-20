@@ -75,7 +75,10 @@ check('the queue can approve when work is pending', approveForms === declineForm
 // Separate surfaces, each linked from the other (product requirement).
 const dash = await (await fetch(`${base}/console/dashboard`, { headers: { cookie } })).text();
 check('console links to the chat', dash.includes('go-to-chat-btn'));
-check('chat links to the console', (await (await fetch(`${base}/console/buzz/general`, { headers: { cookie } })).text()).includes('vital-dashboard-btn'));
+check(
+  'chat links to the console',
+  (await (await fetch(`${base}/console/buzz/general`, { headers: { cookie } })).text()).includes('vital-dashboard-btn'),
+);
 check('console carries the console palette', dash.includes('--v-bg-0'));
 
 console.log(`\n${failed === 0 ? 'all checks passed' : `${failed} check(s) failed`}`);

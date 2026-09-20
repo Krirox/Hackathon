@@ -3,7 +3,7 @@
 This is the ordered, end-to-end playbook for deploying the full Vital stack to
 AWS: account prep, Terraform state, secrets, connecting a **Hostinger** domain,
 running the deploy, first login, and verification. The authoritative reference
-for *why* each piece exists (and what the stack deliberately does not wire) is
+for _why_ each piece exists (and what the stack deliberately does not wire) is
 `docs/deployment.md` — read it alongside this plan. Terraform lives in
 `deploy/aws/`; production deploys go **only** through
 `.github/workflows/deploy-aws.yml` (manual dispatch — infra is never a side
@@ -163,15 +163,15 @@ Use this when mail/other services must stay on Hostinger DNS. Leave
 `domain_name` **empty** so Terraform never writes DNS it does not own
 (the supported "domain managed elsewhere" posture), and:
 
-1. **ACM → Request a public certificate** in the *stack's region*, for
+1. **ACM → Request a public certificate** in the _stack's region_, for
    `console.example.com` (+ `buzz.example.com` if used). Choose DNS
    validation and copy the two `_…._acm-challenge` CNAME records into
    Hostinger's DNS zone editor (or use email validation instead).
-2. Wait for **Status: Issued** (minutes; stuck at *Pending validation* =
+2. Wait for **Status: Issued** (minutes; stuck at _Pending validation_ =
    the CNAMEs aren't resolving yet). Copy the **ARN**.
 3. In Hostinger DNS, point the subdomain at the load balancer: record type
    **CNAME**, name `console`, value = `terraform -chdir=deploy/aws output
-   -raw alb_dns` (run after the first apply). Do **not** CNAME the apex —
+-raw alb_dns` (run after the first apply). Do **not** CNAME the apex —
    it collides with MX/TXT records; use a subdomain. No AAAA record: the ALB
    is IPv4-only.
 4. Set `acm_certificate_arn = "arn:aws:acm:eu-central-1:…"` in
@@ -181,7 +181,7 @@ Use this when mail/other services must stay on Hostinger DNS. Leave
 Known wart on this route: with `domain_name` empty, the `console_url`
 terraform output stays `http://<alb-dns>`, and once a certificate is attached
 port 80 301-redirects to `https://<alb-dns>` — a name no certificate covers —
-so the workflow's smoke-check curl can go red on a *healthy* deploy. Verify
+so the workflow's smoke-check curl can go red on a _healthy_ deploy. Verify
 the journey through your real hostname in a browser instead, or migrate to
 Route A so the stack knows the name it serves.
 
@@ -200,21 +200,21 @@ secp256k1 private key: 64 hex chars; the agent master key 32+ hex chars; the
 review secret 16+ random chars; the rest: long random strings). Then set them
 as **repository secrets** (Settings → Secrets and variables → Actions):
 
-| Secret | Purpose |
-| --- | --- |
-| `AWS_ROLE_TO_ASSUME` | OIDC role from §3 (not a `TF_VAR_*`) |
-| `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface — required, no placeholder passes |
-| `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens — required |
-| `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake — required |
-| `TF_VAR_SERPER_API_KEY` | search plane — required |
-| *(models)* | **`TF_VAR_BEDROCK_API_KEY`** — Bedrock console API key (region must match `AWS_REGION`). Model: GLM 4.7 Flash (`zai.glm-4.7-flash`) via `bedrock_*_model_id` in Terraform. |
-| `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
-| `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | relay identity (64 hex) |
-| `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex; empty = no publishing identity |
-| `TF_VAR_VITAL_REVIEW_SECRET` | 16+ chars; empty = dead webhook-approve path |
-| `TF_VAR_BOOTSTRAP_EMAIL` / `TF_VAR_BOOTSTRAP_PASSWORD` | day-0 owner (§8) |
-| `TF_VAR_SETUP_SECRET` | web-claim authorization on a public bind |
-| `TF_BACKEND_BUCKET` | state bucket from §4; empty = local state |
+| Secret                                                 | Purpose                                                                                                                                                                    |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AWS_ROLE_TO_ASSUME`                                   | OIDC role from §3 (not a `TF_VAR_*`)                                                                                                                                       |
+| `TF_VAR_TENANT_HMAC_SECRET`                            | signs the talk surface — required, no placeholder passes                                                                                                                   |
+| `TF_VAR_VITAL_CORE_SECRET`                             | mints scope tokens — required                                                                                                                                              |
+| `TF_VAR_WEBHOOK_SECRET`                                | authenticates webhook intake — required                                                                                                                                    |
+| `TF_VAR_SERPER_API_KEY`                                | search plane — required                                                                                                                                                    |
+| _(models)_                                             | **`TF_VAR_BEDROCK_API_KEY`** — Bedrock console API key (region must match `AWS_REGION`). Model: GLM 4.7 Flash (`zai.glm-4.7-flash`) via `bedrock_*_model_id` in Terraform. |
+| `TF_VAR_OPERATOR_SECRET`                               | gates console mutations; empty = ungated (dev only)                                                                                                                        |
+| `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`                        | relay identity (64 hex)                                                                                                                                                    |
+| `TF_VAR_BUZZ_AGENT_MASTER_KEY`                         | 32+ hex; empty = no publishing identity                                                                                                                                    |
+| `TF_VAR_VITAL_REVIEW_SECRET`                           | 16+ chars; empty = dead webhook-approve path                                                                                                                               |
+| `TF_VAR_BOOTSTRAP_EMAIL` / `TF_VAR_BOOTSTRAP_PASSWORD` | day-0 owner (§8)                                                                                                                                                           |
+| `TF_VAR_SETUP_SECRET`                                  | web-claim authorization on a public bind                                                                                                                                   |
+| `TF_BACKEND_BUCKET`                                    | state bucket from §4; empty = local state                                                                                                                                  |
 
 The six "required" values fail `terraform validate` when empty or left as the
 literal placeholder (`CHANGEME`), so a half-configured deploy stops at plan
@@ -280,13 +280,13 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
 
 ### 7c. If the smoke check goes red
 
-| Symptom | Likely cause / fix |
-| --- | --- |
-| TLS verification failed on `/healthz` | cert added by hand but the stack doesn't know the hostname — see Route A vs Route B in §5 |
-| `services-stable` times out | ECS → Clusters → `vital` → Services → `vital-core` → **Events** shows the stopped-task reason |
-| `/healthz` 503 after stability | task up but not answering on 3100 — check `/vital/core` in CloudWatch Logs |
-| `core_image must be a real ECR URI` | images weren't pushed before apply — see §7b order |
-| Cert stuck `PENDING_VALIDATION` | §5 validation records not in the *delegated* zone (dig them to confirm) |
+| Symptom                               | Likely cause / fix                                                                            |
+| ------------------------------------- | --------------------------------------------------------------------------------------------- |
+| TLS verification failed on `/healthz` | cert added by hand but the stack doesn't know the hostname — see Route A vs Route B in §5     |
+| `services-stable` times out           | ECS → Clusters → `vital` → Services → `vital-core` → **Events** shows the stopped-task reason |
+| `/healthz` 503 after stability        | task up but not answering on 3100 — check `/vital/core` in CloudWatch Logs                    |
+| `core_image must be a real ECR URI`   | images weren't pushed before apply — see §7b order                                            |
+| Cert stuck `PENDING_VALIDATION`       | §5 validation records not in the _delegated_ zone (dig them to confirm)                       |
 
 ## 8. Day-0 provisioning (in order, once `console_url` is live)
 
@@ -316,6 +316,7 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
    reading relay metadata back, and exits non-zero if any room is
    unverified. Then check `/console/buzz`: roster, health badges, relay
    status green.
+
 5. **Ingestion**: `ingest-files` against an operator-approved source
    (bounded, explicit — see `docs/deployment.md` F04a).
 6. **First release**: replay the Docker E2E journey against the real
@@ -325,7 +326,7 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
 ## 9. Verification and drills (before announcing the pilot)
 
 1. `node scripts/verify-topology.mjs --base-url <console_url> --email …
-   --password … --expect-ready true` — Host routing,
+--password … --expect-ready true` — Host routing,
    `X-Forwarded-Proto` with `TRUST_PROXY=1`, reachability-only pill,
    readiness with DB up.
 2. **Dependency-loss drill**: `--expect-ready false` while `/healthz` stays
@@ -335,7 +336,7 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
    **confirmed** mailbox (AWS sends an SNS confirmation email on apply;
    unconfirmed = formally firing, factually silent).
 4. **RDS**: automated backups + 7-day PITR window confirmed; schedule the
-   quarterly restore-to-scratch drill *now* (procedure in
+   quarterly restore-to-scratch drill _now_ (procedure in
    `docs/deployment.md`).
 5. **S3**: Object Lock (COMPLIANCE 365d) on the audit bucket and
    public-access blocks on all buckets.

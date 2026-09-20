@@ -3,8 +3,8 @@
 - Node 22: `C:\Program Files\nodejs\node.exe` on this machine. The
   `node`/`npx` shims may be absent from the agent bash PATH — call the
   binary by absolute path: `"C:\Program Files\nodejs\node.exe"
-  node_modules/typescript/bin/tsc`, `... node_modules/tsx/dist/cli.mjs
-  test/run.ts`.
+node_modules/typescript/bin/tsc`, `... node_modules/tsx/dist/cli.mjs
+test/run.ts`.
 - `node:sqlite` emits an ExperimentalWarning. Harmless.
 - Windows has no Unix sockets: transports take named pipes
   (`\\.\pipe\…`). jcode has no live Windows e2e coverage either, so every

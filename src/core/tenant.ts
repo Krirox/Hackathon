@@ -153,10 +153,8 @@ export function forTenant(db: AsyncDb, tenant: string): TenantScope {
   return {
     tenant,
     statement,
-    get: async <T = Row>(sql: string, ...params: unknown[]) =>
-      (await statement(sql).get(...params)) as T | undefined,
-    all: async <T = Row>(sql: string, ...params: unknown[]) =>
-      (await statement(sql).all(...params)) as T[],
+    get: async <T = Row>(sql: string, ...params: unknown[]) => (await statement(sql).get(...params)) as T | undefined,
+    all: async <T = Row>(sql: string, ...params: unknown[]) => (await statement(sql).all(...params)) as T[],
     run: async (sql: string, ...params: unknown[]) => statement(sql).run(...params),
   };
 }

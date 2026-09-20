@@ -15,7 +15,7 @@ async function main() {
 
   // 2. Login
   const pre = await fetch(`${BASE}/login`, { redirect: 'manual' });
-  const preCookies = (pre.headers.getSetCookie?.() ?? []).map(c => c.split(';')[0]).join('; ');
+  const preCookies = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
   const preHtml = await pre.text();
   const preCsrf = preHtml.match(/name="csrf" value="([0-9a-f]+)"/)?.[1];
   assert.ok(preCsrf, 'CSRF token extracted from login page');
@@ -23,7 +23,7 @@ async function main() {
   const loginRes = await fetch(`${BASE}/login`, {
     method: 'POST',
     headers: {
-      'cookie': preCookies,
+      cookie: preCookies,
       'content-type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams({
@@ -34,7 +34,7 @@ async function main() {
     redirect: 'manual',
   });
   assert.strictEqual(loginRes.status, 303, 'Login should redirect with 303');
-  const sessionCookie = (loginRes.headers.getSetCookie?.() ?? []).map(c => c.split(';')[0]).join('; ');
+  const sessionCookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
   console.log('✔ Authenticated as', EMAIL);
 
   // 3. Verify /account settings inside workspace shell
@@ -113,7 +113,10 @@ async function main() {
   assert.ok(afterHtml.includes('general-agent'), 'general-agent is author of reply');
   assert.ok(afterHtml.includes('Vital Business Intelligence Briefing'), 'Briefing title rendered');
   assert.ok(afterHtml.includes('Grounded in Reality Ledger'), 'Grounded in reality ledger rendered');
-  assert.ok(afterHtml.includes('Spend &amp; Attention Telemetry') || afterHtml.includes('Spend & Attention Telemetry'), 'Spend telemetry rendered');
+  assert.ok(
+    afterHtml.includes('Spend &amp; Attention Telemetry') || afterHtml.includes('Spend & Attention Telemetry'),
+    'Spend telemetry rendered',
+  );
   console.log('✔ Live Reality Ledger RAG Business Intelligence Q&A verified in #general');
 
   console.log('\n🎉 ALL LIVE END-TO-END VERIFICATIONS PASSED SUCCESSFULLY!');

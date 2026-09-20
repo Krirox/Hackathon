@@ -950,7 +950,9 @@ export async function disableUser(
   }
   const out = await db.prepare('UPDATE users SET disabled = 1 WHERE tenant = ? AND id = ?').run(tenant, userId);
   if (out.changes === 0) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
-  await db.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND tenant = ? AND revoked_at IS NULL').run(now, userId, tenant);
+  await db
+    .prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND tenant = ? AND revoked_at IS NULL')
+    .run(now, userId, tenant);
   await audit(
     db,
     tenant,
@@ -1268,9 +1270,8 @@ export async function verifyLoginCredentials(
   const accountKey = `acct:${input.tenant}|${email}`;
   const day = dayOf(now);
   const bump = async (bucketKey: string, threshold: number): Promise<string | null> => {
-    const row = (await db
-      .prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?')
-      .get(bucketKey, day)) as { fails: number } | undefined;
+    const row = (await db.prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?').get(bucketKey, day)) as
+      { fails: number } | undefined;
     const fails = (row?.fails ?? 0) + 1;
     const lockedUntil = fails >= threshold ? new Date(Date.parse(now) + LOCKOUT_MS).toISOString() : null;
     if (row)
@@ -1299,12 +1300,10 @@ export async function verifyLoginCredentials(
   };
 
   const lockedUntil = (await lockedMessage(key)) ?? (await lockedMessage(accountKey));
-  if (lockedUntil)
-    throw new AuthError('LOCKED', `too many failed attempts — locked until ${lockedUntil}`);
+  if (lockedUntil) throw new AuthError('LOCKED', `too many failed attempts — locked until ${lockedUntil}`);
 
   const user = (await db.prepare('SELECT * FROM users WHERE tenant = ? AND email = ?').get(input.tenant, email)) as
-    | Row
-    | undefined;
+    Row | undefined;
   if (!user) await fail(`no user ${email}`);
   const u = rowToUser(user as Row);
   if (u.disabled) await fail(`disabled user ${email}`);
@@ -1335,8 +1334,7 @@ export async function recordMfaFailure(db: AsyncDb, tenant: string, userId: stri
   const day = dayOf(now);
   const bucketKey = `mfa:${tenant}|${userId}`;
   const row = (await db.prepare('SELECT fails FROM login_attempts WHERE key = ? AND day = ?').get(bucketKey, day)) as
-    | { fails: number }
-    | undefined;
+    { fails: number } | undefined;
   const fails = (row?.fails ?? 0) + 1;
   const lockedUntil = fails >= MFA_LOCKOUT_THRESHOLD ? new Date(Date.parse(now) + LOCKOUT_MS).toISOString() : null;
   if (row)

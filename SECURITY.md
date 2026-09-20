@@ -6,8 +6,8 @@
    web.** A poisoned result is a persistent foothold — especially with
    durable sandboxes where installed tools stay installed.
 2. **Two different injection problems.** (a) A harness signed into tools can
-   be *prompt-injected* into mis-acting. (b) A world model feeding strategy
-   can be *poisoned to steer the company* (fake pricing page, seeded repo,
+   be _prompt-injected_ into mis-acting. (b) A world model feeding strategy
+   can be _poisoned to steer the company_ (fake pricing page, seeded repo,
    astroturfed thread). Only (b) has a competitor deliberately attacking it.
    Keep the defences scoped accordingly.
 3. **Durable state as a foothold.** Anything persisted (sandbox files,
@@ -38,7 +38,7 @@
   transfer tests gate promotion, drift auto-demotes, loops quarantine on
   consecutive failures or undeclared ship actions.
 - **Talk binding integrity — spike, not enforced** (`src/talk/surface.ts`):
-  claim ↔ envelope binding is tamper-evident *where it is used*, which today is
+  claim ↔ envelope binding is tamper-evident _where it is used_, which today is
   only the test suite. No console, worker or CLI path signs or verifies through
   `TalkSurface`, so treat this as a design proof rather than a control. Listed here
   rather than omitted so the gap is legible: the ledger stores one opaque string,
@@ -66,7 +66,7 @@
   forced to change their password at first login and every other mutation
   (approve, invite, disable, correct) is refused until they do. Approvals
   additionally honor a configurable minimum role
-  (`--approver-role`, default `member`).   Per-tenant GDPR erasure (`src/core/erasure.ts`, FLOW-004) is export-first:
+  (`--approver-role`, default `member`). Per-tenant GDPR erasure (`src/core/erasure.ts`, FLOW-004) is export-first:
   the in-memory portable record is always produced inside the erasure
   transaction; optional `--export-to` writes and verifies a JSON file before
   deletion commits (a write failure rolls back — deletion is never reported

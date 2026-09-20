@@ -1,4 +1,4 @@
-# TODO — Vital / The Living Company  (v2 — core built, production next)
+# TODO — Vital / The Living Company (v2 — core built, production next)
 
 Phase-divided build checklist. Companion to `idea.md` (the spec). Where they disagree, `idea.md` wins.
 
@@ -40,11 +40,11 @@ what is built — work the V2 backlog.
 
 **Verification rule inherited from QM's own AGENTS.md:** a green typecheck is not review. Every phase ends with a fresh-context pass that tries to break the change.
 
-**Second rule:** *reading a README is not verification.* Three drafts confidently asserted jcode's language, and the third asserted it **wrong** because it was checked against a clone of the wrong repository. Verify the identifier (URL, package name, commit SHA), not the name.
+**Second rule:** _reading a README is not verification._ Three drafts confidently asserted jcode's language, and the third asserted it **wrong** because it was checked against a clone of the wrong repository. Verify the identifier (URL, package name, commit SHA), not the name.
 
-**Third rule:** *a green typecheck is not a working system.* The error-frame crash (0.6) compiles clean and kills the process on first contact with a real harness. The only tests that count are ones that talk to something.
+**Third rule:** _a green typecheck is not a working system._ The error-frame crash (0.6) compiles clean and kills the process on first contact with a real harness. The only tests that count are ones that talk to something.
 
-**Fourth rule:** *never claim a competitor lacks a control we have not confirmed absent.* The defensible form is "the public evidence does not document typed provenance, action budgets, or measured refusal" — not "they have no audit log." Grok Bot documents confirmation prompts, admin connector provisioning, and API-level SOC 2 / HIPAA-eligible claims. Overclaiming here is exactly the posturing a16z names as a deck-killer, and for a company selling provenance it is fatal. The error-frame crash (0.6) compiles clean and kills the process on first contact with a real harness. The only tests that count are ones that talk to something.
+**Fourth rule:** _never claim a competitor lacks a control we have not confirmed absent._ The defensible form is "the public evidence does not document typed provenance, action budgets, or measured refusal" — not "they have no audit log." Grok Bot documents confirmation prompts, admin connector provisioning, and API-level SOC 2 / HIPAA-eligible claims. Overclaiming here is exactly the posturing a16z names as a deck-killer, and for a company selling provenance it is fatal. The error-frame crash (0.6) compiles clean and kills the process on first contact with a real harness. The only tests that count are ones that talk to something.
 
 ---
 
@@ -56,9 +56,10 @@ mode the Ledger exists to prevent).
 
 ---
 
-## PHASE 0 — Repo, toolchain, fork discipline  `~2 weeks`
+## PHASE 0 — Repo, toolchain, fork discipline `~2 weeks`
 
 ### 0.1 Toolchain recovery
+
 - [x] `git init -b main` at `D:/Vital`
 - [x] `package.json` → `"type": "module"`, deps `zod@^4`, dev `typescript@^5` `tsx@^4` `@types/node@^22` (+ eslint/prettier suites 2026-09-09; unused `yaml` removed)
 - [x] `tsconfig.json` — `nodenext`, `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `allowImportingTsExtensions`, `rewriteRelativeImportExtensions`
@@ -71,6 +72,7 @@ mode the Ledger exists to prevent).
 - [x] [G] `npm run typecheck && npm test` green from a clean clone (**exercised 2026-09-17**: fresh clone of the pushed HEAD on Windows — `npm ci` 2.6s/119 pkgs, typecheck+lint+format:check+tests+provenance+verify-instance+audit all green. The exercise **caught a real gate-breaker**: Prettier 3's default `endOfLine: lf` + Windows `autocrlf` checkouts failed `format:check` on all 75 files in a fresh clone while CI on Linux stayed green. Fixed with `.gitattributes` `* text=auto eol=lf` + explicit `endOfLine` in `.prettierrc`; re-verified in a second fresh clone. Stranger-boot time ≈ **40s** (clone 2s + install 3s + checks+tests 35s), comfortably inside the <30-min budget.)
 
 ### 0.2 Upstream provenance
+
 - [x] `.upstream/qm` cloned — **source to absorb from**, not a host. MIT. SHA `60ba791…` (2026-09-08)
 - [x] `.upstream/buzz` cloned — Apache-2.0, Rust+TS. SHA `218633b…` (2026-09-08)
 - [x] `.upstream/jcode-1jehuang` cloned — **the real jcode**: Rust, 1,198 `.rs` / 0 `.go`, MIT v0.84.0. SHA `e65e47c…` (2026-09-09)
@@ -80,7 +82,7 @@ mode the Ledger exists to prevent).
 - [x] `S` `scripts/upstream-refresh.sh` — fetch + `rev-parse HEAD` vs pins in `docs/upstream.md`
 - [x] [G] `npm run verify:provenance` fails if a vendored file's recorded SHA is missing or malformed (guard implemented + green; also rejects vendored-looking files outside `src/vendor/`)
 
-### 0.3 Absorb from QM — do not depend on it  *(replaces the private-fork plan)*
+### 0.3 Absorb from QM — do not depend on it _(replaces the private-fork plan)_
 
 Decision: Vital is its own core. We take QM's best leaf modules under MIT and build the substrate ourselves. The fork/sync/upstream-drift discipline is gone, and with it the flattering "60% already exists" figure — see `idea.md` §16.2.
 
@@ -96,9 +98,10 @@ Decision: Vital is its own core. We take QM's best leaf modules under MIT and bu
 - [ ] ❌ do **not** absorb the substrate: QM's deps are `@anthropic-ai/claude-agent-sdk`, `@openai/codex`, `opencode-ai`, `@slack/*`, `e2b`, `modal`, AWS SDK, fastify. Absorbing those is a fork, not a startup
 - [x] `S` CI: `git diff` guard that no file outside `src/vendor/qm/` is marked vendored, and vendored files are never silently edited without a header note (`verify-provenance.mjs`: header fields + full-SHA + cross-check that every header SHA appears in `LICENSE-THIRD-PARTY.md` — an unpinned SHA is a silent edit by another name)
 - [ ] [!] `[DECIDED]` packaging — Vital is its own npm package + repo. The old (a)/(b)/(c) fork question is moot
-- [ ] `S` keep watching QM's `adrs/` for *ideas*; we owe it nothing and it blocks us on nothing
+- [ ] `S` keep watching QM's `adrs/` for _ideas_; we owe it nothing and it blocks us on nothing
 
 ### 0.4 Reference topology
+
 - [x] `M` document: VPS-1 Buzz · **VPS-2 Vital core + Postgres** · VPS-3 jcode (sibling process over harness-api) (`docs/deployment.md`)
 - [x] `M` docker-compose single-box dev (Buzz + Vital core + Postgres) (`deploy/compose.yml`)
 - [x] `S` `.env.example` — names and descriptions, never values
@@ -106,7 +109,7 @@ Decision: Vital is its own core. We take QM's best leaf modules under MIT and bu
 - [x] `M` **Buzz→Slack fallback spike** — done 2026-09-09 as `src/talk/surface.ts`: `TalkSurface` bind/verify interface, HMAC fallback surface (§1.4), Buzz/Nostr mapping documented from `.upstream/buzz` (`git-sign-nostr`; `vital-claim` tag; sig verification stays with relay/SDK). Verdict: ledger stores one opaque string + the interface — **swappable with zero ledger changes**. Full Buzz signature verification deferred to Phase 1.4.
 - [ ] [G] a stranger boots the topology from the README alone in < 30 min (not yet timed — time it before claiming it)
 
-### 0.5 The substrate we now own  *(new — created by the absorb decision)*
+### 0.5 The substrate we now own _(new — created by the absorb decision)_
 
 This is the cost side of §0.3. We stopped inheriting these, so they are ours to build **and to secure**.
 
@@ -117,20 +120,21 @@ This is the cost side of §0.3. We stopped inheriting these, so they are ours to
 - [x] `M` Content screen in the `securityScreen` shape: `user_input` / `tool_response`, score/threshold, **shadow before enforce, fails closed** (`src/substrate/screen.ts` + reference denylist backend)
 - [x] `M` Identity: who is this agent acting as, with what grants, and how is that audited (`src/substrate/identity.ts`: HMAC scope tokens; caught + fixed hex-trailing-garbage acceptance in token AND envelope verification)
 - [x] [!] `[G]` **Re-estimate Phase 0–2 — DONE 2026-09-09 (estimate, not a promise).** Corrected against upstream source, not READMEs: `governor.ts` imports `item-ledger` + `output-store`, not "types only" (only `evaluateGovernor` is pure — the absorb is a narrowing, not a copy); `ship-gate`'s `trigger-store` pulls `directory/person` + a **Postgres-backed** `durable-map` (needs a SQLite port or a skip-decision — our coord already dedupes in-SQLite); `egress-authz` is scattered across `resolution/egress-policy.ts` + `egress-authz-main.ts` + `auth/capability-token.ts` (blocklist confirmed: `169.254.0.0/16`, `metadata.goog`); `.upstream/jcode` impostor already absent (verified — only `buzz/`, `jcode-1jehuang/`, `qm/` remain).
-  | Block | Old assumption | Revised |
-  |---|---|---|
-  | 0.1/0.2/0.7 toolchain + provenance + dev docs | days | ~1 wk |
-  | 0.3 absorption (4 modules + egress design + guards) | ~1 wk | ~3 wks (ports + narrowing, not copies) |
-  | 0.4 topology + Buzz→Slack spike | ~1 wk | ~2 wks (spike is the long pole) |
-  | 0.5 substrate, minimal (sandbox/scheduler/egress/adapter/screen/identity) | free (QM) | ~4 wks minimal, ~7 full |
-  | 0.5 hardening (split tests, property/fuzz/adversarial, PG parity, SECURITY.md) | ~1 wk | ~1.5 wks |
-  | Phase 1 Ledger v0 + ingestion + curation + Buzz binding | 3 wks | 4–5 wks |
-  | Phase 2 Ship-to-Result to ≥50 launches | 5 wks | 5–6 wks (calendar-bound: needs partners at ≥2 releases/mo) |
-  | **Total to first loop, solo** | **~8 wks** | **~18–23 wks (~4.5–6 mo)** |
-  Verdict: do not promise 8 weeks to any buyer or investor. §21.1 trigger check: substrate is weeks, not 6 months — **no reconsider-QM trigger**. Top schedule risks: (1) partner calendar time for 50 launches, (2) Buzz youth (if the spike fails, Slack fallback becomes the plan), (3) durable-map PG→SQLite port vs skipping it.
+  | Block                                                                                                                                                                                                                                                                                                                               | Old assumption | Revised                                                    |
+  | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------- |
+  | 0.1/0.2/0.7 toolchain + provenance + dev docs                                                                                                                                                                                                                                                                                       | days           | ~1 wk                                                      |
+  | 0.3 absorption (4 modules + egress design + guards)                                                                                                                                                                                                                                                                                 | ~1 wk          | ~3 wks (ports + narrowing, not copies)                     |
+  | 0.4 topology + Buzz→Slack spike                                                                                                                                                                                                                                                                                                     | ~1 wk          | ~2 wks (spike is the long pole)                            |
+  | 0.5 substrate, minimal (sandbox/scheduler/egress/adapter/screen/identity)                                                                                                                                                                                                                                                           | free (QM)      | ~4 wks minimal, ~7 full                                    |
+  | 0.5 hardening (split tests, property/fuzz/adversarial, PG parity, SECURITY.md)                                                                                                                                                                                                                                                      | ~1 wk          | ~1.5 wks                                                   |
+  | Phase 1 Ledger v0 + ingestion + curation + Buzz binding                                                                                                                                                                                                                                                                             | 3 wks          | 4–5 wks                                                    |
+  | Phase 2 Ship-to-Result to ≥50 launches                                                                                                                                                                                                                                                                                              | 5 wks          | 5–6 wks (calendar-bound: needs partners at ≥2 releases/mo) |
+  | **Total to first loop, solo**                                                                                                                                                                                                                                                                                                       | **~8 wks**     | **~18–23 wks (~4.5–6 mo)**                                 |
+  | Verdict: do not promise 8 weeks to any buyer or investor. §21.1 trigger check: substrate is weeks, not 6 months — **no reconsider-QM trigger**. Top schedule risks: (1) partner calendar time for 50 launches, (2) Buzz youth (if the spike fails, Slack fallback becomes the plan), (3) durable-map PG→SQLite port vs skipping it. |
 - [ ] [!] `[RISK]` If the substrate turns out to be 6 months, **reconsider running on QM** — that option is deprioritised, not closed (`idea.md` §21.1)
 
-### 0.6 jcode connection  ✅ built — was "the connection does not exist"
+### 0.6 jcode connection ✅ built — was "the connection does not exist"
+
 - [x] read `crates/jcode-harness-api/src/{lib,requests,events,sockets}.rs` and mirror the protocol
 - [x] `src/jcode/protocol.ts` — NDJSON frames, `v` major, tags `req`/`ev` snake_case, `PermissionDecision = allow|allow_always|deny`
 - [x] `src/jcode/client.ts` — hello-first handshake, version check, `reply_to` correlation, injectable transport
@@ -138,15 +142,16 @@ This is the cost side of §0.3. We stopped inheriting these, so they are ours to
 - [x] `test/fake-harness.ts` — scripted harness over a **real socket**, so framing and the permission round-trip are exercised, not mocked
 - [x] fixed: `createSession` read `session.id`; `SessionInfo` actually carries `session_id` (`events.rs:281`) — every session creation would have thrown `NO_SESSION`
 - [x] fixed: `hello` reply now asserts `hello_ok` and rejects a major-version mismatch
-- [x] [!] **OPEN CRASH BUG — FIXED 2026-09-09** — `onData` namespaced emitted names (`frame:<ev>`) so Node never sees a bare `'error'` event; `error` replies with `reply_to` now **reject** the pending request instead of resolving it. Verified by new test *"an error reply rejects the pending request instead of crashing the process"*. Also fixed two runner races found while verifying: permission round-trips are drained before the socket closes (the harness never saw `permission_response`), and the token-ceiling check runs synchronously on `turn_done` + the budget path awaits the `cancel` round-trip (same dropped-write race)
+- [x] [!] **OPEN CRASH BUG — FIXED 2026-09-09** — `onData` namespaced emitted names (`frame:<ev>`) so Node never sees a bare `'error'` event; `error` replies with `reply_to` now **reject** the pending request instead of resolving it. Verified by new test _"an error reply rejects the pending request instead of crashing the process"_. Also fixed two runner races found while verifying: permission round-trips are drained before the socket closes (the harness never saw `permission_response`), and the token-ceiling check runs synchronously on `turn_done` + the budget path awaits the `cancel` round-trip (same dropped-write race)
 - [x] `S` `FakeHarness` answers `list_sessions` with `{ev:'sessions', sessions:[…]}` (`events.rs:26`); `create_session` now sends `session.session_id` (was `id`, would have thrown `NO_SESSION` on every call)
-- [x] `S` test *"garbage and unknown frames are skipped, never crash the loop"* green again; added test asserting an `error` reply **rejects** rather than crashes
+- [x] `S` test _"garbage and unknown frames are skipped, never crash the loop"_ green again; added test asserting an `error` reply **rejects** rather than crashes
 - [x] `S` capability gate: require only `sessions`. jcode's SDK notes `permissions` is **absent from the current bridge**, so a client that waits for a prompt deadlocks — we degrade, never hang
 - [x] `M` decide: is jcode's own memory graph a black box (preferred), or do its memories become claims? **DECIDED 2026-09-09: black box.** The runner never reads jcode memory; if that ever changes, imports enter as `OBSERVATION`, never `FACT` (I1). No code path exists today.
 - [x] `L` adopt jcode's `command-risk` gate for `ACT_*`: deterministic, non-model refusal that forces the **generating** model to justify and **cannot be satisfied by retrying the identical call**. Honeytasks police humans; this polices agents (done 2026-09-09 in our own shape: vendored `command-policy` hard-deny list via `src/gov/shell.ts`, enforced on bash-family tools with matched-rule reasons; blind retry re-matches the same rule, so repetition never clears it)
 - [ ] [G] a real code change executed by jcode, coordinated through the Ledger, zero ambient credentials shared (needs a live jcode sibling process — the path is built and socket-tested, the live run is not)
 
 ### 0.7 Environment traps (recorded so nobody rediscovers them)
+
 - [x] `edit_file` resolves **relative** paths against the sandbox cwd, not `D:/Vital` — always pass absolute paths
 - [x] `edit_file` write access to `D:/Vital` dropped mid-session → fall back to `python` + `pathlib` for patches
 - [x] `npx`/`node` absent from the bash PATH → `"C:\Program Files\nodejs\node.exe" node_modules/typescript/bin/tsc`
@@ -154,9 +159,10 @@ This is the cost side of §0.3. We stopped inheriting these, so they are ours to
 - [x] Windows: Unix sockets unavailable → named pipe `\\.\pipe\…`. jcode has **no live Windows e2e coverage** either, so keep the transport injectable
 - [x] **A green typecheck is not a working system.** The error-frame crash above compiles clean and dies on first contact with a real harness
 - [x] `S` write these into `docs/dev-setup.md` (done 2026-09-09, plus node path, sqlite warning, pipe notes, shell notes)
+
 ---
 
-## PHASE 0.5 — Harden what already exists  `~1 week`
+## PHASE 0.5 — Harden what already exists `~1 week`
 
 Already built: `src/core/{types,db}.ts` · `src/ledger/ledger.ts` · `src/coord/coordinator.ts` · `src/router/router.ts` · `src/compiler/compiler.ts`. 30 tests green. Three real bugs were found only by running it (hop-limit off-by-one, `.strict()` rejecting imported packs, stale-rate double-count) — assume there are more.
 
@@ -177,11 +183,12 @@ Already built: `src/core/{types,db}.ts` · `src/ledger/ledger.ts` · `src/coord/
 
 ---
 
-## PHASE 1 — Reality Ledger v0  `~3 weeks`
+## PHASE 1 — Reality Ledger v0 `~3 weeks`
 
 Goal: populate a real Ledger from real sources, take **zero actions**.
 
 ### 1.1 Schema completion
+
 - [x] `S` `decisions` table exists but nothing writes to it → implement `recordDecision()` (done 2026-09-09: UNGROUNDED_DECISION / MISSING_CLAIM / APPROVAL_REQUIRED / AUTONOMY_VIOLATION guards; ACT_IRREVERSIBLE ⇒ human-command + named approver)
 - [x] `M` **Context Bundle**: freeze claim IDs + versions at decision time; store as immutable JSON + hash (per-entry sha256 + bundle hash; tamper ⇒ TAMPERED_BUNDLE on replay)
 - [x] `M` `replayDecision(tenant, id)` → reconstruct the exact claim set that was live (+ drift vs live state, so "why did we do this" shows what moved)
@@ -192,6 +199,7 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 - [x] `M` `OUTCOME` writer requiring a `basis` (measurement ref) + an existing decision — narrative causality rejected; OUTCOME also appended as a ground claim so it is queryable
 
 ### 1.2 Ingestion (read-only)
+
 - [x] `M` GitHub releases + tags collector (deterministic, L0) — fetch-injected, cursor-checkpointed, fixture-tested (no live network in tests)
 - [ ] `M` Linear/Jira ticket-change collector (deferred: needs tenant credentials + live system)
 - [ ] `M` feature-flag change collector (deferred: needs a flag system to watch)
@@ -202,6 +210,7 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 - [x] `S` raw-artifact store (content-addressed) so `rawArtifactRef` resolves (`data/artifacts/<sha256>`, gitignored)
 
 ### 1.3 Curation UX (the part that decides whether this survives contact)
+
 - [x] `L` claim list view — filter by status/kind/scope/owner (built as the Console read model instead of a CRUD page: `src/console/report.ts` aggregates rooms with evidence chips + compiler columns; `src/console/render.ts` draws it as dependency-free HTML; `cli report` writes it. Proven by generated report + 4 tests. Demo: `scripts/seed-demo.ts` builds `var/demo.db` — a lived-in tenant with disputes, decisions, outcomes, 12 weeks of traces, a PROMOTED card, a drift-DEMOTED card, and a quarantined import — so the boards render populated.)
 - [x] `M` correction flow: human edits → old claim SUPERSEDED, new claim, correction counted (`correctClaim` + `correctionCount`, tested)
 - [x] `M` contradiction queue — DISPUTED pairs with owner + SLA (`disputedPairs`; SLA clock deferred to scheduler §0.5)
@@ -210,12 +219,14 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 - [ ] [G] **curation cost measured**: human minutes per 100 claims. If > ~5 min, the ledger is not maintainable and the thesis is in trouble. This is a kill-metric, not a nice-to-have. (needs design partners + UI — cannot be measured in this repo alone)
 
 ### 1.4 Buzz binding
+
 - [x] `M` claim ID ↔ signed-event binding (`TalkSurface` bind/verify; envelope rides the receipt claim)
 - [x] `M` verify signature on read; tamper-evident (`verifyClaimEnvelope`: attestation + content-identity; liveness via replay, documented)
 - [x] `L` fallback: HMAC over Postgres rows when Buzz is absent (HMAC surface implemented + tested; rows today are SQLite — the interface is engine-agnostic)
-- [x] [G] a third party can reconstruct *who asserted what, when, and signed it* (tested end-to-end with the HMAC surface; Nostr-signature verification stays with the relay/Buzz SDK per ADR 0001)
+- [x] [G] a third party can reconstruct _who asserted what, when, and signed it_ (tested end-to-end with the HMAC surface; Nostr-signature verification stays with the relay/Buzz SDK per ADR 0001)
 
 ### 1.5 Phase gates
+
 - [ ] [G] 100 real claims populated from ≥3 systems
 - [ ] [G] `staleFactRate` computable and < 2%
 - [ ] [G] every FACT has resolvable provenance (100%)
@@ -223,7 +234,7 @@ Goal: populate a real Ledger from real sources, take **zero actions**.
 
 ---
 
-## PHASE 2 — Wedge: Ship-to-Result  `~5 weeks`
+## PHASE 2 — Wedge: Ship-to-Result `~5 weeks`
 
 **Why-now evidence, now external.** xAI's Grok Bot (beta 11 Aug 2026, expanded
 26 Aug) already gives agents their own cloud computer, browser and terminal, signs
@@ -232,10 +243,10 @@ them into real tools, has them "finish jobs end to end", and lets multiple bots
 suppliers and negotiating; the same user reports extreme token burn. The behaviour
 we are governing is shipping. Cite it, and cite it precisely — see `idea.md` §2.
 
-
 The only phase that must produce a number.
 
 ### 2.1 Release → understanding
+
 - [x] `M` `release.detect` → REFLEX (changelog parser, already registered in the router)
 - [x] `L` `release.summarize` → evidence-backed change summary (`src/wedge/ship.ts`: every bullet cites live claims; uncited/unverifiable refused, not softened)
 - [ ] `M` affected-segment resolution from usage + CRM (deferred: needs live usage/CRM systems)
@@ -243,6 +254,7 @@ The only phase that must produce a number.
 - [x] `M` novelty check vs Ledger (don't re-summarise a re-deploy — `isKnownRelease`/`markReleaseKnown` over `meta`)
 
 ### 2.2 Fan-out (the coordination test)
+
 - [x] `M` REQUEST → `#marketing` : launch narrative + blog + in-app copy (`fanOut`, tested — 5 legs admitted, all grounded)
 - [x] `M` REQUEST → `#customer` : support macro + FAQ + churn-risk segment
 - [x] `M` REQUEST → `#sales` : battlecard + objection handling
@@ -254,6 +266,7 @@ The only phase that must produce a number.
 - [x] `M` digest composition — NOTICEs land here, never in the Feed (built 2026-09-17: `src/console/digest.ts` composes per-scope digest entries with follow-on counts from the same tables the console reads; `renderDigest` renders them; Feed untouched by construction. The work exposed + fixed a real coordinator bug: re-emitted identical NOTICEs crashed on UNIQUE(idem_key) instead of replaying the finished thread — `REQUEST_REPLAYED` now handles terminal twins)
 
 ### 2.3 Human approval (Buzz rooms)
+
 - [ ] `L` approval surface in-room: draft + evidence chips + confidence + cost + owner (needs Buzz rooms + UI)
 - [x] `M` override capture — every edit stored as a diff, feeds the eval spine (built 2026-09-17 on the console surface: `POST /api/claims/:id/correct` → `correctClaim` supersedes + audits the `oldId->newId` diff, the response carries `{before, after}`, and the CLAIM_CORRECTED audit row is bridged into `proposeEvalFromCorrection` as a `correction-regression` case in the `overrides` suite — a spine failure degrades to `evalCaseId: null`, never un-corrects the claim. **Proven red→green 2026-09-17**: a downstream reader caching the pre-correction statement FAILS the captured `overrides` case (red run recorded in eval_runs, failure detail names the stale value); the same reader serving the corrected ledger passes it)
 - [x] `M` **claims checker** — scan drafts for unverifiable assertions; block on `CANDIDATE`/`SELF_SERVED` sources (`checkDraft`: unverified citations block, regulated denylist forces human)
@@ -262,6 +275,7 @@ The only phase that must produce a number.
 - [x] `M` approval-latency instrumentation (built 2026-09-17 on the console approval surface: every approve/decline records submission→decision as an `APPROVAL_LATENCY` audit row via `coord.recordApprovalLatency` (clamped at 0s, degrades to null — never fails a landed approval); `coord.approvalLatencyStats` aggregates n/median/p90/max; served at `/api/approval-latency`, rendered as a health-grid card, and returned in each decision's HTTP response)
 
 ### 2.4 Outcome measurement
+
 - [x] `M` pre-registration: metrics + thresholds agreed **before** pilot start (`preregister` + audit-visible; tested)
 - [x] `L` holdout lanes — segment/geo split so "adoption rose" means something (`assignHoldout`: deterministic lanes; the lanes themselves live in customer systems)
 - [x] `M` `OUTCOME` claims with `basis` + `holdout_ref` (`recordOutcome`, tested)
@@ -269,6 +283,7 @@ The only phase that must produce a number.
 - [x] `S` baseline capture UI — you cannot prove a delta you never measured (the console IS the surface now: health grid renders stale-fact rate, provenance completeness, orphan count, contradictions+MTTR, today's spend, escalation slots, refusal rate, approval latency (median/p90/slowest human); intelligence-cost curve per decision; tier mix stack; all served at `/` and computed from the same tables the eval spine reads)
 
 ### 2.5 Write-back + first compile
+
 - [x] `S` DECISION + Context Bundle + OUTCOME all persisted (`recordDecision` + `recordOutcome`, tested)
 - [x] `M` the whole chain becomes a TRACE eligible for compilation (jcode runner + local-echo adapter both write traces; tested)
 - [ ] [G] ≥50 launches through the loop
@@ -280,22 +295,24 @@ The only phase that must produce a number.
 
 ---
 
-## PHASE 3 — Eval spine, attribution, governance  `~4 weeks`
+## PHASE 3 — Eval spine, attribution, governance `~4 weeks`
 
 Nothing else in the system is trustworthy without this phase. It is scheduled after the wedge deliberately — but it must exist before autonomy of any kind.
 
 ### 3.1 Evals (the spine)
+
 - [x] `L` eval-case store + suite runner (tables exist: `eval_cases`, `eval_runs`) — `src/evals/runner.ts`: bank, list, run (targets as functions), record; empty suites refuse to run
 - [x] `M` **evals are the spec** — proven pattern: ledger epistemics run AS eval cases against a scratch ledger (tested)
 - [ ] `M` golden sets per capability: Market / Customer / Product / Marketing / Sales / Finance / Engineering (deferred: capabilities don't exist yet)
 - [x] `M` regression suite for every Skill Card (mandatory for SHADOW) (`runCardSuite`: runs the card's referenced eval suite; cards without a reference refuse; tested) (deferred: needs pilot traces)
-- [x] `M` **prompt-injection suite in CI**, re-run on every model *and* harness swap (`src/evals/injection.ts`: 11-case corpus over both hooks, fail-closed counting, false-positive gate at zero; runs against the screen contract so model/harness swaps re-run the same suite. In CI via `npm test`; reference backend is a floor, rates are reported.) (deferred: needs content screen + model under test)
+- [x] `M` **prompt-injection suite in CI**, re-run on every model _and_ harness swap (`src/evals/injection.ts`: 11-case corpus over both hooks, fail-closed counting, false-positive gate at zero; runs against the screen contract so model/harness swaps re-run the same suite. In CI via `npm test`; reference backend is a floor, rates are reported.) (deferred: needs content screen + model under test)
 - [x] `M` offline gate → shadow → canary(1%) → promote, with rollback (`src/evals/promotion.ts`: staged gates with pass-rate bars, evidence run recorded per advance, one-step-at-a-time, rollback always allowed; tested incl. gate-hold and skip-refusal) (deferred: needs deployment layer)
 - [x] `S` eval contamination guard — held-out sets never enter prompts or training traces (`heldout/` suites excluded from listings/runs by default; explicit `{ heldOut: true }` runs are audit-logged; tested) (deferred with golden sets)
 - [x] `M` human-correction → eval-case pipeline (this is what makes learning real) — `proposeEvalFromCorrection` banks a regression case from the audit trail (tested; caught a real target/detail mixup during implementation)
 - [ ] [G] every capability has ≥1 red eval that currently fails (deferred with capabilities)
 
 ### 3.2 Attribution
+
 - [x] `M` counterfactual engine — no OUTCOME without a comparison basis (`recordOutcome` requires basis + decision; holdout refs carried through)
 - [x] `M` holdout assignment + integrity checks (is the holdout actually clean?) (deterministic `assignHoldout`; lane cleanliness is the customer's segment discipline — assignment is ours)
 - [x] `M` pre-registration registry — tamper-evident record of what we promised to measure (`preregister` + audit row)
@@ -303,6 +320,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 - [x] [G] a customer can ask "how do you know this worked" and get a number plus a comparison (cost + outcome + basis + holdoutRef + prereg — the comparison lanes need pilot traffic)
 
 ### 3.3 Governance plane (`src/gov/` — tables exist, zero code)
+
 - [x] `L` **R/A/I matrix** as data: action_class × scope → permitted autonomy (done 2026-09-09: `src/gov/raci.ts` — READ autonomous; ANALYZE needs eval; RECOMMEND needs precision ≥ 0.8; ACT_REVERSIBLE needs 200 clean Trust instances; ACT_IRREVERSIBLE human-command always; money/customer/production/finance pinned Strict)
 - [x] `M` implement over the **absorbed** `src/vendor/qm/ship-gate.ts` (`undeclaredShipActions`, `decideShip`) — one enforcement path, not a parallel one (matrix dominates; undeclared ⇒ denied)
 - [x] `M` Trust Ledger: `trust_score(scope, action_class)` from outcome history + override rate + honeytask misses (`src/gov/trust.ts`: `trustFor` feeds `authorize()`; 200-clean promotion; override resets streak)
@@ -314,7 +332,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 - [x] `M` **autonomy freeze** when human detection drops below threshold (`evaluateFreeze` on the detection rate + `setFreeze`; tested) (deferred: needs detection-rate history over time)
 - [x] `M` kill switches at tenant / scope / action-class (`setKill`/`clearKill`/`checkKill` over `meta` + audit; `guardedAuthorize` denies under kill)
 - [x] `S` **quarterly kill-switch drill** with a logged time-to-halt (`killDrill`: engages all three levels, verifies halt, releases, audits elapsed)
-- [x] `M` silence budget — each capability justifies why it *didn't* speak (`silenceReview` per quarter; tested) (deferred: needs capabilities)
+- [x] `M` silence budget — each capability justifies why it _didn't_ speak (`silenceReview` per quarter; tested) (deferred: needs capabilities)
 - [x] `S` escalation cap enforcement — `openEscalations()` now gates admission (DENIED past cap), not just counts (done 2026-09-09, suite 58/58)
 - [ ] `M` named-overseer registry + competence records (Article 14 evidence) (deferred: needs HR-adjacent data + legal review)
 - [x] `S` audit log written to a store **separate from** the Ledger (`audit_log` table; every module writes it; never mixed into `claims`)
@@ -323,7 +341,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 
 ---
 
-## PHASE 4 — Cognitive Router into control  `~4 weeks`
+## PHASE 4 — Cognitive Router into control `~4 weeks`
 
 - [x] `M` task-type registry — every task declares its class or is refused (`knownTaskTypes` + `registerTaskType`; unknown ⇒ `UNKNOWN_TASK_TYPE`, fail closed)
 - [x] `M` expand the deterministic reflex registry; measure what % of traffic policy handles alone (target ≥80%) (`reflexCoverage` from `routing_decisions`; registry grows via `registerTaskType` + reflex entries)
@@ -340,7 +358,7 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 
 ---
 
-## PHASE 5 — Organizational Compiler into production  `~6 weeks`
+## PHASE 5 — Organizational Compiler into production `~6 weeks`
 
 - [x] `M` trace collector from coordinator + router decisions (traces written by both harness adapters; `mineCandidates` added 2026-09-09)
 - [x] `M` candidate mining — repeated intent detection, dedup by predicate set (`mineCandidates`: compilable-success repeats, reliability rate, scopes/task-types; PG-safe SQL via `groupConcat`)
@@ -359,11 +377,12 @@ Nothing else in the system is trustworthy without this phase. It is scheduled af
 
 ---
 
-## PHASE 6 — World Sense  `~6 weeks`
+## PHASE 6 — World Sense `~6 weeks`
 
 Deliberately late. External intelligence is worthless while internal coordination is unproven.
 
 ### 6.1 Genome → Watch Contract
+
 - [x] `L` Genome authoring UI (human-authored, system-assisted — **no auto-inferred genome in v1**) (UI deferred; the contract law it compiles to is implemented: `compileWatchContract` validates materiality + bill + 30-day expiry)
 - [x] `L` compiler: Genome → executable Watch Contract (entities, predicates, thresholds, budgets, expiry) (`src/sense/watch.ts`, tested)
 - [x] `M` materiality gate — a signal must link to a live GOAL or a revenue/cost/risk path or it archives (tested, incl. threshold + entity-scope rejection)
@@ -371,6 +390,7 @@ Deliberately late. External intelligence is worthless while internal coordinatio
 - [x] `S` cost cap per contract; contracts that exceed it are suspended, not silently funded (`SUSPENDED_BUDGET`, tested)
 
 ### 6.2 Funnel
+
 - [x] `M` Serper.dev web-search collector (L0, fetch-injected, key in header only — never stored/logged/ledgered; fixture-tested incl. fetch-failure path)
 - [ ] `M` L0 collectors: RSS · arXiv · GitHub/PyPI/HuggingFace · app-store changelogs · review sites · HN/Reddit (GitHub releases + file-diff done; rest need live sources + credentials)
 - [x] `M` deterministic diffing + webhooks + polling with rate budgets (`fileDiffCollector` + `Scheduler.webhook` with per-source budgets)
@@ -380,15 +400,16 @@ Deliberately late. External intelligence is worthless while internal coordinatio
 - [x] `S` cost-per-signal telemetry; prove the expensive tier sees <1% of arrivals (built 2026-09-17: `router.costPerSignal` reads `routing_decisions` executed-tier shares — arrivals, modelShare/humanShare, byTier, strict `< 0.01` gate; tested at exactly 1.00% (fails, gate is strict) and at 0% (passes) in router control mode)
 
 - [ ] `M` **Distinguish the two injection problems.** A harness that signs into
-  tools can be prompt-injected; a world model that feeds strategy can be
-  **poisoned to steer the company**. QM's screen and any vendor's address the first.
-  Only the second has a competitor *deliberately* attacking it. Keep our Integrity
-  Gate scoped to strategic inputs.
+      tools can be prompt-injected; a world model that feeds strategy can be
+      **poisoned to steer the company**. QM's screen and any vendor's address the first.
+      Only the second has a competitor _deliberately_ attacking it. Keep our Integrity
+      Gate scoped to strategic inputs.
 - [ ] `M` Sensing must bound cost. An always-on agent workload can burn more tokens
-  in a month than the previous five years combined (real user report). L0/L1 triage
-  and the materiality gate are the defence, and cost-per-signal must be visible.
+      in a month than the previous five years combined (real user report). L0/L1 triage
+      and the materiality gate are the defence, and cost-per-signal must be visible.
 
 ### 6.3 Integrity Gate (beside QM's screen, not on top of it)
+
 - [x] `L` corroboration rule: ≥2 independent provenance paths before strategic escalation (`src/sense/integrity.ts`, tested)
 - [x] `M` self-serving-source prior discount (flagged on every verdict, even ESCALATE)
 - [x] `M` mention-spike anomaly detection (account age, co-timing clustering) (tested)
@@ -399,6 +420,7 @@ Deliberately late. External intelligence is worthless while internal coordinatio
 - [ ] [G] zero poisoning incidents in the red-team suite
 
 ### 6.4 Capabilities
+
 - [ ] `L` Market capability — opportunity/threat register, converts external change into org opportunities (needs live sources; contract format ready)
 - [ ] `L` Customer capability — support/usage/reviews/churn → pain patterns → opportunities (needs live sources; contract format ready)
 - [x] `M` Capability Contract format: 9 questions + outcome metric + **kill condition** (`src/capabilities/contract.ts`: validation names the gap; `evaluateKill` retires, never rebrands; tested)
@@ -418,7 +440,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 
 - [x] `L` research runs: PLANNED → APPROVED → RUNNING → COMPLETED | CANCELLED (`src/wedge/deepresearch.ts`, 6 tests: plan review, dedupe, blocklist, budgets, cancel-keeps-work, report verification)
 
-## PHASE 7 — Bounded autonomy  `ongoing`
+## PHASE 7 — Bounded autonomy `ongoing`
 
 - [x] `M` enable `ACT_REVERSIBLE` only where Trust Ledger grants it (`guardedAuthorize` + `actReversible` execution path: autonomous executes with cited basis, approval needs a human, irreversible has no path; tested)
 - [x] `M` feature-flag / internal-ticket / schedule execution paths (`actReversible` kinds `flag`/`ticket`/`schedule` through the single execution path with ACTION-claim writeback)
@@ -434,7 +456,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 
 ---
 
-## PHASE 8 — Runtime expansion + GTM  `12 months+`
+## PHASE 8 — Runtime expansion + GTM `12 months+`
 
 - [x] `L` second workflow beyond launches (churn-response, pricing-change, incident-comms) (done 2026-09-09, earliest slice: `src/wedge/churn.ts` — grounded legs, no self-delegation, decision + bundle; live-basis bar documented: CANDIDATE risk allowed, STALE/DISPUTED/expired refused, autonomy stays approval. Third loop also built: `src/wedge/feature.ts` — eng feature requests with deep-research → cited plan → named human approval → coding ONLY against verified approved decisions; 4 tests.)
 - [x] `M` multi-workflow Ledger coherence — one reality, many loops (tested: release fan-out + churn loop share a tenant/scheduler, both decisions replay drift-free)
@@ -453,6 +475,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 ## Cross-cutting backlog
 
 ### Docs
+
 - [x] `S` `README.md` — what this is, what it is not, 5-minute boot (done 2026-09-09; 74 tests then, higher now)
 - [x] `M` `docs/adr/0001-buzz-is-a-surface.md`
 - [x] `M` `docs/adr/0002-qm-core-never-diverges.md` — written as `0002-absorb-from-qm-not-depend-on-it.md` (the fork ADR it replaces never existed; the absorb decision is what's recorded)
@@ -468,6 +491,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 - [x] `S` `docs/limitations.md` — what we cannot do, published. A sales asset, not a liability. (done 2026-09-09)
 
 ### Business / GTM
+
 - [ ] `M` name the wedge buyer: Product Marketing or Growth lead with a P&L
 - [ ] `M` 5 design partners with ≥2 releases/month (need ≥50 launches in Phase 2)
 - [ ] `S` baseline instrumented **before** any pilot starts
@@ -479,7 +503,8 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 - [x] `M` the "why not just use QM directly" answer — we are the grounding + eval + transfer-testing layer it doesn't have (in `README.md`: ledger guards, eval spine, transfer compiler, replay; the corpus is the moat)
 - [ ] `S` decide open-source boundary precisely (what's free, what's licensed)
 
-### Fundraising artefacts *(spec in `idea.md` §25–28)*
+### Fundraising artefacts _(spec in `idea.md` §25–28)_
+
 - [ ] `M` 12-slide main deck — Title · Problem · Why now · Insight · Solution · Demo · Wedge · Proof · Stack · Team · Ask · Close
 - [ ] `S` 7-slide Demo Day cut — merge 1+2, drop 3/6/9/12. Derive by deletion, never rewrite
 - [ ] `S` 1-page teaser for cold email
@@ -493,6 +518,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 - [ ] `S` if no design partners yet, **say zero** and show the plan to reach five
 
 ### Research backlog (things we're betting on but haven't proven)
+
 - [ ] `L` does `cross_role` transfer predict production failure? (AFTER suggests specialisation is real)
 - [ ] `M` routing precision vs cost curve — is 4 classes actually enough?
 - [ ] `M` is token burn a **buyer** pain or only a power-user pain? A single heavy user reported more tokens in one month than the prior five years. If buyers don't feel it, cost bids are secondary and the wedge narrative shifts to provenance alone.
@@ -504,6 +530,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 - [ ] `M` automation-bias measurement in our own approval logs
 
 ### Ops / DX
+
 - [x] `M` CI: typecheck · test · lint · injection suite · **provenance guard** (vendored files isolated + SHA headers valid). Replaces the old byte-identical-to-QM check, which is meaningless now (`.github/workflows/ci.yml` + `npm run verify:provenance`; injection suite deferred to §3.1 with the content screen + model under test)
 - [ ] `M` nightly: full instance boot + verify against a real model (deferred: needs deployed topology + model credentials)
 - [x] `S` migration framework with a tested rollback (QM has `migrate-main.ts`; mirror it) (`src/core/migrations.ts`: named up/down journal, apply-once, explicit rollback — tested apply + rollback + unknown + not-applied on every run) (deferred: one additive-column migration exists with idempotent apply; rollback untested by design so far)
@@ -541,7 +568,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 
 **Then:**
 
-1. [x] `S` **Fix the error-frame crash** (0.6) — done 2026-09-09, suite 40/40 green. *Nothing else here is trustworthy while one JSON line from a harness can kill the process* — that invariant now holds.
+1. [x] `S` **Fix the error-frame crash** (0.6) — done 2026-09-09, suite 40/40 green. _Nothing else here is trustworthy while one JSON line from a harness can kill the process_ — that invariant now holds.
 2. [x] `S` **Fix the router RNG** — done 2026-09-09 via `RouterConfig.rng`.
 3. [x] `M` **Re-estimate Phase 0–2 against 0.5** — done 2026-09-09: **~18–23 wks solo (~4.5–6 mo), not ~8.** No §21.1 reconsider-QM trigger (substrate is weeks, not months).
 4. [x] `M` **Start `src/vendor/qm/`** — done 2026-09-09: provenance-header template + `LICENSE-THIRD-PARTY.md` + narrowed `governor.ts` absorb (7 semantic tests, suite 47/47). Correction recorded: governor was never types-only.
@@ -551,6 +578,7 @@ cancellable without losing findings. Findings are OBSERVATIONs, never FACTs.
 8. [x] `M` Test hygiene: split `test/run.ts` into per-module files + a runner; concurrency test on `ledger_seq`; Postgres parity pass on the `json_extract` sites — done 2026-09-09 (suite 67/67; property/fuzz/adversarial/label/budget tests included).
 9. [x] `M` Start `src/gov/` — done 2026-09-09: R/A/I matrix as data (`src/gov/raci.ts`) enforced OVER the newly absorbed `src/vendor/qm/ship-gate.ts` (narrowed: `contentPart` re-pointed at verbatim-vendored `objects.ts`; `crypto.ts` verbatim; `ApprovalGrantModes` verbatim). Matrix dominates, gates only hold lower. 7 tests, suite 74/74. Trust Ledger / honeytasks / kill switches remain Phase 3.3.
 10. [x] `S` Write `README.md` + ADRs: 0001 Buzz-is-a-surface · **0002 absorb-from-QM-not-depend-on-it** (replaces the fork ADR) · 0003 Ledger-is-the-only-claim-store · 0004 messages-never-carry-work · 0005 agents-cannot-mint-facts — done 2026-09-09, plus `docs/dev-setup.md`, `docs/upstream.md` (real remote URLs verified), `SECURITY.md`, `docs/adr/`, `src/cli.ts` (status), MIT license field + `engines`, `.node-version`.
+
 ---
 
 ## Definition of done for the whole project
@@ -567,6 +595,7 @@ Ordered by dependency; each item names its unblocker. (Ops/DX leftovers above ar
 absorbed here — backup drill, nightly boot, on-call runbook, upgrade path.)
 
 ### V2.1 Ship the stack (needs: an AWS account, a domain, a human to run apply)
+
 - [ ] `M` first deploy: OIDC role + `TF_VAR_*` secrets in GitHub → one local `terraform apply` → then `workflow_dispatch` deploys (unblocker: AWS account + domain; the workflow is dispatch-only by design)
 - [ ] `S` HTTPS: ACM cert → `acm_certificate_arn` var (the ALB currently serves plain HTTP on 80; the redirect listener already exists, it just needs the cert)
 - [ ] `S` CloudWatch alarms: ALB 5xx rate, unhealthy-target count, ECS task count, RDS connections+storage, Lambda errors+throttles (logs keep 90 days and nothing watches them)
@@ -606,8 +635,8 @@ signup`, `vital passwd`.
       `--approver-role` floor (default `member`, the room-agent model; raise per tenant),
       disable refuses owner-target/self-disable. Tested over HTTP
 - [~] `M` wire named human owners end-to-end: approvals now name the authenticated identity
-      (`usr_xxx (email)`) in the response and `audit_log`; Ledger claim `owner` fields are
-      still free strings — resolving them against `users` is the remaining step
+  (`usr_xxx (email)`) in the response and `audit_log`; Ledger claim `owner` fields are
+  still free strings — resolving them against `users` is the remaining step
 - [x] `M` tenant isolation checks: login is tenant-scoped (another tenant's credentials fail),
       sessions carry their tenant and re-check per request, the served tenant is fixed at boot,
       and the store-level two-tenant probe test passes. (Storage/index-level separation and
@@ -621,7 +650,7 @@ signup`, `vital passwd`.
       erasure fails the suite), child-before-parent ordering, live sessions die with their users,
       tenant-scoped (a second tenant loses nothing), survives as an `erased:<slug>` receipt row
       naming the operator + row counts, refuses unknown/double erasure. CLI: `vital erase
-      --tenant <slug> --actor <who> [--export-to dir] --yes` (refuses without `--yes`). Tests:
+    --tenant <slug> --actor <who> [--export-to dir] --yes` (refuses without `--yes`). Tests:
       test/erasure.test.ts (7); live-verified via CLI (refusal, erasure, export file, receipt,
       zero remaining users/tenants)
 - [x] [G] an outsider can boot the console, claim its tenant at `/signup`, log in, and approve a
@@ -631,17 +660,20 @@ signup`, `vital passwd`.
       `vital serve --site site` → `/` renders the site, `/console` stays session-gated)
 
 ### V2.2 Watch it before it carries weight (repo-doable now)
+
 - [x] `S` surface cost-per-signal in the console + `cli status` (done 2026-09-17: report card in the health grid (modelShare %, arrivals, within/OVER GATE), `GET /api/cost-per-signal`, and a `costPerSignal` block in `cli status` — all from `router.costPerSignal`, the passive read-model over `routing_decisions`; test asserts the reflex-handled arrival passes the gate end-to-end through report → HTML → API)
 - [ ] `M` nightly: full instance boot + verify against a real model (needs the deployed topology + one model credential)
 - [x] console health grid: stale-rate, provenance completeness, contradictions+MTTR, today's spend, escalation slots, refusal rate, approval latency (median/p90/slowest human) — served at `/`
 
 ### V2.3 Close the agent loop live (needs: a live jcode sibling + a Buzz relay)
+
 - [ ] `M` live jcode sibling run: a real code change through the Ledger, zero ambient credentials (the §0.6 gate — timeouts/fire-and-forget/progress are in; this needs the sibling process)
 - [ ] `M` Buzz claim-binding: claim IDs ↔ signed Nostr events verified by the relay/SDK (HMAC fallback stays)
 - [ ] `S` Buzz live-watch end-to-end: `postProgress` against a real relay (fake-relay tested only; the `POST {relay}/events` body-shape assumption gets its one-line fix here if the relay wants the raw `["EVENT", …]` envelope)
 - [ ] `M` one mission watched start→turn_done in a Buzz room, progress posted live
 
 ### V2.4 First loop with traffic (needs: 5 design partners at ≥2 releases/month)
+
 - [ ] `L` ≥50 launches through Ship-to-Result; ship→launch-ready −50%, hours −40%, claim error <1%, zero regulatory, cost net-positive
 - [ ] [!] `[G]` KILL CHECK at day 90: no delta on ≥3 of top 5 ⇒ the wedge is wrong, stop, re-read `idea.md` §21
 - [ ] `M` 2,000 labelled routing tasks → precision gate → `controlRate` 0 → 0.05 → 0.25 with budget checks
@@ -649,6 +681,7 @@ signup`, `vital passwd`.
 - [ ] `M` curation cost per 100 claims across tenants (kill-metric: ~5 min or the thesis is in trouble)
 
 ### V2.5 GTM + fundraising (needs: founder time, lawyers, designers)
+
 - [ ] `M` name the wedge buyer; sign 5 design partners; baseline instrumented before pilots
 - [ ] `M` pricing (platform fee + outcome-metered, never per-seat) + pilot→production conversion plan
 - [ ] `M` Grok Bot diligence trial (the five unknowns stay "not documented" until checked)

@@ -37,7 +37,12 @@ const rel = await ledger.append({
 });
 await coord.submit(base({ id: 'r1', claimRefs: [rel.id], bid: { dollars: 10, humanMinutes: 30 } }));
 await coord.submit(
-  base({ id: 'r2', goal: 'Draft the launch blog for the release', claimRefs: [rel.id], bid: { dollars: 4, humanMinutes: 12 } }),
+  base({
+    id: 'r2',
+    goal: 'Draft the launch blog for the release',
+    claimRefs: [rel.id],
+    bid: { dollars: 4, humanMinutes: 12 },
+  }),
 );
 await coord.submit(base({ id: 'n1', goal: 'overnight sync completed', messageClass: 'NOTICE', claimRefs: [rel.id] }));
 
@@ -98,7 +103,14 @@ for (const [name, route] of routes) {
     `len=${html.length}`,
   ];
   if (legacy.length) flags.push(`legacy=${legacy.join(',')}`);
-  for (const marker of ['id="system-readiness"', 'id="tenant-journey"', 'name="state"', 'v-kpi', 'rail-item', 'buzz-window']) {
+  for (const marker of [
+    'id="system-readiness"',
+    'id="tenant-journey"',
+    'name="state"',
+    'v-kpi',
+    'rail-item',
+    'buzz-window',
+  ]) {
     if (html.includes(marker)) flags.push(marker);
   }
   console.log(`${name.padEnd(20)} ${flags.join('  ')}`);

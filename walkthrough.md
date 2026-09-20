@@ -12,8 +12,8 @@ We have established the clean two-surface architecture with full visual fidelity
    - **Top Bar**: Vital logo, tenant dropdown (`Acme ▾`), wide search input (`Search rooms, intents, packs, or anything...`), live telemetry chips (`$today`, `escalations`, `human min`), and user profile avatar (`O ▾`).
    - **Left Icon Rail**: Slim vertical navigation rail with `Feed`, `Chat`, `Ledger`, `Coordination`, `Router`, `Compiler` (highlighted active), `Governance`, `World`, `Economics`, and `Evals`.
    - **Secondary Room Column**: `Rooms 13 +` list showing canonical rooms, real status dots (`healthy` / `idle`), scope indicators, and recency timestamps.
-   - **Main View**: Department filter tabs (*All Departments*, *Legal & Compliance*, *Marketing & Growth*, *Finance & Spend*, *Engineering & Infra*), the complete Compiler Kanban board (**TRACE**, **CANDIDATE**, **QUARANTINE** with authentic diagonal stripes, **SHADOW**, **PILOT**, **PROMOTED**), **DEMOTED** card section (`content-moderator` with `EWMA 0.81 < 0.90` alert), and bottom telemetry cards.
-   - **Right Panel**: **Why not trusted yet** panel with the 4 trust gate criteria (*cross-model transfer*, *regression suite*, *20 shadow runs*, *0.95 pilot* with progress bars and percentages) and the `Promote` CTA button.
+   - **Main View**: Department filter tabs (_All Departments_, _Legal & Compliance_, _Marketing & Growth_, _Finance & Spend_, _Engineering & Infra_), the complete Compiler Kanban board (**TRACE**, **CANDIDATE**, **QUARANTINE** with authentic diagonal stripes, **SHADOW**, **PILOT**, **PROMOTED**), **DEMOTED** card section (`content-moderator` with `EWMA 0.81 < 0.90` alert), and bottom telemetry cards.
+   - **Right Panel**: **Why not trusted yet** panel with the 4 trust gate criteria (_cross-model transfer_, _regression suite_, _20 shadow runs_, _0.95 pilot_ with progress bars and percentages) and the `Promote` CTA button.
 3. **Bi-directional Round-Trip Navigation**:
    - In Buzz Chat: Clicking **`📊 View Dashboard`** immediately navigates to `/console/dashboard`.
    - In Operations Dashboard: Clicking **`💬 Go to Chat`** in the top bar, **`Chat`** in the rail, or any room opens the Buzz Workspace chat.
@@ -23,7 +23,8 @@ We have established the clean two-surface architecture with full visual fidelity
 ## Visual Comparison & Verification
 
 ### Surface 1: Vital Operations Dashboard (`/console/dashboard`)
-*Showing the prominent `[ 💬 Go to Chat ]` button in the top bar, the `Chat` rail item, and `Chat →` in the rooms column:*
+
+_Showing the prominent `[ 💬 Go to Chat ]` button in the top bar, the `Chat` rail item, and `Chat →` in the rooms column:_
 
 ![Vital Operations Dashboard with Go to Chat](C:/Users/Asus/.gemini/antigravity-ide/brain/f5a3a84e-d5f3-4fdf-b4df-1a393890da3c/operations_dashboard_go_to_chat_1789792451540.png)
 
@@ -36,7 +37,8 @@ We have established the clean two-surface architecture with full visual fidelity
 ---
 
 ### Surface 2: Buzz Workspace Chat (`/console/buzz/engineering`)
-*Authentic warm-sage Buzz chat surface with the `📊 View Dashboard` button:*
+
+_Authentic warm-sage Buzz chat surface with the `📊 View Dashboard` button:_
 
 ![Buzz Workspace Chat with View Dashboard](C:/Users/Asus/.gemini/antigravity-ide/brain/f5a3a84e-d5f3-4fdf-b4df-1a393890da3c/buzz_chat_view_dashboard_1789792519711.png)
 

@@ -6,10 +6,10 @@
 // See src/console/serve.ts:2719 for live wiring.
 
 export const BUZZ_ROUTES = [
-  "GET /console/buzz",
-  "GET /console/buzz/:scope",
-  "POST /console/buzz/:scope/command",
-  "GET /api/buzz/rooms",
-  "POST /api/buzz/rooms/configure",
-  "POST /api/buzz/commands",
+  'GET /console/buzz',
+  'GET /console/buzz/:scope',
+  'POST /console/buzz/:scope/command',
+  'GET /api/buzz/rooms',
+  'POST /api/buzz/rooms/configure',
+  'POST /api/buzz/commands',
 ] as const;

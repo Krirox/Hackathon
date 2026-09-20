@@ -1,95 +1,129 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Sign in — VITAL</title>
-<meta name="description" content="Sign in to a provisioned Vital console. Membership is invite-only and each console names its bound organization on login."/>
-<meta name="robots" content="noindex,follow"/>
-<meta name="color-scheme" content="dark"/>
-<meta name="theme-color" content="#111111"/>
-<!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
-<meta name="vital-console-url" content=""/>
-<link rel="icon" href="../favicon.svg" type="image/svg+xml"/>
-<link rel="apple-touch-icon" href="../apple-touch-icon.png"/>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../styles.css"/>
-<script src="login.js" defer></script>
-</head>
-<body class="utility-page">
-<a class="skip-link" href="#top">Skip to content</a>
-<noscript><div class="noscript-note"><p><strong>Sign in happens on your own console.</strong> Vital is self-hosted: the public site holds no sessions and no credentials. Co-hosted deployments answer <code>/login</code> on this origin; split deployments answer it on their own console origin.</p><p><a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a> &middot; <a href="../">Back to the site</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>Membership is invite-only, and each console names its bound organization on login.</p></div></noscript>
-<div class="bg-vignette" aria-hidden="true"></div>
-<div class="fx-grain" aria-hidden="true"></div>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sign in — VITAL</title>
+    <meta
+      name="description"
+      content="Sign in to a provisioned Vital console. Membership is invite-only and each console names its bound organization on login."
+    />
+    <meta name="robots" content="noindex,follow" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#111111" />
+    <!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
+    <meta name="vital-console-url" content="" />
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="login.js" defer></script>
+  </head>
+  <body class="utility-page">
+    <a class="skip-link" href="#top">Skip to content</a>
+    <noscript
+      ><div class="noscript-note">
+        <p>
+          <strong>Sign in happens on your own console.</strong> Vital is self-hosted: the public site holds no sessions
+          and no credentials. Co-hosted deployments answer <code>/login</code> on this origin; split deployments answer
+          it on their own console origin.
+        </p>
+        <p>
+          <a href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">Request a pilot walkthrough</a>
+          &middot; <a href="../">Back to the site</a> &middot; <a href="mailto:hello@vital.company">Contact us</a>
+        </p>
+        <p>Membership is invite-only, and each console names its bound organization on login.</p>
+      </div></noscript
+    >
+    <div class="bg-vignette" aria-hidden="true"></div>
+    <div class="fx-grain" aria-hidden="true"></div>
 
-<header id="site-header">
-  <div class="header-bar">
-    <a class="pill" href="../">‹ HOME ›</a>
-    <nav class="header-nav" aria-label="Contact">
-      <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
-        <span>Contact</span>
-        <span class="cta-accent-icon">›</span>
-      </a>
-    </nav>
-  </div>
-</header>
-
-<main id="top" tabindex="-1" class="utility-main">
-  <div class="utility-card">
-    <p class="section-label">VITAL / CONSOLE ACCESS</p>
-    <h1 class="utility-title">Sign in to your console<span class="dot">.</span></h1>
-    <p class="utility-lede">Vital is self-hosted. Sign in happens on the console your organization runs, which names its bound organization on login. This page is the public site — it holds no sessions and no credentials.</p>
-
-    <p id="console-target" class="console-target" role="status">● locating your console…</p>
-
-    <div class="cta-actions">
-      <a id="console-continue" class="cta-btn" href="/login" hidden>
-        <span>Continue to sign in</span>
-        <span class="arrow" aria-hidden="true">→</span>
-      </a>
-      <a class="cta-btn" data-cta="pilot-walkthrough" href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough">
-        <span>Request a pilot walkthrough</span>
-        <span class="arrow" aria-hidden="true">→</span>
-      </a>
-      <a class="secondary-btn" href="../">Back to the site</a>
-    </div>
-
-    <p class="signin-note">Membership is invite-only, with no public registration. Existing members who cannot reach their console should contact their own operator — we hold no accounts on your behalf.</p>
-
-    <dl class="utility-facts">
-      <div>
-        <dt>Co-hosted deployments</dt>
-        <dd>Run <code>vital serve --site</code> and the console answers <code>/login</code> on this same origin.</dd>
+    <header id="site-header">
+      <div class="header-bar">
+        <a class="pill" href="../">‹ HOME ›</a>
+        <nav class="header-nav" aria-label="Contact">
+          <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+            <span>Contact</span>
+            <span class="cta-accent-icon">›</span>
+          </a>
+        </nav>
       </div>
-      <div>
-        <dt>Split deployments</dt>
-        <dd>Point <code>&lt;meta name="vital-console-url"&gt;</code> at your console origin and every sign-in link follows it.</dd>
-      </div>
-    </dl>
-  </div>
-</main>
+    </header>
 
-<footer class="dark-footer">
-  <div class="foot-grid">
-    <div class="f-brand">
-      VITAL<sup>®</sup>
-      <p>The grounding and reflex layer for the sovereign agent stack.</p>
-    </div>
-    <div class="foot-nav">
-      <a href="../">Home</a>
-      <a href="../#statement">Thesis</a>
-      <a href="../#platform">Platform</a>
-      <a href="../#systems">Subsystems</a>
-      <a href="../#wedge">Wedge</a>
-    </div>
-    <div class="foot-meta mono">
-      LEDGER · ROUTER · COMPILER<br/>
-      BUZZ · JCODE · QM-ABSORB<br/>
-      © 2026 VITAL — ALL RIGHTS RESERVED
-    </div>
-  </div>
-</footer>
-</body>
+    <main id="top" tabindex="-1" class="utility-main">
+      <div class="utility-card">
+        <p class="section-label">VITAL / CONSOLE ACCESS</p>
+        <h1 class="utility-title">Sign in to your console<span class="dot">.</span></h1>
+        <p class="utility-lede">
+          Vital is self-hosted. Sign in happens on the console your organization runs, which names its bound
+          organization on login. This page is the public site — it holds no sessions and no credentials.
+        </p>
+
+        <p id="console-target" class="console-target" role="status">● locating your console…</p>
+
+        <div class="cta-actions">
+          <a id="console-continue" class="cta-btn" href="/login" hidden>
+            <span>Continue to sign in</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </a>
+          <a
+            class="cta-btn"
+            data-cta="pilot-walkthrough"
+            href="mailto:hello@vital.company?subject=Vital%20pilot%20walkthrough"
+          >
+            <span>Request a pilot walkthrough</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </a>
+          <a class="secondary-btn" href="../">Back to the site</a>
+        </div>
+
+        <p class="signin-note">
+          Membership is invite-only, with no public registration. Existing members who cannot reach their console should
+          contact their own operator — we hold no accounts on your behalf.
+        </p>
+
+        <dl class="utility-facts">
+          <div>
+            <dt>Co-hosted deployments</dt>
+            <dd>
+              Run <code>vital serve --site</code> and the console answers <code>/login</code> on this same origin.
+            </dd>
+          </div>
+          <div>
+            <dt>Split deployments</dt>
+            <dd>
+              Point <code>&lt;meta name="vital-console-url"&gt;</code> at your console origin and every sign-in link
+              follows it.
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </main>
+
+    <footer class="dark-footer">
+      <div class="foot-grid">
+        <div class="f-brand">
+          VITAL<sup>®</sup>
+          <p>The grounding and reflex layer for the sovereign agent stack.</p>
+        </div>
+        <div class="foot-nav">
+          <a href="../">Home</a>
+          <a href="../#statement">Thesis</a>
+          <a href="../#platform">Platform</a>
+          <a href="../#systems">Subsystems</a>
+          <a href="../#wedge">Wedge</a>
+        </div>
+        <div class="foot-meta mono">
+          LEDGER · ROUTER · COMPILER<br />
+          BUZZ · JCODE · QM-ABSORB<br />
+          © 2026 VITAL — ALL RIGHTS RESERVED
+        </div>
+      </div>
+    </footer>
+  </body>
 </html>

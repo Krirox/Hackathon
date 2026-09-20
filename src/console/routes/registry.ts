@@ -283,10 +283,9 @@ export function validateRoutes<Env>(routes: ReadonlyArray<RouteDef<Env>>): void 
     // checked a token" is not a claim anyone can verify by reading a 7,000-line
     // dispatcher; here it is one table column.
     const mutating = route.method !== 'GET';
-    if (mutating && (route.body !== 'csrf' && route.body !== 'none'))
+    if (mutating && route.body !== 'csrf' && route.body !== 'none')
       problems.push(`${id} must declare a body policy ("csrf" or "none")`);
-    if (!mutating && route.body !== undefined)
-      problems.push(`${id} declares a body policy but does not mutate`);
+    if (!mutating && route.body !== undefined) problems.push(`${id} declares a body policy but does not mutate`);
     // A public route has no session, so there is no token to check: `csrf` there
     // would be a check that can never pass.
     if (route.body === 'csrf' && route.capability === 'public')

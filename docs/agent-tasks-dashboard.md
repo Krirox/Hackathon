@@ -13,7 +13,7 @@ Jcode coding runs are long-lived: a `CoordinationRequest` is admitted by the
 coordinator, claimed by a worker, and executed against the jcode harness
 ([`src/jcode/runner.ts`](../src/jcode/runner.ts)) over minutes or hours, with
 lease heartbeats, budget ceilings, permission round-trips, and swarm
-sub-requests. Today an operator can only see the *result* (Ledger claims,
+sub-requests. Today an operator can only see the _result_ (Ledger claims,
 traces, audit log). This spec defines the **Ongoing Tasks** console page —
 a single screen that answers, in real time:
 
@@ -26,7 +26,7 @@ controls (cancel request, re-fetch). No write paths beyond the existing
 coordinator cancel/kill machinery; the dashboard never bypasses governance.
 
 Non-goals: historical analytics (traces/dashboard), budget configuration
-(gov pages), approval queues (existing review surfaces). The dashboard *links*
+(gov pages), approval queues (existing review surfaces). The dashboard _links_
 to those; it does not duplicate them.
 
 ---
@@ -54,7 +54,7 @@ count) — this is the pulse the feed consumes.
 **(B) Decomposition children — the ONLY true parent→child tree.**
 `Coordinator.split/decompose` ([`src/coord/coordinator.ts`](../src/coord/coordinator.ts))
 parents budgeted child requests on an admitted/in-flight parent via
-`requests.parent_request`, sharing the parent's *unspent* budget
+`requests.parent_request`, sharing the parent's _unspent_ budget
 ("decomposition never prints money"; `BUDGET_SPLIT` refuses overspend). Children
 may target the parent's scope or another (`st.targetScope ?? parent.targetScope`).
 This is what a nested **agent tree** legitimately represents.
@@ -69,9 +69,9 @@ Ledger via `derives_from` claims; high-risk findings cascade to more rooms
 chain (siblings/related)**, never as children of a `parent_request` tree.
 
 **(D) Intra-scope session multiplexing.** The team microVM runs
-*"one isolated workspace per scope, many jcode sessions multiplexed inside"*
+_"one isolated workspace per scope, many jcode sessions multiplexed inside"_
 ([`src/substrate/worker.ts`](../src/substrate/worker.ts)). So one room-agent can
-hold several concurrent jcode **sessions** — the parallelism *under* a single
+hold several concurrent jcode **sessions** — the parallelism _under_ a single
 task. Sessions are runtime state (session_id on the socket + `attached`/
 `session_status` frames), persisted only via artifacts/traces, not a table —
 so the UI shows them best-effort from the run's live event stream.
@@ -87,16 +87,16 @@ which is why this needs a dedicated long-lived monitor.
 
 ## 2. Vocabulary (connects to existing terms)
 
-| Term | Meaning here | Grounding in code |
-|---|---|---|
-| **Task** | A `CoordinationRequest` of message class `REQUEST` currently in a non-terminal state, executed via the jcode runner. | `requests` table, `REQUEST_STATES` (`src/core/types.ts`) |
-| **Primary agent** | The `target_scope` of the task's request — the room/microVM whose worker holds the `claimExecution` lease (`exec_owner`). One workspace per scope, many jcode sessions (`src/substrate/worker.ts`). | `requests.target_scope`, `exec_owner`, `on_behalf_of` |
-| **Sub-agent** | Mechanism (B) only: a **decomposition child** — a `requests` row whose `parent_request` points at the task, recursively, sharing its budget. | `requests.parent_request`, `Coordinator.split` |
-| **Swarm chain** | Mechanism (C): lateral cross-room delegations from an `@agent` mention — related requests keyed by `chainId` (`swm_…`) and `hop_chain`, **not** parented. | `src/talk/swarm.ts`, `requests.hop_chain` |
-| **Session** | Mechanism (D): one concurrent jcode harness session inside a scope's workspace. | `runner.ts` session, `attached`/`session_status` frames |
-| **Live** | The SSE event stream is attached and current (`evt.source.readyState === EventSource.OPEN`). | `GET /api/events` (`src/console/events.ts`) |
-| **Step** | One monotonic progress unit from the runner: a tool completion or a token batch. | `ProgressUpdate.step` (`runner.ts`) |
-| **Guards** | Runtime invariants shown on the detail panel: execution-lease heartbeat, budget ceiling, kill switch, content screen. | `leaseHeartbeat`, `reportUsage`, `checkKill`, `contentScreen` |
+| Term              | Meaning here                                                                                                                                                                                        | Grounding in code                                             |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Task**          | A `CoordinationRequest` of message class `REQUEST` currently in a non-terminal state, executed via the jcode runner.                                                                                | `requests` table, `REQUEST_STATES` (`src/core/types.ts`)      |
+| **Primary agent** | The `target_scope` of the task's request — the room/microVM whose worker holds the `claimExecution` lease (`exec_owner`). One workspace per scope, many jcode sessions (`src/substrate/worker.ts`). | `requests.target_scope`, `exec_owner`, `on_behalf_of`         |
+| **Sub-agent**     | Mechanism (B) only: a **decomposition child** — a `requests` row whose `parent_request` points at the task, recursively, sharing its budget.                                                        | `requests.parent_request`, `Coordinator.split`                |
+| **Swarm chain**   | Mechanism (C): lateral cross-room delegations from an `@agent` mention — related requests keyed by `chainId` (`swm_…`) and `hop_chain`, **not** parented.                                           | `src/talk/swarm.ts`, `requests.hop_chain`                     |
+| **Session**       | Mechanism (D): one concurrent jcode harness session inside a scope's workspace.                                                                                                                     | `runner.ts` session, `attached`/`session_status` frames       |
+| **Live**          | The SSE event stream is attached and current (`evt.source.readyState === EventSource.OPEN`).                                                                                                        | `GET /api/events` (`src/console/events.ts`)                   |
+| **Step**          | One monotonic progress unit from the runner: a tool completion or a token batch.                                                                                                                    | `ProgressUpdate.step` (`runner.ts`)                           |
+| **Guards**        | Runtime invariants shown on the detail panel: execution-lease heartbeat, budget ceiling, kill switch, content screen.                                                                               | `leaseHeartbeat`, `reportUsage`, `checkKill`, `contentScreen` |
 
 ---
 
@@ -109,7 +109,7 @@ which is why this needs a dedicated long-lived monitor.
   `routes/lists.ts`. (The `serve.ts` legacy if-chain remains for unmigrated
   routes, but a new page should not join it.) Per `docs/invariants.md` a route
   must be reachable from the shell, never URL-only.
-- **Navigation:** add a `RailItem` to the *Operations* group in
+- **Navigation:** add a `RailItem` to the _Operations_ group in
   `src/console/console-shell.ts` — and critically add its `navKey` to both
   `RAIL_KEYS` and `titleFor`, or the rail silently highlights Dashboard
   (existing gotcha).
@@ -227,30 +227,30 @@ empty/skeleton/spinner/error states, drawer (mobile fallback), tooltips.
 
 ### 6.1 Row anatomy — 48px two-line row (`/console/requests` idiom)
 
-| Zone | Content | Classes |
-|---|---|---|
-| Status banner (left) | state chip (reuse `statusChip(state)` from `components.ts`) + 4px budget-utilization progress bar + elapsed timer | `.v-task-status`, `.v-badge`/`.v-badge-info`…, `.v-progress` |
-| Main (center) | goal as `<a>` to `requestDetailUrl(id)` (the *row click* expands; the *title link* navigates — the same dual-target the requests list uses); underneath: scope `.v-tag`, routing-tier `.v-badge`, sub-agent count chip | `.v-task-main`, `.v-card-title`, `.v-tag` |
-| Side (right) | `spent_tokens` with `.v-num`, `$x.xx / $cap`, `↳ n sub-agents` (from `parent_request`), `⇢ m swarm hops` (from `hop_chain`), most-recent tool `.v-meta` | `.v-task-side`, `.v-mono` |
+| Zone                 | Content                                                                                                                                                                                                                | Classes                                                      |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Status banner (left) | state chip (reuse `statusChip(state)` from `components.ts`) + 4px budget-utilization progress bar + elapsed timer                                                                                                      | `.v-task-status`, `.v-badge`/`.v-badge-info`…, `.v-progress` |
+| Main (center)        | goal as `<a>` to `requestDetailUrl(id)` (the _row click_ expands; the _title link_ navigates — the same dual-target the requests list uses); underneath: scope `.v-tag`, routing-tier `.v-badge`, sub-agent count chip | `.v-task-main`, `.v-card-title`, `.v-tag`                    |
+| Side (right)         | `spent_tokens` with `.v-num`, `$x.xx / $cap`, `↳ n sub-agents` (from `parent_request`), `⇢ m swarm hops` (from `hop_chain`), most-recent tool `.v-meta`                                                                | `.v-task-side`, `.v-mono`                                    |
 
 ### 6.2 State → badge mapping (complete, covers `REQUEST_STATES`)
 
-| Request state | Badge | Tone class |
-|---|---|---|
-| `PROPOSED`, `QUEUED` | Queued | default `.v-badge` |
-| `ADMITTED`, `ACCEPTED` | Ready | `.v-badge-info` |
-| `IN_FLIGHT` | Running ● (pulsing) | `.v-badge-info` + `.v-pulse-dot` |
-| `DEFERRED` | Waiting | `.v-badge-warn` |
-| `DENIED` | Denied | `.v-badge-risk` |
-| `REDIRECTED` | Rerouted | `.v-badge-warn` |
-| `COMPLETED` | Done | `.v-badge-good` |
-| `FAILED`, `EXPIRED` | Failed / Expired | `.v-badge-risk` |
-| `TERMINATED_BUDGET` | Out of budget | `.v-badge-warn` |
+| Request state          | Badge               | Tone class                       |
+| ---------------------- | ------------------- | -------------------------------- |
+| `PROPOSED`, `QUEUED`   | Queued              | default `.v-badge`               |
+| `ADMITTED`, `ACCEPTED` | Ready               | `.v-badge-info`                  |
+| `IN_FLIGHT`            | Running ● (pulsing) | `.v-badge-info` + `.v-pulse-dot` |
+| `DEFERRED`             | Waiting             | `.v-badge-warn`                  |
+| `DENIED`               | Denied              | `.v-badge-risk`                  |
+| `REDIRECTED`           | Rerouted            | `.v-badge-warn`                  |
+| `COMPLETED`            | Done                | `.v-badge-good`                  |
+| `FAILED`, `EXPIRED`    | Failed / Expired    | `.v-badge-risk`                  |
+| `TERMINATED_BUDGET`    | Out of budget       | `.v-badge-warn`                  |
 
 Default filter shows the four "ongoing" buckets (`QUEUED`, `ADMITTED`,
 `ACCEPTED`, `IN_FLIGHT`); `DEFERRED`/`REDIRECTED` live under "Waiting";
 completed/failed appear only when the operator switches the segmented
-control to "Recent (24h)" — the list is an *ongoing* view first.
+control to "Recent (24h)" — the list is an _ongoing_ view first.
 
 ### 6.3 Ordering, grouping, pagination, counts
 
@@ -304,10 +304,10 @@ control to "Recent (24h)" — the list is an *ongoing* view first.
 
 Three `.v-guard` chips, each with `data-state="ok|warn|risk"`:
 
-| Guard | ok | warn | risk |
-|---|---|---|---|
-| **Lease** | renewed < 60s | 60–120s stale | > 120s or lost |
-| **Budget** | spent < 70% cap | 70–95% | ≥ 95% or `TERMINATED_BUDGET` |
+| Guard          | ok                | warn                        | risk                         |
+| -------------- | ----------------- | --------------------------- | ---------------------------- |
+| **Lease**      | renewed < 60s     | 60–120s stale               | > 120s or lost               |
+| **Budget**     | spent < 70% cap   | 70–95%                      | ≥ 95% or `TERMINATED_BUDGET` |
 | **Governance** | no recent denials | 1+ `PERMISSION_DENY` in run | kill switch active for scope |
 
 ### 7.3 Live feed
@@ -330,17 +330,17 @@ Three `.v-guard` chips, each with `data-state="ok|warn|risk"`:
 
 ## 8. Interaction States
 
-| Target | states |
-|---|---|
-| `.v-task-row-head` | idle · `:hover` (bg `--v-bg-2`) · `:focus-visible` (global outline token) · `[open]` (accent left border + lifted card shadow) |
+| Target                | states                                                                                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.v-task-row-head`    | idle · `:hover` (bg `--v-bg-2`) · `:focus-visible` (global outline token) · `[open]` (accent left border + lifted card shadow)                                  |
 | Title link inside row | underlines on hover; `click` does **not** toggle expansion (stop-propagation by markup structure: `<summary>` excludes nested `<a>` default via `href` capture) |
-| Agent tree row | `:hover` highlights; click scrolls the feed to that agent's partition (future: per-agent filter) |
-| Cancel button | `.v-btn-danger` — opens `.v-drawer` confirm (type-to-confirm the request id); disabled + `[data-vtip]` when state is terminal |
-| Refresh button | `.v-icon-btn`; shows `.v-spinner` while re-fetching snapshot |
-| Live pill | `data-state="live|stalled|offline"`; click = manual reconnect |
-| Keyboard | `Enter`/`Space` on summary toggles (native); `Esc` closes expanded detail; `j`/`k` row navigation is a fast-follow, out of MVP |
+| Agent tree row        | `:hover` highlights; click scrolls the feed to that agent's partition (future: per-agent filter)                                                                |
+| Cancel button         | `.v-btn-danger` — opens `.v-drawer` confirm (type-to-confirm the request id); disabled + `[data-vtip]` when state is terminal                                   |
+| Refresh button        | `.v-icon-btn`; shows `.v-spinner` while re-fetching snapshot                                                                                                    |
+| Live pill             | `data-state="live                                                                                                                                               | stalled | offline"`; click = manual reconnect |
+| Keyboard              | `Enter`/`Space` on summary toggles (native); `Esc` closes expanded detail; `j`/`k` row navigation is a fast-follow, out of MVP                                  |
 
-State transitions of the *page*: skeleton (`.v-skeleton` rows ×6, one-time)
+State transitions of the _page_: skeleton (`.v-skeleton` rows ×6, one-time)
 → populated; empty; error (`500` → `.v-error`); stale (poll or SSE dead >
 2 poll intervals → `.v-live` flips to `stalled`, amber, banner
 `.v-attention-item.v-attention-warn` "Showing data from {time}").
@@ -438,67 +438,253 @@ one snapshot diff so nothing is missed between streams.
 
 ## 12. Responsive
 
-| Breakpoint | behavior |
-|---|---|
-| ≥ 1400px | full workbench incl. optional inspector mirror |
-| 1100–1400px | `.v-grid-wide` single column; agent tree above feed |
-| < 1100px | KPI strip wraps (auto-fit); row side-zone drops cost to a second line under title |
-| < 900px | `.v-page` padding 16px; detail disclosure chevron on right; expanded detail may open as `.v-drawer` when the row is tall — reusing the existing `?drawer=1` / `shellPage({drawer})` convention the `/console/*` list pages already ship, no new markup |
-| < 700px | filterbar wraps (existing); table-free by construction; agent tree stays nested (never a table); feed item timestamps move under the message (`.v-feed-time` full-width) |
+| Breakpoint  | behavior                                                                                                                                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ≥ 1400px    | full workbench incl. optional inspector mirror                                                                                                                                                                                                         |
+| 1100–1400px | `.v-grid-wide` single column; agent tree above feed                                                                                                                                                                                                    |
+| < 1100px    | KPI strip wraps (auto-fit); row side-zone drops cost to a second line under title                                                                                                                                                                      |
+| < 900px     | `.v-page` padding 16px; detail disclosure chevron on right; expanded detail may open as `.v-drawer` when the row is tall — reusing the existing `?drawer=1` / `shellPage({drawer})` convention the `/console/*` list pages already ship, no new markup |
+| < 700px     | filterbar wraps (existing); table-free by construction; agent tree stays nested (never a table); feed item timestamps move under the message (`.v-feed-time` full-width)                                                                               |
 
 ---
 
 ## 13. CSS Additions for `theme.ts`
 
-Proposed for a single new section in `themeCss()` (between *progress* and
-*breadcrumb*). Token-only, both themes inherit automatically; light mode
+Proposed for a single new section in `themeCss()` (between _progress_ and
+_breadcrumb_). Token-only, both themes inherit automatically; light mode
 gets the subdued glass values for free. **This spec does not patch
 `theme.ts` — the block below is the deliverable for implementation.**
 
 ```css
 /* ------------------------------------------------------- agent tasks */
-.v-task-list{display:grid;gap:8px}
-.v-task-row{border:1px solid var(--v-line);border-radius:var(--radius-md);background:var(--v-bg-1)}
-.v-task-row>.v-task-row-head{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;list-style:none;min-width:0}
-.v-task-row>.v-task-row-head::-webkit-details-marker{display:none}
-.v-task-row>.v-task-row-head:hover{background:var(--v-bg-2)}
-.v-task-row[open]{border-color:var(--v-line-strong);box-shadow:var(--v-card-shadow)}
-.v-task-row[open]>.v-task-row-head{border-bottom:1px solid var(--v-line)}
-.v-task-status{display:flex;align-items:center;gap:8px;min-width:0}
-.v-task-main{flex:1;display:grid;gap:3px;min-width:0}
-.v-task-side{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--v-muted);white-space:nowrap}
-.v-task-detail{display:grid;gap:16px;padding:16px}
-.v-task-detail-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.v-agent-tree{border:1px solid var(--v-line);border-radius:var(--radius-md);background:var(--v-bg-2);padding:8px 10px;display:grid;gap:2px}
-.v-agent-tree-row{display:flex;align-items:center;gap:8px;padding:6px 4px;border-radius:var(--radius-sm);font-size:12.5px;min-width:0}
-.v-agent-tree-row--depth-2{margin-left:16px}
-.v-agent-tree-row--depth-3{margin-left:32px}
-.v-agent-tree-row--depth-4{margin-left:48px}
-.v-agent-tree-row.is-active{background:var(--v-bg-1);box-shadow:inset 2px 0 0 var(--v-accent)}
-.v-agent-dot{width:8px;height:8px;border-radius:50%;background:var(--v-faint);flex-shrink:0}
-.v-agent-dot[data-state="processing"]{background:var(--v-pred);animation:v-pulse 2.4s var(--ease-out) infinite}
-.v-agent-dot[data-state="waiting"]{background:var(--v-hypo)}
-.v-agent-dot[data-state="done"]{background:var(--v-fact)}
-.v-agent-dot[data-state="risk"]{background:var(--v-risk)}
-.v-swarm-chain{display:flex;flex-wrap:wrap;gap:6px}
-.v-swarm-hop{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;padding:3px 9px;border-radius:var(--radius-pill);border:1px dashed var(--v-line-strong);background:var(--v-bg-2);color:var(--v-ink-2);text-decoration:none}
-.v-swarm-hop:hover{border-style:solid;border-color:var(--v-accent);color:var(--v-accent);text-decoration:none}
-.v-session-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.v-session-chips .v-tag[data-state="open"]{color:var(--v-ink);border-color:var(--v-line-strong)}
-.v-step-counter{font-family:var(--font-mono);font-size:11.5px;color:var(--v-muted);font-variant-numeric:tabular-nums}
-.v-guardstrip{display:flex;gap:8px;flex-wrap:wrap}
-.v-guard{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:var(--radius-pill);border:1px solid var(--v-line);background:var(--v-bg-1);color:var(--v-ink-2)}
-.v-guard::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--v-faint)}
-.v-guard[data-state="ok"]::before{background:var(--v-fact)}
-.v-guard[data-state="warn"]::before{background:var(--v-hypo)}
-.v-guard[data-state="risk"]::before{background:var(--v-risk)}
-.v-live{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--v-muted)}
-.v-live::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--v-fact);box-shadow:0 0 8px var(--v-glow-accent);animation:v-pulse 2.4s var(--ease-out) infinite}
-.v-live[data-state="stalled"]::before{background:var(--v-hypo);animation:none}
-.v-live[data-state="offline"]::before{background:var(--v-faint);animation:none}
-.v-progress--hatch>i{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.22) 0 6px,transparent 6px 12px),none;animation:v-hatch 1s linear infinite}
-@keyframes v-hatch{to{background-position:17px 0}}
-@media (prefers-reduced-motion:reduce){.v-agent-dot[data-state="processing"],.v-live::before,.v-progress--hatch>i{animation:none}}
+.v-task-list {
+  display: grid;
+  gap: 8px;
+}
+.v-task-row {
+  border: 1px solid var(--v-line);
+  border-radius: var(--radius-md);
+  background: var(--v-bg-1);
+}
+.v-task-row > .v-task-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+  min-width: 0;
+}
+.v-task-row > .v-task-row-head::-webkit-details-marker {
+  display: none;
+}
+.v-task-row > .v-task-row-head:hover {
+  background: var(--v-bg-2);
+}
+.v-task-row[open] {
+  border-color: var(--v-line-strong);
+  box-shadow: var(--v-card-shadow);
+}
+.v-task-row[open] > .v-task-row-head {
+  border-bottom: 1px solid var(--v-line);
+}
+.v-task-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.v-task-main {
+  flex: 1;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.v-task-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--v-muted);
+  white-space: nowrap;
+}
+.v-task-detail {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+.v-task-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.v-agent-tree {
+  border: 1px solid var(--v-line);
+  border-radius: var(--radius-md);
+  background: var(--v-bg-2);
+  padding: 8px 10px;
+  display: grid;
+  gap: 2px;
+}
+.v-agent-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  min-width: 0;
+}
+.v-agent-tree-row--depth-2 {
+  margin-left: 16px;
+}
+.v-agent-tree-row--depth-3 {
+  margin-left: 32px;
+}
+.v-agent-tree-row--depth-4 {
+  margin-left: 48px;
+}
+.v-agent-tree-row.is-active {
+  background: var(--v-bg-1);
+  box-shadow: inset 2px 0 0 var(--v-accent);
+}
+.v-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--v-faint);
+  flex-shrink: 0;
+}
+.v-agent-dot[data-state='processing'] {
+  background: var(--v-pred);
+  animation: v-pulse 2.4s var(--ease-out) infinite;
+}
+.v-agent-dot[data-state='waiting'] {
+  background: var(--v-hypo);
+}
+.v-agent-dot[data-state='done'] {
+  background: var(--v-fact);
+}
+.v-agent-dot[data-state='risk'] {
+  background: var(--v-risk);
+}
+.v-swarm-chain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.v-swarm-hop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--v-line-strong);
+  background: var(--v-bg-2);
+  color: var(--v-ink-2);
+  text-decoration: none;
+}
+.v-swarm-hop:hover {
+  border-style: solid;
+  border-color: var(--v-accent);
+  color: var(--v-accent);
+  text-decoration: none;
+}
+.v-session-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.v-session-chips .v-tag[data-state='open'] {
+  color: var(--v-ink);
+  border-color: var(--v-line-strong);
+}
+.v-step-counter {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--v-muted);
+  font-variant-numeric: tabular-nums;
+}
+.v-guardstrip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.v-guard {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--v-line);
+  background: var(--v-bg-1);
+  color: var(--v-ink-2);
+}
+.v-guard::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--v-faint);
+}
+.v-guard[data-state='ok']::before {
+  background: var(--v-fact);
+}
+.v-guard[data-state='warn']::before {
+  background: var(--v-hypo);
+}
+.v-guard[data-state='risk']::before {
+  background: var(--v-risk);
+}
+.v-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--v-muted);
+}
+.v-live::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--v-fact);
+  box-shadow: 0 0 8px var(--v-glow-accent);
+  animation: v-pulse 2.4s var(--ease-out) infinite;
+}
+.v-live[data-state='stalled']::before {
+  background: var(--v-hypo);
+  animation: none;
+}
+.v-live[data-state='offline']::before {
+  background: var(--v-faint);
+  animation: none;
+}
+.v-progress--hatch > i {
+  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.22) 0 6px, transparent 6px 12px), none;
+  animation: v-hatch 1s linear infinite;
+}
+@keyframes v-hatch {
+  to {
+    background-position: 17px 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v-agent-dot[data-state='processing'],
+  .v-live::before,
+  .v-progress--hatch > i {
+    animation: none;
+  }
+}
 ```
 
 (`rgba(255,255,255,.22)` inside the hatch is a translucent texture, not a

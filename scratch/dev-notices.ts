@@ -34,7 +34,7 @@ const coord = createCoordinator(db, {
 // Resolve the latency claim so the follow-on NOTICE cites real evidence rather
 // than a hardcoded id that only exists in a particular database.
 const latencyClaim = (await db
-  .prepare("SELECT id FROM claims WHERE tenant = ? AND statement = ?")
+  .prepare('SELECT id FROM claims WHERE tenant = ? AND statement = ?')
   .get(TENANT, 'p95 latency is 240ms')) as { id: string } | undefined;
 
 let n = 0;
@@ -66,7 +66,9 @@ async function notice(
     bid: { dollars: 0, humanMinutes: 0 },
     now: atTime,
   });
-  console.log(`  ${id} ${res.state} · ${originScope}→${targetScope} · ${goal}${claimRefs.length ? ' (+evidence)' : ''}`);
+  console.log(
+    `  ${id} ${res.state} · ${originScope}→${targetScope} · ${goal}${claimRefs.length ? ' (+evidence)' : ''}`,
+  );
 }
 
 await notice('nightly Atlas sync finished with no drift', 'data', 'business', at('02:05'));

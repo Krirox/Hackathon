@@ -7,8 +7,8 @@ this file when the system needs to grow.
 Hallmark multi-page redesign · 2026-09-19
 Genre: modern-minimal (Linear/Stripe school) on dark paper.
 Macrostructure family: Workbench for all Console pages (rail + stream +
-  inspector). The Workspace/chat is NOT a Console page and is exempt — it
-  mirrors upstream Buzz and is locked to Buzz's own look (see "Two surfaces").
+inspector). The Workspace/chat is NOT a Console page and is exempt — it
+mirrors upstream Buzz and is locked to Buzz's own look (see "Two surfaces").
 Nav: N3 side-rail. Top: N13 inline ⌘K-pill. No footer on app pages.
 Enrichment: none on app pages — function carries the page.
 
@@ -80,18 +80,18 @@ no component needs a second stylesheet or a theme branch.
 
 Dark (default) — brand glass, mapped onto the console token names:
 
-- `--v-bg-0`     #111111 — app canvas (dot-matrix painted over it)
-- `--v-bg-1`     rgba(22,22,22,.82) — raised glass card
-- `--v-bg-2/3`   rgba(255,255,255,.05/.09) — hover / inset wash
-- `--v-ink`      #F3F3F3 — primary text; `--v-ink-strong` #FFFFFF
-- `--v-muted`    #9A9A9A — secondary text; `--v-faint` #6A6A6A
-- `--v-line`     rgba(255,255,255,.1) — hairlines
-- `--v-accent`   #D9FFA8 — lime, actions + active states; `--v-accent-2` #EAE4DC champagne
-- `--v-fact`     #9BE08C — verified / healthy
-- `--v-hypo`     #E8C07A — pending / provisional
-- `--v-risk`     #E87A70 — destructive / halted
-- `--v-pred`     #8AA4D8 — predictions / info
-- `--v-focus`    var(--v-accent) — 2px focus ring, instant, never animated
+- `--v-bg-0` #111111 — app canvas (dot-matrix painted over it)
+- `--v-bg-1` rgba(22,22,22,.82) — raised glass card
+- `--v-bg-2/3` rgba(255,255,255,.05/.09) — hover / inset wash
+- `--v-ink` #F3F3F3 — primary text; `--v-ink-strong` #FFFFFF
+- `--v-muted` #9A9A9A — secondary text; `--v-faint` #6A6A6A
+- `--v-line` rgba(255,255,255,.1) — hairlines
+- `--v-accent` #D9FFA8 — lime, actions + active states; `--v-accent-2` #EAE4DC champagne
+- `--v-fact` #9BE08C — verified / healthy
+- `--v-hypo` #E8C07A — pending / provisional
+- `--v-risk` #E87A70 — destructive / halted
+- `--v-pred` #8AA4D8 — predictions / info
+- `--v-focus` var(--v-accent) — 2px focus ring, instant, never animated
 
 Light opt-in mirrors every name on paper (`--v-bg-0` #F7F8F6, `--v-accent`
 #126B52 deep green, …) with the brand textures dialed down, so the same markup
@@ -127,7 +127,7 @@ rooms and fails if any shell module's statement count moves.
 Scope exception — the Workspace/chat is exempt from the token law, not merely
 non-compliant. Its literal Buzz hexes (`#1C1E21`, `#E8EAE6`, `#616061`,
 `#DDDDDD`, `#2BAC76`, `#E01E5A`, `#ECB22E`, `#CD2553`, `#F8FAFC`, `#E2E8F0`,
-`#0F5C57`, …) and its system font stack are the *locked* appearance. Do not
+`#0F5C57`, …) and its system font stack are the _locked_ appearance. Do not
 "fix" them into tokens: doing so changes the chat's look, which is the one thing
 this system must not do. Changing them requires an explicit product decision to
 re-skin the chat away from upstream Buzz.
@@ -216,19 +216,33 @@ Sentiment tints (per-theme pairs so pills read on both modes):
 
 ```css
 :root {
-  --v-bg-0: oklch(18% 0.02 260);  --v-bg-1: oklch(23% 0.025 260);
-  --v-bg-2: oklch(27% 0.03 260);  --v-bg-3: oklch(32% 0.035 260);
-  --v-ink: oklch(93% 0.01 260);   --v-ink-2: oklch(75% 0.02 260);
-  --v-faint: oklch(60% 0.02 260); --v-line: rgb(255 255 255 / 9%);
-  --v-accent: oklch(80% 0.12 180); --v-accent-ink: oklch(20% 0.05 180);
-  --v-fact: oklch(72% 0.16 155);  --v-hypo: oklch(78% 0.14 80);
-  --v-risk: oklch(70% 0.18 25);   --v-pred: oklch(72% 0.12 280);
-  --font-display: "Inter", system-ui, sans-serif;
-  --font-body: "Inter", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
-  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
+  --v-bg-0: oklch(18% 0.02 260);
+  --v-bg-1: oklch(23% 0.025 260);
+  --v-bg-2: oklch(27% 0.03 260);
+  --v-bg-3: oklch(32% 0.035 260);
+  --v-ink: oklch(93% 0.01 260);
+  --v-ink-2: oklch(75% 0.02 260);
+  --v-faint: oklch(60% 0.02 260);
+  --v-line: rgb(255 255 255 / 9%);
+  --v-accent: oklch(80% 0.12 180);
+  --v-accent-ink: oklch(20% 0.05 180);
+  --v-fact: oklch(72% 0.16 155);
+  --v-hypo: oklch(78% 0.14 80);
+  --v-risk: oklch(70% 0.18 25);
+  --v-pred: oklch(72% 0.12 280);
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --radius-card: 12px; --radius-pill: 999px; --radius-input: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+  --radius-input: 8px;
 }
 ```

@@ -162,7 +162,8 @@ async function runLiveVideoCallTest() {
   assert.equal(p2Offer?.payload.sdp, fakeSdpOffer);
   console.log('  ✔ Peer 2 received SDP Offer from Peer 1.');
 
-  const fakeSdpAnswer = 'v=0\r\no=- 424243 2 IN IP4 127.0.0.1\r\ns=LiveVideoCallAnswer\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
+  const fakeSdpAnswer =
+    'v=0\r\no=- 424243 2 IN IP4 127.0.0.1\r\ns=LiveVideoCallAnswer\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n';
   ws2.send(
     JSON.stringify({
       type: 'answer',
@@ -180,7 +181,11 @@ async function runLiveVideoCallTest() {
 
   // 8. ICE Candidate Exchange & Media State Updates
   console.log('[Step 8] Exchanging ICE candidates and media mute states...');
-  const fakeCandidate = { candidate: 'candidate:1 1 UDP 2130706431 127.0.0.1 50000 typ host', sdpMid: '0', sdpMLineIndex: 0 };
+  const fakeCandidate = {
+    candidate: 'candidate:1 1 UDP 2130706431 127.0.0.1 50000 typ host',
+    sdpMid: '0',
+    sdpMLineIndex: 0,
+  };
   ws1.send(
     JSON.stringify({
       type: 'ice-candidate',
@@ -214,8 +219,20 @@ async function runLiveVideoCallTest() {
   console.log('[Step 9] Streaming spoken conversation audio & transcript segments...');
   const segments = [
     { speakerId: 'usr_krishiv', speakerName: 'Krishiv', startTime: 0, endTime: 4, text: 'We launch Friday.' },
-    { speakerId: 'usr_sid', speakerName: 'Siddharth', startTime: 5, endTime: 9, text: 'Krishiv will handle deployment by Friday 2pm.' },
-    { speakerId: 'usr_krishiv', speakerName: 'Krishiv', startTime: 10, endTime: 14, text: 'We still need to decide the production domain.' },
+    {
+      speakerId: 'usr_sid',
+      speakerName: 'Siddharth',
+      startTime: 5,
+      endTime: 9,
+      text: 'Krishiv will handle deployment by Friday 2pm.',
+    },
+    {
+      speakerId: 'usr_krishiv',
+      speakerName: 'Krishiv',
+      startTime: 10,
+      endTime: 14,
+      text: 'We still need to decide the production domain.',
+    },
   ];
 
   for (const seg of segments) {

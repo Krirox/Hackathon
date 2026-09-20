@@ -3,7 +3,7 @@
 > **SUPERSEDED IN PART — 2026-09-19.** This audit predates the auth/console
 > wave that landed the same week. Its F01 conclusion ("console does not
 > establish individual identity, permissions, or tenant-bound access") and the
->"reads remain open" claim are no longer true: `src/core/auth.ts` now provides
+> "reads remain open" claim are no longer true: `src/core/auth.ts` now provides
 > signup→claim, DB-backed sessions with revocation, roles (owner/admin/member),
 > CSRF on every POST, lockout, and tenant-scoped session re-checks on every
 > route, tested over HTTP (`test/console.test.ts`, `test/buzz-security.test.ts`).
@@ -141,18 +141,18 @@ intake → durable dispatch → governed execution → deliverable review
 
 The inspected runtime DDL declares **22 distinct tables**, plus a conditional `schema_migrations` table created by the separate journal. This is schema inspection, not a live database count.
 
-| Domain                    | Tables                                                         | Use / limitation                                                                               |
-| ------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Ledger                    | `claims`, `claim_links`, `decisions`, `outcomes`, `ledger_seq` | Active; resolution and correction semantics incomplete                                         |
-| Subject identity          | `subjects`, `subject_aliases`                                  | Library-backed identity/alias support; not an operator curation workflow                       |
-| Coordination              | `requests`, `escalations`                                      | Active; lease/reservation additions exist, but worker and daily-attention lifecycle incomplete |
+| Domain                    | Tables                                                         | Use / limitation                                                                                    |
+| ------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Ledger                    | `claims`, `claim_links`, `decisions`, `outcomes`, `ledger_seq` | Active; resolution and correction semantics incomplete                                              |
+| Subject identity          | `subjects`, `subject_aliases`                                  | Library-backed identity/alias support; not an operator curation workflow                            |
+| Coordination              | `requests`, `escalations`                                      | Active; lease/reservation additions exist, but worker and daily-attention lifecycle incomplete      |
 | Compiler                  | `skill_cards`, `traces`, `skill_transfer_tests`                | Active; transfer evidence is revision-, model- and eval-bound with gate linking and smoke isolation |
-| Router                    | `routing_decisions`, `routing_calibration`                     | Test/demo/library-backed; routing records lack a direct request link                           |
-| Governance                | `trust_scores`, `honeytasks`                                   | Policy persistence exists; no production outcome/review feedback loop found                    |
-| Evaluation                | `eval_cases`, `eval_runs`                                      | Active correction intake plus library/tests                                                    |
-| Audit/configuration       | `audit_log`, `meta`                                            | Active; `meta` also carries heterogeneous business state without first-class lifecycles        |
-| Durable integration       | `ingest_inbox`, `outbox`                                       | Recent schema/helper additions; no authoritative runtime consumer/relay                        |
-| Parallel migration system | `schema_migrations`                                            | Journal tests; not normal `migrate()` authority                                                |
+| Router                    | `routing_decisions`, `routing_calibration`                     | Test/demo/library-backed; routing records lack a direct request link                                |
+| Governance                | `trust_scores`, `honeytasks`                                   | Policy persistence exists; no production outcome/review feedback loop found                         |
+| Evaluation                | `eval_cases`, `eval_runs`                                      | Active correction intake plus library/tests                                                         |
+| Audit/configuration       | `audit_log`, `meta`                                            | Active; `meta` also carries heterogeneous business state without first-class lifecycles             |
+| Durable integration       | `ingest_inbox`, `outbox`                                       | Recent schema/helper additions; no authoritative runtime consumer/relay                             |
+| Parallel migration system | `schema_migrations`                                            | Journal tests; not normal `migrate()` authority                                                     |
 
 Evidence: `src/core/db.ts` additive migrations and `SCHEMA`; `src/core/migrations.ts:25–63`.
 

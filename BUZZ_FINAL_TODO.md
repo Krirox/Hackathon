@@ -1,6 +1,7 @@
 # BUZZ_FINAL_TODO.md — Chat-First Agent Orchestration & Workspace Shell
 
 > **Vision**: Transform Vital into a **chat-first autonomous agent environment**.
+>
 > - **Primary Workspace**: Upon login, users land directly in the Buzz chat UI (`/console/buzz/...`).
 > - **Team Channels**: `#marketing`, `#engineering`, `#general`, `#finance`, etc. Humans talk, plan, and mention agents (`@marketing-agent`, `@growth-agent`, `@finance-agent`).
 > - **Cross-Room Agent Context**: When tagged, agents possess full context across all rooms via the Reality Ledger (cross-room evidence injection + tool search), reply with grounded intelligence, and execute real cross-agent handoffs (`InterAgentSwarmCoordinator.executeHandoff`).
@@ -42,12 +43,14 @@
 ## Phase Roadmap
 
 ### Phase 0 — Keep buzz/ as chat home, add alias (0.5d)
+
 - [x] Add `marketing` → `business` alias in `src/talk/rooms.ts:303` (`if (clean === 'marketing' || clean === 'marketing-agent') return 'business';`).
 - [x] Broaden mention regex in `src/console/buzz.ts:389` to `/@([A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*)/` to match hyphenated agent names (`@marketing-agent`, `@growth-agent`, `@finance-agent`) and multi-word names.
 - [x] Extend autocomplete datalist `#buzz-users` in `src/console/buzz.ts:340` to include human users (`listUsers`) + all room agents (`CANONICAL_ROOMS.map(r => r.agentName)` + aliases).
 - [x] Add `general` canonical room (`scope:general`, `agentName: 'general-agent'`, `chan-general`) to `CANONICAL_ROOMS` in `src/talk/rooms.ts:225` as the 13th room to power the company-wide global chat.
 
 ### Phase 1 — Make chat the default entry & add Dashboard entry (0.5d)
+
 - [x] In `src/console/serve.ts`:
   - `1871` (GET `/login` when `sessionOf()`): redirect to `${home}console/buzz/${defaultRoomForUser(user)}`.
   - `1986` (POST `/login` success): redirect to `next ?? ${home}console/buzz/${defaultRoomForUser(user)}`.
@@ -59,11 +62,13 @@
   - Add a dedicated **Vital Dashboard** launcher button on the bottom left directly above Settings/Account cluster (`<a href="${esc(home)}console/dashboard" id="vital-dashboard-btn" ...>📊 Vital Dashboard</a>`) so users can access Compiler, Feed, Ledger, Coordination, Router, Governance, Economics, and Evals.
 
 ### Phase 2 — One more chat that connects to all (`#general`) (0.5d)
+
 - [x] In `src/console/buzz.ts`: when viewing `#general` (`scope:general`), display cross-cutting pending approvals across all scopes (`pendingForRoom` aggregates all admitted human-minute requests across all rooms).
 - [x] Swarm treats `#general` as broadcast/fan-out when an open request is submitted.
 - [x] Dynamic composer placeholder: `Message #${esc(def.name)}` (e.g. `Message #general`, `Message #growth`).
 
 ### Phase 3 — Give `@marketing-agent` context about other things (1d)
+
 - [x] Extend `Ledger` in `src/ledger/ledger.ts:135` (and implementations) with `search(tenant, { q, scopes[], kinds, status, limit })` reusing the LIKE query pattern from `src/console/report.ts:718`.
 - [x] In `src/jcode/runner.ts:392`, expand prompt assembly:
   - Inject `[Grounded Context]` from direct claim refs.
@@ -72,6 +77,7 @@
 - [x] Inject pending approvals from all rooms and recent cross-room claims into in-room agent responses.
 
 ### Phase 4 — Wire `@` in chat to real handoffs (1d)
+
 - [x] In `src/console/serve.ts:2838` (`/command` when not a room command) and `2888` (`/reply` + unified chat message POST):
   - Parse text for `@` mentions: `text.matchAll(/@([a-zA-Z0-9_-]+)/g)`.
   - Resolve target agent via `CANONICAL_ROOMS` + aliases (`marketing-agent` → `growth-agent` / `scope:business`, `finance-agent` → `finance` / `scope:finance`).
@@ -81,6 +87,7 @@
   - Swarm posts deliberation messages to both the origin room and target room.
 
 ### Phase 5 — Make other UIs (Image 3 Compiler etc.) around chat (0.5d each)
+
 - [x] In `src/console/serve.ts`, support `?drawer=1` query parameter on routes (`/console/workflows`, `/console/requests`, `/console/claims`, `/console/compiler`, `/console/dashboard`):
   - When `?drawer=1` is passed, return only the inner HTML fragment suitable for embedding in a slide-out right drawer.
 - [x] Chat slash commands:

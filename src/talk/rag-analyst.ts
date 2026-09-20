@@ -112,10 +112,18 @@ export function classifyDomain(query: string): DomainSpecialist | null {
   if (/\b(?:legal|compliance|regulatory|gdpr|audit|privacy|policy|policies|eu ai act|terms|contract)\b/i.test(q)) {
     return DOMAIN_SPECIALISTS.compliance ?? null;
   }
-  if (/\b(?:finance|billing|stripe|quickbooks|invoice|revenue|spend|budget|churn|payment|cost-per-signal|price|pricing)\b/i.test(q)) {
+  if (
+    /\b(?:finance|billing|stripe|quickbooks|invoice|revenue|spend|budget|churn|payment|cost-per-signal|price|pricing)\b/i.test(
+      q,
+    )
+  ) {
     return DOMAIN_SPECIALISTS.finance ?? null;
   }
-  if (/\b(?:deploy|deployment|server|microvm|docker|kubernetes|infra|pipeline|build|commit|branch|pr|pull request|issue|bug|code|git|repo|crash|logs?)\b/i.test(q)) {
+  if (
+    /\b(?:deploy|deployment|server|microvm|docker|kubernetes|infra|pipeline|build|commit|branch|pr|pull request|issue|bug|code|git|repo|crash|logs?)\b/i.test(
+      q,
+    )
+  ) {
     return DOMAIN_SPECIALISTS.engineering ?? null;
   }
   if (/\b(?:risk|exposure|counterparty|hedge|hedging|drift|volatility)\b/i.test(q)) {
@@ -163,7 +171,13 @@ export function isBusinessIntelligenceInquiry(query: string, scope = 'general'):
   if (
     (scope === 'general' || scope === 'exec') &&
     q.endsWith('?') &&
-    (q.includes('status') || q.includes('doing') || q.includes('going') || q.includes('health') || q.includes('what') || q.includes('how') || q.includes('who'))
+    (q.includes('status') ||
+      q.includes('doing') ||
+      q.includes('going') ||
+      q.includes('health') ||
+      q.includes('what') ||
+      q.includes('how') ||
+      q.includes('who'))
   ) {
     return true;
   }
@@ -367,12 +381,63 @@ export async function answerGeneralQuestion(
 
   // Extract query keywords (words >= 3 chars, ignoring common stopwords)
   const stopWords = new Set([
-    'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'any', 'can',
-    'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
-    'how', 'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy',
-    'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use', 'what', 'when',
-    'where', 'which', 'why', 'with', 'tell', 'about', 'does', 'should',
-    'would', 'could', 'some', 'them', 'then', 'there', 'they', 'this', 'that'
+    'the',
+    'and',
+    'for',
+    'are',
+    'but',
+    'not',
+    'you',
+    'all',
+    'any',
+    'can',
+    'her',
+    'was',
+    'one',
+    'our',
+    'out',
+    'day',
+    'get',
+    'has',
+    'him',
+    'his',
+    'how',
+    'man',
+    'new',
+    'now',
+    'old',
+    'see',
+    'two',
+    'way',
+    'who',
+    'boy',
+    'did',
+    'its',
+    'let',
+    'put',
+    'say',
+    'she',
+    'too',
+    'use',
+    'what',
+    'when',
+    'where',
+    'which',
+    'why',
+    'with',
+    'tell',
+    'about',
+    'does',
+    'should',
+    'would',
+    'could',
+    'some',
+    'them',
+    'then',
+    'there',
+    'they',
+    'this',
+    'that',
   ]);
 
   const tokens = cleanQuery
@@ -504,9 +569,7 @@ export async function answerGeneralQuestion(
     if (matchingIssues.length > 0) {
       lines.push(`**Engineering Issues:**`);
       for (const iss of matchingIssues.slice(0, 2)) {
-        lines.push(
-          `• Issue \`#${iss.id.slice(0, 7)}\`: **${iss.title}** (${iss.state} · Priority: ${iss.priority})`,
-        );
+        lines.push(`• Issue \`#${iss.id.slice(0, 7)}\`: **${iss.title}** (${iss.state} · Priority: ${iss.priority})`);
       }
       lines.push('');
     }

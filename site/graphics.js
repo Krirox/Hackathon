@@ -1,5 +1,6 @@
 function enhanceGraphic(element, setup) {
-  if (!element || element.hidden || document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (!element || element.hidden || document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+    return;
   try {
     setup();
   } catch {
@@ -11,8 +12,9 @@ function initMatrixBackground() {
   const canvas = document.getElementById('bg-canvas');
   if (!canvas) return;
 
-  const gl = canvas.getContext('webgl', { antialias: false, powerPreference: 'high-performance' }) ||
-             canvas.getContext('experimental-webgl');
+  const gl =
+    canvas.getContext('webgl', { antialias: false, powerPreference: 'high-performance' }) ||
+    canvas.getContext('experimental-webgl');
 
   if (!gl) {
     canvas.hidden = true;
@@ -94,14 +96,7 @@ function initMatrixBackground() {
   }
   const positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    -1, -1,
-     1, -1,
-    -1,  1,
-    -1,  1,
-     1, -1,
-     1,  1,
-  ]), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
 
   const posLoc = gl.getAttribLocation(program, 'a_position');
   const resLoc = gl.getUniformLocation(program, 'u_resolution');
@@ -127,14 +122,20 @@ function initMatrixBackground() {
     gl.uniform1f(alphaLoc, 1);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
-  canvas.addEventListener('webglcontextlost', () => { canvas.hidden = true; });
+  canvas.addEventListener('webglcontextlost', () => {
+    canvas.hidden = true;
+  });
   window.addEventListener('resize', () => enhanceGraphic(canvas, draw), { passive: true });
-  window.addEventListener('pointermove', (event) => {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    mouseX = event.clientX * dpr;
-    mouseY = (window.innerHeight - event.clientY) * dpr;
-    enhanceGraphic(canvas, draw);
-  }, { passive: true });
+  window.addEventListener(
+    'pointermove',
+    (event) => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      mouseX = event.clientX * dpr;
+      mouseY = (window.innerHeight - event.clientY) * dpr;
+      enhanceGraphic(canvas, draw);
+    },
+    { passive: true },
+  );
   draw();
 }
 
@@ -151,7 +152,7 @@ function init3DStage() {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
-    powerPreference: 'high-performance'
+    powerPreference: 'high-performance',
   });
   renderer.setSize(width, height);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -170,7 +171,7 @@ function init3DStage() {
     const mat = new THREE.LineBasicMaterial({
       color: color,
       transparent: true,
-      opacity: opacity
+      opacity: opacity,
     });
     return new THREE.LineLoop(geom, mat);
   }
@@ -233,15 +234,21 @@ function init3DStage() {
     renderer.setSize(width, height);
     renderer.render(scene, camera);
   }
-  renderer.domElement.addEventListener('webglcontextlost', () => { container.hidden = true; });
+  renderer.domElement.addEventListener('webglcontextlost', () => {
+    container.hidden = true;
+  });
   window.addEventListener('resize', () => enhanceGraphic(container, draw), { passive: true });
-  window.addEventListener('pointermove', (event) => {
-    const x = (event.clientX / window.innerWidth) * 2 - 1;
-    const y = (event.clientY / window.innerHeight) * 2 - 1;
-    ringsGroup.rotation.y = x * 0.28;
-    ringsGroup.rotation.x = y * 0.14;
-    enhanceGraphic(container, draw);
-  }, { passive: true });
+  window.addEventListener(
+    'pointermove',
+    (event) => {
+      const x = (event.clientX / window.innerWidth) * 2 - 1;
+      const y = (event.clientY / window.innerHeight) * 2 - 1;
+      ringsGroup.rotation.y = x * 0.28;
+      ringsGroup.rotation.x = y * 0.14;
+      enhanceGraphic(container, draw);
+    },
+    { passive: true },
+  );
   draw();
 }
 
@@ -249,9 +256,13 @@ try {
   if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     enhanceGraphic(document.getElementById('bg-canvas'), initMatrixBackground);
     enhanceGraphic(document.getElementById('canvas-3d-container'), init3DStage);
-    window.addEventListener('resize', () => {
-      enhanceGraphic(document.getElementById('canvas-3d-container'), init3DStage);
-    }, { passive: true });
+    window.addEventListener(
+      'resize',
+      () => {
+        enhanceGraphic(document.getElementById('canvas-3d-container'), init3DStage);
+      },
+      { passive: true },
+    );
   }
 } catch {
   const background = document.getElementById('bg-canvas');

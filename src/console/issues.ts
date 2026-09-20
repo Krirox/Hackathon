@@ -415,7 +415,7 @@ export function parseGitHubRepoPath(raw: string): { owner: string; repo: string 
     .trim()
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/^git@github\.com:/i, '')
-    .replace(/\.git$/i, '')
+    .replace(/\.git$/i, '');
   const parts = clean.split('/');
   const [owner, repo] = parts;
   if (parts.length === 2 && owner && repo) {
@@ -492,7 +492,15 @@ export async function saveGitHubSyncConfig(
          updated_by = excluded.updated_by,
          updated_at = excluded.updated_at`,
     )
-    .run(tenant, repo.trim(), effectiveToken, existing?.lastSyncedAt ?? null, existing?.syncedCount ?? 0, updatedBy, now);
+    .run(
+      tenant,
+      repo.trim(),
+      effectiveToken,
+      existing?.lastSyncedAt ?? null,
+      existing?.syncedCount ?? 0,
+      updatedBy,
+      now,
+    );
 
   return (await getGitHubSyncConfig(db, tenant))!;
 }
@@ -558,8 +566,7 @@ export async function markGitHubSyncError(db: AsyncDb, tenant: string, failure: 
 
 export async function getGitHubPushError(db: AsyncDb, tenant: string): Promise<GitHubPushError | null> {
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(pushErrorKey(tenant))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!row) return null;
   try {
     return JSON.parse(String(row.value)) as GitHubPushError;
@@ -661,12 +668,16 @@ export async function syncGitHubProject(
     );
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+      await db
+        .prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?')
+        .run('error', now, tenant);
       return { ok: false, syncedCount: 0, error: `GitHub API error (${res.status}): ${errText.slice(0, 100)}` };
     }
     ghIssues = (await res.json()) as unknown[];
   } catch (err) {
-    await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+    await db
+      .prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?')
+      .run('error', now, tenant);
     return { ok: false, syncedCount: 0, error: (err as Error).message };
   }
 
@@ -697,7 +708,9 @@ export async function syncGitHubProject(
       if (lowerLabels.some((l) => l.includes('progress') || l.includes('doing') || l.includes('wip'))) {
         state = 'IN PROGRESS';
       } else if (
-        lowerLabels.some((l) => l.includes('todo') || l.includes('to do') || l.includes('ready') || l.includes('planned'))
+        lowerLabels.some(
+          (l) => l.includes('todo') || l.includes('to do') || l.includes('ready') || l.includes('planned'),
+        )
       ) {
         state = 'TO DO';
       } else {
@@ -728,8 +741,12 @@ export async function syncGitHubProject(
       matchedLabels.push(...normalizeLabels(ghLabelNames));
     }
 
-    const title = String(gh.title ?? `Issue #${gh.number}`).trim().slice(0, 300);
-    const body = String(gh.body ?? '').trim().slice(0, 4000);
+    const title = String(gh.title ?? `Issue #${gh.number}`)
+      .trim()
+      .slice(0, 300);
+    const body = String(gh.body ?? '')
+      .trim()
+      .slice(0, 4000);
     const desc = body ? body : `Imported from GitHub #${gh.number}: ${gh.html_url ?? ''}`;
     const createdAt = gh.created_at ? new Date(String(gh.created_at)).toISOString() : now;
     const updatedAt = gh.updated_at ? new Date(String(gh.updated_at)).toISOString() : now;
@@ -825,20 +842,24 @@ export async function pushCreateToGitHub(
 ): Promise<{ ok: boolean; ghNumber?: number; error?: string }> {
   const cfg = await getGitHubSyncConfig(db, tenant);
   if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
-  if (!cfg.token?.trim()) return { ok: false, error: 'no token — push requires a PAT for private repos and write access' };
+  if (!cfg.token?.trim())
+    return { ok: false, error: 'no token — push requires a PAT for private repos and write access' };
   const parsed = parseGitHubRepoPath(cfg.repo);
   if (!parsed) return { ok: false, error: 'invalid repo path' };
   const fetchFn = opts?.fetchFn ?? fetch;
   try {
-    const res = await fetchFn(`https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues`, {
-      method: 'POST',
-      headers: githubHeaders(cfg.token),
-      body: JSON.stringify({
-        title: issue.title,
-        body: issue.description || `Created from Vital board — ${issue.id}`,
-        labels: issueToGitHubLabels(issue),
-      }),
-    });
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues`,
+      {
+        method: 'POST',
+        headers: githubHeaders(cfg.token),
+        body: JSON.stringify({
+          title: issue.title,
+          body: issue.description || `Created from Vital board — ${issue.id}`,
+          labels: issueToGitHubLabels(issue),
+        }),
+      },
+    );
     if (!res.ok) {
       const t = await res.text().catch(() => '');
       return { ok: false, error: `GitHub create failed ${res.status}: ${t.slice(0, 200)}` };
@@ -1135,7 +1156,7 @@ function issueCard(issue: IssueRow, comments: IssueCommentRow[]): string {
   ${previewHtml}
   <div class="iss-title">${esc(issue.title)}</div>
   ${pills ? `<div class="iss-pills">${pills}</div>` : ''}
-  ${(progressHtml || repoHtml) ? `<div class="iss-progress-row">${progressHtml}${repoHtml}</div>` : ''}
+  ${progressHtml || repoHtml ? `<div class="iss-progress-row">${progressHtml}${repoHtml}</div>` : ''}
   <div class="iss-bottom-row">
     <div class="iss-assignees">${avatars}</div>
     <div class="iss-meta-group">
@@ -1159,7 +1180,7 @@ function formatIssueKey(issue: { id: string; title: string; description?: string
   if (idNum && idNum[0]) return `CRM-${idNum[0]}`;
   let hash = 0;
   for (let i = 0; i < issue.id.length; i++) hash = (hash * 31 + issue.id.charCodeAt(i)) & 0x7fff;
-  return `CRM-${(hash % 90 + 10)}`;
+  return `CRM-${(hash % 90) + 10}`;
 }
 
 function extractSubtasks(issue: { description?: string }): string | null {
@@ -1201,10 +1222,19 @@ function formatShortDate(iso: string): string {
 function prioritySignalSvg(priority: IssuePriority): string {
   let pLevel = 0;
   let color = 'var(--v-muted)';
-  if (priority === 'Urgent') { pLevel = 3; color = 'var(--v-risk)'; }
-  else if (priority === 'High') { pLevel = 3; color = 'var(--v-hypo)'; }
-  else if (priority === 'Medium') { pLevel = 2; color = 'var(--v-pred)'; }
-  else if (priority === 'Low') { pLevel = 1; color = 'var(--v-pred)'; }
+  if (priority === 'Urgent') {
+    pLevel = 3;
+    color = 'var(--v-risk)';
+  } else if (priority === 'High') {
+    pLevel = 3;
+    color = 'var(--v-hypo)';
+  } else if (priority === 'Medium') {
+    pLevel = 2;
+    color = 'var(--v-pred)';
+  } else if (priority === 'Low') {
+    pLevel = 1;
+    color = 'var(--v-pred)';
+  }
   const empty = 'var(--v-line-strong)';
 
   return `<span class="iss-row-signal" title="Priority: ${esc(priority)}">
@@ -1247,9 +1277,10 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
     ? `<span class="iss-pill-subtask" title="Subtasks: ${esc(subtasks)}"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ${esc(subtasks)}</span>`
     : '';
 
-  const chatHtml = count > 0
-    ? `<span class="iss-pill-chat" title="${count} comment(s)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg> ${count}</span>`
-    : '';
+  const chatHtml =
+    count > 0
+      ? `<span class="iss-pill-chat" title="${count} comment(s)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg> ${count}</span>`
+      : '';
 
   let milestoneHtml = '';
   if (milestone === 'MVP') {
@@ -1294,9 +1325,10 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
 
 function renderIssuesList(byState: Map<IssueState, IssueRow[]>, comments: IssueCommentRow[]): string {
   const listStates: IssueState[] = ['IN PROGRESS', 'TO DO', 'BACKLOG', 'DONE'];
-  return listStates.map((state) => {
-    const issues = byState.get(state) ?? [];
-    return `<div class="iss-list-group" data-state="${esc(state)}">
+  return listStates
+    .map((state) => {
+      const issues = byState.get(state) ?? [];
+      return `<div class="iss-list-group" data-state="${esc(state)}">
       <div class="iss-list-group-header" role="button" tabindex="0" aria-expanded="true">
         <span class="iss-list-chevron">▼</span>
         <span class="iss-dot" style="background:${STATE_DOT[state]}"></span>
@@ -1308,7 +1340,8 @@ function renderIssuesList(byState: Map<IssueState, IssueRow[]>, comments: IssueC
         ${issues.map((i) => issueListRow(i, comments)).join('\n')}
       </div>
     </div>`;
-  }).join('\n');
+    })
+    .join('\n');
 }
 
 function columnHeader(state: IssueState, issues: IssueRow[]): string {

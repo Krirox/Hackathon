@@ -89,16 +89,15 @@ async function latestOutcomeRow(db: AsyncDb, tenant: string): Promise<OutcomeRow
 
 /** Creation time of the tenant's first user — durable record of tenant birth. */
 async function firstUserCreatedAt(db: AsyncDb, tenant: string): Promise<string | null> {
-  const row = (await db
-    .prepare('SELECT MIN(created_at) AS n FROM users WHERE tenant = ?')
-    .get(tenant)) as { n: string | null } | undefined;
+  const row = (await db.prepare('SELECT MIN(created_at) AS n FROM users WHERE tenant = ?').get(tenant)) as
+    { n: string | null } | undefined;
   return row?.n ? String(row.n) : null;
 }
 
 /** Earliest deliverable-version creation time for the tenant, or null. */
 async function firstDeliverableAt(db: AsyncDb, tenant: string): Promise<string | null> {
   const rows = (await db
-    .prepare("SELECT value FROM meta WHERE key LIKE ? ORDER BY key ASC LIMIT 500")
+    .prepare('SELECT value FROM meta WHERE key LIKE ? ORDER BY key ASC LIMIT 500')
     .all(`wedge:deliverable-ver:${tenant}:%`)) as { value: string }[];
   let earliest: string | null = null;
   for (const r of rows) {
@@ -114,11 +113,7 @@ async function firstDeliverableAt(db: AsyncDb, tenant: string): Promise<string |
   return earliest;
 }
 
-export async function buildTenantJourney(
-  db: AsyncDb,
-  tenant: string,
-  _now: string,
-): Promise<TenantJourney> {
+export async function buildTenantJourney(db: AsyncDb, tenant: string, _now: string): Promise<TenantJourney> {
   // Stage 1 — signup: the web flow records `activation:signupAt`; tenants
   // created via the CLI fall back to the first user row (also durable).
   const signedUpAt = (await signupAt(db, tenant)) ?? (await firstUserCreatedAt(db, tenant));
@@ -140,12 +135,7 @@ export async function buildTenantJourney(
   // Stage 3 — first source: real ingested evidence, excluding the labeled
   // sample walkthrough scope (mirrors ingestClaimCount in activation.ts).
   const sourceWhere = `tenant = ? AND scope <> ? AND extractor IN ('file-diff', 'github-releases')`;
-  const sourceCount = await count(
-    db,
-    `SELECT COUNT(*) AS n FROM claims WHERE ${sourceWhere}`,
-    tenant,
-    SAMPLE_SCOPE,
-  );
+  const sourceCount = await count(db, `SELECT COUNT(*) AS n FROM claims WHERE ${sourceWhere}`, tenant, SAMPLE_SCOPE);
   let firstSourceAt: string | null = null;
   if (sourceCount > 0) {
     const row = (await db
@@ -276,9 +266,7 @@ export function renderJourneyMilestone(journey: TenantJourney, home: string): st
       const marker = markerFor(done, current);
       const color = colorFor(done, current);
       const weight = current ? '700' : '600';
-      const label = s.href
-        ? `<a href="${esc(s.href)}" style="color:var(--v-ink)">${esc(s.label)}</a>`
-        : esc(s.label);
+      const label = s.href ? `<a href="${esc(s.href)}" style="color:var(--v-ink)">${esc(s.label)}</a>` : esc(s.label);
       const when = whenFor(s.at, current);
       const elapsed =
         done && signedUp !== null && s.at !== null && s.id !== 'signup'

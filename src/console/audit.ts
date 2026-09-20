@@ -83,7 +83,8 @@ export async function renderAuditPage(db: AsyncDb, tenant: string, opts: AuditPa
     // hiding the entry.
   }
   const actorDisplay = (actor: string): string => {
-    if (people.has(actor)) return `${esc(people.get(actor)!)} <span class="v-meta">(${esc(actor.slice(0, 12))}…)</span>`;
+    if (people.has(actor))
+      return `${esc(people.get(actor)!)} <span class="v-meta">(${esc(actor.slice(0, 12))}…)</span>`;
     return esc(actor);
   };
   // Machine and system actors read as neutral chips so a human actor stands out.
@@ -117,7 +118,10 @@ export async function renderAuditPage(db: AsyncDb, tenant: string, opts: AuditPa
 </table>
 </div>`;
 
-  const prev = offset > 0 ? `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(buildUrl(Math.max(0, offset - PAGE_SIZE)))}">← Previous</a>` : '';
+  const prev =
+    offset > 0
+      ? `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(buildUrl(Math.max(0, offset - PAGE_SIZE)))}">← Previous</a>`
+      : '';
   const next =
     offset + page.rows.length < page.total
       ? `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(buildUrl(offset + page.rows.length))}">Next →</a>`

@@ -5,7 +5,7 @@ Moved out of `site/` because it cannot be honest or reachable as a marketing pag
 - `/signup` is a **console route** (`src/console/serve.ts`). In a co-hosted
   deployment (`vital serve --site site`) console routes win over the static
   fallthrough, so `site/signup/index.html` was never served.
-- In a standalone static deployment it *was* served — and it reported
+- In a standalone static deployment it _was_ served — and it reported
   "● account created" while its script only validated fields and toggled a
   success panel. Nothing was created anywhere.
 - The product closes sign-up after the first owner claims the tenant: the

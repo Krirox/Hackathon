@@ -44,7 +44,10 @@ for (const page of ['compiler', 'digest', 'learning', 'audit', 'data']) {
   const leaked = html.indexOf('max-width:960px');
   const shellReset = html.indexOf('max-width: none');
   check(`${page}: shell reset present`, shellReset !== -1);
-  check(`${page}: reset wins cascade (appears after leaked rule)`, leaked === -1 || (shellReset !== -1 && shellReset > leaked));
+  check(
+    `${page}: reset wins cascade (appears after leaked rule)`,
+    leaked === -1 || (shellReset !== -1 && shellReset > leaked),
+  );
   check(`${page}: back-link pill rule`, html.includes('.ws-scroll > a:first-of-type'));
 }
 const compiler = readOut('compiler');
