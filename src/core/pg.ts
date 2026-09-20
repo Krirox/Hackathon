@@ -61,9 +61,7 @@ export function openPostgres(url: string): AsyncDb {
   const useSsl = sslMode !== null && sslMode !== 'disable';
   const pool = new Pool({
     connectionString,
-    ...(useSsl
-      ? { ssl: { rejectUnauthorized: sslMode === 'verify-full' || sslMode === 'verify-ca' } }
-      : {}),
+    ...(useSsl ? { ssl: { rejectUnauthorized: sslMode === 'verify-full' || sslMode === 'verify-ca' } } : {}),
   });
 
   // Transaction context rides the async chain, never shared mutable state:
