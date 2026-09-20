@@ -6,6 +6,7 @@
 # (login/index.html already resolves as a directory index on every static host —
 # this rule just skips the extra 301 hop.)
 /login    /login/index.html   200
+/signup   /signup/index.html  200
 
 # One canonical entry point.
 /index.html   /   301

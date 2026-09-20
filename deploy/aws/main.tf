@@ -609,7 +609,10 @@ resource "aws_iam_policy" "ecs_task" {
         "${aws_s3_bucket.artifacts.arn}/*", "${aws_s3_bucket.audit.arn}/*"
       ] },
       { Effect = "Allow", Action = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource = [aws_sqs_queue.requests.arn] },
-      { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["${aws_cloudwatch_log_group.core.arn}:*"] }
+      { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["${aws_cloudwatch_log_group.core.arn}:*"] },
+      # Public sign-up funnel: the console signs up / verifies against the
+      # user pool with these task-role permissions (SigV4 in cognito.ts).
+      { Effect = "Allow", Action = ["cognito-idp:SignUp", "cognito-idp:InitiateAuth"], Resource = [aws_cognito_user_pool.public.arn] }
     ]
   })
 }
@@ -792,6 +795,12 @@ resource "aws_ecs_task_definition" "core" {
         # public bind. Set once, claim the owner (forced password change),
         # then rotate (unset + re-apply).
         { name = "VITAL_BOOTSTRAP_EMAIL", value = var.bootstrap_email },
+        # Production identity source (cognito.tf). The console's public
+        # sign-up creates the account in the pool first and mirrors it
+        # locally; login verifies against the pool, falling back to local
+        # rows for pool-less accounts. Region comes from AWS_REGION below.
+        { name = "VITAL_COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.public.id },
+        { name = "VITAL_COGNITO_CLIENT_ID", value = aws_cognito_user_pool_client.funnel.id },
         { name = "VITAL_WITH_WORKER", value = "1" },
         { name = "TALK_SURFACE", value = "buzz" },
         { name = "ARTIFACT_DIR", value = "/var/vital/sandboxes/artifacts" },

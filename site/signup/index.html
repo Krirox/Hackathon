@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sign up · VITAL</title>
+<meta name="description" content="Create a Vital account and start with free credits. Accounts are provisioned on your organization's console — the public site holds no sessions and no credentials."/>
+<meta name="robots" content="noindex,follow"/>
+<meta name="color-scheme" content="dark"/>
+<meta name="theme-color" content="#111111"/>
+<!-- Empty = same-origin console routes (co-hosted `vital serve --site`). Set to an absolute console origin for split deployments. -->
+<meta name="vital-console-url" content=""/>
+<link rel="icon" href="../favicon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="../apple-touch-icon.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../styles.css"/>
+<script src="signup.js" defer></script>
+</head>
+<body class="utility-page">
+<a class="skip-link" href="#top">Skip to content</a>
+<noscript><div class="noscript-note"><p><strong>Sign-up runs on your console.</strong> Vital is self-hosted: this public page posts account creation to the console it can reach, and holds no sessions and no credentials of its own. Without JavaScript, use the console directly.</p><p><a href="/signup">Claim this console on the co-hosted sign-up route</a> &middot; <a href="../login/">Sign in</a> &middot; <a href="../">Back to the site</a> &middot; <a href="mailto:hello@vital.company">Contact us</a></p><p>Each console names its bound organization on login.</p></div></noscript>
+<div class="bg-vignette" aria-hidden="true"></div>
+<div class="fx-grain" aria-hidden="true"></div>
+
+<header id="site-header">
+  <div class="header-bar">
+    <a class="pill" href="../">‹ HOME ›</a>
+    <nav class="header-nav" aria-label="Account and contact">
+      <a class="nav-signin" href="../login/" aria-label="Sign in to your console">Sign in</a>
+      <a class="cta-contact" data-cta="contact" href="mailto:hello@vital.company?subject=Vital%20pilot%20inquiry">
+        <span>Contact</span>
+        <span class="cta-accent-icon">›</span>
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top" tabindex="-1" class="utility-main">
+  <div class="utility-card">
+    <p class="section-label">VITAL / CREATE ACCOUNT</p>
+    <h1 class="utility-title">Create an account<span class="dot">.</span></h1>
+    <p class="utility-lede">One account, the whole governed loop — detect a change, cite assets, approve, measure. New accounts start with <b id="free-credits">100</b> free credits on the console this page is bound to.</p>
+
+    <p id="console-target" class="console-target" role="status">● locating your console…</p>
+
+    <form class="signup-form" id="signup-form" novalidate>
+      <div class="field-row">
+        <input class="signup-input" id="first-name" name="firstName" type="text" placeholder="First name" autocomplete="given-name" aria-label="First name" required/>
+        <input class="signup-input" id="last-name" name="lastName" type="text" placeholder="Last name" autocomplete="family-name" aria-label="Last name" required/>
+      </div>
+      <input class="signup-input" id="email" name="email" type="email" placeholder="Work email" autocomplete="email" aria-label="Work email" required/>
+      <div class="field-pass">
+        <input class="signup-input" id="password" name="new-password" type="password" placeholder="Create a password" autocomplete="new-password" aria-label="Create a password" aria-describedby="pass-hint" required/>
+        <button class="eye-btn" id="eye-btn" type="button" aria-label="Show password" aria-pressed="false">
+          <svg id="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          <svg id="eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" hidden aria-hidden="true">
+            <path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.2 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.2-1.6"/>
+            <path d="M3 3l18 18"/>
+          </svg>
+        </button>
+      </div>
+      <div class="pass-meter" id="pass-meter" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <p class="pass-hint" id="pass-hint">12+ characters · mix cases, numbers, symbols</p>
+
+      <label class="signup-consent" for="consent">
+        <input id="consent" name="consent" type="checkbox" required/>
+        <span>I agree to the <a href="mailto:hello@vital.company?subject=Terms%20%26%20Conditions">Terms &amp; Conditions</a></span>
+      </label>
+
+      <p class="signup-alert" id="signup-alert" role="alert" hidden></p>
+
+      <button class="cta-btn signup-submit" id="signup-submit" type="submit">
+        <span>Create account</span>
+        <span class="arrow" aria-hidden="true">→</span>
+      </button>
+    </form>
+
+    <p class="signin-note">Accounts are provisioned on the console this page reaches; the public site itself holds no sessions and no credentials. Each console names its bound organization on login.</p>
+
+    <div class="signup-success" id="signup-success" hidden>
+      <p class="console-target live" role="status">● account created · <span id="success-credits">100</span> free credits granted</p>
+      <h2 class="utility-title" id="success-title" tabindex="-1">Account created<span class="dot">.</span></h2>
+      <p class="utility-lede">Your account for <b id="success-email"></b> exists on the console and starts with <b id="success-credits-2">100</b> free credits. Sign in to run your first governed release loop.</p>
+      <div class="cta-actions">
+        <a id="success-signin" class="cta-btn" href="/login">
+          <span>Sign in</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="secondary-btn" href="../">Back to the site</a>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="dark-footer">
+  <div class="foot-grid">
+    <div class="f-brand">
+      VITAL<sup>®</sup>
+      <p>The grounding and reflex layer for the sovereign agent stack.</p>
+    </div>
+    <div class="foot-nav">
+      <a href="../">Home</a>
+      <a href="../#statement">Thesis</a>
+      <a href="../#platform">Platform</a>
+      <a href="../#systems">Subsystems</a>
+      <a href="../#wedge">Wedge</a>
+    </div>
+    <div class="foot-meta mono">
+      LEDGER · ROUTER · COMPILER<br/>
+      BUZZ · JCODE · QM-ABSORB<br/>
+      © 2026 VITAL · ALL RIGHTS RESERVED
+    </div>
+  </div>
+</footer>
+</body>
+</html>

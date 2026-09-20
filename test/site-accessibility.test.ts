@@ -102,7 +102,10 @@ T('FLOW-011 source: governed release copy, proof levels, same-origin CTAs, invit
   assert.doesNotMatch(html, /localhost|127\.0\.0\.1/);
   assert.doesNotMatch(app, /localhost|127\.0\.0\.1/);
   assert.doesNotMatch(html, /target="_blank"/);
-  assert.doesNotMatch(html, /sign.?up|create (an? )?(org|account)|get started|new org/i);
+  assert.doesNotMatch(html, /get started|new org/i);
+  // Self-serve sign-up is a live funnel now (site/signup + /api/signup); the
+  // gate keeps banning hype copy instead of the account CTA itself.
+  assert.match(html, /href="\/signup\/" data-cta="signup"/);
   assert.match(html, /proof-tag shipped/);
   assert.match(html, /proof-tag demo/);
   assert.match(html, /proof-tag pilot/);

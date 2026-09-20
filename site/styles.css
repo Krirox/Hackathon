@@ -222,7 +222,8 @@ a {
   order: 3;
 }
 
-.nav-signin {
+.nav-signin,
+.nav-signup {
   color: var(--text-muted);
   font-size: 13px;
   letter-spacing: 0.02em;
@@ -237,7 +238,8 @@ a {
   transition: all 0.3s var(--ease);
 }
 
-.nav-signin:hover {
+.nav-signin:hover,
+.nav-signup:hover {
   border-color: var(--border-focus);
   color: var(--text-pure);
 }
@@ -1633,8 +1635,14 @@ body.menu-open {
   .header-nav {
     gap: 8px;
   }
-  .nav-signin {
+  .nav-signin,
+  .nav-signup {
     padding: 0 10px;
+  }
+  /* Keep the bar from overflowing at 320-375px: the hero CTA and the menu
+     overlay still carry Sign up on small screens. */
+  .header-nav .nav-signup {
+    display: none;
   }
   .hero-overlay {
     padding-top: 100px;
