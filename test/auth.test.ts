@@ -11,6 +11,7 @@ import {
   createAccountNotice,
   createInvitation,
   disableConfirmation,
+  disableConfirmations,
   invitationNextSteps,
   inviteUser,
   listInvitations,
@@ -1656,6 +1657,37 @@ T('FLOW-009: disable confirmation names the person, sessions, and handoff need',
   const ownerConfirm = await disableConfirmation(db, TEN, owner.id);
   eq(ownerConfirm.lastUsableOwner, true);
   await rejects(() => disableConfirmation(db, TEN, 'usr_missing'), 'UNKNOWN_USER');
+});
+
+T('FLOW-009: the batched confirmation answers what the per-user calls answered', async () => {
+  // The team page asked for its members one at a time — four statements per row,
+  // which is a page whose cost grows with the org chart. The batch is one query
+  // per question whatever the number of rows, so the thing that must not drift is
+  // the answer: person, live sessions, the consequence wording, the
+  // outstanding-work counts and the last-usable-owner flag.
+  const { db, owner } = await authed();
+  const admin = await inviteUser(
+    db,
+    TEN,
+    { email: 'ops@acme.test', name: 'Ops Admin', role: 'admin', password: 'a-long-admin-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  const member = await inviteUser(
+    db,
+    TEN,
+    { email: 'dev3@acme.test', name: 'Dev Three', role: 'member', password: 'a-long-member-password' },
+    { userId: owner.id, role: owner.role },
+    NOW,
+  );
+  await loginCookie(db, 'dev3@acme.test', 'a-long-member-password');
+  const everyone = [owner, admin, member];
+  const batch = await disableConfirmations(db, TEN, everyone);
+  eq(batch.size, everyone.length, 'one confirmation per user:');
+  for (const u of everyone) {
+    eq(batch.get(u.id), await disableConfirmation(db, TEN, u.id), `${u.email} matches the single call:`);
+  }
+  eq((await disableConfirmations(db, TEN, [])).size, 0, 'an empty list is an empty map:');
 });
 
 T('FLOW-009: duplicate and disabled cases map to next steps', async () => {

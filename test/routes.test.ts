@@ -910,7 +910,7 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
       // not cover this page's most expensive per-member work. Flagged, not
       // hidden: /team costs *more* per member, and the number below is
       // calibrated to this fixture.
-      'core/auth': 12,
+      'core/auth': 11,
       'gov/trust': 1,
     },
   },
@@ -1121,22 +1121,29 @@ T('every page stays inside its statement budget', async () => {
   const base = `http://127.0.0.1:${server.port}`;
   try {
     const cookie = await login(base);
-    // One engineering member, for the pages the owner is refused. Without them
-    // the board's budget would be a measurement of its 403.
+    // Engineering members, for the pages the owner is refused. Without one the
+    // board's budget would be a measurement of its 403.
+    //
+    // Two of them, not one: with a single member a per-row loop and a batch cost
+    // almost the same, and the thing these budgets exist to catch — a page whose
+    // cost grows with the org chart — would stay invisible. `/team` is 11 either
+    // way; a regression to per-member reads makes it 15.
     //
     // Invited and accepted rather than `inviteUser`d: that helper flags the
     // account `mustChangePassword`, so the session it produces is redirected to
     // /change-password and the "page" measured would be that redirect.
-    const engineerEmail = 'eng@acme.test';
-    const { token } = await createInvitation(
-      db,
-      TEN,
-      { email: engineerEmail, name: 'Eng One', role: 'member', team: 'engineering' },
-      { userId: owner.id, role: 'owner' },
-      NOW,
-    );
-    await acceptInvitation(db, token, 'the-console-password', NOW);
-    const engineerCookie = await login(base, engineerEmail);
+    const engineerEmails = ['eng@acme.test', 'eng2@acme.test'];
+    for (const [i, email] of engineerEmails.entries()) {
+      const { token } = await createInvitation(
+        db,
+        TEN,
+        { email, name: `Eng ${i + 1}`, role: 'member', team: 'engineering' },
+        { userId: owner.id, role: 'owner' },
+        NOW,
+      );
+      await acceptInvitation(db, token, 'the-console-password', NOW);
+    }
+    const engineerCookie = await login(base, engineerEmails[0]!);
     const headersFor = (page: PageBudget): Record<string, string> => {
       if (page.anonymous) return {};
       return { cookie: page.as === 'engineer' ? engineerCookie : cookie };

@@ -22,7 +22,7 @@ import {
   changeUserRole,
   createAccountNotice,
   createInvitation,
-  disableConfirmation,
+  disableConfirmations,
   disableUser,
   getTenant,
   getUser,
@@ -5494,15 +5494,17 @@ export function startConsoleServer(
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (auth.user.mustChangePassword) return redirect(res, '/change-password');
             const data = await teamData();
-            const confirmations = new Map<string, DisableConfirmation>();
-            for (const u of data.users) {
-              if (!canDisable(auth.user, u)) continue;
-              try {
-                confirmations.set(u.id, await disableConfirmation(db, tenant, u.id));
-              } catch {
-                continue;
-              }
-            }
+            // One batch for the whole list. This used to be a loop calling
+            // `disableConfirmation` per member — four statements per row the page
+            // drew, and a `try`/`catch` that would have swallowed a real database
+            // error into a silently missing confirmation. The users here come
+            // from `data.users`, so the `UNKNOWN_USER` case the single-user call
+            // guarded against cannot arise.
+            const confirmations = await disableConfirmations(
+              db,
+              tenant,
+              data.users.filter((u) => canDisable(auth.user, u)),
+            );
             const q = url.searchParams.get('q') ?? undefined;
             const role = url.searchParams.get('role') ?? undefined;
             const status = url.searchParams.get('status') ?? undefined;

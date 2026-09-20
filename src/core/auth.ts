@@ -841,6 +841,50 @@ export async function countOutstandingWork(db: AsyncDb, tenant: string, user: Us
   return { claimCount: Number(claims.n), requestCount: Number(requests.n) };
 }
 
+/**
+ * Outstanding work for many users, in a fixed number of statements.
+ *
+ * The single-user version matches a row on any of the three identifiers an
+ * accountability field may hold (`owner` / `on_behalf_of` are written with
+ * whichever of email, name or id was current at the time), so this groups by that
+ * value and attributes each group to every user whose identifiers contain it.
+ * Identifiers are de-duplicated per user because `IN (…)` never counts the same
+ * value twice, and the per-user loop below would.
+ *
+ * Two people who share an identifier — a name that is also someone's email — each
+ * count the row, which is what asking for them separately already did.
+ */
+async function countOutstandingWorkForMany(
+  db: AsyncDb,
+  tenant: string,
+  users: readonly User[],
+): Promise<Map<string, OutstandingWork>> {
+  const out = new Map<string, OutstandingWork>(users.map((u) => [u.id, { claimCount: 0, requestCount: 0 }]));
+  if (users.length === 0) return out;
+  const values = [...new Set(users.flatMap((u) => [u.email, u.name, u.id]))];
+  const ph = values.map(() => '?').join(', ');
+  const claims = (await db
+    .prepare(
+      `SELECT owner AS k, COUNT(*) AS n FROM claims WHERE tenant = ? AND status NOT IN ${ACTIVE_CLAIM_STATUSES} AND owner IN (${ph}) GROUP BY owner`,
+    )
+    .all(tenant, ...values)) as { k: string; n: number }[];
+  const requests = (await db
+    .prepare(
+      `SELECT on_behalf_of AS k, COUNT(*) AS n FROM requests WHERE tenant = ? AND state IN ${OPEN_REQUEST_STATES} AND on_behalf_of IN (${ph}) GROUP BY on_behalf_of`,
+    )
+    .all(tenant, ...values)) as { k: string; n: number }[];
+  const claimByKey = new Map(claims.map((r) => [String(r.k), Number(r.n)]));
+  const requestByKey = new Map(requests.map((r) => [String(r.k), Number(r.n)]));
+  for (const u of users) {
+    const work = out.get(u.id)!;
+    for (const key of new Set([u.email, u.name, u.id])) {
+      work.claimCount += claimByKey.get(key) ?? 0;
+      work.requestCount += requestByKey.get(key) ?? 0;
+    }
+  }
+  return out;
+}
+
 async function reassignAccountableWork(
   db: AsyncDb,
   tenant: string,
@@ -1127,18 +1171,16 @@ export interface DisableConfirmation {
   lastUsableOwner: boolean;
 }
 
-export async function disableConfirmation(db: AsyncDb, tenant: string, userId: string): Promise<DisableConfirmation> {
-  const target = await getUser(db, tenant, userId);
-  if (!target) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
-  const sessions = (await db
-    .prepare('SELECT COUNT(*) AS n FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL')
-    .get(userId)) as { n: number };
-  const work = await countOutstandingWork(db, tenant, target);
-  let lastUsableOwner = false;
-  if (target.role === 'owner') lastUsableOwner = (await countActiveOwners(db, tenant)) <= 1;
+/** The confirmation body. Built in one place so both entry points word it identically. */
+function confirmationFor(
+  person: User,
+  liveSessions: number,
+  work: OutstandingWork,
+  lastUsableOwner: boolean,
+): DisableConfirmation {
   return {
-    person: { id: target.id, email: target.email, name: target.name, role: target.role },
-    liveSessions: Number(sessions.n),
+    person: { id: person.id, email: person.email, name: person.name, role: person.role },
+    liveSessions,
     sessionConsequence: 'Disabling revokes every live session immediately.',
     accessConsequence:
       'They cannot sign in again until reactivated. Reactivation restores sign-in access but never restores revoked sessions.',
@@ -1146,6 +1188,59 @@ export async function disableConfirmation(db: AsyncDb, tenant: string, userId: s
     needsHandoff: work.claimCount + work.requestCount > 0,
     lastUsableOwner,
   };
+}
+
+/**
+ * One disable confirmation per user, in a fixed number of statements.
+ *
+ * `disableConfirmation` is the right shape for one person and the wrong one for a
+ * list: the team page built it inside a loop over its members, so the page cost
+ * four statements per row it drew — a session count plus the two
+ * outstanding-work counts, on top of reading a user the page already had. That is
+ * a page whose cost grows with the org chart, and the console's per-page
+ * statement budget is what caught it.
+ *
+ * Users are taken rather than ids because the caller that needs this already has
+ * them; the single-user entry point below is the one that has to look one up, and
+ * it keeps its `UNKNOWN_USER` throw for an id that does not exist.
+ */
+export async function disableConfirmations(
+  db: AsyncDb,
+  tenant: string,
+  users: readonly User[],
+): Promise<Map<string, DisableConfirmation>> {
+  const out = new Map<string, DisableConfirmation>();
+  if (users.length === 0) return out;
+  const ids = users.map((u) => u.id);
+  const ph = ids.map(() => '?').join(', ');
+  const sessions = (await db
+    .prepare(
+      `SELECT user_id, COUNT(*) AS n FROM auth_sessions WHERE user_id IN (${ph}) AND revoked_at IS NULL GROUP BY user_id`,
+    )
+    .all(...ids)) as { user_id: string; n: number }[];
+  const liveSessions = new Map(sessions.map((r) => [String(r.user_id), Number(r.n)]));
+  const work = await countOutstandingWorkForMany(db, tenant, users);
+  // Only owners can be the last usable owner, and the count is tenant-wide, so
+  // one query answers it for every owner in the batch.
+  const ownersLeft = users.some((u) => u.role === 'owner') ? await countActiveOwners(db, tenant) : 0;
+  for (const u of users) {
+    out.set(
+      u.id,
+      confirmationFor(
+        u,
+        liveSessions.get(u.id) ?? 0,
+        work.get(u.id) ?? { claimCount: 0, requestCount: 0 },
+        u.role === 'owner' && ownersLeft <= 1,
+      ),
+    );
+  }
+  return out;
+}
+
+export async function disableConfirmation(db: AsyncDb, tenant: string, userId: string): Promise<DisableConfirmation> {
+  const target = await getUser(db, tenant, userId);
+  if (!target) throw new AuthError('UNKNOWN_USER', `no user ${userId} in tenant ${tenant}`);
+  return (await disableConfirmations(db, tenant, [target])).get(target.id)!;
 }
 
 // ------------------------------------------------------------------- login ----
