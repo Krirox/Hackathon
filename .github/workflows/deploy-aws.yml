@@ -57,7 +57,11 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - name: Resolve tag
         id: tag
-        run: echo "tag=${{ inputs.image_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+        # SHA alone is not enough: the repos use IMMUTABLE tags, so a re-run
+        # of the same commit would collide with its own previous push
+        # ("tag invalid: already exists ... immutable"). The run id makes
+        # every dispatch unique while staying traceable to the commit.
+        run: echo "tag=${{ inputs.image_tag || format('{0}-{1}', github.sha, github.run_id) }}" >> "$GITHUB_OUTPUT"
       - name: Build and push vital-core
         run: |
           aws ecr describe-repositories --repository-names vital-core 2>/dev/null || aws ecr create-repository --repository-name vital-core --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true
