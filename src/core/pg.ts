@@ -50,7 +50,16 @@ const cleanParam = (v: unknown): unknown => {
 };
 
 export function openPostgres(url: string): AsyncDb {
-  const pool = new Pool({ connectionString: url });
+  const parsed = new URL(url);
+  const sslMode = parsed.searchParams.get('sslmode');
+  // RDS presents an Amazon CA chain that Node treats as self-signed unless
+  // verify-full is wired with the CA bundle. Pilot stacks use encrypted
+  // connections without custom CA mounting (sslmode=require on the URL).
+  const ssl =
+    sslMode && sslMode !== 'disable'
+      ? { rejectUnauthorized: sslMode === 'verify-full' || sslMode === 'verify-ca' }
+      : undefined;
+  const pool = new Pool({ connectionString: url, ...(ssl ? { ssl } : {}) });
 
   // Transaction context rides the async chain, never shared mutable state:
   // concurrent transactions each hold their own pool client (READ COMMITTED
