@@ -50,16 +50,21 @@ const cleanParam = (v: unknown): unknown => {
 };
 
 export function openPostgres(url: string): AsyncDb {
-  const parsed = new URL(url);
+  const normalized = url.replace(/^postgres:\/\//, 'postgresql://');
+  const parsed = new URL(normalized);
   const sslMode = parsed.searchParams.get('sslmode');
-  // RDS presents an Amazon CA chain that Node treats as self-signed unless
-  // verify-full is wired with the CA bundle. Pilot stacks use encrypted
-  // connections without custom CA mounting (sslmode=require on the URL).
-  const ssl =
-    sslMode && sslMode !== 'disable'
-      ? { rejectUnauthorized: sslMode === 'verify-full' || sslMode === 'verify-ca' }
-      : undefined;
-  const pool = new Pool({ connectionString: url, ...(ssl ? { ssl } : {}) });
+  parsed.searchParams.delete('sslmode');
+  const connectionString = parsed.toString().replace(/^postgresql:\/\//, 'postgres://');
+  // node-pg v8+ maps sslmode=require in the URL to verify-full semantics, which
+  // rejects RDS's Amazon CA unless we ship the bundle. Strip the query param and
+  // pass ssl explicitly for encrypted-but-unverified pilot RDS (see deploy/aws).
+  const useSsl = sslMode !== null && sslMode !== 'disable';
+  const pool = new Pool({
+    connectionString,
+    ...(useSsl
+      ? { ssl: { rejectUnauthorized: sslMode === 'verify-full' || sslMode === 'verify-ca' } }
+      : {}),
+  });
 
   // Transaction context rides the async chain, never shared mutable state:
   // concurrent transactions each hold their own pool client (READ COMMITTED
