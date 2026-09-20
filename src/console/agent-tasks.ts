@@ -23,14 +23,7 @@ import type { CoordinationRequest } from '../core/types.ts';
 import { esc, requestDetailUrl, withReturnTo } from './render.ts';
 
 /** A settled task. The list shows only the non-terminal set; the tree shows all. */
-export const TERMINAL_STATES = new Set([
-  'COMPLETED',
-  'DECLINED',
-  'FAILED',
-  'EXPIRED',
-  'TERMINATED_BUDGET',
-  'DENIED',
-]);
+export const TERMINAL_STATES = new Set(['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED']);
 
 /** Seconds after which an IN_FLIGHT task with no write is considered quiet. */
 const PROCESSING_WINDOW_MS = 30_000;
@@ -188,7 +181,8 @@ function indexByParent(requests: CoordinationRequest[]): Map<string, Coordinatio
     if (arr) arr.push(r);
     else map.set(r.parentRequestId, [r]);
   }
-  for (const arr of map.values()) arr.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  for (const arr of map.values())
+    arr.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   return map;
 }
 
@@ -199,7 +193,9 @@ function retimestamp(node: AgentNode, now: string, byParent: Map<string, Coordin
     request: node.request,
     depth: node.depth,
     status: deriveStatus(node.request, now),
-    children: reqChildren.map((c) => retimestamp(buildNode(c, node.depth + 1, byParent, new Set([node.request.id])), now, byParent)),
+    children: reqChildren.map((c) =>
+      retimestamp(buildNode(c, node.depth + 1, byParent, new Set([node.request.id])), now, byParent),
+    ),
   };
 }
 
@@ -310,9 +306,18 @@ function guardStripHtml(task: AgentTask, now: string): string {
   const lease = leaseGuard(task.request, now);
   const budget = budgetGuard(task.request);
   const chips: string[] = [];
-  if (lease) chips.push(`<span class="v-guard" data-state="${lease.level}"><span class="v-guard__k">lease</span> ${esc(lease.text)}</span>`);
-  if (budget.dollars) chips.push(`<span class="v-guard" data-state="${budget.dollars.level}"><span class="v-guard__k">spend</span> ${esc(budget.dollars.text)}</span>`);
-  if (budget.tokens) chips.push(`<span class="v-guard" data-state="${budget.tokens.level}"><span class="v-guard__k">tokens</span> ${esc(budget.tokens.text)}</span>`);
+  if (lease)
+    chips.push(
+      `<span class="v-guard" data-state="${lease.level}"><span class="v-guard__k">lease</span> ${esc(lease.text)}</span>`,
+    );
+  if (budget.dollars)
+    chips.push(
+      `<span class="v-guard" data-state="${budget.dollars.level}"><span class="v-guard__k">spend</span> ${esc(budget.dollars.text)}</span>`,
+    );
+  if (budget.tokens)
+    chips.push(
+      `<span class="v-guard" data-state="${budget.tokens.level}"><span class="v-guard__k">tokens</span> ${esc(budget.tokens.text)}</span>`,
+    );
   return `<div class="v-guardstrip">${chips.join('')}</div>`;
 }
 
@@ -347,14 +352,39 @@ ${node.children.map((c) => renderNode(c, now, here)).join('')}`;
 function renderSwarmChain(task: AgentTask): string {
   if (task.swarmChain.length === 0) return '';
   const hops = task.swarmChain
-    .map((s, i) => `<span class="v-swarm-hop">${esc(s)}</span>${i < task.swarmChain.length - 1 ? '<span class="v-swarm-sep" aria-hidden="true">→</span>' : ''}`)
+    .map(
+      (s, i) =>
+        `<span class="v-swarm-hop">${esc(s)}</span>${i < task.swarmChain.length - 1 ? '<span class="v-swarm-sep" aria-hidden="true">→</span>' : ''}`,
+    )
     .join('');
   return `<div class="v-swarm-chain" title="Swarm deliberation chain (hop_chain): unparented handoffs, not sub-agents">
   <span class="v-swarm-label">swarm</span>${hops}</div>`;
 }
 
+/**
+ * What a task's code review looks like from here: its state, and nothing else.
+ *
+ * A review is keyed by mission id and a task is keyed by request id, so the only
+ * honest link between them is the one a reader makes: the id offered as the
+ * review's key. The row offers it, and says whether a review is already open
+ * under it — the page itself is the one that explains what a review is.
+ */
+export interface ReviewLink {
+  status: string;
+  updatedAt: string;
+}
+
+/** The review affordance for one task: open it, or open one under this id. */
+function reviewActionHtml(requestId: string, review: ReviewLink | undefined): string {
+  const href = `/console/review/${encodeURIComponent(requestId)}`;
+  if (!review) {
+    return `<a class="v-btn v-btn-secondary v-btn-sm" href="${esc(href)}" title="No review is open under this task's id">Review change set →</a>`;
+  }
+  return `<span class="v-badge ${review.status === 'COMPLETED' ? 'v-badge-good' : 'v-badge-info'}" title="Review ${esc(review.status)} — updated ${esc(review.updatedAt)}">review · ${esc(review.status)}</span> <a class="v-btn v-btn-secondary v-btn-sm" href="${esc(href)}">Open review →</a>`;
+}
+
 /** One expandable list row. Uses <details name="v-tasks"> so only one opens. */
-export function renderTaskRow(task: AgentTask, now: string, here: string): string {
+export function renderTaskRow(task: AgentTask, now: string, here: string, review?: ReviewLink): string {
   const r = task.request;
   const live = task.status.runtime === 'processing';
   const subLabel =
@@ -391,6 +421,7 @@ export function renderTaskRow(task: AgentTask, now: string, here: string): strin
     </div>
     <div class="v-task-detail-actions">
       <a class="v-btn v-btn-secondary v-btn-sm" href="${esc(withReturnTo(`/console/agent-tasks/${encodeURIComponent(r.id)}`, here))}">Open live view →</a>
+      ${reviewActionHtml(r.id, review)}
     </div>
   </div>
 </details>`;
@@ -418,8 +449,14 @@ export function renderLivePill(anyLive: boolean): string {
 }
 
 /** The list page body (LIVE pill + KPIs + expandable rows). Inside renderListPage. */
-export function renderAgentTaskList(tasks: AgentTask[], totals: TaskTotals, now: string, here: string): string {
-  const rows = tasks.map((t) => renderTaskRow(t, now, here)).join('');
+export function renderAgentTaskList(
+  tasks: AgentTask[],
+  totals: TaskTotals,
+  now: string,
+  here: string,
+  reviews: ReadonlyMap<string, ReviewLink> = new Map(),
+): string {
+  const rows = tasks.map((t) => renderTaskRow(t, now, here, reviews.get(t.request.id))).join('');
   return `<div class="v-task-list" data-now="${esc(now)}">
   <div class="v-split" style="margin-bottom:14px;">
     <p class="v-lede" style="margin:0">Real-time view of Jcode coding-agent executions in flight. Expand a task to see its agents.</p>
@@ -436,6 +473,7 @@ export function renderAgentTaskDetail(
   feed: { action: string; actor: string; detail: string; at: string }[],
   now: string,
   here: string,
+  review?: ReviewLink,
 ): string {
   const r = task.request;
   const feedHtml = feed.length
@@ -485,6 +523,15 @@ export function renderAgentTaskDetail(
         </div>
         ${task.subAgents.map((n) => renderNode(n, now, here)).join('') || '<p class="v-meta" style="padding:8px 0 0 22px">no sub-agents</p>'}
       </div>
+    </div></section>
+    <section class="v-card v-card-flush"><div style="padding:18px 20px;">
+      <h2 class="v-card-title" style="margin-bottom:6px;">Code review</h2>
+      ${
+        review
+          ? `<p class="v-sub" style="font-size:12.5px;margin:0 0 10px;">A review is open under this task's id — <strong>${esc(review.status)}</strong>, updated ${esc(review.updatedAt)}. Changes are decided hunk by hunk, and a VERIFIED snapshot is created only after review and verification pass.</p>`
+          : `<p class="v-sub" style="font-size:12.5px;margin:0 0 10px;">No review is open under this task's id. A review compares a working tree against a git baseline and gates the change hunk by hunk, with a secret scan before any snapshot.</p>`
+      }
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">${reviewActionHtml(r.id, review)}</div>
     </div></section>
     <a class="v-btn v-btn-secondary v-btn-sm" href="${esc(requestDetailUrl(r.id))}">Full request record →</a>
   </div>

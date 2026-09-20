@@ -61,6 +61,16 @@ locals {
   azs            = slice(data.aws_availability_zones.available.names, 0, var.az_count)
   core_image     = var.core_image
   executor_image = var.executor_image
+  bedrock_model_env = [
+    { name = "DEV_MODEL_PROVIDER", value = "bedrock" },
+    { name = "PROD_MODEL_PROVIDER", value = "bedrock" },
+    { name = "BEDROCK_DEV_MODEL", value = var.bedrock_dev_model_id },
+    { name = "BEDROCK_MODEL", value = var.bedrock_prod_model_id },
+    { name = "APPROVED_DEV_MODELS", value = var.bedrock_dev_model_id },
+    { name = "APPROVED_PROD_MODELS", value = var.bedrock_prod_model_id },
+  ]
+  # Bedrock API keys are region-scoped — egress allowlist must match var.region.
+  allowed_egress = "${var.allowed_egress_hosts},bedrock-runtime.${var.region}.amazonaws.com"
 }
 
 # ------------------------------------------------------------- networking ----
@@ -294,15 +304,10 @@ resource "aws_secretsmanager_secret_version" "serper" {
   secret_id     = aws_secretsmanager_secret.serper.id
   secret_string = var.serper_api_key
 }
-resource "aws_secretsmanager_secret" "gemini" { name = "${local.name}/gemini-api-key" }
-resource "aws_secretsmanager_secret_version" "gemini" {
-  secret_id     = aws_secretsmanager_secret.gemini.id
-  secret_string = var.gemini_api_key
-}
-resource "aws_secretsmanager_secret" "novita" { name = "${local.name}/novita-api-key" }
-resource "aws_secretsmanager_secret_version" "novita" {
-  secret_id     = aws_secretsmanager_secret.novita.id
-  secret_string = var.novita_api_key
+resource "aws_secretsmanager_secret" "bedrock" { name = "${local.name}/bedrock-api-key" }
+resource "aws_secretsmanager_secret_version" "bedrock" {
+  secret_id     = aws_secretsmanager_secret.bedrock.id
+  secret_string = var.bedrock_api_key
 }
 # Operator secret is optional (empty var = no secret, mutations ungated):
 # count-gated so dev applies create nothing to rotate or leak.
@@ -556,8 +561,7 @@ resource "aws_iam_policy" "ecs_execution_secrets" {
           aws_secretsmanager_secret.core_secret.arn,
           aws_secretsmanager_secret.webhook.arn,
           aws_secretsmanager_secret.serper.arn,
-          aws_secretsmanager_secret.gemini.arn,
-          aws_secretsmanager_secret.novita.arn
+          aws_secretsmanager_secret.bedrock.arn
           ], aws_secretsmanager_secret.operator[*].arn,
           aws_secretsmanager_secret.agent_master_key[*].arn,
           aws_secretsmanager_secret.review_secret[*].arn,
@@ -595,7 +599,7 @@ resource "aws_iam_policy" "ecs_task" {
         aws_secretsmanager_secret.db_url.arn,
         aws_secretsmanager_secret.tenant_hmac.arn, aws_secretsmanager_secret.core_secret.arn,
         aws_secretsmanager_secret.webhook.arn, aws_secretsmanager_secret.serper.arn,
-        aws_secretsmanager_secret.gemini.arn, aws_secretsmanager_secret.novita.arn
+        aws_secretsmanager_secret.bedrock.arn
       ], aws_secretsmanager_secret.operator[*].arn) },
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = [
         "${aws_s3_bucket.artifacts.arn}/*", "${aws_s3_bucket.audit.arn}/*"
@@ -805,8 +809,8 @@ resource "aws_ecs_task_definition" "core" {
         # the task role has no ecs:RunTask to make one. Leave it unset until the
         # driver actually launches tasks — see the staged note in variables.tf.
         { name = "AWS_REGION", value = var.region },
-        { name = "ALLOWED_EGRESS_HOSTS", value = var.allowed_egress_hosts }
-        ], local.tls_enabled == 1 ? [
+        { name = "ALLOWED_EGRESS_HOSTS", value = local.allowed_egress }
+        ], local.bedrock_model_env, local.tls_enabled == 1 ? [
         # Only with a certificate attached (dns.tf): the ALB then terminates
         # TLS and redirects :80, so the session cookie must carry `Secure` or
         # the browser will also send it over a plaintext http:// downgrade.
@@ -823,8 +827,7 @@ resource "aws_ecs_task_definition" "core" {
           { name = "VITAL_CORE_SECRET", valueFrom = aws_secretsmanager_secret.core_secret.arn },
           { name = "WEBHOOK_SECRET", valueFrom = aws_secretsmanager_secret.webhook.arn },
           { name = "SERPER_API_KEY", valueFrom = aws_secretsmanager_secret.serper.arn },
-          { name = "GEMINI_API_KEY", valueFrom = aws_secretsmanager_secret.gemini.arn },
-          { name = "NOVITA_API_KEY", valueFrom = aws_secretsmanager_secret.novita.arn }
+          { name = "BEDROCK_API_KEY", valueFrom = aws_secretsmanager_secret.bedrock.arn }
         ],
         var.operator_secret == "" ? [] : [
           { name = "VITAL_OPERATOR_SECRET", valueFrom = aws_secretsmanager_secret.operator[0].arn }
@@ -1029,16 +1032,17 @@ resource "aws_lambda_function" "executor" {
     variables = {
       VITAL_TENANT          = "acme"
       VITAL_MIGRATE_ON_BOOT = "0"
-      ALLOWED_EGRESS_HOSTS  = var.allowed_egress_hosts
-      APPROVED_PROD_MODELS  = "deepseek/deepseek-v4"
-      APPROVED_DEV_MODELS   = "gemini-3.8-flash"
+      ALLOWED_EGRESS_HOSTS  = local.allowed_egress
+      DEV_MODEL_PROVIDER    = "bedrock"
+      PROD_MODEL_PROVIDER   = "bedrock"
+      BEDROCK_DEV_MODEL     = var.bedrock_dev_model_id
+      BEDROCK_MODEL         = var.bedrock_prod_model_id
+      APPROVED_PROD_MODELS  = var.bedrock_prod_model_id
+      APPROVED_DEV_MODELS   = var.bedrock_dev_model_id
+      AWS_REGION            = var.region
       ARTIFACT_BUCKET       = aws_s3_bucket.artifacts.bucket
-      # Without these the handler falls back to sqlite :memory: and keyless
-      # model calls — every job fails at coord.get. Values ride TF state
-      # (sensitive); rotation = new secret version + re-apply.
-      DATABASE_URL   = aws_secretsmanager_secret_version.db_url.secret_string
-      GEMINI_API_KEY = aws_secretsmanager_secret_version.gemini.secret_string
-      NOVITA_API_KEY = aws_secretsmanager_secret_version.novita.secret_string
+      DATABASE_URL          = aws_secretsmanager_secret_version.db_url.secret_string
+      BEDROCK_API_KEY       = aws_secretsmanager_secret_version.bedrock.secret_string
     }
   }
   logging_config {

@@ -70,7 +70,10 @@ export function verifyScopeToken(secret: string, token: string, now: string): Sc
   if (!grant.scope || !Array.isArray(grant.grants))
     throw new IdentityError('MALFORMED_TOKEN', 'scope token carries no scope/grants');
   if (grant.grants.length === 0)
-    throw new IdentityError('MALFORMED_TOKEN', 'scope token carries no grants: a token that authorizes nothing verifies to nothing');
+    throw new IdentityError(
+      'MALFORMED_TOKEN',
+      'scope token carries no grants — a token that authorizes nothing verifies to nothing',
+    );
   if (now > grant.expiresAt)
     throw new IdentityError('EXPIRED_TOKEN', `scope "${grant.scope}" token lapsed at ${grant.expiresAt}`);
   return grant;
@@ -82,10 +85,7 @@ export function verifyScopeToken(secret: string, token: string, now: string): Sc
  */
 export function assertTokenAudience(grant: ScopeGrant, requestId: string): void {
   if (!grant.audience) {
-    throw new IdentityError(
-      'NO_AUDIENCE',
-      'scope token names no request: mint with audience set to the request id',
-    );
+    throw new IdentityError('NO_AUDIENCE', 'scope token names no request — mint with audience set to the request id');
   }
   if (grant.audience !== requestId) {
     throw new IdentityError(

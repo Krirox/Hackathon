@@ -100,9 +100,7 @@ export async function listCompileCandidates(
   const out: CompileCandidate[] = [];
   for (const candidate of mined) {
     const rows = await evidenceFor(db, tenant, candidate.intent);
-    const usable = rows.filter(
-      (r) => r.outcome !== 'UNRESOLVED' && Number(r.router_confidence) >= 0.5,
-    );
+    const usable = rows.filter((r) => r.outcome !== 'UNRESOLVED' && Number(r.router_confidence) >= 0.5);
     const scopes = [...new Set(usable.map((r) => String(r.scope)))].sort();
     const tiers = [
       ...new Set(
@@ -118,7 +116,8 @@ export async function listCompileCandidates(
     if (usable.length < minRepeats) {
       blocked = `${usable.length} of ${minRepeats} required resolved successes`;
     } else if (originModels.length === 0) {
-      blocked = 'no executor provenance on these traces: the compiler will not guess which models the procedure came from';
+      blocked =
+        'no executor provenance on these traces — the compiler will not guess which models the procedure came from';
     } else if (tiers.length === 0) {
       blocked = 'no routing tier recorded for these traces';
     }
@@ -161,7 +160,7 @@ export async function compileCandidate(
   const candidate = candidates.find((c) => c.intent === input.intent);
   if (!candidate) {
     throw new Error(
-      `no compilable candidate for intent "${input.intent}". The compiler only learns from repeated successful traces`,
+      `no compilable candidate for intent "${input.intent}" — the compiler only learns from repeated successful traces`,
     );
   }
   if (candidate.blocked) throw new Error(`candidate "${candidate.intent}" is not compilable: ${candidate.blocked}`);
@@ -235,7 +234,7 @@ export async function enqueueTransferTest(
   // row would be negative *evidence*, and misconfiguration is not evidence.
   if (targetScope === card.originScope) {
     throw new Error(
-      `a transfer must leave the card's own scope: ${card.originScope} cannot send work to itself; pick a different target scope`,
+      `a transfer must leave the card's own scope — ${card.originScope} cannot send work to itself; pick a different target scope`,
     );
   }
   if (!input.command.trim()) throw new Error('a transfer command is required');

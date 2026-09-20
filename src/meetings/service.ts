@@ -159,7 +159,11 @@ export class MeetingService {
     }
   }
 
-  async endMeeting(tenant: string, meetingId: string, endedByUserId: string): Promise<Meeting> {
+  // The caller knows who ended the meeting, but the store has no `ended_by`
+  // column: recording it would be a schema change, not a signature change. The
+  // parameter stays (callers pass it, the live room labels the event with it)
+  // and is prefixed per the repo's rule for an argument a body does not read.
+  async endMeeting(tenant: string, meetingId: string, _endedByUserId: string): Promise<Meeting> {
     const meeting = await getMeetingById(this.db, tenant, meetingId);
     if (!meeting) {
       throw new Error(`[meeting-service] Meeting ${meetingId} not found`);

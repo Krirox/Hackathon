@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict';
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { T, eq, fresh, TEN, NOW } from './helpers.ts';
 import { MeetingService } from '../src/meetings/service.ts';
 import { MeetingSignalingHub, type SignalingPeer, type SignalingMessage } from '../src/meetings/signaling.ts';
 import { MockSttProvider } from '../src/meetings/stt.ts';
-import { DeterministicEmbeddingProvider, cosineSimilarity } from '../src/meetings/embeddings.ts';
 import { extractIntelligenceDeterministic } from '../src/meetings/intelligence.ts';
-import { chunkAndIndexMeeting, askMeetingQuestion } from '../src/meetings/rag.ts';
 import {
   getMeetingById,
   insertRecording,
-  listMeetings,
   listParticipants,
   listTranscriptSegments,
   getMeetingNotes,
@@ -675,6 +672,68 @@ T('meeting mutations require the session CSRF token and validate input', async (
   }
 });
 
+T('a meeting is addressed by id: the ?id= aliases are no longer routes', async () => {
+  const { startConsoleServer } = await import('../src/console/serve.ts');
+  const { installAuthSchema, signupTenant } = await import('../src/core/auth.ts');
+  const { OrganizationalCompiler } = await import('../src/compiler/compiler.ts');
+  const ctx = await fresh();
+  const OWNER = { email: 'owner@acme.test', password: 'the-console-password' };
+  await installAuthSchema(ctx.db, '2026-09-09T12:00:00.000Z');
+  await signupTenant(
+    ctx.db,
+    { slug: TEN, name: 'Acme', email: OWNER.email, password: OWNER.password, ownerName: 'Ada' },
+    '2026-09-09T12:00:00.000Z',
+  );
+  const comp = new OrganizationalCompiler(ctx.db);
+  const server = await startConsoleServer(ctx.db, ctx.ledger, ctx.coord, comp, {
+    tenant: TEN,
+    now: () => '2026-09-09T12:00:00.000Z',
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const pre = await fetch(`${base}/login`, { redirect: 'manual' });
+    const preCookie = (pre.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const preToken = (await pre.text()).match(/name="csrf" value="([0-9a-f]+)"/)![1]!;
+    const loginRes = await fetch(`${base}/login`, {
+      method: 'POST',
+      headers: { cookie: preCookie },
+      body: `csrf=${preToken}&email=${encodeURIComponent(OWNER.email)}&password=${encodeURIComponent(OWNER.password)}`,
+      redirect: 'manual',
+    });
+    const cookie = (loginRes.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    const homeHtml = await (await fetch(`${base}/`, { headers: { cookie } })).text();
+    const csrf = homeHtml.match(/name="vital-csrf" content="([0-9a-f]+)"/)![1]!;
+    const created = await fetch(`${base}/api/meetings`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-vital-csrf': csrf },
+      body: JSON.stringify({ title: 'Alias Meeting' }),
+    });
+    eq(created.status, 200, 'meeting created:');
+    const mid = ((await created.json()) as { meeting: { id: string } }).meeting.id;
+
+    // The canonical pair, addressed by path.
+    const detail = await fetch(`${base}/console/meetings/${mid}`, { headers: { cookie } });
+    eq(detail.status, 200, 'the detail page answers at /console/meetings/:id:');
+    const room = await fetch(`${base}/console/meetings/${mid}/room`, { headers: { cookie } });
+    eq(room.status, 200, 'the live room answers at /console/meetings/:id/room:');
+
+    // The retired forms are neither redirects nor silent 200s. A stale bookmark
+    // gets a plain not-found instead of a bare list that quietly drops the id.
+    for (const retired of [
+      `/console/meetings/detail?id=${mid}`,
+      `/console/meetings/room?id=${mid}`,
+      '/console/meetings/detail',
+      '/console/meetings/room',
+    ]) {
+      const res = await fetch(`${base}${retired}`, { headers: { cookie }, redirect: 'manual' });
+      eq(res.status, 404, `${retired} is no longer a route:`);
+    }
+  } finally {
+    await server.close();
+    await ctx.db.close();
+  }
+});
+
 // --------------------------------------------------- 4. Room View & Signaling Hardening ----
 
 import { renderMeetingRoomView, meetingRoomAsset, meetingIceServers } from '../src/console/meetings.ts';
@@ -791,7 +850,7 @@ T('signaling upgrade refuses unauthenticated sockets and reaps idle peers', asyn
     });
 
   // 1. No identity: the upgrade is refused with 401, not silently accepted.
-  let res1 = await tryUpgrade();
+  const res1 = await tryUpgrade();
   eq(res1.status, '401', 'unauthenticated upgrade is refused:');
   res1.socket.destroy();
 

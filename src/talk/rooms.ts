@@ -1,4 +1,5 @@
 import type { AsyncDb } from '../core/db.ts';
+import { memo } from '../core/request-cache.ts';
 import { resolveAgentKey, agentKeyResolution, type AgentKeyResolution } from './agent-keys.ts';
 import { signNostrEvent, type NostrKeypair } from './nostr.ts';
 
@@ -9,7 +10,8 @@ export interface CanonicalRoomDefinition {
   readonly name: string;
   readonly scope: string;
   readonly channel: string;
-  readonly agentName: string;  readonly duties: string;
+  readonly agentName: string;
+  readonly duties: string;
   readonly triggers: string;
   readonly healthMetric: string;
   readonly defaultMission: string;
@@ -307,7 +309,7 @@ export function signAsRoomAgent(
   const agent = agentForScope(rawScope);
   if (!agent) {
     throw new Error(
-      `[buzz:NO_AGENT_KEY] no Buzz agent key configured: set BUZZ_AGENT_MASTER_KEY to sign as ${roomForScope(rawScope).agentName}`,
+      `[buzz:NO_AGENT_KEY] no Buzz agent key configured — set BUZZ_AGENT_MASTER_KEY to sign as ${roomForScope(rawScope).agentName}`,
     );
   }
   return signNostrEvent(agent.keypair, {
@@ -388,7 +390,15 @@ export async function resolveRoomDef(
   const scope = normalizeScope(rawScope);
   const canonical = CANONICAL_ROOMS.find((r) => r.scope === scope || r.id === scope);
   if (canonical) return canonical;
-  const customs = await listCustomRooms(db, tenant);
+  return defFromCustoms(scope, await listCustomRooms(db, tenant));
+}
+
+/**
+ * The custom-definition half of `resolveRoomDef`, with the stored list already
+ * in hand. Exists so a caller resolving many scopes (the health rollup, the
+ * batched config read) can pay for the custom rooms once instead of per scope.
+ */
+function defFromCustoms(scope: string, customs: CustomRoomDefinition[]): CanonicalRoomDefinition | null {
   const custom = customs.find((c) => c.scope === scope || c.id === scope);
   if (!custom) return null;
   const mission = custom.mission || `Team room for ${custom.name}.`;
@@ -407,7 +417,27 @@ export async function resolveRoomDef(
     defaultBudgetDollars: 500,
     defaultBudgetTokens: 2_000_000,
     defaultSoRs: [],
-    recommendedModel: 'n/a',
+    recommendedModel: '—',
+  };
+}
+
+/** The synthetic definition an unknown scope resolves to (config defaults). */
+function fallbackDef(scope: string): CanonicalRoomDefinition {
+  return {
+    id: scope,
+    name: scope,
+    scope,
+    channel: `chan-${scope}`,
+    agentName: `${scope}-agent`,
+    duties: '',
+    triggers: '',
+    healthMetric: '',
+    defaultMission: '',
+    defaultAutonomy: 'guarded',
+    defaultBudgetDollars: 500,
+    defaultBudgetTokens: 2_000_000,
+    defaultSoRs: [],
+    recommendedModel: '—',
   };
 }
 
@@ -472,74 +502,149 @@ export const ROOM_BUDGET_MAX_TOKENS = 500_000_000;
 
 export async function loadRoomConfig(db: AsyncDb, tenant: string, rawScope: string): Promise<RoomConfig> {
   const scope = normalizeScope(rawScope);
-  const resolved =
-    (await resolveRoomDef(db, tenant, scope)) ??
-    ({
-      id: scope,
-      name: scope,
-      scope,
-      channel: `chan-${scope}`,
-      agentName: `${scope}-agent`,
-      duties: '',
-      triggers: '',
-      healthMetric: '',
-      defaultMission: '',
-      defaultAutonomy: 'guarded',
-      defaultBudgetDollars: 500,
-      defaultBudgetTokens: 2_000_000,
-      defaultSoRs: [],
-      recommendedModel: 'n/a',
-    } as CanonicalRoomDefinition);
-  const def = resolved;
+  const def = (await resolveRoomDef(db, tenant, scope)) ?? fallbackDef(scope);
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(configKey(tenant, def.scope))) as
     { value: string } | undefined;
-  if (!row) {
-    return {
-      id: def.id,
-      name: def.name,
-      scope: def.scope,
-      channel: def.channel,
-      agentName: def.agentName,
-      mission: def.defaultMission,
-      autonomy: def.defaultAutonomy,
-      budgetCeilingDollars: def.defaultBudgetDollars,
-      budgetCeilingTokens: def.defaultBudgetTokens,
-      connectedSoRs: [...def.defaultSoRs],
-      modelPolicy: def.recommendedModel,
-      active: true,
-      verifiedCalibrated: false,
-      updatedAt: new Date().toISOString(),
-    };
-  }
+  return configFromStored(def, row?.value);
+}
+
+/** Config defaults for a definition with nothing stored (or nothing parseable). */
+function defaultsFor(def: CanonicalRoomDefinition): RoomConfig {
+  return {
+    id: def.id,
+    name: def.name,
+    scope: def.scope,
+    channel: def.channel,
+    agentName: def.agentName,
+    mission: def.defaultMission,
+    autonomy: def.defaultAutonomy,
+    budgetCeilingDollars: def.defaultBudgetDollars,
+    budgetCeilingTokens: def.defaultBudgetTokens,
+    connectedSoRs: [...def.defaultSoRs],
+    modelPolicy: def.recommendedModel,
+    active: true,
+    verifiedCalibrated: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * A resolved definition plus its stored row → `RoomConfig`.
+ *
+ * Pure, and the only place the stored shape is interpreted, so the single-scope
+ * read and the batched one cannot drift apart on a default. A row that is not
+ * valid JSON falls back to the definition's defaults: the previous version
+ * re-called `loadRoomConfig` for that case, which read the same row and threw
+ * again — one malformed `meta` row recursed until the stack ran out and took
+ * the page with it.
+ */
+function configFromStored(def: CanonicalRoomDefinition, value: string | undefined): RoomConfig {
+  if (value === undefined) return defaultsFor(def);
+  let parsed: Partial<RoomConfig>;
   try {
-    const parsed = JSON.parse(row.value) as Partial<RoomConfig>;
-    const storedAlias =
-      typeof parsed.agentName === 'string' && /^[a-z0-9_-]+-agent$/i.test(parsed.agentName.trim())
-        ? parsed.agentName.trim()
-        : undefined;
-    return {
-      id: def.id,
-      name: def.name,
-      scope: def.scope,
-      channel: def.channel,
-      agentName: storedAlias ?? def.agentName,
-      mission: parsed.mission ?? def.defaultMission,
-      autonomy: parsed.autonomy ?? def.defaultAutonomy,
-      budgetCeilingDollars: parsed.budgetCeilingDollars ?? def.defaultBudgetDollars,
-      budgetCeilingTokens: parsed.budgetCeilingTokens ?? def.defaultBudgetTokens,
-      connectedSoRs: parsed.connectedSoRs ?? [...def.defaultSoRs],
-      modelPolicy: parsed.modelPolicy ?? def.recommendedModel,
-      active: parsed.active !== undefined ? Boolean(parsed.active) : true,
-      verifiedCalibrated: Boolean(parsed.verifiedCalibrated),
-      calibratedAt: parsed.calibratedAt,
-      channelId: parsed.channelId,
-      agentPubkey: parsed.agentPubkey,
-      provisionedAt: parsed.provisionedAt,
-      updatedAt: parsed.updatedAt ?? new Date().toISOString(),
-    };
+    parsed = JSON.parse(value) as Partial<RoomConfig>;
   } catch {
-    return loadRoomConfig(db, tenant, def.scope);
+    return defaultsFor(def);
   }
+  const storedAlias =
+    typeof parsed.agentName === 'string' && /^[a-z0-9_-]+-agent$/i.test(parsed.agentName.trim())
+      ? parsed.agentName.trim()
+      : undefined;
+  return {
+    id: def.id,
+    name: def.name,
+    scope: def.scope,
+    channel: def.channel,
+    agentName: storedAlias ?? def.agentName,
+    mission: parsed.mission ?? def.defaultMission,
+    autonomy: parsed.autonomy ?? def.defaultAutonomy,
+    budgetCeilingDollars: parsed.budgetCeilingDollars ?? def.defaultBudgetDollars,
+    budgetCeilingTokens: parsed.budgetCeilingTokens ?? def.defaultBudgetTokens,
+    connectedSoRs: parsed.connectedSoRs ?? [...def.defaultSoRs],
+    modelPolicy: parsed.modelPolicy ?? def.recommendedModel,
+    active: parsed.active !== undefined ? Boolean(parsed.active) : true,
+    verifiedCalibrated: Boolean(parsed.verifiedCalibrated),
+    calibratedAt: parsed.calibratedAt,
+    channelId: parsed.channelId,
+    agentPubkey: parsed.agentPubkey,
+    provisionedAt: parsed.provisionedAt,
+    updatedAt: parsed.updatedAt ?? new Date().toISOString(),
+  };
+}
+
+/**
+ * A room as a caller that has to render it needs it: the config, the display
+ * definition (name/channel) and the sidebar group.
+ */
+export interface TenantRoom {
+  config: RoomConfig;
+  /** What `resolveRoomDef` would answer — the canonical or synthesized custom def. */
+  room: CanonicalRoomDefinition;
+  category: RoomCategory;
+}
+
+/**
+ * Every room this tenant can have, in two reads: one `meta` scan and the
+ * custom-room list.
+ *
+ * The set is the union the health rollup already enumerated — canonical rooms,
+ * scopes with a stored config, custom rooms — but resolved without asking for
+ * one row per room. That per-room read is why every shelled page grew with the
+ * tenant's room count; this keeps the cost flat instead.
+ */
+export function loadTenantRooms(db: AsyncDb, tenant: string): Promise<Map<string, TenantRoom>> {
+  // Memoized per request: a shelled page asks for the room set more than once
+  // (the health rollup, the roster, the room's own config), and each ask used to
+  // re-read the tenant's whole room configuration.
+  return memo(`talk:tenant-rooms:${tenant}`, () => readTenantRooms(db, tenant));
+}
+
+async function readTenantRooms(db: AsyncDb, tenant: string): Promise<Map<string, TenantRoom>> {
+  const stored = await storedConfigValues(db, tenant);
+  const customs = await listCustomRooms(db, tenant);
+
+  const scopes: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string): void => {
+    const scope = normalizeScope(raw);
+    if (!scope || seen.has(scope)) return;
+    seen.add(scope);
+    scopes.push(scope);
+  };
+  for (const r of CANONICAL_ROOMS) add(r.scope);
+  for (const scope of stored.keys()) add(scope);
+  for (const c of customs) add(c.scope);
+
+  const out = new Map<string, TenantRoom>();
+  for (const scope of scopes) {
+    // `resolved` is null only for a stored config naming a scope that is not a
+    // room. The display fallback then matches `evaluateScope`'s (`roomForScope`
+    // answers the first canonical room for an unknown scope), so a batched
+    // evaluation and a single one still agree on the pathological case.
+    const resolved = CANONICAL_ROOMS.find((r) => r.scope === scope || r.id === scope) ?? defFromCustoms(scope, customs);
+    const def = resolved ?? fallbackDef(scope);
+    out.set(scope, {
+      config: configFromStored(def, stored.get(def.scope)),
+      room: resolved ?? roomForScope(scope),
+      category: resolved?.category ?? categoryForScope(scope),
+    });
+  }
+  return out;
+}
+
+/** Stored config values for the tenant, keyed by the scope in the meta key. */
+async function storedConfigValues(db: AsyncDb, tenant: string): Promise<Map<string, string>> {
+  const prefix = `room:config:${tenant}:`;
+  const rows = (await db.prepare(`SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key`).all(`${prefix}%`)) as {
+    key: string;
+    value: string;
+  }[];
+  const out = new Map<string, string>();
+  for (const r of rows) {
+    const scope = String(r.key).slice(prefix.length);
+    if (scope) out.set(scope, String(r.value));
+  }
+  return out;
 }
 
 /** A custom room definition created by users (not in CANONICAL_ROOMS). */
@@ -556,23 +661,25 @@ export interface CustomRoomDefinition {
 
 const customKey = (tenant: string, scope: string): string => `room:custom:${tenant}:${normalizeScope(scope)}`;
 
-export async function listCustomRooms(db: AsyncDb, tenant: string): Promise<CustomRoomDefinition[]> {
-  const rows = (await db.prepare(`SELECT value FROM meta WHERE key LIKE ?`).all(`room:custom:${tenant}:%`)) as {
-    value: string;
-  }[];
-  const out: CustomRoomDefinition[] = [];
-  for (const r of rows) {
-    try {
-      const p = JSON.parse(String(r.value)) as CustomRoomDefinition;
-      if (p && typeof p.scope === 'string' && typeof p.agentName === 'string') {
-        if (!isRoomCategory(p.category)) p.category = 'product';
-        out.push(p);
+export function listCustomRooms(db: AsyncDb, tenant: string): Promise<CustomRoomDefinition[]> {
+  return memo(`talk:custom-rooms:${tenant}`, async () => {
+    const rows = (await db.prepare(`SELECT value FROM meta WHERE key LIKE ?`).all(`room:custom:${tenant}:%`)) as {
+      value: string;
+    }[];
+    const out: CustomRoomDefinition[] = [];
+    for (const r of rows) {
+      try {
+        const p = JSON.parse(String(r.value)) as CustomRoomDefinition;
+        if (p && typeof p.scope === 'string' && typeof p.agentName === 'string') {
+          if (!isRoomCategory(p.category)) p.category = 'product';
+          out.push(p);
+        }
+      } catch {
+        continue;
       }
-    } catch {
-      continue;
     }
-  }
-  return out;
+    return out;
+  });
 }
 
 export async function createCustomRoom(

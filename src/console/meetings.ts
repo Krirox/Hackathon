@@ -342,17 +342,17 @@ export function renderMeetingDetailView(opts: {
 
     <!-- Background Processing Pipeline Bar -->
     <div class="processing-strip">
-      <div class="pipeline-step ${status.recording === 'done' ? 'done' : status.recording === 'processing' ? 'active' : ''}">
+      <div class="pipeline-step ${stageClass(status.recording)}">
         ${status.recording === 'done' ? '✓' : '●'} Recording
       </div>
-      <div class="pipeline-step ${status.transcript === 'done' ? 'done' : status.transcript === 'processing' ? 'active' : ''}">
-        ${status.transcript === 'done' ? '✓' : status.transcript === 'processing' ? '●' : '○'} Transcript
+      <div class="pipeline-step ${stageClass(status.transcript)}">
+        ${stageGlyph(status.transcript)} Transcript
       </div>
-      <div class="pipeline-step ${status.summary === 'done' ? 'done' : status.summary === 'processing' ? 'active' : ''}">
-        ${status.summary === 'done' ? '✓' : status.summary === 'processing' ? '●' : '○'} Summary & Notes
+      <div class="pipeline-step ${stageClass(status.summary)}">
+        ${stageGlyph(status.summary)} Summary & Notes
       </div>
-      <div class="pipeline-step ${status.indexing === 'done' ? 'done' : status.indexing === 'processing' ? 'active' : ''}">
-        ${status.indexing === 'done' ? '✓' : status.indexing === 'processing' ? '●' : '○'} RAG Indexing
+      <div class="pipeline-step ${stageClass(status.indexing)}">
+        ${stageGlyph(status.indexing)} RAG Indexing
       </div>
     </div>
   </div>
@@ -720,6 +720,25 @@ export function renderMeetingDetailView(opts: {
 }
 
 // ------------------------------------------------------------- 3. Meeting Library List ----
+
+/**
+ * The pipeline stage's class: finished, running, or not started yet. A stage
+ * with no styling is the honest third state — a dot that is neither green nor
+ * pulsing says "we have not got there", which is the truth on a fresh meeting.
+ */
+function stageClass(state: string): string {
+  if (state === 'done') return 'done';
+  if (state === 'processing') return 'active';
+  return '';
+}
+
+/** The stage's glyph. Pending is a hollow circle rather than a blank cell, so the
+ * row keeps its width and a reader can tell the stage exists. */
+function stageGlyph(state: string): string {
+  if (state === 'done') return '✓';
+  if (state === 'processing') return '●';
+  return '○';
+}
 
 function formatMeetingTime(iso: string | null | undefined): string {
   if (!iso) return '';

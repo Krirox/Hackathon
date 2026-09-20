@@ -69,53 +69,53 @@ export function startEgressProxy(
 
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
-    // Proxy-form: GET http://host:port/path. Origin-form (GET /path) has
-    // no authority and is refused — this proxy never guesses destinations.
-    const raw = req.url ?? '';
-    let target: URL | null;
-    try {
-      target = new URL(raw);
-    } catch {
-      target = null;
-    }
-    if (!target || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
-      audit({
-        at: now(),
-        host: raw || '(none)',
-        port: 0,
-        method: req.method ?? '?',
-        verdict: 'deny',
-        reason: 'origin-form request has no proxy authority: refused',
+      // Proxy-form: GET http://host:port/path. Origin-form (GET /path) has
+      // no authority and is refused — this proxy never guesses destinations.
+      const raw = req.url ?? '';
+      let target: URL | null;
+      try {
+        target = new URL(raw);
+      } catch {
+        target = null;
+      }
+      if (!target || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
+        audit({
+          at: now(),
+          host: raw || '(none)',
+          port: 0,
+          method: req.method ?? '?',
+          verdict: 'deny',
+          reason: 'origin-form request has no proxy authority — refused',
+        });
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end('proxy requires absolute-URI requests');
+        return;
+      }
+      const { host, port } = hostPortFrom(target.host, target.protocol === 'http:' ? 80 : 443);
+      const judgement = await judge(host, port, req.method ?? 'GET');
+      if (!judgement.ok) {
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end('egress denied by policy');
+        return;
+      }
+      const upstream = httpRequest(
+        {
+          host: judgement.dialHost,
+          port,
+          path: `${target.pathname}${target.search}`,
+          method: req.method,
+          headers: { ...req.headers, host: target.host },
+        },
+        (up) => {
+          res.writeHead(up.statusCode ?? 502, up.headers);
+          up.pipe(res);
+        },
+      );
+      upstream.on('error', () => {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end('upstream unreachable');
       });
-      res.writeHead(400, { 'content-type': 'text/plain' });
-      res.end('proxy requires absolute-URI requests');
-      return;
-    }
-    const { host, port } = hostPortFrom(target.host, target.protocol === 'http:' ? 80 : 443);
-    const judgement = await judge(host, port, req.method ?? 'GET');
-    if (!judgement.ok) {
-      res.writeHead(403, { 'content-type': 'text/plain' });
-      res.end('egress denied by policy');
-      return;
-    }
-    const upstream = httpRequest(
-      {
-        host: judgement.dialHost,
-        port,
-        path: `${target.pathname}${target.search}`,
-        method: req.method,
-        headers: { ...req.headers, host: target.host },
-      },
-      (up) => {
-        res.writeHead(up.statusCode ?? 502, up.headers);
-        up.pipe(res);
-      },
-    );
-    upstream.on('error', () => {
-      res.writeHead(502, { 'content-type': 'text/plain' });
-      res.end('upstream unreachable');
-    });
-    req.pipe(upstream);
+      req.pipe(upstream);
     })().catch(() => {
       if (!res.headersSent) {
         res.writeHead(502, { 'content-type': 'text/plain' });

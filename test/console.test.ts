@@ -1719,9 +1719,7 @@ T('FLOW-012: the six-stage journey closes — signup, setup, source, approval, d
     // Human curation — the governed CANDIDATE → VERIFIED promotion that makes
     // ingested evidence approvable. This is a real journey step, not a test fix.
     const claimRow = (await db
-      .prepare(
-        "SELECT id FROM claims WHERE tenant = ? AND extractor = 'file-diff' ORDER BY created_at ASC LIMIT 1",
-      )
+      .prepare("SELECT id FROM claims WHERE tenant = ? AND extractor = 'file-diff' ORDER BY created_at ASC LIMIT 1")
       .get(TEN)) as { id: string } | undefined;
     eq(claimRow !== undefined, true, 'ingested claim exists:');
     const verify = await fetch(`${base_}/api/claims/${encodeURIComponent(claimRow!.id)}/verify`, {
@@ -2218,6 +2216,27 @@ T('FINAL-002: Settings nav entry is admin-gated and the setup page stays reachab
     eq(setupHtml.includes('Guided setup'), true);
     eq(setupHtml.includes('href="/setup/rooms"'), true, 'setup links room provisioning:');
     eq(setupHtml.includes('Open room provisioning'), true);
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('the room provisioning page has one address: /setup/rooms', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const canonical = await fetch(`${base_}/setup/rooms`, { headers: owner.headers });
+    eq(canonical.status, 200, 'the canonical page resolves:');
+    // /settings/rooms and /console/settings/rooms were duplicate dispatcher
+    // aliases for it. A page with three addresses has three places to get its
+    // auth wrong, and only one of them was ever linked.
+    for (const retired of ['/settings/rooms', '/console/settings/rooms']) {
+      const res = await fetch(`${base_}${retired}`, { headers: owner.headers });
+      eq(res.status, 404, `${retired} no longer resolves:`);
+    }
   } finally {
     await server.close();
     await db.close();
@@ -2856,7 +2875,7 @@ T('FLOW-022: stops display on the team page and recovery is role-gated and audit
     const base_ = `http://127.0.0.1:${server.port}`;
     const owner = await ownerSession(server.port);
     const member = await formSession(server.port, 'member@acme.test', 'a-members-password');
-    const team = await (await fetch(`${base_}/team`, { headers: owner.headers })).text();
+    const team = await (await fetch(`${base_}/team/operations`, { headers: owner.headers })).text();
     eq(team.includes('Emergency stops'), true);
     eq(team.includes('scope engineering × class ACT_REVERSIBLE'), true);
     eq(team.includes('suspected bad deploy'), true);
@@ -2875,7 +2894,7 @@ T('FLOW-022: stops display on the team page and recovery is role-gated and audit
     eq((await missing.text()).includes('recorded reason'), true);
     const done = await recover(owner, 'deploy verified healthy');
     eq(done.status, 303);
-    const cleared = await (await fetch(`${base_}/team`, { headers: owner.headers })).text();
+    const cleared = await (await fetch(`${base_}/team/operations`, { headers: owner.headers })).text();
     eq(cleared.includes('No active stops'), true);
     const audits = (await db
       .prepare("SELECT action FROM audit_log WHERE tenant = ? AND action IN ('KILL_RECOVERED','team.stops_recover')")
@@ -2900,7 +2919,9 @@ T('FLOW-022: automation self-halts surface on the team page', async () => {
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    const team = await (
+      await fetch(`http://127.0.0.1:${server.port}/team/operations`, { headers: session.headers })
+    ).text();
     eq(team.includes('Recent automation self-halts'), true);
     eq(team.includes('AUTOMATION_SELF_HALT'), true);
     eq(team.includes('engineering/ACT_REVERSIBLE'), true);
@@ -3119,7 +3140,9 @@ T('FLOW-025: team page shows the effective governance policy with sources and im
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    const team = await (
+      await fetch(`http://127.0.0.1:${server.port}/team/operations`, { headers: session.headers })
+    ).text();
     eq(team.includes('Governance policy'), true);
     eq(team.includes('approver-role'), true);
     eq(team.includes('<code>member</code>'), true, 'default approver role is shown:');
@@ -3139,7 +3162,9 @@ T('FLOW-025: team page surfaces compiler trust gaps with eval-evidence links and
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
     const session = await ownerSession(server.port);
-    const team = await (await fetch(`http://127.0.0.1:${server.port}/team`, { headers: session.headers })).text();
+    const team = await (
+      await fetch(`http://127.0.0.1:${server.port}/team/operations`, { headers: session.headers })
+    ).text();
     eq(team.includes('Compiler trust gaps'), true, 'trust-gaps section renders:');
     eq(team.includes('no passing regression test'), true, 'actionable gap is named:');
     eq(team.includes(`/console/learning/${card.id}`), true, 'gap links to required evaluation evidence:');
@@ -4199,11 +4224,7 @@ T('FLOW-015: a leg nothing will advance is named stalled and can be reclaimed', 
   const NOW_MS = Date.parse(NOW);
   eq(describeLegStall('IN_FLIGHT', null, NOW_MS), null, 'no lease row, no claim of a stall:');
   eq(
-    describeLegStall(
-      'IN_FLIGHT',
-      { state: 'IN_FLIGHT', claimedAt: NOW, leaseMs: 60_000, updatedAt: NOW },
-      NOW_MS,
-    ),
+    describeLegStall('IN_FLIGHT', { state: 'IN_FLIGHT', claimedAt: NOW, leaseMs: 60_000, updatedAt: NOW }, NOW_MS),
     null,
     'a lease still inside its window is not stalled:',
   );
@@ -4280,11 +4301,7 @@ T('FLOW-015: a leg nothing will advance is named stalled and can be reclaimed', 
   eq(view?.legs[0]!.stalled, true);
   eq(view?.stalledLegs.length, 1);
   eq(view?.stalledLegs[0]!.requestId, request.id);
-  eq(
-    view?.canRetry,
-    true,
-    'a stalled run offers recovery even while the fan-out status still says IN_PROGRESS:',
-  );
+  eq(view?.canRetry, true, 'a stalled run offers recovery even while the fan-out status still says IN_PROGRESS:');
   eq(view?.blocker?.includes('stalled'), true, 'the blocker names the stall:');
 
   const html = renderWorkflowDetailPage(view!, { home: '/console/dashboard', csrf: 'csrf', actor: 'owner' });
@@ -4328,7 +4345,21 @@ T('learning actions: the compile form is owner-only, evidence-gated, and CSRF-ch
       .prepare(
         'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
       )
-      .run(`tr_route_${i}`, TEN, request.id, 'marketing', 'launch.copy.draft', 'draft-launch-copy', '[]', 'MODEL', 'SUCCESS', '{}', null, 0.9, NOW);
+      .run(
+        `tr_route_${i}`,
+        TEN,
+        request.id,
+        'marketing',
+        'launch.copy.draft',
+        'draft-launch-copy',
+        '[]',
+        'MODEL',
+        'SUCCESS',
+        '{}',
+        null,
+        0.9,
+        NOW,
+      );
   }
   const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
   try {
@@ -4375,7 +4406,9 @@ T('learning actions: the compile form is owner-only, evidence-gated, and CSRF-ch
     eq(cards[0]!.originModels, ['jcode']);
 
     // The card page offers the transfer test, and refuses a same-scope run.
-    const cardPage = await (await fetch(`${base_}/console/learning/${cards[0]!.id}`, { headers: owner.headers })).text();
+    const cardPage = await (
+      await fetch(`${base_}/console/learning/${cards[0]!.id}`, { headers: owner.headers })
+    ).text();
     eq(cardPage.includes('Run a transfer test'), true, 'the page can now start the path it describes:');
     const sameScope = await fetch(`${base_}/console/learning/cards/${cards[0]!.id}/transfer-test`, {
       method: 'POST',
@@ -4396,7 +4429,9 @@ T('learning actions: the compile form is owner-only, evidence-gated, and CSRF-ch
     });
     eq(queued.status, 303);
     eq((queued.headers.get('location') ?? '').includes('queued='), true);
-    const after = await db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'transfer-test' AND status = 'PENDING'").get();
+    const after = await db
+      .prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'transfer-test' AND status = 'PENDING'")
+      .get();
     eq(Number((after as { n: number }).n), 1, 'the transfer test is durable:');
 
     // Members cannot compile or queue anything.

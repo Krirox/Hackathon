@@ -22,7 +22,7 @@ import {
   changeUserRole,
   createAccountNotice,
   createInvitation,
-  disableConfirmation,
+  disableConfirmations,
   disableUser,
   getTenant,
   getUser,
@@ -200,6 +200,7 @@ import { listsRoutes, type ListsEnv } from './routes/lists.ts';
 import { agentTasksRoutes, type AgentTasksEnv } from './routes/agent-tasks.ts';
 import { learningRoutes, type LearningEnv } from './routes/learning.ts';
 import { reviewRoutes, type ReviewEnv } from './routes/review.ts';
+import { issuesRoutes, type IssuesEnv } from './routes/issues.ts';
 import { createRequestStats, memo as memoize, withRequestCache } from '../core/request-cache.ts';
 // `shellMetrics as shellMetricsFor`: the page branches below keep local
 // `shellMetrics` / `teamMetrics` bindings, and shadowing the import there would
@@ -233,46 +234,27 @@ import {
 } from '../gov/trust.ts';
 import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
-import { renderReviewPage } from './code-review.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
 import { renderConsoleShell } from './console-shell.ts';
 import {
-  ISSUE_PRIORITIES,
-  ISSUE_STATES,
-  addComment,
-  createIssue,
-  deleteIssue,
   getGitHubPushError,
   getGitHubSyncConfig,
-  getIssue,
-  listComments,
   listIssues,
   markGitHubSyncError,
-  moveIssue,
   parseGitHubRepoPath,
   authorizeGitHubRepo,
-  pushCommentToGitHub,
-  pushCreateToGitHub,
-  pushDeleteToGitHub,
-  pushUpdateToGitHub,
-  renderIssuesBoard,
   saveGitHubSyncConfig,
   syncGitHubProject,
-  syncIssues,
   unlinkGitHubSyncConfig,
-  updateIssue,
-  type IssuePriority,
-  type IssueSnapshot,
-  type IssueState,
 } from './issues.ts';
 import { maybeBuzzSurface } from '../talk/buzz-runtime.ts';
 import {
   CANONICAL_ROOMS,
-  loadRoomConfig,
   normalizeScope,
   saveRoomConfig,
+  loadTenantRooms,
   ROOM_BUDGET_MAX_DOLLARS,
   ROOM_BUDGET_MAX_TOKENS,
 } from '../talk/rooms.ts';
@@ -570,10 +552,7 @@ function workspaceInnerHtml(html: string): string {
  * its utility styling is preserved.
  */
 function stripUtilityPageStyles(head: string): string {
-  return head.replace(
-    /<style>\s*\/\*\s*Compact utility surface:[\s\S]*?<\/style>/i,
-    '',
-  );
+  return head.replace(/<style>\s*\/\*\s*Compact utility surface:[\s\S]*?<\/style>/i, '');
 }
 
 async function wrapInWorkspaceShell(
@@ -596,13 +575,12 @@ async function wrapInWorkspaceShell(
   // only place the two families differ. This split is deliberate — restyling
   // the Console must never re-skin the chat.
   const isChat = navKey === 'buzz';
-  const innerHtml = isChat
-    ? // Buzz keeps upstream's exact body slice: the shell owns a #main landmark
-      // and the chat document already supplies one, so nothing is stripped.
-      html.includes('<body>')
-      ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
-      : html
-    : workspaceInnerHtml(html);
+  // Buzz keeps upstream's exact body slice: the shell owns a #main landmark and
+  // the chat document already supplies one, so nothing is stripped.
+  const chatInnerHtml = html.includes('<body>')
+    ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
+    : html;
+  const innerHtml = isChat ? chatInnerHtml : workspaceInnerHtml(html);
   if (isDrawer) {
     return innerHtml;
   }
@@ -1032,7 +1010,9 @@ function accountPage(
 ): string {
   const result = passwordChangeResult('voluntary');
   const initials = user.email.slice(0, 2).toUpperCase();
-  const displayName = (user.email.split('@')[0] ?? user.email).replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const displayName = (user.email.split('@')[0] ?? user.email)
+    .replace(/[._]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
   const nav = accountNav('account')
     .map((item) => {
       if (item.active) {
@@ -1257,6 +1237,23 @@ interface Call {
   csrf: string | null;
   fields: Record<string, string>;
   json?: Record<string, unknown>;
+}
+
+/**
+ * The `question` field of a RAG request, from whichever shape arrived.
+ *
+ * Two content types reach this endpoint — a JSON body from the room's fetch
+ * calls and a urlencoded form from the no-JS path. `JSON.parse` on a form body
+ * throws, and swallowing that with an empty string would answer "question
+ * required" to a caller who did send one. The form is the fallback, not the
+ * default.
+ */
+function readQuestion(raw: string): string {
+  try {
+    return (JSON.parse(raw) as { question?: string }).question ?? '';
+  } catch {
+    return new URLSearchParams(raw).get('question') ?? '';
+  }
 }
 
 async function parseCall(req: IncomingMessage): Promise<Call> {
@@ -1508,17 +1505,6 @@ function teamPage(
     home?: string;
     now?: string;
     confirmations?: Map<string, DisableConfirmation>;
-    stops?: StopDisplay[];
-    selfHalts?: {
-      action: string;
-      actor: string;
-      target: string;
-      detail: string | null;
-      at: string;
-      outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
-    }[];
-    policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
-    compilerGaps?: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[];
     filter?: {
       q?: string;
       role?: string;
@@ -1686,6 +1672,15 @@ ${notice ? `<div class="v-card" style="margin-bottom:18px;border-left:3px solid 
   </div>
   ${paginationBar ? `<div style="margin-top:14px;">${paginationBar}</div>` : ''}
 </div>
+${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
+<h2>${membersHeading}</h2>
+${filterForm}
+<table style="border-collapse:collapse;min-width:640px">
+  <thead><tr class="sub"><th align="left">email</th><th align="left">name</th><th align="left">role</th><th align="left">team</th><th align="left">status</th><th></th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="6" class="sub">No matching team members found.</td></tr>'}</tbody>
+</table>
+${paginationBar}
+>>>>>>> origin/main
 ${
   pendingInvites.length
     ? `<div class="v-card" style="margin-bottom:20px;">
@@ -1749,6 +1744,113 @@ ${governanceSection(extra?.policy)}
 ${compilerGapsSection(extra?.compilerGaps)}
 ${billingScopeSection()}`,
   );
+}
+
+/**
+ * The Team surface is split across two pages so neither reads as a wall of
+ * information: "Members" manages people, "Operations" holds the safety and
+ * governance read-outs (emergency stops, effective policy, compiler trust gaps,
+ * billing scope). This segmented control is the bridge rendered on both halves,
+ * built from the shared `.v-tabs` design-system control with the current page
+ * marked via `aria-current` (the design system's active-tab hook).
+ */
+function teamTabs(active: 'members' | 'operations'): string {
+  const tab = (key: 'members' | 'operations', label: string, href: string): string =>
+    `<a class="v-tab${active === key ? ' v-tab-active' : ''}" href="${href}"${active === key ? ' aria-current="page"' : ''}>${label}</a>`;
+  return `<nav class="v-tabs" aria-label="Team sections" style="margin:0 0 20px;">${tab('members', 'Members', '/team')}${tab('operations', 'Operations', '/team/operations')}</nav>`;
+}
+
+/** The read-only safety/governance data the Operations half of Team renders. */
+type TeamOpsData = {
+  stops?: StopDisplay[];
+  selfHalts?: {
+    action: string;
+    actor: string;
+    target: string;
+    detail: string | null;
+    at: string;
+    outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
+  }[];
+  policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
+  compilerGaps?: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[];
+};
+
+/**
+ * The operations half of Team. These governance surfaces were crowding the
+ * roster, so they live on their own page reached from the Team tab bar. The
+ * expensive reads (stop evidence, per-card trust gaps for up to 100 cards)
+ * happen only here, which keeps the Members page light.
+ */
+function teamOperationsPage(csrf: string, viewer: User, home: string, ops: TeamOpsData, notice?: string): string {
+  const canManage = atLeast(viewer.role, 'admin') && !viewer.mustChangePassword;
+  return page(
+    'Vital Console — team operations',
+    `<p class="sub"><a href="${esc(home)}">← console</a></p>
+<h1>Team</h1>
+${teamTabs('operations')}
+${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
+${stopsSection(csrf, canManage, ops.stops, ops.selfHalts)}
+${governanceSection(ops.policy)}
+${compilerGapsSection(ops.compilerGaps)}
+${billingScopeSection()}
+`,
+  );
+}
+
+/**
+ * Wrap a Team page (either half) in the Console workspace shell. Both /team and
+ * /team/operations share this so they get the identical rail, topbar, room list,
+ * and metrics — and so the rail highlights the Team item (navKey 'team').
+ */
+async function teamShelledDocument(
+  html: string,
+  db: import('../core/db.ts').AsyncDb,
+  tenant: string,
+  home: string,
+  auth: { user: User; session: { csrfToken: string } },
+): Promise<string> {
+  const isAdmin = atLeast(auth.user.role, 'admin');
+  const nav = renderConsoleNav(
+    buildConsoleNav(home, {
+      requests: true,
+      claims: true,
+      rooms: true,
+      humanWork: true,
+      settings: isAdmin,
+      learning: isAdmin,
+      audit: isAdmin,
+      data: isAdmin,
+      buzz: isAdmin,
+    }),
+    'team',
+  );
+  const cluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+  const rooms = (await roomHealth(db, tenant)).map((h) => ({
+    scope: h.scope,
+    roomName: h.roomName,
+    badge: h.badge,
+    pending: h.pendingApprovals,
+    category: h.category,
+  }));
+  const shelled = renderConsoleShell({
+    rooms,
+    home,
+    consoleNav: nav,
+    accountCluster: cluster,
+    innerHtml: workspaceInnerHtml(html),
+    userEmail: auth.user.email,
+    userRole: auth.user.role,
+    userTeam: auth.user.team,
+    tenant,
+    metrics: await shellMetricsFor(db, tenant),
+    roomRecency: await roomRecency(
+      db,
+      tenant,
+      rooms.map((r) => r.scope),
+    ),
+    navKey: 'team',
+  });
+  return html.slice(0, html.indexOf('<body>') + 6) + shelled + html.slice(html.indexOf('</body>'));
 }
 
 function stopsSection(
@@ -1966,6 +2068,18 @@ const by = (u: User): string => `${u.id} (${u.email})`;
  * on purpose: `by` is an audit/signature value, this is display only.
  */
 const actorLabel = (u: User): string => u.email;
+
+/**
+ * Two-segment paths under /console/meetings that are words, not meeting ids.
+ *
+ * They used to be the query-param aliases (`/console/meetings/detail?id=…`,
+ * `/console/meetings/room?id=…`) for the detail and live-room pages. Those
+ * routes are deleted: a meeting is addressed by id, at `/console/meetings/:id`
+ * and `/console/meetings/:id/room`. Named once because two places must agree on
+ * it — the dispatcher must not read the segment as a meeting id, and the
+ * request log must not bucket the resulting 404 as a meeting view.
+ */
+const RETIRED_MEETING_ALIASES = new Set(['/console/meetings/room', '/console/meetings/detail']);
 
 /**
  * Dashboard search (FLOW-020) over the existing home path: permissioned
@@ -2609,6 +2723,7 @@ export function startConsoleServer(
       ListsEnv &
       LearningEnv &
       ReviewEnv &
+      IssuesEnv &
       AgentTasksEnv;
     /** Shelled console page: the chrome stays here, the page body comes from the domain. */
     const shellPage: ListsEnv['shellPage'] = async (auth, page) => {
@@ -2653,7 +2768,10 @@ export function startConsoleServer(
       operatorMode,
       coord,
       ledger,
-      audit: (actor, action, target, at) => auditConsole(db, tenant, actor, action, target, at),
+      // `detail` is optional so this satisfies both the four-argument domains and
+      // the domains (review, issues) that record a detail line.
+      audit: (actor: string, action: string, target: string, at: string, detail?: string) =>
+        auditConsole(db, tenant, actor, action, target, at, detail),
       redirect: (res, location, opts) => redirect(res, location, opts?.clearSession ? CLEAR_SESSION_COOKIE : undefined),
       vitalVersion: '0.0.1',
       // Read at request time: the address is only known after listen().
@@ -2673,6 +2791,11 @@ export function startConsoleServer(
       approvalLatency: (t) => coord.approvalLatencyStats(t),
       costPerSignal: (t) => new CognitiveRouter(db).costPerSignal(t),
       comp,
+      // The board's outbound GitHub pushes. Same closure the legacy GitHub
+      // routes use, so "a push failure is recorded, never swallowed" has one
+      // implementation.
+      pushAfterLocalWrite,
+      fetchFn: opts.fetchFn ?? fetch,
     };
     const routes: RouteDef<ConsoleRouteEnv>[] = [
       ...observabilityRoutes(),
@@ -2681,6 +2804,7 @@ export function startConsoleServer(
       ...listsRoutes(),
       ...learningRoutes(),
       ...reviewRoutes(),
+      ...issuesRoutes(),
       ...agentTasksRoutes(),
     ];
     // Fail at boot, not at request time: a route that cannot register is a 404
@@ -2734,11 +2858,7 @@ export function startConsoleServer(
             logPath = `/api/meetings/:id/${path.split('/').pop()}`;
           else if (/^\/api\/meetings\/[^/]+$/.test(path)) logPath = '/api/meetings/:id';
           else if (/^\/console\/meetings\/[^/]+\/room$/.test(path)) logPath = '/console/meetings/:id/room';
-          else if (
-            /^\/console\/meetings\/[^/]+$/.test(path) &&
-            path !== '/console/meetings/room' &&
-            path !== '/console/meetings/detail'
-          )
+          else if (/^\/console\/meetings\/[^/]+$/.test(path) && !RETIRED_MEETING_ALIASES.has(path))
             logPath = '/console/meetings/:id';
           // Chat room names are tenant data too, and this is the busiest page in
           // the product — logged as `unmatched` it made the render-cost metric
@@ -2748,13 +2868,12 @@ export function startConsoleServer(
             [
               home,
               '/console',
+              '/console/',
               '/console/rooms',
               '/console/requests',
               '/console/human-work',
               '/console/claims',
               '/console/meetings',
-              '/console/meetings/room',
-              '/console/meetings/detail',
               '/api/meetings',
               '/api/meetings/create',
               '/api/meetings/list',
@@ -2769,6 +2888,10 @@ export function startConsoleServer(
               '/login/mfa',
               '/console/dashboard',
               '/console/compiler',
+              '/console/buzz',
+              '/console/digest',
+              '/console/learning',
+              '/console/workflows',
               '/console/audit',
               '/console/data',
               '/console/data/export',
@@ -2789,6 +2912,7 @@ export function startConsoleServer(
               '/forgot-password',
               '/reset-password',
               '/team',
+              '/team/operations',
               '/team/invite',
               '/team/disable',
               '/team/reactivate',
@@ -2804,6 +2928,7 @@ export function startConsoleServer(
               '/setup/test-source',
               '/setup/sample',
               '/setup/start-release',
+              '/setup/rooms',
               '/api/ingest/health',
               '/healthz',
               '/api/health',
@@ -4148,315 +4273,23 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
             return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
           }
-          // ------------------------------------------------------------ Code review (per-mission human gate)
-          // GET  /console/review/:missionId — diff review page
-          // POST /console/review/:missionId — review actions (accept/reject/edit/comment/verify/snapshot)
-          const reviewMatch = path.match(/^\/console\/review\/([^/]+)$/);
-          if (reviewMatch && (method === 'GET' || method === 'POST')) {
-            const auth = await sessionOf();
-            if (!auth)
-              return method === 'GET' ? redirectLogin() : json(res, 401, { ok: false, error: 'session required' });
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            const missionId = decodeURIComponent(reviewMatch[1]!);
-            if (method === 'GET') {
-              const html = await renderReviewPage(
-                db,
-                tenant,
-                missionId,
-                {
-                  q: url.searchParams.get('q') ?? undefined,
-                  file: url.searchParams.get('file') ?? undefined,
-                  mode: url.searchParams.get('mode') ?? undefined,
-                  notice: url.searchParams.get('notice') ?? undefined,
-                },
-                auth.session.csrfToken,
-                by(auth.user),
-              );
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(html);
-              return;
-            }
-            // POST: parse, CSRF-gate, dispatch, redirect back to the page.
-            let call: Call;
-            try {
-              call = await parseCall(req);
-            } catch (e) {
-              return json(res, 400, { ok: false, error: (e as Error).message });
-            }
-            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            try {
-              const { handleReviewAction } = await import('./code-review.ts');
-              const result = await handleReviewAction(db, tenant, missionId, call.fields, by(auth.user));
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'review.action',
-                `mission:${missionId}`,
-                at,
-                String(call.fields.action ?? ''),
-              );
-              return redirect(res, result.redirect);
-            } catch (e) {
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'review.action_failed',
-                `mission:${missionId}`,
-                at,
-                String((e as Error).message).slice(0, 200),
-              );
-              return redirect(
-                res,
-                `/console/review/${encodeURIComponent(missionId)}?notice=${encodeURIComponent((e as Error).message.slice(0, 200))}`,
-              );
-            }
-          }
+          // The per-mission code review moved onto the route table (both verbs,
+          // with their CSRF policy declared) and into the console shell. It used
+          // to answer a signed-out POST with JSON 401 while every other review
+          // form is a browser submission; `surface: 'html'` is the honest half of
+          // that pair — a reviewer whose session expired gets the login form.
 
           // ------------------------------------------------------------ Issues (engineers team only)
-          // The engineering Issues board: kanban over the `issues` table with
-          // live delta sync. Every route below gates on `isEngineer(auth.user)`
-          // — the SESSION user's department, never the request body — so the
-          // board is invisible and unwritable for every other team (owners
-          // included) and for anonymous callers. All mutations audit.
+          // The board itself moved to routes/issues.ts with a declared
+          // `engineer` capability. What stays here is the GitHub sub-surface,
+          // whose webhook GitHub calls anonymously once a repo is linked — a
+          // capability that depends on tenant state, not on the caller, so it
+          // cannot be stated as one declared value yet. `engineerOnly` is the
+          // same predicate the `engineer` capability applies.
           const engineerOnly = (auth: { user: User }): boolean => {
             return isEngineer(auth.user) && !auth.user.disabled;
           };
-          const engineerList = async (): Promise<{ email: string; name: string }[]> =>
-            (await listUsers(db, tenant))
-              .filter((u) => isEngineer(u) && !u.disabled)
-              .map((u) => ({ email: u.email, name: u.name }));
-          const issueSnapshot = async (since: string | null): Promise<IssueSnapshot> =>
-            since ? syncIssues(db, tenant, since) : listIssues(db, tenant);
 
-          const issuesPage = path === '/console/issues' && method === 'GET';
-          const issuesSync = path === '/console/issues/sync' && method === 'GET';
-          if (issuesPage || issuesSync) {
-            const auth = await sessionOf();
-            if (!auth) return redirectLogin();
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            if (activationDenied(res, auth, false)) return;
-            // Engineers-team gate: owners and every other department are refused.
-            if (!engineerOnly(auth)) {
-              if (issuesSync)
-                return json(res, 403, {
-                  ok: false,
-                  error: 'the Issues board is available to the engineering team only',
-                });
-              res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-              res.end(
-                page(
-                  'Vital Console: Issues',
-                  `<h1>Not available</h1><p class="err">The Issues board is available to the engineering team only.</p><p class="sub"><a href="${esc(home)}console/dashboard">← Back</a></p>`,
-                ),
-              );
-              return;
-            }
-            const since = issuesSync ? url.searchParams.get('since') : null;
-            const snapshot = await issueSnapshot(since);
-            if (issuesSync) {
-              return json(res, 200, { ok: true, snapshot });
-            }
-            const engineers = await engineerList();
-            const body = renderIssuesBoard(snapshot, {
-              csrf: auth.session.csrfToken,
-              home,
-              engineers,
-              currentEmail: auth.user.email,
-              syncConfig: await getGitHubSyncConfig(db, tenant),
-              pushError: await getGitHubPushError(db, tenant),
-            });
-            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(
-              await wrapInWorkspaceShell(buzzDocument('Issues', body), db, tenant, home, auth, 'buzz', 'dashboard'),
-            );
-            return;
-          }
-          const issuesDetail = path === '/console/issues/detail' && method === 'GET';
-          const issuesMutations: [boolean, string][] = [
-            [path === '/console/issues/create' && method === 'POST', 'create'],
-            [path === '/console/issues/move' && method === 'POST', 'move'],
-            [path === '/console/issues/update' && method === 'POST', 'update'],
-            [path === '/console/issues/delete' && method === 'POST', 'delete'],
-            [path === '/console/issues/comment' && method === 'POST', 'comment'],
-          ];
-          const issuesMutation = issuesMutations.find(([match]) => match);
-          if (issuesDetail || issuesMutation) {
-            const auth = await sessionOf();
-            if (!auth) return redirectLogin();
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            if (activationDenied(res, auth, false)) return;
-            if (!engineerOnly(auth))
-              return json(res, 403, { ok: false, error: 'the Issues board is available to the engineering team only' });
-            let call: Call | null = null;
-            if (issuesMutation) {
-              try {
-                call = await parseCall(req);
-              } catch (e) {
-                return json(res, 400, { ok: false, error: (e as Error).message });
-              }
-              if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            }
-            const action = issuesMutation?.[1];
-            try {
-              if (issuesDetail) {
-                const id = (url.searchParams.get('id') ?? '').slice(0, 64);
-                const issue = id ? await getIssue(db, tenant, id) : null;
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                const comments = await listComments(db, tenant, issue.id);
-                return json(res, 200, { ok: true, issue, comments });
-              }
-              const fields = call!.fields;
-              if (action === 'create') {
-                const rawLabels = (call!.json?.labels ?? fields.labels) as unknown;
-                let labelList: string[] | undefined;
-                if (Array.isArray(rawLabels)) {
-                  labelList = rawLabels.map((l) => String(l));
-                } else if (typeof rawLabels === 'string' && rawLabels.trim()) {
-                  labelList = rawLabels
-                    .split(/[,;]+/)
-                    .map((l) => l.trim())
-                    .filter(Boolean);
-                }
-                const issue = await createIssue(
-                  db,
-                  tenant,
-                  {
-                    title: String(fields.title ?? ''),
-                    description: String(fields.description ?? ''),
-                    state: ISSUE_STATES.includes(String(fields.state ?? '') as IssueState)
-                      ? (String(fields.state) as IssueState)
-                      : undefined,
-                    priority: ISSUE_PRIORITIES.includes(String(fields.priority ?? '') as IssuePriority)
-                      ? (String(fields.priority) as IssuePriority)
-                      : undefined,
-                    labels: labelList,
-                    assigneeEmail: String(fields.assigneeEmail ?? '') || null,
-                  },
-                  { userId: auth.user.id, email: auth.user.email },
-                  at,
-                );
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.create',
-                  `issue:${issue.id}`,
-                  at,
-                  issue.title.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.create', `issue:${issue.id}`, by(auth.user), () =>
-                  pushCreateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'move') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const state = String(fields.state ?? '');
-                if (!ISSUE_STATES.includes(state as IssueState))
-                  return json(res, 400, { ok: false, error: 'unknown state' });
-                const issue = await moveIssue(
-                  db,
-                  tenant,
-                  id,
-                  {
-                    state: state as IssueState,
-                    beforeId: String(fields.beforeId ?? '') || null,
-                    afterId: String(fields.afterId ?? '') || null,
-                  },
-                  at,
-                );
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.move',
-                  `issue:${issue.id}`,
-                  at,
-                  `state=${issue.state}`,
-                );
-                pushAfterLocalWrite('issue.move', `issue:${issue.id}`, by(auth.user), () =>
-                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'update') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const progressRaw =
-                  fields.progress === undefined || fields.progress === '' ? undefined : Number(fields.progress);
-                const stateRaw =
-                  fields.state !== undefined && ISSUE_STATES.includes(String(fields.state) as IssueState)
-                    ? (String(fields.state) as IssueState)
-                    : undefined;
-                const issue = await updateIssue(
-                  db,
-                  tenant,
-                  id,
-                  {
-                    title: fields.title === undefined ? undefined : String(fields.title),
-                    description: fields.description === undefined ? undefined : String(fields.description),
-                    state: stateRaw,
-                    priority:
-                      fields.priority === undefined ||
-                      !ISSUE_PRIORITIES.includes(String(fields.priority) as IssuePriority)
-                        ? undefined
-                        : (String(fields.priority) as IssuePriority),
-                    progress: progressRaw !== undefined && Number.isFinite(progressRaw) ? progressRaw : undefined,
-                    expectedUpdatedAt: String(fields.expectedUpdatedAt ?? '') || null,
-                  },
-                  at,
-                );
-                if (!issue) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.update',
-                  `issue:${issue.id}`,
-                  at,
-                  issue.title.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.update', `issue:${issue.id}`, by(auth.user), () =>
-                  pushUpdateToGitHub(db, tenant, issue, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, issue });
-              }
-              if (action === 'delete') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const gone = await deleteIssue(db, tenant, id);
-                if (!gone) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(db, tenant, by(auth.user), 'issues.delete', `issue:${id}`, at);
-                pushAfterLocalWrite('issue.delete', `issue:${id}`, by(auth.user), () =>
-                  pushDeleteToGitHub(db, tenant, id, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true });
-              }
-              if (action === 'comment') {
-                const id = String(fields.issueId ?? '').slice(0, 64);
-                const comment = await addComment(db, tenant, id, auth.user.email, String(fields.content ?? ''), at);
-                if (!comment) return json(res, 404, { ok: false, error: 'no such issue' });
-                await auditConsole(
-                  db,
-                  tenant,
-                  by(auth.user),
-                  'issues.comment',
-                  `issue:${id}`,
-                  at,
-                  comment.content.slice(0, 120),
-                );
-                pushAfterLocalWrite('issue.comment', `issue:${id}`, by(auth.user), () =>
-                  pushCommentToGitHub(db, tenant, id, comment.content, { fetchFn: opts.fetchFn ?? fetch }),
-                );
-                return json(res, 200, { ok: true, comment });
-              }
-            } catch (e) {
-              const msg = (e as Error).message.replace(/^\[issues:[^\]]+\]\s*/, '');
-              const stale = (e as Error).message.includes('STALE_WRITE');
-              return json(res, stale ? 409 : 400, { ok: false, error: msg });
-            }
-          }
           // ------------------------------------------------------------ GitHub Project Sync (bidirectional)
           {
             const issuesGhConfig = path === '/console/issues/github/config' && method === 'GET';
@@ -4507,12 +4340,15 @@ export function startConsoleServer(
                 const syncRes = await syncGitHubProject(db, tenant, { fetchFn: opts.fetchFn ?? fetch });
                 return json(res, 200, { ok: syncRes.ok, syncedCount: syncRes.syncedCount, error: syncRes.error });
               }
-              let call: Call | null = null;
-              try {
-                call = await parseCall(req);
-              } catch (e) {
-                return json(res, 400, { ok: false, error: (e as Error).message });
+              // Parsed, or the parser's own refusal. The union keeps the parser's
+              // message visible (a malformed body and a rejected one are
+              // different answers) without a `let` whose initial value no reader
+              // ever sees.
+              const parsed = await parseCall(req).catch((e: unknown) => e as Error);
+              if (parsed instanceof Error) {
+                return json(res, 400, { ok: false, error: parsed.message });
               }
+              const call: Call = parsed;
               if (!auth || !csrfOk(auth.session, call.csrf))
                 return json(res, 403, { ok: false, error: 'bad CSRF token' });
               const serverFetchFn = opts.fetchFn ?? fetch;
@@ -4603,18 +4439,14 @@ export function startConsoleServer(
           }
 
           const roomMatch = path.match(/^\/console\/meetings\/([^/]+)\/room$/);
-          if ((path === '/console/meetings/room' || roomMatch) && method === 'GET') {
+          if (roomMatch && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (activationDenied(res, auth, false)) return;
 
-            const meetingId = roomMatch ? decodeURIComponent(roomMatch[1]!) : url.searchParams.get('id');
-            if (!meetingId) {
-              res.writeHead(302, { location: `${home}console/meetings` });
-              res.end();
-              return;
-            }
+            // The id is a path segment, so it is always present and never empty.
+            const meetingId = decodeURIComponent(roomMatch[1]!);
             const meeting = await meetingService.getMeeting(tenant, meetingId);
             if (!meeting) {
               res.writeHead(302, { location: `${home}console/meetings` });
@@ -4661,25 +4493,13 @@ export function startConsoleServer(
           }
 
           const detailMatch = path.match(/^\/console\/meetings\/([^/]+)$/);
-          if (
-            (path === '/console/meetings/detail' ||
-              (detailMatch && detailMatch[1] !== 'room' && detailMatch[1] !== 'detail')) &&
-            method === 'GET'
-          ) {
+          if (detailMatch && !RETIRED_MEETING_ALIASES.has(path) && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (activationDenied(res, auth, false)) return;
 
-            const meetingId =
-              detailMatch && detailMatch[1] !== 'detail'
-                ? decodeURIComponent(detailMatch[1]!)
-                : url.searchParams.get('id');
-            if (!meetingId) {
-              res.writeHead(302, { location: `${home}console/meetings` });
-              res.end();
-              return;
-            }
+            const meetingId = decodeURIComponent(detailMatch[1]!);
             const details = await meetingService.getMeetingDetails(tenant, meetingId);
             if (!details) {
               res.writeHead(302, { location: `${home}console/meetings` });
@@ -4723,7 +4543,9 @@ export function startConsoleServer(
                 title = body.title || title;
                 scope = body.scope || scope;
                 if (typeof body.recordingEnabled === 'boolean') recordingEnabled = body.recordingEnabled;
-              } catch {}
+              } catch {
+                /* not JSON — the form fields above already carried the values */
+              }
             } else {
               const params = new URLSearchParams(raw);
               const formCsrf = params.get('csrf');
@@ -4748,7 +4570,7 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'meeting.create', `meeting:${meeting.id}`, at, meeting.title);
 
             if (ctype.includes('application/x-www-form-urlencoded')) {
-              res.writeHead(303, { location: `${home}console/meetings/room?id=${encodeURIComponent(meeting.id)}` });
+              res.writeHead(303, { location: `${home}console/meetings/${encodeURIComponent(meeting.id)}/room` });
               res.end();
               return;
             }
@@ -4923,12 +4745,7 @@ export function startConsoleServer(
 
             if ((subAction === 'rag' || subAction === 'ask') && method === 'POST') {
               const raw = await readBody(req);
-              let question = '';
-              try {
-                question = JSON.parse(raw).question ?? '';
-              } catch {
-                question = new URLSearchParams(raw).get('question') ?? '';
-              }
+              const question = readQuestion(raw);
               if (!question.trim()) {
                 return json(res, 400, { ok: false, error: 'question required' });
               }
@@ -4999,11 +4816,14 @@ export function startConsoleServer(
             // render at all — a GET carries it for a POST that the route table then
             // verifies. `queued` / `compiled` are the one-line receipts the actions
             // redirect back with; `error` is the refusal, which is the useful half.
-            const queueNotice = url.searchParams.get('queued')
-              ? `Transfer test queued (job ${url.searchParams.get('queued')}). A worker runs it and banks the result.`
-              : url.searchParams.get('compiled')
-                ? 'Card compiled into CANDIDATE. Promotion still requires transfer evidence.'
-                : undefined;
+            const queuedJob = url.searchParams.get('queued');
+            const compiledCard = url.searchParams.get('compiled');
+            let queueNotice: string | undefined;
+            if (queuedJob) {
+              queueNotice = `Transfer test queued (job ${queuedJob}). A worker runs it and banks the result.`;
+            } else if (compiledCard) {
+              queueNotice = 'Card compiled into CANDIDATE — promotion still requires transfer evidence.';
+            }
             const body = await renderLearningCardPage(db, comp, tenant, cardId, {
               csrf: auth.session.csrfToken,
               notice: queueNotice,
@@ -5485,7 +5305,6 @@ export function startConsoleServer(
 
             const dashboardContent = renderOperationsDashboard({
               tenant,
-              home,
               userEmail: auth.user.email,
               userRole: auth.user.role,
               userTeam: auth.user.team,
@@ -5726,10 +5545,7 @@ export function startConsoleServer(
             return;
           }
 
-          if (
-            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-            method === 'GET'
-          ) {
+          if (path === '/setup/rooms' && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -5742,10 +5558,7 @@ export function startConsoleServer(
             res.end(shelled);
             return;
           }
-          if (
-            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-            method === 'POST'
-          ) {
+          if (path === '/setup/rooms' && method === 'POST') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -5808,15 +5621,38 @@ export function startConsoleServer(
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (auth.user.mustChangePassword) return redirect(res, '/change-password');
             const data = await teamData();
-            const confirmations = new Map<string, DisableConfirmation>();
-            for (const u of data.users) {
-              if (!canDisable(auth.user, u)) continue;
-              try {
-                confirmations.set(u.id, await disableConfirmation(db, tenant, u.id));
-              } catch {
-                continue;
-              }
-            }
+            // One batch for the whole list. This used to be a loop calling
+            // `disableConfirmation` per member — four statements per row the page
+            // drew, and a `try`/`catch` that would have swallowed a real database
+            // error into a silently missing confirmation. The users here come
+            // from `data.users`, so the `UNKNOWN_USER` case the single-user call
+            // guarded against cannot arise.
+            const confirmations = await disableConfirmations(
+              db,
+              tenant,
+              data.users.filter((u) => canDisable(auth.user, u)),
+            );
+            const q = url.searchParams.get('q') ?? undefined;
+            const role = url.searchParams.get('role') ?? undefined;
+            const status = url.searchParams.get('status') ?? undefined;
+            const teamParam = url.searchParams.get('team') ?? undefined;
+            const rawPage = Number(url.searchParams.get('page') ?? '1');
+            const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+              home,
+              now: at,
+              confirmations,
+              filter: { q, role, status, team: teamParam, page: pageNum },
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(await teamShelledDocument(html, db, tenant, home, auth));
+            return;
+          }
+          if (method === 'GET' && path === '/team/operations') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
             const stops = await describeStops(db, tenant);
             const haltEvidence = await listHaltEvidence(db, tenant);
             // Query outbox for automation-self-halt rows and pair with audit entries.
@@ -5877,25 +5713,14 @@ export function startConsoleServer(
             } catch {
               // No cards or compiler unavailable — the section renders empty.
             }
-            const q = url.searchParams.get('q') ?? undefined;
-            const role = url.searchParams.get('role') ?? undefined;
-            const status = url.searchParams.get('status') ?? undefined;
-            const teamParam = url.searchParams.get('team') ?? undefined;
-            const rawPage = Number(url.searchParams.get('page') ?? '1');
-            const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
-              home,
-              now: at,
-              confirmations,
+            const html = teamOperationsPage(auth.session.csrfToken, auth.user, home, {
               stops,
               selfHalts,
               policy: { approverRole: approverMin, operatorMode },
               compilerGaps,
-              filter: { q, role, status, team: teamParam, page: pageNum },
             });
-            const teamShelled = await wrapInWorkspaceShell(html, db, tenant, home, auth, 'team');
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(teamShelled);
+            res.end(await teamShelledDocument(html, db, tenant, home, auth));
             return;
           }
           if (path === '/team/invite' && method === 'POST') {
@@ -6414,14 +6239,12 @@ export function startConsoleServer(
             if (!scope || !actionClass)
               return json(res, 400, { ok: false, error: 'scope and action class are required' });
             if (!reason) {
-              const data = await teamData();
-              const html = teamPage(
+              const html = teamOperationsPage(
                 auth.session.csrfToken,
                 auth.user,
-                data.users,
-                data.invitations,
+                home,
+                {},
                 'recover failed: a recorded reason is required',
-                { home },
               );
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
               res.end(html);
@@ -6441,16 +6264,14 @@ export function startConsoleServer(
                 at,
                 reason,
               );
-              return redirect(res, '/team');
+              return redirect(res, '/team/operations');
             } catch (e) {
-              const data = await teamData();
-              const html = teamPage(
+              const html = teamOperationsPage(
                 auth.session.csrfToken,
                 auth.user,
-                data.users,
-                data.invitations,
+                home,
+                {},
                 `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
-                { home },
               );
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
               res.end(html);
@@ -7623,12 +7444,17 @@ export function startConsoleServer(
             const evaluator = new ScopeHealthEvaluator(db, tenant, { coord, compiler: comp, ledger });
             const gaugeTracker = new RoomBudgetTracker(db, tenant);
             const allHealth = await evaluator.evaluateAll();
-            const rooms = [];
-            for (const h of allHealth) {
-              const cfg = await loadRoomConfig(db, tenant, h.scope);
-              const gauge = await gaugeTracker.computeGauge(h.scope);
-              rooms.push({ ...h, config: cfg, gauge });
-            }
+            // Config and gauge are whole-tenant reads, not per-room ones: this
+            // endpoint used to issue three statements for each room it listed.
+            // Both lookups hit by construction: `evaluateAll` enumerates the
+            // same room set, and a gauge is computed for every scope it lists.
+            const configs = await loadTenantRooms(db, tenant);
+            const gauges = await gaugeTracker.computeGauges(allHealth.map((h) => h.scope));
+            const rooms = allHealth.map((h) => ({
+              ...h,
+              config: configs.get(h.scope)!.config,
+              gauge: gauges.get(h.scope)!,
+            }));
             return json(res, 200, { ok: true, rooms });
           }
 

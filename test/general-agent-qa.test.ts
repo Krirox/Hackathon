@@ -1,8 +1,5 @@
 import { T, eq, TEN, NOW, fresh } from './helpers.ts';
-import {
-  handleGeneralAgentQuery,
-  answerGeneralQuestion,
-} from '../src/talk/rag-analyst.ts';
+import { handleGeneralAgentQuery, answerGeneralQuestion } from '../src/talk/rag-analyst.ts';
 
 T('general-agent: broad status query returns 4-section executive briefing', async () => {
   const { db } = await fresh();

@@ -308,6 +308,11 @@ img,svg{max-width:100%}
 .v-input:focus{border-color:var(--v-accent);outline:none;box-shadow:0 0 0 3px var(--v-accent-dim)}
 .v-input::placeholder{color:var(--v-faint)}
 select.v-input,.v-select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--v-muted) 50%),linear-gradient(135deg,var(--v-muted) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:32px;cursor:pointer}
+/* Native dropdown lists render with the UA's own colors, which ignores the
+   theme: a themed (light) option label on the default white popup is invisible
+   in the dark theme. Pin both sides to tokens so the open list matches the
+   closed control on every platform, in light and dark. */
+select.v-input option,.v-select option,select.v-input optgroup,.v-select optgroup{background:var(--v-bg-0);color:var(--v-ink)}
 .v-search{display:flex;align-items:center;gap:9px;background:var(--v-bg-2);border:1px solid transparent;border-radius:var(--radius-md);padding:0 12px;height:38px;color:var(--v-muted);transition:background .15s var(--ease-out),border-color .15s var(--ease-out)}
 .v-search:hover{border-color:var(--v-line-strong);color:var(--v-ink-2)}
 .v-search input{border:0;outline:0;background:transparent;font-size:13px;color:var(--v-ink);width:100%;font-family:inherit;min-width:0}

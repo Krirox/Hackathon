@@ -333,14 +333,16 @@ T('a member reads rooms and chats, but governance commands stay admin-only', asy
     // The refusals changed nothing: the room is still halted and the policy
     // ceiling is untouched. A gate that rejects but lets state drift would
     // only be a slower breach. (Kill state lives in meta — see setKill.)
-    const killRow = await db
-      .prepare("SELECT COUNT(*) AS n FROM meta WHERE key = ?")
-      .get(`kill:${TEN}:general:*`);
+    const killRow = await db.prepare('SELECT COUNT(*) AS n FROM meta WHERE key = ?').get(`kill:${TEN}:general:*`);
     eq((killRow as { n: number }).n > 0, true, 'room remains halted after member attempts:');
 
     const cfg = await loadRoomConfig(db, TEN, 'general');
     eq(cfg.autonomy === cfgBefore.autonomy, true, 'autonomy unchanged after member /policy attempt:');
-    eq(cfg.budgetCeilingDollars === cfgBefore.budgetCeilingDollars, true, 'budget ceiling unchanged after member /policy attempt:');
+    eq(
+      cfg.budgetCeilingDollars === cfgBefore.budgetCeilingDollars,
+      true,
+      'budget ceiling unchanged after member /policy attempt:',
+    );
 
     // And the owner CAN complete the recover — proving the member refusal was
     // the role gate, not a broken command path.
@@ -356,7 +358,11 @@ T('a member reads rooms and chats, but governance commands stay admin-only', asy
     const halted = await db
       .prepare("SELECT actor FROM audit_log WHERE tenant = ? AND action = 'buzz.command' ORDER BY at DESC LIMIT 1")
       .get(TEN);
-    eq(String((halted as { actor?: string } | undefined)?.actor ?? '').includes('owner'), true, 'halt audited under the owner:');
+    eq(
+      String((halted as { actor?: string } | undefined)?.actor ?? '').includes('owner'),
+      true,
+      'halt audited under the owner:',
+    );
   } finally {
     await server.close();
   }

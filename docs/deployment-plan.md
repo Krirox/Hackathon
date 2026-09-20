@@ -34,9 +34,10 @@ agents and people talk; both ride the same deployment and database.
 
 ## 0. Ship gates (do not start Phase 1 until all are true)
 
-- [ ] `ci.yml` green on main: typecheck, `npm test`, `test:postgres` lane,
-      lint, `format:check`, `docs:check`, provenance, `npm audit`,
-      `verify-instance.mjs`, browser test
+- [ ] `ci.yml` green on main: typecheck, `npm test`, `docs:check`,
+      `test:postgres` lane, lint, `format:check`, `verify:provenance`,
+      `npm audit`, `verify-instance.mjs` — plus `npm run test:browser` green
+      (a separate lane; `ci.yml` installs Chromium but does not run it)
 - [ ] Local Docker E2E green on a clean tree (`deploy/compose.yml` +
       signup → setup → ingest → release → approve → receipt journey)
 - [ ] All P0 `flow_TODO.md` items closed with evidence; remaining gaps
@@ -75,8 +76,7 @@ agents and people talk; both ride the same deployment and database.
    §5 covers both ways to connect it.
 3. **GitHub repo** with `main` protected by `ci.yml`, plus Docker and the
    AWS CLI available locally if you take the from-your-machine path (§6b).
-4. **Model/provider API keys**: Novita (production model plane), Gemini
-   (development plane), Serper (search).
+4. **Bedrock API key**: create a key in **Bedrock → API keys** in the same region as the stack (`AWS_REGION`, default `eu-central-1`). Store it as GitHub secret **`TF_VAR_BEDROCK_API_KEY`** (not a console “model access” flow).
 5. **Quotas**: Fargate vCPU, RDS, ElastiCache in the target region —
    request increases before the pilot if the account is new.
 
@@ -206,7 +206,8 @@ as **repository secrets** (Settings → Secrets and variables → Actions):
 | `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface — required, no placeholder passes |
 | `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens — required |
 | `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake — required |
-| `TF_VAR_SERPER_API_KEY` / `TF_VAR_GEMINI_API_KEY` / `TF_VAR_NOVITA_API_KEY` | search + model planes — required |
+| `TF_VAR_SERPER_API_KEY` | search plane — required |
+| *(models)* | **`TF_VAR_BEDROCK_API_KEY`** — Bedrock console API key (region must match `AWS_REGION`). Model: GLM 4.7 Flash (`zai.glm-4.7-flash`) via `bedrock_*_model_id` in Terraform. |
 | `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
 | `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | relay identity (64 hex) |
 | `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex; empty = no publishing identity |
@@ -305,11 +306,16 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
 
    ```sh
    BUZZ_RELAY_URL=<relay> BUZZ_AGENT_MASTER_KEY=<from Secrets Manager> \
+     VITAL_DB=var/vital.db \
      node --import tsx scripts/seed-buzz-rooms.ts --tenant acme
    ```
 
-   Asserts 12 persisted channel UUIDs, exits non-zero otherwise. Then check
-   `/console/buzz`: roster, health badges, relay status green.
+   `VITAL_DB` is mandatory — the script refuses to run without it so
+   provisioning persists instead of evaporating. It provisions the 12
+   canonical rooms with real signed events, verifies each channel binding by
+   reading relay metadata back, and exits non-zero if any room is
+   unverified. Then check `/console/buzz`: roster, health badges, relay
+   status green.
 5. **Ingestion**: `ingest-files` against an operator-approved source
    (bounded, explicit — see `docs/deployment.md` F04a).
 6. **First release**: replay the Docker E2E journey against the real

@@ -1,8 +1,8 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { T, eq, throws, fresh, TEN, NOW } from './helpers.ts';
-import { installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
+import { T, eq, throws, fresh, TEN, NOW, base } from './helpers.ts';
+import { acceptInvitation, createInvitation, installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import {
   capabilityAllows,
@@ -20,6 +20,8 @@ import { listsRoutes, LISTS_CAPABILITIES } from '../src/console/routes/lists.ts'
 import { learningRoutes, LEARNING_CAPABILITIES } from '../src/console/routes/learning.ts';
 import { agentTasksRoutes, AGENT_TASKS_CAPABILITIES } from '../src/console/routes/agent-tasks.ts';
 import { reviewRoutes, REVIEW_CAPABILITIES } from '../src/console/routes/review.ts';
+import { issuesRoutes, ISSUES_CAPABILITIES } from '../src/console/routes/issues.ts';
+import { createCustomRoom } from '../src/talk/rooms.ts';
 import type { Role } from '../src/core/auth.ts';
 import type { AsyncDb } from '../src/core/db.ts';
 
@@ -44,9 +46,13 @@ T('a route that cannot register fails loudly at boot, not as a 404', () => {
   // Surface is not optional either: it decides whether a browser is redirected
   // to the login form or handed a 401, and 'undefined' has no sane default.
   throws(() => validateRoutes([def({ surface: undefined as never })]), 'no surface');
-  // An owner-only *page* must declare what a non-owner sees. Without it the
+  // A restricted *page* must declare what everyone else sees. Without it the
   // dispatcher would have to invent user-facing copy.
   throws(() => validateRoutes([def({ capability: 'owner', surface: 'html' })]), 'must declare `denied`');
+  throws(() => validateRoutes([def({ capability: 'engineer', surface: 'html' })]), 'must declare `denied`');
+  // The unrestricted capabilities are not asked: nobody who reaches them is
+  // refused, so there is no refusal copy to state.
+  validateRoutes([def({ pattern: '/open', capability: 'session', surface: 'html' })]);
   // The valid case must not throw.
   validateRoutes([def({ pattern: '/a' }), def({ pattern: '/a/:id', method: 'POST', body: 'none' })]);
   validateRoutes([
@@ -101,6 +107,32 @@ T('capability is the whole policy, and it is a pure function', () => {
   eq(capabilityAllows('owner', session), false);
   eq(capabilityAllows('owner', owner), true);
   eq(capabilityAllows('owner', admin), true);
+});
+
+T('the engineer capability gates on department, not role', () => {
+  const who = (role: Role, team: string, disabled = false): AuthContext => ({
+    user: { role, team, disabled } as AuthContext['user'],
+    session: {} as AuthContext['session'],
+  });
+  // Anonymous is refused before any of this matters.
+  eq(capabilityAllows('engineer', null), false);
+  // The department decides, and this is the pair no role check can express: an
+  // engineering *member* is in, a marketing *admin* is out.
+  eq(capabilityAllows('engineer', who('member', 'engineering')), true);
+  eq(capabilityAllows('engineer', who('admin', 'marketing')), false);
+  eq(capabilityAllows('engineer', who('owner', 'finance')), false);
+  // Owners are deliberately not special-cased into it — an unassigned owner is
+  // refused, which is the board's behaviour since it had a board — while an
+  // engineering owner is admitted for the same reason a member is.
+  eq(capabilityAllows('engineer', who('owner', 'unassigned')), false);
+  eq(capabilityAllows('engineer', who('owner', 'engineering')), true);
+  // A deactivated engineer with a live session loses the board. This is the
+  // half of the original gate that a refactor is most likely to drop, because
+  // it looks redundant next to the role check and is not.
+  eq(capabilityAllows('engineer', who('member', 'engineering', true)), false);
+  // The capabilities are independent in both directions.
+  eq(capabilityAllows('owner', who('member', 'engineering')), false);
+  eq(capabilityAllows('engineer', who('owner', 'marketing')), false);
 });
 
 // ---------------------------------------------------- the migrated domain
@@ -475,6 +507,10 @@ T('one page view evaluates the room set once, not once per consumer', async () =
   // the tenant's stop list once per room (13×). This test fails if either comes
   // back, because a duplicate read is invisible in a screenshot and invisible in
   // a functional test — it only shows up as a latency regression nobody owns.
+  //
+  // The second assertion moved when the configs were batched: the rollup no
+  // longer asks for one `meta` row per room, so the read is matched on its
+  // argument — the tenant's config prefix — instead of on the old statement.
   const { db, ledger, coord, comp } = await fresh();
   await installAuthSchema(db, NOW);
   await signupTenant(
@@ -515,11 +551,86 @@ T('one page view evaluates the room set once, not once per consumer', async () =
       ['SELECT * FROM users WHERE id = ?'],
       'no read is issued twice within a page view:',
     );
-    // And the room health rollup itself ran once.
-    const rollups = [...counted.byKey().keys()].filter((id) =>
-      id.startsWith("SELECT key FROM meta WHERE key LIKE 'room:config:"),
+    // And the room set itself is enumerated once, not once per room and not once
+    // per consumer. A page that grew with the tenant's room count is what this
+    // whole measurement exists to prevent.
+    const roomSetReads = [...counted.byKey().entries()].filter(
+      ([id]) => id.startsWith('SELECT key, value FROM meta WHERE key LIKE ?') && id.includes('room:config:'),
     );
-    eq(rollups.length, 1, 'room health evaluated once per request:');
+    eq(roomSetReads.length, 1, 'one room-set read per request (args asked for):');
+    eq(roomSetReads[0]?.[1], 1, 'the room set is read exactly once:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
+T('a shelled page costs the same at nine rooms and at fifteen', async () => {
+  // The property the shell's reads were rebuilt for, asserted as a property
+  // rather than as a number: chrome must not be a function of how many rooms a
+  // tenant has. Every one of these reads used to run once per room — five health
+  // statements, a config row, two budget aggregates and the stop list — so a
+  // tenant that added a team room made every page in the console heavier.
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    {
+      slug: TEN,
+      name: 'Acme',
+      email: 'owner@acme.test',
+      password: 'the-console-password',
+      ownerName: 'Ada',
+    },
+    NOW,
+  );
+  const counted = instrument(db);
+  const server = await startConsoleServer(counted.proxy, ledger, coord, comp, {
+    tenant: TEN,
+    now: () => NOW,
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  // The shell modules, by the name the meter attributes them to.
+  const SHELL_MODULES = ['talk/health', 'talk/rooms', 'console/shell-metrics', 'talk/budget-gauge', 'gov/trust'];
+  const shellReads = (): Record<string, number> =>
+    Object.fromEntries(SHELL_MODULES.map((m) => [m, counted.byModule().get(m) ?? 0]));
+  try {
+    const cookie = await login(origin);
+    const get = async (): Promise<string> => {
+      counted.reset();
+      const res = await fetch(`${origin}/console/rooms`, { headers: { cookie } });
+      eq(res.status, 200);
+      return await res.text();
+    };
+
+    const before = await get();
+    const beforeTotal = counted.statements();
+    const beforeShell = shellReads();
+
+    // Six team-made rooms, through the product's own store rather than by
+    // hand-writing `meta`: the definition *and* its config both have to land.
+    for (let i = 1; i <= 6; i += 1) {
+      await createCustomRoom(
+        db,
+        TEN,
+        { id: `team-${i}`, name: `team-${i}`, scope: `team-${i}`, agentName: `team-${i}-agent`, mission: '' },
+        'human:owner',
+      );
+    }
+
+    const after = await get();
+    const afterTotal = counted.statements();
+    const afterShell = shellReads();
+
+    // The fixture has to have actually grown, or the comparison proves nothing:
+    // the new room is rendered, and it was not there before.
+    eq(before.includes('team-6'), false, 'the sixth room is not on the page yet:');
+    eq(after.includes('team-6'), true, 'the page lists the rooms that were added:');
+
+    // Compared per module, so a failure names the read that started scaling
+    // instead of just reporting a bigger number.
+    eq(afterShell, beforeShell, `the shell issues the same reads at 15 rooms as at 9 (${JSON.stringify(afterShell)}):`);
+    eq(afterTotal, beforeTotal, 'and the page costs the same in total (rooms 9 → 15):');
   } finally {
     await server.close();
     await db.close();
@@ -548,13 +659,16 @@ T('every request logs its render cost', async () => {
   const base = `http://127.0.0.1:${server.port}`;
   const original = console.log;
   const lines: string[] = [];
+  // The pages whose cost matters most, including ones that were missing from
+  // the log's name list and so logged as the useless bucket `unmatched`.
+  const pages = ['/console/rooms', '/console/digest', '/console/workflows', '/setup/rooms'];
   try {
     const cookie = await login(base);
     console.log = (...args: unknown[]) => {
       lines.push(args.map(String).join(' '));
     };
     try {
-      await (await fetch(`${base}/console/rooms`, { headers: { cookie } })).text();
+      for (const path of pages) await (await fetch(`${base}${path}`, { headers: { cookie } })).text();
       // The line is written on `finish`, a tick after the body is read.
       await new Promise((r) => setTimeout(r, 50));
     } finally {
@@ -575,11 +689,20 @@ T('every request logs its render cost', async () => {
       .filter((r): r is { path: string; sql: number; memo: number } => Boolean(r?.path));
     // The line must name the page: a metric bucketed as `unmatched` cannot show
     // which page regressed, and the busiest pages used to log exactly that.
+    for (const path of pages) {
+      eq(
+        logged.some((r) => r.path === path),
+        true,
+        `${path} logged its own name (got ${logged.map((l) => l.path).join(', ')}):`,
+      );
+    }
     const page = logged.find((r) => r.path === '/console/rooms');
-    eq(Boolean(page), true, `the page logged its own name (got ${logged.map((l) => l.path).join(', ')}):`);
     // A shelled page is not one query: this asserts a real count, so a meter that
-    // silently stopped counting (or stopped being wired) fails here.
-    eq((page?.sql ?? 0) > 20, true, `sql counted (${page?.sql}):`);
+    // silently stopped counting (or stopped being wired) fails here. The number
+    // is deliberately loose — the exact figure is the budget table's business —
+    // and it dropped from ~97 to ~15 when the shell's per-room reads were
+    // batched, which is the improvement this assertion must survive.
+    eq((page?.sql ?? 0) > 10, true, `sql counted (${page?.sql}):`);
     eq((page?.memo ?? 0) > 0, true, `memo hits logged (${page?.memo}):`);
     // And an identifier-free name: a request log is not a place for tenant data.
     eq(page?.path.includes(':id'), false, 'no raw identifiers in the log path:');
@@ -692,6 +815,13 @@ interface PageBudget {
   dispatch: 'table' | 'legacy';
   /** Rendered with no session (the login form answers a session with a redirect). */
   anonymous?: true;
+  /**
+   * Who fetches the page. Defaults to the seeded owner. `engineer` exists
+   * because a page can be gated on *department* rather than role: fetched as the
+   * owner it answers a refusal, which costs almost nothing and would let the
+   * page's real cost drift unmeasured for as long as nobody looked.
+   */
+  as?: 'engineer';
   /** Total statements for one render: measured with ~10% headroom. */
   total: number;
   /**
@@ -717,13 +847,24 @@ interface PageBudget {
  * legitimately costs more than the one-room tenant these numbers come from.
  * What must not scale is the number of times the same read is issued per render.
  *
- * What the first per-module measurement showed, and the reason the breakdown is
- * worth freezing: **the shell dominates every page**. `talk/health` (the stop
- * list) is 53 statements and `talk/rooms` 14 and `console/shell-metrics` 16 on
- * every shelled page, so ~83 of each page's ~90 statements belong to chrome, not
- * to the page. `/console/buzz` costs 208 because it asks for the same shell
- * reads per room (talk/health 106, talk/rooms 54). That is where the next
- * performance change should go, and it is visible here without a profiler.
+ * What the first per-module measurement showed — and what the batching change
+ * then fixed, which is why these numbers are worth freezing — is that **the
+ * shell dominated every page**: `talk/health` 53, `console/shell-metrics` 16,
+ * `talk/rooms` 14 and `gov/trust` 2 on *every* shelled page, so ~85 of each
+ * page's ~90 statements were chrome. `/console/buzz` cost 229 (talk/health 106,
+ * talk/rooms 54) because the roster asked for the same things per room again.
+ *
+ * Every one of those was a per-room loop: the health rollup evaluated each room
+ * with five statements of its own, the config read asked for one `meta` row per
+ * room, the gauge was two aggregates plus a config read per room, and the stop
+ * list was re-read per room. They are now one grouped read each, so the chrome
+ * is ~12 statements whatever the tenant's room count — `/console/dashboard` is
+ * the heaviest page at 35, and the shell is no longer why.
+ *
+ * What is still per-row, and would show up here if it grew: `/team` runs a
+ * confirmation read per member an admin could disable (see its `core/auth`
+ * count), and the drift check asks the compiler once per *promoted card* — both
+ * are real work at the granularity of the row, not a duplicated read.
  */
 const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
   // Still served by the legacy chain. Budgeted anyway: what a page costs is a
@@ -734,16 +875,18 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/dashboard',
     pattern: '/console/dashboard',
     dispatch: 'legacy',
-    total: 119,
+    total: 39,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'console/activation': 7,
       'core/auth': 6,
       'console/journey': 4,
+      // The whole shell, in four reads: the health rollup, the metrics and
+      // recency pair, the room set, and the stop list.
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
       'gov/trust': 2,
+      'talk/rooms': 2,
       'attrib/attribution': 1,
       'router/router': 1,
       'console/serve': 1,
@@ -754,13 +897,15 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/buzz',
     pattern: '/console/buzz',
     dispatch: 'legacy',
-    total: 229,
+    total: 20,
     modules: {
-      'talk/health': 106,
-      'talk/rooms': 54,
-      'talk/budget-gauge': 26,
-      'console/shell-metrics': 16,
       'core/auth': 5,
+      // The roster draws every room, and every room's readings come from the
+      // same shared pass the shell above it uses: health 4 + gauge 2 + rooms 2.
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
+      'talk/budget-gauge': 2,
       'gov/trust': 1,
     },
   },
@@ -768,12 +913,14 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/buzz/general',
     pattern: '/console/buzz/:room',
     dispatch: 'legacy',
-    total: 113,
+    total: 31,
     modules: {
-      'talk/health': 57,
-      'talk/rooms': 17,
-      'console/shell-metrics': 16,
+      // The one page that reads room health twice — once for the room it is
+      // showing, once for the shell's rail — which is 4 + 4, not a per-room loop.
+      'talk/health': 8,
       'core/auth': 6,
+      'talk/rooms': 4,
+      'console/shell-metrics': 4,
       'console/buzz': 3,
       'talk/budget-gauge': 2,
       'gov/trust': 1,
@@ -783,13 +930,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/workflows',
     pattern: '/console/workflows',
     dispatch: 'legacy',
-    total: 102,
+    total: 21,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/release-workspace': 3,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -797,12 +944,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/meetings',
     pattern: '/console/meetings',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
       'meetings/db': 1,
     },
@@ -811,12 +958,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/learning',
     pattern: '/console/learning',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'router/router': 1,
       'gov/trust': 1,
     },
@@ -825,12 +972,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/digest',
     pattern: '/console/digest',
     dispatch: 'legacy',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
       'console/digest': 1,
     },
@@ -839,12 +986,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/compiler',
     pattern: '/console/compiler',
     dispatch: 'legacy',
-    total: 98,
+    total: 18,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -852,13 +999,30 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/team',
     pattern: '/team',
     dispatch: 'legacy',
-    total: 104,
+    total: 24,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
-      'core/auth': 8,
+      // The page's own per-member work, now batched at the source: this was 11
+      // with two members when `disableConfirmation` ran once per member, and it
+      // is 11 because the owner, the member list and the two engineers are all
+      // still read — the confirmations are the part that stopped scaling.
+      'core/auth': 11,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
+      'gov/trust': 1,
+    },
+  },
+  {
+    url: '/team/operations',
+    pattern: '/team/operations',
+    dispatch: 'legacy',
+    total: 20,
+    modules: {
+      'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'gov/trust': 2,
+      'talk/rooms': 2,
       'console/serve': 1,
     },
   },
@@ -866,12 +1030,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/account',
     pattern: '/account',
     dispatch: 'legacy',
-    total: 102,
+    total: 21,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 8,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -882,12 +1046,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/rooms',
     pattern: '/console/rooms',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -895,13 +1059,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/requests',
     pattern: '/console/requests',
     dispatch: 'table',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -909,13 +1073,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/claims',
     pattern: '/console/claims',
     dispatch: 'table',
-    total: 99,
+    total: 19,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'console/report': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -923,12 +1087,12 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/human-work',
     pattern: '/console/human-work',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -936,13 +1100,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/audit',
     pattern: '/console/audit',
     dispatch: 'table',
-    total: 101,
+    total: 20,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 5,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
       'ledger/export': 2,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -950,29 +1114,69 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/console/data',
     pattern: '/console/data',
     dispatch: 'table',
-    total: 97,
+    total: 17,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
   // The code-review index. One statement of its own (`coding/review` reading the
-  // review documents); the other 88 belong to the shell, which is the honest
-  // picture of a console page today.
+  // review documents); the other 15 belong to the shell, which is still the
+  // honest picture of a console page today.
   {
     url: '/console/review',
     pattern: '/console/review',
     dispatch: 'table',
-    total: 99,
+    total: 18,
     modules: {
-      'talk/health': 53,
-      'console/shell-metrics': 16,
-      'talk/rooms': 14,
       'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'coding/review': 1,
+      'gov/trust': 1,
+    },
+  },
+  // The per-mission review page for a mission the tenant never reviewed: the
+  // shell, one `coding/review` read that returns nothing, and the mission lookup
+  // the empty state uses to name what it is asking about. Budgeted at the miss
+  // because that is the shape a fresh install renders; a review *with* files
+  // also reads the repository, which is disk rather than SQL.
+  {
+    url: '/console/review/M-NONE',
+    pattern: '/console/review/:missionId',
+    dispatch: 'table',
+    total: 19,
+    modules: {
+      'core/auth': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
+      'coding/review': 1,
+      'coding/mission': 1,
+      'gov/trust': 1,
+    },
+  },
+  {
+    // Measured as an engineering member, not as the owner: this page answers the
+    // owner with a 403, and a refusal is not what its budget is about. Unlike
+    // `/console/rooms`, the board does *not* evaluate every row it shows — it
+    // reads the issues once and draws them, which is why this stays flat as the
+    // board fills up.
+    url: '/console/issues',
+    pattern: '/console/issues',
+    dispatch: 'table',
+    as: 'engineer',
+    total: 22,
+    modules: {
+      'core/auth': 5,
+      'console/issues': 4,
+      'talk/health': 4,
+      'console/shell-metrics': 4,
+      'talk/rooms': 2,
       'gov/trust': 1,
     },
   },
@@ -988,6 +1192,7 @@ T('every budgeted page is attributed to the mechanism that really serves it', ()
     ...Object.keys(REQUESTS_CAPABILITIES),
     ...Object.keys(LISTS_CAPABILITIES),
     ...Object.keys(REVIEW_CAPABILITIES),
+    ...Object.keys(ISSUES_CAPABILITIES),
   ]);
   const wrong = PAGE_SQL_BUDGETS.filter((p) => (p.dispatch === 'table') !== migrated.has(`GET ${p.pattern}`)).map(
     (p) => `${p.url} is marked ${p.dispatch}`,
@@ -998,7 +1203,7 @@ T('every budgeted page is attributed to the mechanism that really serves it', ()
 T('every page stays inside its statement budget', async () => {
   const { db, ledger, coord, comp } = await fresh();
   await installAuthSchema(db, NOW);
-  await signupTenant(
+  const { owner } = await signupTenant(
     db,
     {
       slug: TEN,
@@ -1014,11 +1219,38 @@ T('every page stays inside its statement budget', async () => {
   const base = `http://127.0.0.1:${server.port}`;
   try {
     const cookie = await login(base);
+    // Engineering members, for the pages the owner is refused. Without one the
+    // board's budget would be a measurement of its 403.
+    //
+    // Two of them, not one: with a single member a per-row loop and a batch cost
+    // almost the same, and the thing these budgets exist to catch — a page whose
+    // cost grows with the org chart — would stay invisible. `/team` is 11 either
+    // way; a regression to per-member reads makes it 15.
+    //
+    // Invited and accepted rather than `inviteUser`d: that helper flags the
+    // account `mustChangePassword`, so the session it produces is redirected to
+    // /change-password and the "page" measured would be that redirect.
+    const engineerEmails = ['eng@acme.test', 'eng2@acme.test'];
+    for (const [i, email] of engineerEmails.entries()) {
+      const { token } = await createInvitation(
+        db,
+        TEN,
+        { email, name: `Eng ${i + 1}`, role: 'member', team: 'engineering' },
+        { userId: owner.id, role: 'owner' },
+        NOW,
+      );
+      await acceptInvitation(db, token, 'the-console-password', NOW);
+    }
+    const engineerCookie = await login(base, engineerEmails[0]!);
+    const headersFor = (page: PageBudget): Record<string, string> => {
+      if (page.anonymous) return {};
+      return { cookie: page.as === 'engineer' ? engineerCookie : cookie };
+    };
     const measured: { page: PageBudget; status: number; total: number; modules: Record<string, number> }[] = [];
     for (const page of PAGE_SQL_BUDGETS) {
       counted.reset();
       const res = await fetch(`${base}${page.url}`, {
-        headers: page.anonymous ? {} : { cookie },
+        headers: headersFor(page),
         redirect: 'manual',
       });
       await res.text();
@@ -1041,6 +1273,18 @@ T('every page stays inside its statement budget', async () => {
     // The per-module diff. This is the assertion meant to be *read*: it answers
     // "which statements grew", in the module that owns them, so the fix is
     // visible before opening a profiler.
+    // The measured breakdown, printed in full: both failures below are meant to
+    // be read and acted on, and rewriting a budget needs the numbers to copy.
+    const breakdown = measured
+      .map(
+        (m) =>
+          `${m.page.url}[${Object.entries(m.modules)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, v]) => `${k}:${v}`)
+            .join(' ')}]`,
+      )
+      .join(' ');
+
     const grown: string[] = [];
     for (const m of measured) {
       for (const [mod, n] of Object.entries(m.modules).sort((a, b) => b[1] - a[1])) {
@@ -1051,14 +1295,7 @@ T('every page stays inside its statement budget', async () => {
     eq(
       grown,
       [],
-      `statement counts that grew — if intended, update that page\u2019s module counts (breakdown: ${measured
-        .map(
-          (m) =>
-            `${m.page.url}[${Object.entries(m.modules)
-              .map(([k, v]) => `${k}:${v}`)
-              .join(' ')}]`,
-        )
-        .join(' ')}):`,
+      `statement counts that grew — if intended, update that page\u2019s module counts: ${grown}\n${breakdown}`,
     );
 
     // And a budget may not go slack: one more than half again over the measured
@@ -1067,7 +1304,7 @@ T('every page stays inside its statement budget', async () => {
     const slack = measured
       .filter((m) => m.page.total > m.total * 1.5)
       .map((m) => `${m.page.url} ${m.page.total} vs ${m.total}`);
-    eq(slack, [], `budgets stay tight (page budget vs measured):`);
+    eq(slack, [], `budgets stay tight (page budget vs measured: ${slack.join(', ')})\n${breakdown}`);
   } finally {
     await server.close();
     await db.close();
@@ -1170,6 +1407,42 @@ T('the compliance domain is complete, and erasure checks its token', async () =>
   }
 });
 
+T('the issues board declares one gate — engineer — for every route it owns', () => {
+  const routes = issuesRoutes();
+  validateRoutes(routes);
+  const byId = new Map(routeManifest(routes).map((m) => [`${m.method} ${m.pattern}`, m]));
+  eq(byId.size, Object.keys(ISSUES_CAPABILITIES).length, 'issues route count:');
+  for (const [id, want] of Object.entries(ISSUES_CAPABILITIES)) {
+    eq(byId.get(id)?.capability, want.capability, `${id} capability:`);
+    eq(byId.get(id)?.surface, want.surface, `${id} surface:`);
+    eq((byId.get(id)?.note ?? '').length > 0, true, `${id} has a stated reason:`);
+  }
+  // One gate for the whole module. A `session` route hiding inside an
+  // engineer-gated domain is the exact shape this table exists to make
+  // impossible to read past.
+  eq(
+    routes.every((r) => r.capability === 'engineer'),
+    true,
+    'every board route is engineer-gated:',
+  );
+  // The board is a page, so a refused non-engineer must be told in the page's
+  // own words rather than handed a JSON body.
+  const page = routes.find((r) => r.surface === 'html');
+  eq(typeof page?.denied?.message, 'string', 'the board page declares its refusal copy:');
+  // "Every board write checks its token" is one column, not six branches.
+  eq(
+    routes.filter((r) => r.method === 'POST').every((r) => r.body === 'csrf'),
+    true,
+    'every board write is CSRF-checked by the dispatcher:',
+  );
+  // The board names goals, scopes and spend, and its JSON repeats the page.
+  eq(
+    routes.every((r) => r.activation === 'required'),
+    true,
+    'every board route needs an activated account:',
+  );
+});
+
 T('the code-review index lists what was opened, and refuses what cannot be read', async () => {
   // The bug this pins: `/console/review/:missionId` was a real page with no
   // inbound link. A review is keyed by mission id, nothing listed the keys, and
@@ -1253,6 +1526,69 @@ T('the code-review index lists what was opened, and refuses what cannot be read'
   }
 });
 
+T('a code review opens inside the console shell, and a task links to it', async () => {
+  // Two claims, both about reachability. First: the diff gate used to return a
+  // whole HTML document, so arriving at it from the console index swapped the
+  // rail out from under the reader. Second: an Agent Task could not point at the
+  // change set it produced, because nothing linked the two stores — the row now
+  // offers the task's own id as the review key and says whether one is open.
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
+  await coord.submit(base({ id: 'TASK-1', goal: 'ship the copy change' }));
+  const repo = mkdtempSync(join(tmpdir(), 'vital-review-shell-'));
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  try {
+    const cookie = await login(baseUrl);
+
+    // 1. The per-mission page is a page inside the console shell, not a document
+    //    of its own. Asserted on the miss path so no repository is involved.
+    const miss = await fetch(`${baseUrl}/console/review/M-NONE`, { headers: { cookie } });
+    eq(miss.status, 200);
+    const missBody = await miss.text();
+    eq(missBody.includes('id="console-rail"'), true, 'the review page carries the console rail:');
+    eq(missBody.includes('Open code review'), true, 'and the form that opens one:');
+    // Exactly one document: the shell's. The old page returned its own complete
+    // `<html>` too, which is how it could render without the rail.
+    eq((missBody.match(/<html/g) ?? []).length, 1, 'one document, not a nested second one:');
+
+    // 2. Before a review exists, the task row offers one under the task's id.
+    const before = await fetch(`${baseUrl}/console/agent-tasks`, { headers: { cookie } });
+    const beforeBody = await before.text();
+    eq(beforeBody.includes('href="/console/review/TASK-1"'), true, 'the task links into its review:');
+    eq(beforeBody.includes('Review change set'), true, 'and says what the link does:');
+
+    // Open one under that id — the link's whole premise, exercised.
+    const csrf = await freshToken(baseUrl, cookie);
+    const opened = await fetch(`${baseUrl}/console/review`, {
+      method: 'POST',
+      headers: { cookie },
+      body: `csrf=${csrf}&action=open&missionId=TASK-1&baseline=HEAD&workdir=${encodeURIComponent(repo)}`,
+      redirect: 'manual',
+    });
+    eq(opened.status, 303);
+
+    // 3. With a review open, both the row and the task's own page say so and link
+    //    to it, with the review's real status rather than a hopeful label.
+    const after = await fetch(`${baseUrl}/console/agent-tasks`, { headers: { cookie } });
+    const afterBody = await after.text();
+    eq(afterBody.includes('review · READY_FOR_REVIEW'), true, 'the row shows the review state:');
+    eq(afterBody.includes('href="/console/review/TASK-1"'), true, 'the row still links to it:');
+    const detail = await fetch(`${baseUrl}/console/agent-tasks/TASK-1`, { headers: { cookie } });
+    const detailBody = await detail.text();
+    eq(detailBody.includes('Code review'), true, 'the task page names the review:');
+    eq(detailBody.includes('Open review →'), true, 'and links into it:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('the migration boundary is explicit, not implied', () => {
   // Everything not in these tables is still served by the legacy chain, so it
   // has no declared capability yet. This assertion is the burn-down list: as
@@ -1266,6 +1602,7 @@ T('the migration boundary is explicit, not implied', () => {
       ...Object.keys(LISTS_CAPABILITIES),
       ...Object.keys(LEARNING_CAPABILITIES),
       ...Object.keys(REVIEW_CAPABILITIES),
+      ...Object.keys(ISSUES_CAPABILITIES),
     ].map((id) => `${id.split(' ')[0]} ${id.split(' ')[1]}`),
   );
   // The whole compliance domain now declares its capability, surface and body
@@ -1286,16 +1623,28 @@ T('the migration boundary is explicit, not implied', () => {
   eq(migrated.has('GET /console/learning/compile'), true, 'compile form migrated:');
   eq(migrated.has('POST /console/learning/compile'), true, 'compilation migrated:');
   eq(migrated.has('POST /console/learning/cards/:id/transfer-test'), true, 'transfer dispatch migrated:');
-  // The code-review index — the two verbs that list reviews and open one. The
-  // per-mission review page itself is still legacy and is named below, so
-  // "code review is on the table" cannot be read as "the whole review surface is".
+  // The whole code-review surface: the index, the open form, and the
+  // per-mission diff gate with every action it posts. Four routes, and the
+  // capability is now read from a table instead of a regex branch.
   eq(migrated.has('GET /console/review'), true, 'review index migrated:');
   eq(migrated.has('POST /console/review'), true, 'review open migrated:');
-  eq(migrated.size, 18, 'migrated route count (update deliberately):');
-  eq(migrated.has('GET /console/review/:missionId'), false, 'the per-mission review page is still legacy:');
+  eq(migrated.has('GET /console/review/:missionId'), true, 'the per-mission review page migrated:');
+  eq(migrated.has('POST /console/review/:missionId'), true, 'review actions migrated:');
+  // The board: the page, its delta sync, its detail payload and its five writes.
+  // This is also the first domain whose gate is a department rather than a role,
+  // which is why `engineer` had to exist before any of it could move.
+  eq(migrated.has('GET /console/issues'), true, 'the board page migrated:');
+  eq(migrated.has('POST /console/issues/create'), true, 'issue create migrated:');
+  eq(migrated.has('POST /console/issues/comment'), true, 'issue comment migrated:');
+  eq(migrated.size, 28, 'migrated route count (update deliberately):');
   eq(migrated.has('GET /console/learning'), false, 'the learning read page is still legacy:');
   eq(migrated.has('GET /console/learning/:id'), false, 'the card page is still legacy:');
   eq(migrated.has('POST /console/learning/label'), false, 'the label write is still legacy:');
+  // The board's GitHub sub-surface is deliberately still legacy: its webhook is
+  // called anonymously by GitHub once a repo is linked, so its capability
+  // depends on tenant state and cannot be one declared value yet.
+  eq(migrated.has('GET /console/issues/github/config'), false, 'github config is still legacy:');
+  eq(migrated.has('POST /console/issues/github/webhook'), false, 'the github webhook is still legacy:');
   // Still on the legacy chain, with no declared capability. Named explicitly so
   // "migrated" cannot quietly mean "everything". These write a ledger decision
   // inside a transaction with a duplicate-submission receipt path — their own

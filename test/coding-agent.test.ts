@@ -8,7 +8,16 @@ process.env.VITAL_SNAPSHOT_DIR = mkdtempSync(join(tmpdir(), 'vital-snaps-'));
 import { T } from './helpers.ts';
 import { openDb, migrate } from '../src/core/db.ts';
 import { createMission, transitionMission, submitPlan, approveMission, groupTasks } from '../src/coding/mission.ts';
-import { createSnapshot, verifySnapshot, checkCompatibility, selectBestSnapshot, saveMemory, getMemory, stripSecrets, pinSnapshot } from '../src/coding/snapshot.ts';
+import {
+  createSnapshot,
+  verifySnapshot,
+  checkCompatibility,
+  selectBestSnapshot,
+  saveMemory,
+  getMemory,
+  stripSecrets,
+  pinSnapshot,
+} from '../src/coding/snapshot.ts';
 import { createMicroVM } from '../src/coding/microvm.ts';
 import { buildLambdaPayload, restoreSnapshotToLambda } from '../src/coding/lambda-runtime.ts';
 import { launchFargate } from '../src/coding/fargate-runtime.ts';
@@ -19,7 +28,11 @@ import { openReview, getReview } from '../src/coding/review.ts';
 import { renderReviewPage, handleReviewAction } from '../src/console/code-review.ts';
 import { listSnapshots } from '../src/coding/snapshot.ts';
 
-async function mem() { const db = openDb(':memory:'); await migrate(db); return db; }
+async function mem() {
+  const db = openDb(':memory:');
+  await migrate(db);
+  return db;
+}
 
 T('coding-agent: mission lifecycle — creates, plans, approves, executes to complete', async () => {
   const db = await mem();
@@ -39,9 +52,17 @@ T('coding-agent: mission lifecycle — creates, plans, approves, executes to com
 });
 
 T('coding-agent: grouping engine — groups compatible, splits conflicts, records real split reasons', async () => {
-  const base = { repo: 'r', runtime: { node: '22' }, permissions: 'std', trust: 't1', resources: 'low' as const, deps: [] };
+  const base = {
+    repo: 'r',
+    runtime: { node: '22' },
+    permissions: 'std',
+    trust: 't1',
+    resources: 'low' as const,
+    deps: [],
+  };
   const tasks = [
-    { ...base, id: 'a', title: 'a' }, { ...base, id: 'b', title: 'b', deps: ['a'] },
+    { ...base, id: 'a', title: 'a' },
+    { ...base, id: 'b', title: 'b', deps: ['a'] },
     { ...base, id: 'c', title: 'c', runtime: { node: '18' } },
     { ...base, id: 'd', title: 'd', repo: 'other' },
   ];
@@ -60,11 +81,37 @@ T('coding-agent: grouping engine — groups compatible, splits conflicts, record
 
 T('coding-agent: snapshot + memory — creates, verifies, compat-checks, selects verified, strips secrets', async () => {
   const db = await mem();
-  const s1 = await createSnapshot(db, 't', { missionId: 'M1', groupId: 'G1', projectId: 'p', repo: 'r', branch: 'b', commit: 'c1', parentId: null, type: 'VERIFIED', runtime: { node: '22' }, docker: [], toolchains: {}, workspaceContent: 'hello' });
+  const s1 = await createSnapshot(db, 't', {
+    missionId: 'M1',
+    groupId: 'G1',
+    projectId: 'p',
+    repo: 'r',
+    branch: 'b',
+    commit: 'c1',
+    parentId: null,
+    type: 'VERIFIED',
+    runtime: { node: '22' },
+    docker: [],
+    toolchains: {},
+    workspaceContent: 'hello',
+  });
   assert.equal(s1.status, 'VERIFYING');
   assert.equal(await verifySnapshot(db, 't', s1.id, 'hello'), true);
   assert.equal(await verifySnapshot(db, 't', s1.id, 'tampered'), false); // quarantined
-  const s2 = await createSnapshot(db, 't', { missionId: 'M1', groupId: 'G1', projectId: 'p', repo: 'r', branch: 'b', commit: 'c2', parentId: s1.id, type: 'VERIFIED', runtime: { node: '22' }, docker: [], toolchains: {}, workspaceContent: 'world' });
+  const s2 = await createSnapshot(db, 't', {
+    missionId: 'M1',
+    groupId: 'G1',
+    projectId: 'p',
+    repo: 'r',
+    branch: 'b',
+    commit: 'c2',
+    parentId: s1.id,
+    type: 'VERIFIED',
+    runtime: { node: '22' },
+    docker: [],
+    toolchains: {},
+    workspaceContent: 'world',
+  });
   await verifySnapshot(db, 't', s2.id, 'world');
   const best = await selectBestSnapshot(db, 't', { repo: 'r', runtime: { node: '22' } });
   assert.equal(best?.id, s2.id);
@@ -73,7 +120,14 @@ T('coding-agent: snapshot + memory — creates, verifies, compat-checks, selects
   assert.equal((clean as Record<string, string>).apiToken, 'secret://ref/apiToken');
   assert.deepEqual(refs, ['apiToken']);
   await pinSnapshot(db, 't', s2.id, true);
-  const mem1 = await saveMemory(db, 't', { missionId: 'M1', summary: 's', decisions: ['d'], completedSteps: ['a'], knownIssues: [], constraints: [] });
+  const mem1 = await saveMemory(db, 't', {
+    missionId: 'M1',
+    summary: 's',
+    decisions: ['d'],
+    completedSteps: ['a'],
+    knownIssues: [],
+    constraints: [],
+  });
   assert.equal(mem1.version, 1);
   assert.equal((await getMemory(db, 't', 'M1'))?.summary, 's');
   const vm = await createMicroVM(db, 't', 'M1', 'G1', s2.id);
@@ -83,12 +137,32 @@ T('coding-agent: snapshot + memory — creates, verifies, compat-checks, selects
 
 T('coding-agent: lambda microvm — builds invoke payload without secrets and restores manifest to /tmp', async () => {
   const db = await mem();
-  const s = await createSnapshot(db, 't', { missionId: 'M9', groupId: 'G9', projectId: 'p', repo: 'r', branch: 'b', commit: 'c', parentId: null, type: 'EXPERIMENTAL', runtime: { node: '22' }, docker: [], toolchains: {}, workspaceContent: 'x' });
+  const s = await createSnapshot(db, 't', {
+    missionId: 'M9',
+    groupId: 'G9',
+    projectId: 'p',
+    repo: 'r',
+    branch: 'b',
+    commit: 'c',
+    parentId: null,
+    type: 'EXPERIMENTAL',
+    runtime: { node: '22' },
+    docker: [],
+    toolchains: {},
+    workspaceContent: 'x',
+  });
   const sess = await restoreSnapshotToLambda(db, 't', s, 'testvm123');
   assert.equal(sess.ephemeral, true);
   assert.equal(sess.kind, 'lambda');
   assert.equal(existsSync(sess.workdir + '/snapshot-manifest.json'), true);
-  const payload = buildLambdaPayload({ tenant: 't', missionId: 'M9', groupId: 'G9', taskIds: ['a'], snapshotId: s.id, continuationPrompt: 'hi' });
+  const payload = buildLambdaPayload({
+    tenant: 't',
+    missionId: 'M9',
+    groupId: 'G9',
+    taskIds: ['a'],
+    snapshotId: s.id,
+    continuationPrompt: 'hi',
+  });
   assert.equal(payload['ephemeral'], true);
   assert.ok(!JSON.stringify(payload).includes('sk-'), 'no secrets in payload');
   process.env.VITAL_VM_BACKEND = 'lambda';
@@ -106,22 +180,35 @@ T('coding-agent: lambda microvm — builds invoke payload without secrets and re
 
 T('coding-agent: fargate + merge — dry-run intent, clean merge, overlap conflict, unverified block', async () => {
   const db = await mem();
-  const sess = await launchFargate(db, 't', 'vm-fg-1', { missionId: 'M', groupId: 'G', taskIds: ['a'], continuationPrompt: 'go' }, null);
+  const sess = await launchFargate(
+    db,
+    't',
+    'vm-fg-1',
+    { missionId: 'M', groupId: 'G', taskIds: ['a'], continuationPrompt: 'go' },
+    null,
+  );
   assert.equal(sess.kind, 'fargate');
-  const ok = await mergeGroups(db, 't', 'M', { baseSnapshotId: 's0', branches: [
-    { groupId: 'A', branch: 'a', files: ['x.ts'], snapshotId: 's1', verified: true },
-    { groupId: 'B', branch: 'b', files: ['y.ts'], snapshotId: 's2', verified: true },
-  ]});
+  const ok = await mergeGroups(db, 't', 'M', {
+    baseSnapshotId: 's0',
+    branches: [
+      { groupId: 'A', branch: 'a', files: ['x.ts'], snapshotId: 's1', verified: true },
+      { groupId: 'B', branch: 'b', files: ['y.ts'], snapshotId: 's2', verified: true },
+    ],
+  });
   assert.equal(ok.status, 'MERGED');
-  const cf = await mergeGroups(db, 't', 'M', { baseSnapshotId: 's0', branches: [
-    { groupId: 'A', branch: 'a', files: ['src/auth/svc.ts'], snapshotId: 's1', verified: true },
-    { groupId: 'B', branch: 'b', files: ['src/auth/svc.ts'], snapshotId: 's2', verified: true },
-  ]});
+  const cf = await mergeGroups(db, 't', 'M', {
+    baseSnapshotId: 's0',
+    branches: [
+      { groupId: 'A', branch: 'a', files: ['src/auth/svc.ts'], snapshotId: 's1', verified: true },
+      { groupId: 'B', branch: 'b', files: ['src/auth/svc.ts'], snapshotId: 's2', verified: true },
+    ],
+  });
   assert.equal(cf.status, 'CONFLICT');
   assert.ok(cf.reason.includes('human review'));
-  const bl = await mergeGroups(db, 't', 'M', { baseSnapshotId: 's0', branches: [
-    { groupId: 'A', branch: 'a', files: ['x.ts'], snapshotId: 's1', verified: false },
-  ]});
+  const bl = await mergeGroups(db, 't', 'M', {
+    baseSnapshotId: 's0',
+    branches: [{ groupId: 'A', branch: 'a', files: ['x.ts'], snapshotId: 's1', verified: false }],
+  });
   assert.equal(bl.status, 'BLOCKED');
   await db.close();
 });
@@ -133,7 +220,11 @@ T('coding-agent: snapshot store — dedupes identical layers, docker digest refs
   const b = await store.put('workspace', 'same-bytes');
   assert.equal(a.hash, b.hash);
   assert.equal(b.deduped, true);
-  const layers = await persistSnapshotLayers(store, { workspace: 'code', dependencies: 'lock', dockerDigests: ['sha256:abc', 'sha256:abc'] });
+  const layers = await persistSnapshotLayers(store, {
+    workspace: 'code',
+    dependencies: 'lock',
+    dockerDigests: ['sha256:abc', 'sha256:abc'],
+  });
   assert.equal(layers.dockerRefs[0], layers.dockerRefs[1], 'same digest stored once');
   // get(hash) resolves the ref via the db index and returns the exact bytes.
   assert.equal((await store.get(a.hash))?.toString(), 'same-bytes');

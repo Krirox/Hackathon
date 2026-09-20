@@ -1314,7 +1314,11 @@ T('ADR 0006: findNearDuplicate detects paraphrase, passes novelty, skips short i
   });
 
   // Paraphrase clears the threshold
-  const dup = await findNearDuplicate(db, TEN, 'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts');
+  const dup = await findNearDuplicate(
+    db,
+    TEN,
+    'Competitor cut enterprise pricing by twenty percent on Q3 renewals for big accounts',
+  );
   eq(dup.hit !== null, true, 'paraphrase detected:');
   eq(dup.hit?.claimId, base.id);
 

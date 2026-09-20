@@ -17,14 +17,8 @@ console.log('\n\x1b[1mTenant scope — the structural half of multi-tenancy\x1b[
 T('a tenant-table statement without a tenant predicate is refused', () => {
   // The predicate IS the guarantee: without it the query returns someone else's
   // rows silently, so this must throw rather than warn.
-  throws(
-    () => assertTenantScoped('SELECT id FROM requests WHERE state = ?'),
-    'UNSCOPED',
-  );
-  throws(
-    () => assertTenantScoped('UPDATE issues SET state = ? WHERE id = ?'),
-    'UNSCOPED',
-  );
+  throws(() => assertTenantScoped('SELECT id FROM requests WHERE state = ?'), 'UNSCOPED');
+  throws(() => assertTenantScoped('UPDATE issues SET state = ? WHERE id = ?'), 'UNSCOPED');
   // With the predicate it passes, in either spelling.
   assertTenantScoped('SELECT id FROM requests WHERE tenant = ? AND state = ?');
   assertTenantScoped('SELECT id FROM requests WHERE state = ? AND tenant = ?');
@@ -178,7 +172,10 @@ export function scanUnscopedStatements(root = 'src'): {
       call = nextCall(call.at + call.fn.length);
     }
   }
-  violations.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
+  violations.sort((a, b) => {
+    if (a.file === b.file) return a.line - b.line;
+    return a.file < b.file ? -1 : 1;
+  });
   return { violations, scanned, indirect };
 }
 

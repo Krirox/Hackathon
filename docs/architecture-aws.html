@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vital — AWS Architecture (deploy/aws)</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #121821;
+        --panel-2: #0e141c;
+        --ink: #eaf0f6;
+        --ink-dim: #9fb0c0;
+        --hair: #24303e;
+        --edge: #34455a;
+        --connector: #7f93a8;
+        /* category hues */
+        --compute: #f78e21;
+        --database: #4d8dff;
+        --storage: #2fbf71;
+        --network: #a970ff;
+        --mgmt: #ff6b6b;
+        --security: #ffcf4d;
+        --ease: cubic-bezier(0.16, 1, 0.3, 1);
+        font-size: 15px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        background: radial-gradient(1200px 700px at 70% -10%, rgba(77, 141, 255, 0.1), transparent 60%), var(--bg);
+        color: var(--ink);
+        font-family:
+          ui-sans-serif,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          Helvetica,
+          Arial,
+          sans-serif;
+        line-height: 1.35;
+      }
+      .stage {
+        max-width: 1500px;
+        margin: 0 auto;
+        padding: 28px 30px 60px;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 14px;
+        border-bottom: 1px solid var(--hair);
+        padding-bottom: 16px;
+        margin-bottom: 22px;
+      }
+      header h1 {
+        font-size: 26px;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      header .sub {
+        color: var(--ink-dim);
+        font-size: 13.5px;
+      }
+      header .badge {
+        margin-left: auto;
+        font-size: 11.5px;
+        color: var(--ink-dim);
+        border: 1px solid var(--hair);
+        border-radius: 999px;
+        padding: 5px 12px;
+        white-space: nowrap;
+      }
+
+      /* ---- generic card ---- */
+      .node {
+        position: relative;
+        background: linear-gradient(180deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--edge);
+        border-radius: 12px;
+        padding: 11px 13px 12px;
+        min-width: 130px;
+        transition:
+          transform 0.3s var(--ease),
+          border-color 0.3s var(--ease),
+          box-shadow 0.3s var(--ease);
+      }
+      .node::before {
+        content: '';
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 4px;
+        border-radius: 12px 0 0 12px;
+        background: var(--cat, var(--edge));
+      }
+      .node .nm {
+        font-weight: 650;
+        font-size: 14px;
+        display: block;
+      }
+      .node .ty {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: var(--cat, var(--ink-dim));
+        font-weight: 700;
+      }
+      .node .meta {
+        font-size: 11.5px;
+        color: var(--ink-dim);
+        margin-top: 4px;
+      }
+      .node .meta b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .node:hover {
+        transform: translateY(-2px);
+        border-color: var(--cat);
+        box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+      }
+
+      /* ---- zone containers ---- */
+      .zone {
+        border: 1px dashed var(--hair);
+        border-radius: 16px;
+        padding: 16px 18px 18px;
+        margin-bottom: 18px;
+        position: relative;
+        background: rgba(255, 255, 255, 0.012);
+      }
+      .zone > .tag {
+        position: absolute;
+        top: -10px;
+        left: 16px;
+        background: var(--bg);
+        padding: 0 10px;
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+      }
+      .zone > .tag small {
+        color: var(--ink-dim);
+        font-weight: 600;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        align-items: stretch;
+      }
+      .row.tight {
+        gap: 10px;
+      }
+      .grow {
+        flex: 1 1 200px;
+      }
+
+      .cat-compute {
+        --cat: var(--compute);
+      }
+      .cat-database {
+        --cat: var(--database);
+      }
+      .cat-storage {
+        --cat: var(--storage);
+      }
+      .cat-network {
+        --cat: var(--network);
+      }
+      .cat-mgmt {
+        --cat: var(--mgmt);
+      }
+      .cat-security {
+        --cat: var(--security);
+      }
+      .cat-ext {
+        --cat: #8497aa;
+      }
+
+      /* flow arrow between inline nodes */
+      .arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--connector);
+        font-size: 20px;
+        min-width: 26px;
+        font-weight: 700;
+      }
+      .arrow span {
+        font-size: 10.5px;
+        color: var(--ink-dim);
+        white-space: nowrap;
+      }
+
+      .flowline {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 10px 14px;
+        margin-bottom: 18px;
+        border: 1px solid var(--hair);
+        border-radius: 12px;
+        background: rgba(169, 112, 255, 0.05);
+        font-size: 12.5px;
+      }
+      .flowline .ft {
+        font-weight: 700;
+        color: var(--network);
+        text-transform: uppercase;
+        font-size: 10.5px;
+        letter-spacing: 0.6px;
+        margin-right: 4px;
+      }
+      .pill {
+        border: 1px solid var(--edge);
+        border-radius: 999px;
+        padding: 3px 10px;
+        background: var(--panel-2);
+        white-space: nowrap;
+      }
+      .sep {
+        color: var(--connector);
+      }
+
+      .nested {
+        border: 1px solid var(--hair);
+        border-radius: 12px;
+        padding: 12px 13px 13px;
+        background: rgba(247, 142, 33, 0.04);
+        flex: 1 1 320px;
+      }
+      .nested .nh {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--compute);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 9px;
+      }
+      .nested .nh small {
+        color: var(--ink-dim);
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .cont {
+        border: 1px solid var(--edge);
+        border-radius: 9px;
+        padding: 8px 10px;
+        background: var(--panel-2);
+        font-size: 12px;
+      }
+      .cont b {
+        font-size: 12.5px;
+      }
+      .cont .p {
+        color: var(--ink-dim);
+        font-size: 11px;
+      }
+
+      /* legend */
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        margin-top: 6px;
+        padding-top: 16px;
+        border-top: 1px solid var(--hair);
+        font-size: 12px;
+        color: var(--ink-dim);
+      }
+      .legend i {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        margin-right: 6px;
+        vertical-align: -1px;
+      }
+      .foot {
+        margin-top: 14px;
+        font-size: 11px;
+        color: var(--ink-dim);
+      }
+      @media print {
+        html,
+        body {
+          background: #fff;
+          color: #111;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <header>
+        <h1>Vital — Production Topology on AWS</h1>
+        <span class="sub">one-region Fargate stack · Terraform-as-code · ledger is the source of truth</span>
+        <span class="badge">reflects deploy/aws/main.tf · buzz.tf · dns.tf</span>
+      </header>
+
+      <!-- request path summary bar -->
+      <div class="flowline">
+        <span class="ft">Request path</span>
+        <span class="pill">Browser / Buzz client / Webhook</span>
+        <span class="sep">→</span>
+        <span class="pill">Route 53 (alias)</span>
+        <span class="sep">→</span>
+        <span class="pill">ACM TLS · HTTPS :443</span>
+        <span class="sep">→</span>
+        <span class="pill">ALB host-routing</span>
+        <span class="sep">→</span>
+        <span class="pill">core :3100 · buzz :3000</span>
+      </div>
+
+      <!-- OUTSIDE -->
+      <div class="zone">
+        <span class="tag">Clients <small>&mdash; the web, not in AWS</small></span>
+        <div class="row">
+          <div class="node cat-ext grow">
+            <span class="ty">external</span>
+            <span class="nm">Console browser</span>
+            <span class="meta">signed-in humans → evidence queue &amp; approvals</span>
+          </div>
+          <div class="node cat-ext grow">
+            <span class="ty">external</span>
+            <span class="nm">Buzz chat client</span>
+            <span class="meta">talk surface · Nostr relay</span>
+          </div>
+          <div class="node cat-ext grow">
+            <span class="ty">external</span>
+            <span class="nm">Webhooks</span>
+            <span class="meta">GitHub release / Slack (HMAC) → ALB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- GLOBAL / EDGE -->
+      <div class="zone">
+        <span class="tag">Edge &amp; TLS</span>
+        <div class="row">
+          <div class="node cat-network grow">
+            <span class="ty">Route 53</span>
+            <span class="nm">Hosted zone (looked-up)</span>
+            <span class="meta"><b>Alias A</b> record → ALB · zone is never created by the stack</span>
+          </div>
+          <div class="node cat-network grow">
+            <span class="ty">ACM</span>
+            <span class="nm">Public certificate</span>
+            <span class="meta">DNS-validated (CNAME in zone) · TLS 1.3 policy on the HTTPS listener</span>
+          </div>
+          <div class="node cat-network grow">
+            <span class="ty">Load Balancer</span>
+            <span class="nm">ALB</span>
+            <span class="meta"
+              >:80 → 301 HTTPS · default → <b>core</b> TG · host rule <i>buzz.*</i> (prio 20) → <b>buzz</b> TG</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- VPC -->
+      <div class="zone" style="border-color: var(--edge)">
+        <span class="tag">VPC <small>10.0.0.0/16 · public + private subnets across AZs</small></span>
+
+        <div class="row tight" style="margin-bottom: 14px">
+          <div class="node cat-network">
+            <span class="ty">Public subnet</span>
+            <span class="nm">Internet Gateway</span>
+            <span class="meta">ingress for the ALB</span>
+          </div>
+          <div class="node cat-network">
+            <span class="ty">Public subnet</span>
+            <span class="nm">NAT Gateway</span>
+            <span class="meta">private egress · single by default, per-AZ opt</span>
+          </div>
+          <div class="node cat-network">
+            <span class="ty">Data path</span>
+            <span class="nm">Egress policy</span>
+            <span class="meta">decided in code (<i>egress.ts</i>) · SGs/NAT are backstop only</span>
+          </div>
+        </div>
+
+        <!-- COMPUTE: ECS + Lambda -->
+        <div class="row" style="margin-bottom: 14px">
+          <div class="nested" style="flex: 2 1 520px">
+            <div class="nh">ECS Fargate cluster <small>&mdash; 3 services · awsvpc · Cloud Map</small></div>
+            <div class="row tight">
+              <div class="cont" style="flex: 2 1 300px">
+                <b style="color: var(--compute)">vital-core</b>
+                <div class="p">task = <b>vital-core :3100</b> (essential) + <b>jcode</b> sidecar (non-essential)</div>
+                <div class="p">
+                  sidecar talks over <b>NDJSON /run/jcode-api.sock</b> · TRUST_PROXY=1 · worker in-process
+                </div>
+              </div>
+              <div class="cont">
+                <b style="color: var(--compute)">vital-buzz</b>
+                <div class="p"><b>buzz-relay</b> :3000 API</div>
+                <div class="p">:8080 health · :9102 metrics</div>
+                <div class="p">discovered at buzz.vital.local:3000</div>
+              </div>
+              <div class="cont" style="border-style: dashed; opacity: 0.85">
+                <b style="color: var(--compute)">vital-jcode</b>
+                <div class="p">standalone service · <b>staged</b></div>
+                <div class="p">desired=0 today (socket mode); TCP split ready</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="nested" style="flex: 1 1 300px; background: rgba(247, 142, 33, 0.06)">
+            <div class="nh">Ephemeral workers <small>&mdash; serverless</small></div>
+            <div class="row tight" style="align-items: center">
+              <div class="node cat-compute" style="flex: 1 1 120px">
+                <span class="ty">SQS</span>
+                <span class="nm">vital-requests</span>
+                <span class="meta">visibility 5400s · redrive →</span>
+              </div>
+              <div class="arrow">→</div>
+              <div class="node cat-compute" style="flex: 1 1 130px">
+                <span class="ty">Lambda</span>
+                <span class="nm">executor</span>
+                <span class="meta">container image · <b>batch=1</b> · 900s cap · in-VPC</span>
+              </div>
+            </div>
+            <div class="meta" style="margin-top: 8px; font-size: 11px">
+              Firecracker microVM per job · DLQ <b>vital-executor-dlq</b> after 3 receives
+            </div>
+          </div>
+        </div>
+
+        <!-- DATA -->
+        <div
+          class="nh"
+          style="
+            color: var(--database);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+          "
+        >
+          State in the VPC — private subnets
+        </div>
+        <div class="row tight" style="margin-bottom: 12px">
+          <div class="node cat-database">
+            <span class="ty">RDS Postgres 16</span>
+            <span class="nm">vital-ledger</span>
+            <span class="meta">Reality Ledger + console · gp3 · encrypted · PITR 7d</span>
+          </div>
+          <div class="node cat-database">
+            <span class="ty">RDS Postgres 16</span>
+            <span class="nm">vital-buzz</span>
+            <span class="meta">relay store · PITR 7d · deletion-protected</span>
+          </div>
+          <div class="node cat-database">
+            <span class="ty">ElastiCache Redis 7</span>
+            <span class="nm">buzz-redis</span>
+            <span class="meta">auth token · TLS in-transit + at-rest</span>
+          </div>
+          <div class="node cat-storage">
+            <span class="ty">EFS</span>
+            <span class="nm">sandboxes</span>
+            <span class="meta">rebuildable cache · NFS 2049 · TLS transit</span>
+          </div>
+        </div>
+        <div class="row tight">
+          <div class="node cat-storage">
+            <span class="ty">S3</span>
+            <span class="nm">vital-artifacts</span>
+            <span class="meta">content-addressed · versioned · SSE-S3</span>
+          </div>
+          <div class="node cat-storage">
+            <span class="ty">S3 · Object Lock</span>
+            <span class="nm">vital-audit</span>
+            <span class="meta">immutable audit copy · COMPLIANCE <b>365d</b> — runtime can't erase its trail</span>
+          </div>
+          <div class="node cat-storage">
+            <span class="ty">S3</span>
+            <span class="nm">buzz-media</span>
+            <span class="meta">relay media · IAM task role · block-public</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CROSS-CUTTING / GOVERNANCE OF THE STACK -->
+      <div class="zone">
+        <span class="tag">Identity, Secrets &amp; Operations</span>
+        <div class="row">
+          <div class="node cat-security">
+            <span class="ty">IAM</span>
+            <span class="nm">Task &amp; execution roles</span>
+            <span class="meta">ecs-execution · ecs-task · buzz-task · lambda</span>
+          </div>
+          <div class="node cat-security">
+            <span class="ty">Secrets Manager</span>
+            <span class="nm">~15 secrets</span>
+            <span class="meta">DB URLs · relay key · HMAC/core/webhook · model API keys</span>
+          </div>
+          <div class="node cat-mgmt">
+            <span class="ty">ECR</span>
+            <span class="nm">core + executor</span>
+            <span class="meta">immutable tags · scan-on-push · keep last 20</span>
+          </div>
+          <div class="node cat-mgmt">
+            <span class="ty">CloudWatch</span>
+            <span class="nm">Logs + 4 alarms</span>
+            <span class="meta"
+              >/vital/core · /executor · /buzz (90d) · ALB 5xx · Lambda errors · queue age · RDS free-space</span
+            >
+          </div>
+          <div class="node cat-mgmt">
+            <span class="ty">SNS</span>
+            <span class="nm">vital-ops → email</span>
+            <span class="meta">all alarms fan out to a named operator</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- legend -->
+      <div class="legend">
+        <span><i style="background: var(--compute)"></i>Compute (Fargate/Lambda)</span>
+        <span><i style="background: var(--database)"></i>Database (RDS/Redis)</span>
+        <span><i style="background: var(--storage)"></i>Storage (S3/EFS)</span>
+        <span><i style="background: var(--network)"></i>Network &amp; Edge</span>
+        <span><i style="background: var(--security)"></i>Identity &amp; Secrets</span>
+        <span><i style="background: var(--mgmt)"></i>Management &amp; Observability</span>
+      </div>
+      <div class="foot">
+        Facts sourced directly from Terraform: 3 <code>aws_ecs_service</code> (core, buzz, staged jcode), 2
+        <code>aws_db_instance</code>, <code>aws_elasticache_replication_group</code>, <code>aws_efs_file_system</code>,
+        3 <code>aws_s3_bucket</code>, SQS→Lambda executor, <code>aws_secretsmanager_*</code>, <code>aws_iam_*</code>, 4
+        <code>aws_cloudwatch_metric_alarm</code> → <code>aws_sns_topic</code>.
+      </div>
+    </div>
+  </body>
+</html>

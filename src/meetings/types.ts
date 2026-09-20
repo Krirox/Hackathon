@@ -176,7 +176,10 @@ export interface SttTranscriptionResult {
 export interface SttProvider {
   name: string;
   transcribeAudio(audioBytes: Buffer | Uint8Array, mimeType?: string): Promise<SttTranscriptionResult>;
-  transcribeLiveChunk?(chunk: Buffer | Uint8Array, context?: { speakerId: string; speakerName: string; offsetSec: number }): Promise<TranscriptSegment | null>;
+  transcribeLiveChunk?(
+    chunk: Buffer | Uint8Array,
+    context?: { speakerId: string; speakerName: string; offsetSec: number },
+  ): Promise<TranscriptSegment | null>;
 }
 
 export interface EmbeddingProvider {

@@ -141,10 +141,7 @@ export function listsRoutes(): RouteDef<ListsEnv>[] {
           const group = (heading: string, rows2: { id: string; goal: string; state: string }[]): string =>
             rows2.length === 0
               ? ''
-              : renderListSection(
-                  `${heading} (${rows2.length})`,
-                  renderTable(REQUEST_COLUMNS, rows2.map(row)),
-                );
+              : renderListSection(`${heading} (${rows2.length})`, renderTable(REQUEST_COLUMNS, rows2.map(row)));
           let body = '';
           if (pageResult.total === 0) {
             const model = noResultsModel('/console/requests', state);
@@ -317,8 +314,7 @@ export function listsRoutes(): RouteDef<ListsEnv>[] {
         roomRows.sort(
           (a, b) =>
             (categoryRank.get(a.category) ?? ROOM_CATEGORIES.length) -
-              (categoryRank.get(b.category) ?? ROOM_CATEGORIES.length) ||
-            a.roomName.localeCompare(b.roomName),
+              (categoryRank.get(b.category) ?? ROOM_CATEGORIES.length) || a.roomName.localeCompare(b.roomName),
         );
         const total = roomRows.length;
         const pageRooms = roomRows.slice(offset, offset + limit);
@@ -404,9 +400,7 @@ ${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], in
         const q = (state.q ?? '').trim().toLowerCase();
         const all = await ctx.env.coord.list(tenant);
         const terminal = new Set(['COMPLETED', 'DECLINED', 'FAILED', 'EXPIRED', 'TERMINATED_BUDGET', 'DENIED']);
-        let work = all.filter(
-          (r) => r.messageClass === 'REQUEST' && r.bid.humanMinutes > 0 && !terminal.has(r.state),
-        );
+        let work = all.filter((r) => r.messageClass === 'REQUEST' && r.bid.humanMinutes > 0 && !terminal.has(r.state));
         if (q) work = work.filter((r) => `${r.goal} ${r.id}`.toLowerCase().includes(q));
         work.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
         const total = work.length;
@@ -479,10 +473,7 @@ ${renderTable(['Room', 'Scope', 'Status', 'Pending', 'Stops', 'Budget used'], in
 }
 
 /** Capability + surface of each route, for the manifest test and reviewers. */
-export const LISTS_CAPABILITIES: Record<
-  string,
-  { capability: Capability; surface: 'api' | 'html' }
-> = {
+export const LISTS_CAPABILITIES: Record<string, { capability: Capability; surface: 'api' | 'html' }> = {
   'GET /console/requests': { capability: 'session', surface: 'html' },
   'GET /console/claims': { capability: 'session', surface: 'html' },
   'GET /console/rooms': { capability: 'session', surface: 'html' },

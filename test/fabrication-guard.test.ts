@@ -73,7 +73,11 @@ const RULES: Array<{ re: RegExp; rule: string; hint: string }> = [
     hint: 'verification badges must come from a real evaluation — render the computed status or remove the claim',
   },
   { re: PERSONA_RE, rule: 'invented-persona', hint: 'render real principals from the session/ledger' },
-  { re: UNREAD_RE, rule: 'fake-unread', hint: 'unread counts require read-state tracking; render a real count or remove it' },
+  {
+    re: UNREAD_RE,
+    rule: 'fake-unread',
+    hint: 'unread counts require read-state tracking; render a real count or remove it',
+  },
 ];
 
 /** Strip line comments, block comments, and eslint directive comments. */
@@ -131,9 +135,7 @@ T('fabrication guard: src/console + src/talk contain no fabricated telemetry', (
   }
 
   if (violations.length > 0) {
-    const report = violations
-      .map((v) => `${v.file}:${v.line} [${v.rule}] ${v.text}\n    → ${v.hint}`)
-      .join('\n  ');
+    const report = violations.map((v) => `${v.file}:${v.line} [${v.rule}] ${v.text}\n    → ${v.hint}`).join('\n  ');
     console.error(`\n\x1b[1mAnti-fabrication guard violations (${violations.length}):\x1b[0m\n  ${report}\n`);
   }
 
@@ -158,7 +160,11 @@ T('fabrication guard: a fabricated literal is caught (self-test of the scanner)'
 
 T('fabrication guard: percentages and claimed verdicts are caught (self-test)', () => {
   const pct = scanLine('const s = `<span>99.8% dedupe ratio</span>`;', 'self-test.ts');
-  eq(pct.some((v) => v.rule === 'invented-percent'), true, 'a hardcoded percentage is caught:');
+  eq(
+    pct.some((v) => v.rule === 'invented-percent'),
+    true,
+    'a hardcoded percentage is caught:',
+  );
 
   const css = scanLine('return `<div style="border-radius:50%;width:20%">x</div>`;', 'self-test.ts');
   eq(css.length, 0, 'CSS percentage units are not telemetry:');
@@ -166,10 +172,18 @@ T('fabrication guard: percentages and claimed verdicts are caught (self-test)', 
   eq(keyframes.length, 0, 'CSS keyframe stops are not telemetry:');
 
   const badge = scanLine('return `<div>Immutable Hash Chain: 🟢 VERIFIED</div>`;', 'self-test.ts');
-  eq(badge.some((v) => v.rule === 'claimed-verdict'), true, 'an emoji verification badge is caught:');
+  eq(
+    badge.some((v) => v.rule === 'claimed-verdict'),
+    true,
+    'an emoji verification badge is caught:',
+  );
 
   const verdict = scanLine('const s = "Ledger RECONCILED";', 'self-test.ts');
-  eq(verdict.some((v) => v.rule === 'claimed-verdict'), true, 'a bare uppercase verdict is caught:');
+  eq(
+    verdict.some((v) => v.rule === 'claimed-verdict'),
+    true,
+    'a bare uppercase verdict is caught:',
+  );
 
   // Honest shapes must pass: computed percentages and lowercase prose.
   const computed = scanLine('const s = `${ratio.toFixed(1)}% dedupe`;', 'self-test.ts');

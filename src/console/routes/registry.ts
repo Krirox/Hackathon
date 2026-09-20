@@ -14,23 +14,38 @@
 // into a 401/403/redirect is a transport concern and stays in the server.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Role, Session, User } from '../../core/auth.ts';
+import { isEngineer, type Role, type Session, type User } from '../../core/auth.ts';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /**
  * What a caller must be to reach a route.
  *
- * - `public`  — no session. Deliberate and rare: liveness and the status pill.
- * - `session` — any authenticated user of the tenant.
- * - `owner`   — authenticated user whose role is owner or admin.
+ * - `public`   — no session. Deliberate and rare: liveness and the status pill.
+ * - `session`  — any authenticated user of the tenant.
+ * - `engineer` — authenticated, and on the `engineering` team. That is a
+ *                *department*, not a role, and the distinction is the whole
+ *                point: a marketing admin is refused and an engineering member
+ *                is allowed, which no combination of role checks can express.
+ *                The policy is `isEngineer()` from core/auth — the same
+ *                function the engineering Issues board gated on before it
+ *                moved here, so there is one definition of "an engineer".
+ * - `owner`    — authenticated user whose role is owner or admin.
+ *
+ * `engineer` is the only capability that also reads `disabled`. That is not
+ * symmetry for its own sake — it is half of the gate the Issues board applied
+ * (`isEngineer(user) && !user.disabled`), and dropping it during a routing
+ * migration would have widened access silently. `session` and `owner` do not
+ * check `disabled` today; making them do so is a behaviour change that belongs
+ * in its own commit, with its own test.
  *
  * Deliberately *not* a capability: "must have changed the bootstrap password".
  * That is a session-freshness rule applied to HTML surfaces, and encoding it
- * here as three booleans would make it easy to pick the wrong one. Routes that
- * need it state it in the handler, where the redirect shape is visible.
+ * here as more booleans would make it easy to pick the wrong one. Routes that
+ * need it declare `activation` or state it in the handler, where the redirect
+ * shape is visible.
  */
-export type Capability = 'public' | 'session' | 'owner';
+export type Capability = 'public' | 'session' | 'engineer' | 'owner';
 
 /** Resolved identity for one request. `null` means no valid session. */
 export interface AuthContext {
@@ -213,6 +228,7 @@ export function capabilityAllows(capability: Capability, auth: AuthContext | nul
   if (capability === 'public') return true;
   if (!auth) return false;
   if (capability === 'owner') return isOwner(auth.user.role);
+  if (capability === 'engineer') return isEngineer(auth.user) && !auth.user.disabled;
   return true;
 }
 
@@ -247,11 +263,13 @@ export function validateRoutes<Env>(routes: ReadonlyArray<RouteDef<Env>>): void 
     if (!route.capability) problems.push(`${id} declares no capability`);
     if (route.surface !== 'api' && route.surface !== 'html')
       problems.push(`${id} declares no surface (expected "api" or "html")`);
-    // An admin-only HTML route must say what a non-admin sees. Without it the
+    // A restricted HTML route must say what everyone else sees. Without it the
     // dispatcher would have to invent a message, and inventing user-facing copy
-    // is how "Forbidden" ends up in front of a customer.
-    if (route.surface === 'html' && route.capability === 'owner' && !route.denied)
-      problems.push(`${id} is an owner-only HTML route and must declare \`denied\``);
+    // is how "Forbidden" ends up in front of a customer. `public` and `session`
+    // are not restricted: nobody who reaches them is refused.
+    const restricted = route.capability === 'owner' || route.capability === 'engineer';
+    if (route.surface === 'html' && restricted && !route.denied)
+      problems.push(`${id} is a ${route.capability}-only HTML route and must declare \`denied\``);
     if (route.pattern.length === 0 || !route.pattern.startsWith('/'))
       problems.push(`${id} pattern must start with "/"`);
     for (const seg of route.pattern.split('/')) {
@@ -265,10 +283,9 @@ export function validateRoutes<Env>(routes: ReadonlyArray<RouteDef<Env>>): void 
     // checked a token" is not a claim anyone can verify by reading a 7,000-line
     // dispatcher; here it is one table column.
     const mutating = route.method !== 'GET';
-    if (mutating && (route.body !== 'csrf' && route.body !== 'none'))
+    if (mutating && route.body !== 'csrf' && route.body !== 'none')
       problems.push(`${id} must declare a body policy ("csrf" or "none")`);
-    if (!mutating && route.body !== undefined)
-      problems.push(`${id} declares a body policy but does not mutate`);
+    if (!mutating && route.body !== undefined) problems.push(`${id} declares a body policy but does not mutate`);
     // A public route has no session, so there is no token to check: `csrf` there
     // would be a check that can never pass.
     if (route.body === 'csrf' && route.capability === 'public')

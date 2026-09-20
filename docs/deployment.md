@@ -175,7 +175,7 @@ Why this shape, per Vital's own rules:
 - **Egress decided once, in code.** `decideEgress` (core + Lambda) is the
   policy; SGs/NAT/WAF are the backstop. Metadata hosts + 169.254/16 + EC2
   IPv6 metadata are never destinations; `ALLOWED_EGRESS_HOSTS` allowlists
-  only Novita/Gemini/Serper by default.
+  only Serper by default on AWS (models use Bedrock via IAM, not egress).
 - **Kill switches stay drills, now alarmed.** Tenant/scope/action-class
   kills (`killDrill`) plus CloudWatch alarms (ALB 5xx, Lambda errors, SQS
   oldest-message age) → SNS ops topic.
@@ -192,7 +192,13 @@ non-billable executor dry-run invocation).
 First-time bootstrap:
 
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
-2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`, `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`).
+2. Set repository secrets for the OIDC role and sensitive variables
+   (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`,
+   `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_BEDROCK_API_KEY`, `TF_VAR_OPERATOR_SECRET`,
+   `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`, `TF_VAR_BUZZ_AGENT_MASTER_KEY`,
+   `TF_VAR_VITAL_REVIEW_SECRET`, `TF_VAR_BOOTSTRAP_EMAIL`,
+   `TF_VAR_BOOTSTRAP_PASSWORD`, `TF_VAR_SETUP_SECRET` — the full table with
+   what each one is lives under *Deploy — GitHub Actions* below).
 3. Run the `deploy-aws` workflow (see *Deploy — GitHub Actions* below). A local
    `terraform apply` works too, but the images must exist first: `core_image` and
    `executor_image` are validated as non-empty ECR URIs and the busybox fallback
@@ -386,9 +392,8 @@ GitHub → repo → **Settings → Secrets and variables → Actions**.
 | `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface. Required; no placeholder passes |
 | `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens. Required |
 | `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake. Required |
-| `TF_VAR_SERPER_API_KEY` | search. Required |
-| `TF_VAR_GEMINI_API_KEY` | development-model plane. Required |
-| `TF_VAR_NOVITA_API_KEY` | production-model plane. Required |
+| `TF_VAR_SERPER_API_KEY` | search plane — required |
+| `TF_VAR_BEDROCK_API_KEY` | Bedrock console API key — same region as `AWS_REGION` |
 | `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
 | `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | secp256k1 relay key, 64 hex chars |
 | `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex chars; empty = no publishing identity |
@@ -542,6 +547,25 @@ database access, execution, and measurement are operational.
   class: rate limits back off, unknown results reconcile before retry, and
   sensitive actions (approvals, spends, external effects) are
   explicit-resubmission-only — never blindly replayed.
+
+## Topology verification
+
+`scripts/verify-topology.mjs` validates the documented ALB-to-task path, not
+just a loopback probe: Host routing, `X-Forwarded-Proto` handling with
+`TRUST_PROXY=1`, the reachability-only public pill (`/api/health` carries no
+readiness), and — with `--email`/`--password` — authenticated readiness from
+`/api/metrics`.
+
+```sh
+node scripts/verify-topology.mjs --base-url <console_url> --email … --password … --expect-ready true
+```
+
+Dependency-loss drill against `deploy/compose.yml`: boot the stack and run
+once expecting ready, `docker compose stop postgres`, run again with
+`--expect-ready false` — readiness fails while `/healthz` still answers alive
+(liveness ≠ readiness, per the rule above) — then start postgres again.
+`--expect-ready` needs the authenticated credentials; without them the
+readiness check cannot see the report.
 
 ## Support contact and diagnostics
 

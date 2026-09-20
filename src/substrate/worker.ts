@@ -259,29 +259,22 @@ export class ApplicationWorker {
       );
     }
 
-    const runs = await runCrossModelEvidence(
-      this.coord,
-      this.compiler,
-      this.tenant,
-      cardId,
-      this.transferAdapters,
-      {
-        originScope,
-        targetScope,
-        command: payload.command?.trim() || cardId,
-        claimIds: payload.claimIds ?? [],
-        onBehalfOf: payload.onBehalfOf?.trim() || `worker:${this.workerId}`,
-        maxDollars: payload.maxDollars ?? 2,
-        maxTokens: payload.maxTokens ?? 20_000,
-        now: nowIso,
-      },
-    );
+    const runs = await runCrossModelEvidence(this.coord, this.compiler, this.tenant, cardId, this.transferAdapters, {
+      originScope,
+      targetScope,
+      command: payload.command?.trim() || cardId,
+      claimIds: payload.claimIds ?? [],
+      onBehalfOf: payload.onBehalfOf?.trim() || `worker:${this.workerId}`,
+      maxDollars: payload.maxDollars ?? 2,
+      maxTokens: payload.maxTokens ?? 20_000,
+      now: nowIso,
+    });
 
     // Baseline harnesses record `harness_smoke`, which does not satisfy the
     // cross-model gate. Say so here: a transfer test that ran but cannot promote
     // is a fact the operator needs, not a silent success.
     if (!runs.some((r) => r.kind === 'cross_model')) {
-      const msg = `[worker:TRANSFER_SMOKE_ONLY] card=${cardId}: every attached harness is a test baseline, so the run recorded harness_smoke and the cross-model gate is still open`;
+      const msg = `[worker:TRANSFER_SMOKE_ONLY] card=${cardId} — every attached harness is a test baseline, so the run recorded harness_smoke and the cross-model gate is still open`;
       this.lastError = msg;
       this.errors.push(msg);
     }
@@ -311,11 +304,11 @@ export class ApplicationWorker {
     isTestBaseline?: boolean;
   }): Promise<void> {
     try {
-      // An echo/test-baseline adapter is not a deliverable: drafting its 
+      // An echo/test-baseline adapter is not a deliverable: drafting its
       // transcript would fill the review queue with the harness's own words.
       if (input.isTestBaseline) return;
       if (!input.content.trim()) {
-        throw new Error('run completed with an empty transcript: nothing to draft');
+        throw new Error('run completed with an empty transcript — nothing to draft');
       }
       const existing = await loadDeliverableByRequest(this.db, this.tenant, input.requestId);
       if (existing) return;
@@ -352,8 +345,8 @@ export class ApplicationWorker {
     const scope = payload.scope ?? '*';
     const summary =
       row.kind === 'canary-sla-miss'
-        ? `Honeytask canary missed: scope ${scope}: ${payload.reason ?? 'canary SLA miss'}`
-        : `Automation frozen: scope ${scope}/${payload.actionClass ?? '*'}: ${payload.reason ?? 'self-halt'}`;
+        ? `Honeytask canary missed — scope ${scope}: ${payload.reason ?? 'canary SLA miss'}`
+        : `Automation frozen — scope ${scope}/${payload.actionClass ?? '*'}: ${payload.reason ?? 'self-halt'}`;
     if (!this.buzz) {
       throw new Error(`[worker:OUTBOX_UNDELIVERABLE] no Buzz surface bound: ${summary}`);
     }
@@ -511,9 +504,7 @@ export class ApplicationWorker {
               // own alarm was marked "delivered" by falling through this branch,
               // with the DB as the only witness that it was not. A row nobody can
               // deliver must stay FAILED and retrying so it is visible.
-              throw new Error(
-                `outbox: no handler for kind "${row.kind}": refusing to settle it as delivered`,
-              );
+              throw new Error(`outbox: no handler for kind "${row.kind}" — refusing to settle it as delivered`);
             }
             await settleOutbox(this.db, [row.id], 'DONE', { owner: this.workerId });
             this.counters.outboxSettled += 1;
@@ -704,11 +695,7 @@ export class ApplicationWorker {
                 (await checkKill(this.db, this.tenant, targetScope, '*')) ||
                 (await checkKill(this.db, this.tenant, '*', '*'))
               ) {
-                await this.coord.fail(
-                  this.tenant,
-                  reqId,
-                  `kill switch engaged for scope "${targetScope}"`,
-                );
+                await this.coord.fail(this.tenant, reqId, `kill switch engaged for scope "${targetScope}"`);
                 result.requestsFailed += 1;
                 this.counters.requestsFailed += 1;
                 continue;

@@ -194,38 +194,38 @@ variable "serper_api_key" {
 
   validation {
     condition     = length(var.serper_api_key) > 0 && var.serper_api_key != "CHANGEME"
-    error_message = "serper_api_key must be a real key without the placeholder — pass TF_VAR_serper_api_key. Set all three API keys or the executor plane cannot run a single job."
+    error_message = "serper_api_key must be a real key without the placeholder — pass TF_VAR_serper_api_key."
   }
 }
 
-variable "gemini_api_key" {
-  description = "Gemini API key (development-model plane). Required — see serper_api_key."
+variable "bedrock_api_key" {
+  description = "Amazon Bedrock API key (Converse HTTP, Bearer auth). Create in Bedrock console → API keys. Must match var.region."
   type        = string
   sensitive   = true
   default     = ""
 
   validation {
-    condition     = length(var.gemini_api_key) > 0 && var.gemini_api_key != "CHANGEME"
-    error_message = "gemini_api_key must be a real key without the placeholder — pass TF_VAR_gemini_api_key."
+    condition     = length(var.bedrock_api_key) > 0 && var.bedrock_api_key != "CHANGEME"
+    error_message = "bedrock_api_key must be a real key — pass TF_VAR_bedrock_api_key."
   }
 }
 
-variable "novita_api_key" {
-  description = "Novita API key (production-model plane, APPROVED_PROD_MODELS). Required — see serper_api_key."
+variable "bedrock_prod_model_id" {
+  description = "Bedrock foundation model ID for the production lane (Converse API). Default: Z.AI GLM 4.7 Flash (zai.glm-4.7-flash). Enable model access in the account before apply."
   type        = string
-  sensitive   = true
-  default     = ""
+  default     = "zai.glm-4.7-flash"
+}
 
-  validation {
-    condition     = length(var.novita_api_key) > 0 && var.novita_api_key != "CHANGEME"
-    error_message = "novita_api_key must be a real key without the placeholder — pass TF_VAR_novita_api_key."
-  }
+variable "bedrock_dev_model_id" {
+  description = "Bedrock foundation model ID for the dev lane on AWS."
+  type        = string
+  default     = "zai.glm-4.7-flash"
 }
 
 variable "allowed_egress_hosts" {
   description = "Comma-separated allowlist enforced in code (decideEgress) by core + Lambda executor"
   type        = string
-  default     = "api.novita.ai,generativelanguage.googleapis.com,api.serper.dev"
+  default     = "api.serper.dev"
 }
 
 variable "lambda_memory_mb" {

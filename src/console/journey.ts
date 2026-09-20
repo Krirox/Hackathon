@@ -89,16 +89,15 @@ async function latestOutcomeRow(db: AsyncDb, tenant: string): Promise<OutcomeRow
 
 /** Creation time of the tenant's first user — durable record of tenant birth. */
 async function firstUserCreatedAt(db: AsyncDb, tenant: string): Promise<string | null> {
-  const row = (await db
-    .prepare('SELECT MIN(created_at) AS n FROM users WHERE tenant = ?')
-    .get(tenant)) as { n: string | null } | undefined;
+  const row = (await db.prepare('SELECT MIN(created_at) AS n FROM users WHERE tenant = ?').get(tenant)) as
+    { n: string | null } | undefined;
   return row?.n ? String(row.n) : null;
 }
 
 /** Earliest deliverable-version creation time for the tenant, or null. */
 async function firstDeliverableAt(db: AsyncDb, tenant: string): Promise<string | null> {
   const rows = (await db
-    .prepare("SELECT value FROM meta WHERE key LIKE ? ORDER BY key ASC LIMIT 500")
+    .prepare('SELECT value FROM meta WHERE key LIKE ? ORDER BY key ASC LIMIT 500')
     .all(`wedge:deliverable-ver:${tenant}:%`)) as { value: string }[];
   let earliest: string | null = null;
   for (const r of rows) {
@@ -114,11 +113,7 @@ async function firstDeliverableAt(db: AsyncDb, tenant: string): Promise<string |
   return earliest;
 }
 
-export async function buildTenantJourney(
-  db: AsyncDb,
-  tenant: string,
-  _now: string,
-): Promise<TenantJourney> {
+export async function buildTenantJourney(db: AsyncDb, tenant: string, _now: string): Promise<TenantJourney> {
   // Stage 1 — signup: the web flow records `activation:signupAt`; tenants
   // created via the CLI fall back to the first user row (also durable).
   const signedUpAt = (await signupAt(db, tenant)) ?? (await firstUserCreatedAt(db, tenant));
@@ -140,12 +135,7 @@ export async function buildTenantJourney(
   // Stage 3 — first source: real ingested evidence, excluding the labeled
   // sample walkthrough scope (mirrors ingestClaimCount in activation.ts).
   const sourceWhere = `tenant = ? AND scope <> ? AND extractor IN ('file-diff', 'github-releases')`;
-  const sourceCount = await count(
-    db,
-    `SELECT COUNT(*) AS n FROM claims WHERE ${sourceWhere}`,
-    tenant,
-    SAMPLE_SCOPE,
-  );
+  const sourceCount = await count(db, `SELECT COUNT(*) AS n FROM claims WHERE ${sourceWhere}`, tenant, SAMPLE_SCOPE);
   let firstSourceAt: string | null = null;
   if (sourceCount > 0) {
     const row = (await db
@@ -206,7 +196,10 @@ export async function buildTenantJourney(
       id: 'deliverable',
       label: 'Deliverable',
       at: firstDeliverable,
-      href: '/console/deliverables',
+      // A deliverable is drafted from an admitted request, and there is no
+      // deliverable index — /console/deliverables never existed, so this
+      // milestone used to link into a 404.
+      href: '/console/requests',
       detail:
         firstDeliverable !== null
           ? `First versioned deliverable ${fmtWhen(firstDeliverable)} (${deliverableCount} version(s))`
@@ -216,7 +209,9 @@ export async function buildTenantJourney(
       id: 'outcome',
       label: 'Measured outcome',
       at: outcomeAt,
-      href: '/console/report',
+      // Pre-registration and outcome capture both live on the release
+      // workspace. /console/report was the legacy CLI report and has no route.
+      href: '/console/workflows',
       detail: outcome
         ? `${outcome.metric}: predicted ${outcome.predicted ?? DASH} → actual ${outcome.actual ?? DASH} (${outcome.basis})`
         : 'Capture a measured outcome against the pre-registered basis',
@@ -269,11 +264,9 @@ export function renderJourneyMilestone(journey: TenantJourney, home: string): st
       const done = s.at !== null;
       const current = journey.currentIndex === i;
       const marker = markerFor(done, current);
-      const color = done ? 'var(--v-fact)' : current ? 'var(--v-accent)' : 'var(--v-faint)';
-      const weight = current ? '650' : '500';
-      const label = s.href
-        ? `<a href="${esc(s.href)}" style="color:var(--v-ink);text-decoration:none;">${esc(s.label)}</a>`
-        : esc(s.label);
+      const color = colorFor(done, current);
+      const weight = current ? '700' : '600';
+      const label = s.href ? `<a href="${esc(s.href)}" style="color:var(--v-ink);text-decoration:none;">${esc(s.label)}</a>` : esc(s.label);
       const when = whenFor(s.at, current);
       const elapsed =
         done && signedUp !== null && s.at !== null && s.id !== 'signup'

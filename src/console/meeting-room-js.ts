@@ -251,7 +251,7 @@ export const MEETING_ROOM_JS = String.raw`(() => {
         if (!isHost) {
           toast('The host has concluded this meeting. Opening summary...');
           setTimeout(function () {
-            window.location.href = home + 'console/meetings/detail?id=' + encodeURIComponent(meetingId);
+            window.location.href = home + 'console/meetings/' + encodeURIComponent(meetingId);
           }, 1600);
         }
         break;
@@ -1171,7 +1171,7 @@ export const MEETING_ROOM_JS = String.raw`(() => {
     var headers = { 'x-vital-csrf': csrfToken };
     if (isHost) {
       await fetch(home + 'api/meetings/' + encodeURIComponent(meetingId) + '/end', { method: 'POST', headers: headers }).catch(function () {});
-      window.location.href = home + 'console/meetings/detail?id=' + encodeURIComponent(meetingId);
+      window.location.href = home + 'console/meetings/' + encodeURIComponent(meetingId);
     } else {
       await fetch(home + 'api/meetings/' + encodeURIComponent(meetingId) + '/leave', { method: 'POST', headers: headers }).catch(function () {});
       window.location.href = home + 'console/meetings';

@@ -325,7 +325,7 @@ export async function updateIssue(
   const existing = await getIssue(db, tenant, issueId);
   if (!existing) return null;
   if (input.expectedUpdatedAt && input.expectedUpdatedAt !== existing.updatedAt) {
-    throw new Error('[issues:STALE_WRITE] this card changed while you were editing. Reload and retry');
+    throw new Error('[issues:STALE_WRITE] this card changed while you were editing — reload and retry');
   }
   const title = input.title !== undefined ? input.title.trim().slice(0, 300) : existing.title;
   if (!title) throw new Error('[issues:BAD_TITLE] title is required');
@@ -415,7 +415,7 @@ export function parseGitHubRepoPath(raw: string): { owner: string; repo: string 
     .trim()
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/^git@github\.com:/i, '')
-    .replace(/\.git$/i, '')
+    .replace(/\.git$/i, '');
   const parts = clean.split('/');
   const [owner, repo] = parts;
   if (parts.length === 2 && owner && repo) {
@@ -440,14 +440,14 @@ export async function getGitHubSyncConfig(db: AsyncDb, tenant: string): Promise<
     const key = secretsKeyFromEnv();
     if (!key) {
       throw new Error(
-        '[github:TOKEN_SEALED] stored GitHub token is sealed but VITAL_SECRETS_KEY is not set: set it (or re-link the repository) to resume sync',
+        '[github:TOKEN_SEALED] stored GitHub token is sealed but VITAL_SECRETS_KEY is not set — set it (or re-link the repository) to resume sync',
       );
     }
     try {
       token = openSecret(stored, key);
     } catch (e) {
       throw new Error(
-        `[github:TOKEN_UNSEALABLE] stored GitHub token did not open: ${(e as Error).message}. Re-link the repository with a fresh token`,
+        `[github:TOKEN_UNSEALABLE] stored GitHub token did not open: ${(e as Error).message} — re-link the repository with a fresh token`,
         { cause: e },
       );
     }
@@ -492,7 +492,15 @@ export async function saveGitHubSyncConfig(
          updated_by = excluded.updated_by,
          updated_at = excluded.updated_at`,
     )
-    .run(tenant, repo.trim(), effectiveToken, existing?.lastSyncedAt ?? null, existing?.syncedCount ?? 0, updatedBy, now);
+    .run(
+      tenant,
+      repo.trim(),
+      effectiveToken,
+      existing?.lastSyncedAt ?? null,
+      existing?.syncedCount ?? 0,
+      updatedBy,
+      now,
+    );
 
   return (await getGitHubSyncConfig(db, tenant))!;
 }
@@ -558,8 +566,7 @@ export async function markGitHubSyncError(db: AsyncDb, tenant: string, failure: 
 
 export async function getGitHubPushError(db: AsyncDb, tenant: string): Promise<GitHubPushError | null> {
   const row = (await db.prepare('SELECT value FROM meta WHERE key = ?').get(pushErrorKey(tenant))) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (!row) return null;
   try {
     return JSON.parse(String(row.value)) as GitHubPushError;
@@ -661,12 +668,16 @@ export async function syncGitHubProject(
     );
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+      await db
+        .prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?')
+        .run('error', now, tenant);
       return { ok: false, syncedCount: 0, error: `GitHub API error (${res.status}): ${errText.slice(0, 100)}` };
     }
     ghIssues = (await res.json()) as unknown[];
   } catch (err) {
-    await db.prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?').run('error', now, tenant);
+    await db
+      .prepare('UPDATE github_project_sync SET status = ?, updated_at = ? WHERE tenant = ?')
+      .run('error', now, tenant);
     return { ok: false, syncedCount: 0, error: (err as Error).message };
   }
 
@@ -697,7 +708,9 @@ export async function syncGitHubProject(
       if (lowerLabels.some((l) => l.includes('progress') || l.includes('doing') || l.includes('wip'))) {
         state = 'IN PROGRESS';
       } else if (
-        lowerLabels.some((l) => l.includes('todo') || l.includes('to do') || l.includes('ready') || l.includes('planned'))
+        lowerLabels.some(
+          (l) => l.includes('todo') || l.includes('to do') || l.includes('ready') || l.includes('planned'),
+        )
       ) {
         state = 'TO DO';
       } else {
@@ -728,8 +741,12 @@ export async function syncGitHubProject(
       matchedLabels.push(...normalizeLabels(ghLabelNames));
     }
 
-    const title = String(gh.title ?? `Issue #${gh.number}`).trim().slice(0, 300);
-    const body = String(gh.body ?? '').trim().slice(0, 4000);
+    const title = String(gh.title ?? `Issue #${gh.number}`)
+      .trim()
+      .slice(0, 300);
+    const body = String(gh.body ?? '')
+      .trim()
+      .slice(0, 4000);
     const desc = body ? body : `Imported from GitHub #${gh.number}: ${gh.html_url ?? ''}`;
     const createdAt = gh.created_at ? new Date(String(gh.created_at)).toISOString() : now;
     const updatedAt = gh.updated_at ? new Date(String(gh.updated_at)).toISOString() : now;
@@ -825,20 +842,24 @@ export async function pushCreateToGitHub(
 ): Promise<{ ok: boolean; ghNumber?: number; error?: string }> {
   const cfg = await getGitHubSyncConfig(db, tenant);
   if (!cfg || !cfg.repo) return { ok: false, error: 'no repo linked' };
-  if (!cfg.token?.trim()) return { ok: false, error: 'no token: push requires a PAT for private repos and write access' };
+  if (!cfg.token?.trim())
+    return { ok: false, error: 'no token — push requires a PAT for private repos and write access' };
   const parsed = parseGitHubRepoPath(cfg.repo);
   if (!parsed) return { ok: false, error: 'invalid repo path' };
   const fetchFn = opts?.fetchFn ?? fetch;
   try {
-    const res = await fetchFn(`https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues`, {
-      method: 'POST',
-      headers: githubHeaders(cfg.token),
-      body: JSON.stringify({
-        title: issue.title,
-        body: issue.description || `Created from Vital board · ${issue.id}`,
-        labels: issueToGitHubLabels(issue),
-      }),
-    });
+    const res = await fetchFn(
+      `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/issues`,
+      {
+        method: 'POST',
+        headers: githubHeaders(cfg.token),
+        body: JSON.stringify({
+          title: issue.title,
+          body: issue.description || `Created from Vital board — ${issue.id}`,
+          labels: issueToGitHubLabels(issue),
+        }),
+      },
+    );
     if (!res.ok) {
       const t = await res.text().catch(() => '');
       return { ok: false, error: `GitHub create failed ${res.status}: ${t.slice(0, 200)}` };
@@ -1122,18 +1143,20 @@ function issueCard(issue: IssueRow, comments: IssueCommentRow[]): string {
       : '';
 
   const imageMatch = issue.description.match(/(?:image|img):\s*(\S+)/i);
+  // A preview image is rendered only when the issue actually carries one
+  // (`image:` / `img:` in the description). There used to be a second branch
+  // here that drew an "Onboarding flow mockup" panel for any issue whose title
+  // contained "user onboarding" — invented artwork in a working screen.
   let previewHtml = '';
   if (imageMatch && imageMatch[1]) {
     previewHtml = `<div class="iss-card-preview-wrap"><img src="${esc(imageMatch[1])}" alt="" class="iss-card-preview-img" /></div>`;
-  } else if (issue.title.toLowerCase().includes('user onboarding')) {
-    previewHtml = `<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>`;
   }
 
   return `<article class="iss-card" draggable="true" data-id="${esc(issue.id)}" data-updated-at="${esc(issue.updatedAt)}" data-assignee="${esc(issue.assigneeEmail ?? '')}" tabindex="0" aria-label="${esc(issue.title)}">
   ${previewHtml}
   <div class="iss-title">${esc(issue.title)}</div>
   ${pills ? `<div class="iss-pills">${pills}</div>` : ''}
-  ${(progressHtml || repoHtml) ? `<div class="iss-progress-row">${progressHtml}${repoHtml}</div>` : ''}
+  ${progressHtml || repoHtml ? `<div class="iss-progress-row">${progressHtml}${repoHtml}</div>` : ''}
   <div class="iss-bottom-row">
     <div class="iss-assignees">${avatars}</div>
     <div class="iss-meta-group">
@@ -1157,7 +1180,7 @@ function formatIssueKey(issue: { id: string; title: string; description?: string
   if (idNum && idNum[0]) return `CRM-${idNum[0]}`;
   let hash = 0;
   for (let i = 0; i < issue.id.length; i++) hash = (hash * 31 + issue.id.charCodeAt(i)) & 0x7fff;
-  return `CRM-${(hash % 90 + 10)}`;
+  return `CRM-${(hash % 90) + 10}`;
 }
 
 function extractSubtasks(issue: { description?: string }): string | null {
@@ -1199,10 +1222,19 @@ function formatShortDate(iso: string): string {
 function prioritySignalSvg(priority: IssuePriority): string {
   let pLevel = 0;
   let color = 'var(--v-muted)';
-  if (priority === 'Urgent') { pLevel = 3; color = 'var(--v-risk)'; }
-  else if (priority === 'High') { pLevel = 3; color = 'var(--v-hypo)'; }
-  else if (priority === 'Medium') { pLevel = 2; color = 'var(--v-pred)'; }
-  else if (priority === 'Low') { pLevel = 1; color = 'var(--v-pred)'; }
+  if (priority === 'Urgent') {
+    pLevel = 3;
+    color = 'var(--v-risk)';
+  } else if (priority === 'High') {
+    pLevel = 3;
+    color = 'var(--v-hypo)';
+  } else if (priority === 'Medium') {
+    pLevel = 2;
+    color = 'var(--v-pred)';
+  } else if (priority === 'Low') {
+    pLevel = 1;
+    color = 'var(--v-pred)';
+  }
   const empty = 'var(--v-line-strong)';
 
   return `<span class="iss-row-signal" title="Priority: ${esc(priority)}">
@@ -1245,9 +1277,10 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
     ? `<span class="iss-pill-subtask" title="Subtasks: ${esc(subtasks)}"><svg class="iss-subtask-icon" width="12" height="12" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--v-line-strong)" stroke-width="2"/><path d="M8 2 A6 6 0 0 1 14 8" fill="none" stroke="var(--v-accent)" stroke-width="2"/></svg> ${esc(subtasks)}</span>`
     : '';
 
-  const chatHtml = count > 0
-    ? `<span class="iss-pill-chat" title="${count} comment(s)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg> ${count}</span>`
-    : '';
+  const chatHtml =
+    count > 0
+      ? `<span class="iss-pill-chat" title="${count} comment(s)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg> ${count}</span>`
+      : '';
 
   let milestoneHtml = '';
   if (milestone === 'MVP') {
@@ -1292,21 +1325,23 @@ function issueListRow(issue: IssueRow, comments: IssueCommentRow[]): string {
 
 function renderIssuesList(byState: Map<IssueState, IssueRow[]>, comments: IssueCommentRow[]): string {
   const listStates: IssueState[] = ['IN PROGRESS', 'TO DO', 'BACKLOG', 'DONE'];
-  return listStates.map((state) => {
-    const issues = byState.get(state) ?? [];
-    return `<div class="iss-list-group" data-state="${esc(state)}">
+  return listStates
+    .map((state) => {
+      const issues = byState.get(state) ?? [];
+      return `<div class="iss-list-group" data-state="${esc(state)}">
       <div class="iss-list-group-header" role="button" tabindex="0" aria-expanded="true">
         <span class="iss-list-chevron">▼</span>
         <span class="iss-dot" style="background:${STATE_DOT[state]}"></span>
         <span class="iss-list-group-title">${esc(state)}</span>
-        <span class="iss-col-dash"></span>
+        <span class="iss-col-dash">—</span>
         <span class="iss-list-group-count">${issues.length}</span>
       </div>
       <div class="iss-list-rows" data-state="${esc(state)}">
         ${issues.map((i) => issueListRow(i, comments)).join('\n')}
       </div>
     </div>`;
-  }).join('\n');
+    })
+    .join('\n');
 }
 
 function columnHeader(state: IssueState, issues: IssueRow[]): string {
@@ -1314,7 +1349,7 @@ function columnHeader(state: IssueState, issues: IssueRow[]): string {
   return `<header class="iss-col-head">
   <span class="iss-dot" style="background:${STATE_DOT[state]}"></span>
   <h2 class="iss-col-title">${esc(state)}</h2>
-  <span class="iss-col-dash"></span>
+  <span class="iss-col-dash">—</span>
   <span class="iss-col-count">${count}</span>
   <span class="iss-col-dots" aria-hidden="true">···</span>
 </header>`;
@@ -1910,10 +1945,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
     var previewHtml = '';
     var imgMatch = new RegExp('(?:image|img):\\\\s*(\\\\S+)', 'i').exec(issue.description || '');
+    // No title-keyed fallback: a card shows a preview only when the issue
+    // description carries a real image reference.
     if (imgMatch) {
       previewHtml = '<div class="iss-card-preview-wrap"><img src="' + escHtml(imgMatch[1]) + '" alt="" class="iss-card-preview-img" /></div>';
-    } else if (issue.title && issue.title.toLowerCase().indexOf('user onboarding') !== -1) {
-      previewHtml = '<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>';
     }
 
     return '<article class="iss-card" draggable="true" data-id="' + escHtml(issue.id) + '" data-updated-at="' + escHtml(issue.updatedAt) + '" data-assignee="' + escHtml(issue.assigneeEmail || '') + '" tabindex="0" aria-label="' + escHtml(issue.title) + '">' +
@@ -2587,7 +2622,7 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
 /** Standalone document for drawer fetches — same chrome, no workspace shell. */
 export function issuesDocument(title: string, inner: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Issues</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — Issues</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head><body style="margin:0;height:100%;overflow:hidden;">${inner}</body></html>`;
 }
