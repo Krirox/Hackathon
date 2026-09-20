@@ -88,7 +88,9 @@ function resolveBase(cfg: CognitoConfig): string {
     throw new CognitoError('BAD_ENDPOINT', 'VITAL_COGNITO_ENDPOINT is not a parseable URL');
   }
   const host = url.hostname;
-  const local = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  // Node's URL exposes an IPv6 literal with brackets ([::1]) — accept both
+  // spellings so a loopback test endpoint is not misread as remote.
+  const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
   if (url.protocol !== 'https:' && !local)
     throw new CognitoError('BAD_ENDPOINT', 'Cognito endpoint must be https:// (http allowed only for localhost)');
   return url.origin;
@@ -174,6 +176,7 @@ export function signCognitoRequest(opts: {
   const canonicalHeaders: Array<[string, string]> = [
     ['content-type', 'application/x-amz-json-1.1'],
     ['host', host],
+    ['x-amz-content-sha256', payloadHash],
     ['x-amz-date', amzDate],
     ['x-amz-target', target],
   ];
@@ -294,7 +297,7 @@ export async function cognitoSignUp(
   const j = await call(
     cfg,
     creds,
-    'CognitoIdentityProvider.SignUp',
+    'AWSCognitoIdentityProviderService.SignUp',
     { ClientId: cfg.clientId, Username: input.email, Password: input.password, UserAttributes: userAttributes },
     opts.fetchFn ?? nodeCognitoFetch,
     opts.now ?? (() => new Date()),
@@ -322,7 +325,7 @@ export async function cognitoVerifyPassword(
   const j = await call(
     cfg,
     creds,
-    'CognitoIdentityProvider.InitiateAuth',
+    'AWSCognitoIdentityProviderService.InitiateAuth',
     {
       AuthFlow: 'USER_PASSWORD_AUTH',
       ClientId: cfg.clientId,

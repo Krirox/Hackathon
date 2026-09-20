@@ -26,6 +26,18 @@
     .trim()
     .replace(/\/$/, '');
   let consoleBase = configured && configured !== '.' && configured !== '/' ? configured : '';
+  // The funnel posts JSON to the console; that only works same-origin (the
+  // console sends no CORS headers and its CSRF cookie is SameSite=Lax). A
+  // split deployment points signers at the console's own address instead of
+  // pretending the fetch can cross origins.
+  const crossOrigin = (() => {
+    if (!consoleBase) return false;
+    try {
+      return new URL(consoleBase).origin !== location.origin;
+    } catch {
+      return true;
+    }
+  })();
 
   const paint = (cls, text) => {
     status.textContent = '● ' + text;
@@ -83,7 +95,10 @@
   }
 
   // Resolve the console and pick up the pre-session CSRF token + credit offer.
+  // Submit stays disabled until the offer lands — a submission racing the
+  // initial lookup would falsely report "no console reachable".
   let csrf = '';
+  submit.disabled = true;
   const offer = (base) => {
     return fetch(base + '/api/signup', { credentials: 'same-origin' })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
@@ -103,7 +118,10 @@
     submit.disabled = true;
   };
 
-  if (consoleBase) {
+  if (crossOrigin) {
+    paint('down', 'this site signs up against a console on another origin — create your account at ' + consoleBase);
+    submit.disabled = true;
+  } else if (consoleBase) {
     offer(consoleBase).catch(() => {
       csrf = '';
       paint('down', 'configured console is not answering /api/signup');
@@ -150,6 +168,10 @@
         const credits = String(j.credits || 0);
         const emailEl = document.getElementById('success-email');
         if (emailEl) emailEl.textContent = j.email || email;
+        if (j.confirmationRequired) {
+          const note = document.querySelector('#signup-success .console-target');
+          if (note) note.textContent = '● account created · check your email to confirm it before signing in';
+        }
         ['success-credits', 'success-credits-2'].forEach((id) => {
           const el = document.getElementById(id);
           if (el && credits !== '0') el.textContent = credits;

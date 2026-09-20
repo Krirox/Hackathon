@@ -21,11 +21,18 @@ resource "aws_cognito_user_pool" "public" {
     require_symbols   = false
   }
 
-  policies {
-    # The funnel signs users up through the SignUp API. With this true the
-    # API refuses every non-admin call outright, so it must be false; the
-    # hosted self-service UI stays unused (no domain is attached).
+  # The funnel signs users up through the SignUp API. With this true the
+  # API refuses every non-admin call outright, so it must be false; the
+  # hosted self-service UI stays unused (no domain is attached).
+  admin_create_user_config {
     allow_admin_create_user_only = false
+  }
+
+  # A user pool is an account registry: destroying it invalidates every
+  # production account, so removal must be a deliberate operator act
+  # (destroy the guard first), never an accident of `terraform destroy`.
+  lifecycle {
+    prevent_destroy = true
   }
 
   account_recovery_setting {
@@ -50,8 +57,13 @@ resource "aws_cognito_user_pool_client" "funnel" {
   generate_secret = false
   explicit_auth_flows = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
 
-  # Uniform "user doesn't exist" answers instead of enumeration signals.
-  prevent_user_existence_errors = "ENABLED"
+  # LEGACY on purpose: with ENABLED, USER_PASSWORD_AUTH for a non-existent
+  # user answers NotAuthorizedException instead of UserNotFoundException —
+  # and the console's local-login fallback (bootstrap owner, invitees) keys
+  # off UserNotFound. The sign-up API's duplicate answer is already explicit
+  # by design ("that email already has an account"), so hiding existence at
+  # login would buy inconsistency, not safety.
+  prevent_user_existence_errors = "LEGACY"
 
   access_token_validity  = 1
   id_token_validity      = 1

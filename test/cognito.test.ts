@@ -56,14 +56,14 @@ T('signCognitoRequest: deterministic SigV4 scoped to cognito-idp with sorted hea
   const a = signCognitoRequest({
     cfg: CFG,
     creds: CREDS,
-    target: 'CognitoIdentityProvider.SignUp',
+    target: 'AWSCognitoIdentityProviderService.SignUp',
     body,
     now: FIXED_NOW,
   });
   const b = signCognitoRequest({
     cfg: CFG,
     creds: CREDS,
-    target: 'CognitoIdentityProvider.SignUp',
+    target: 'AWSCognitoIdentityProviderService.SignUp',
     body,
     now: FIXED_NOW,
   });
@@ -71,15 +71,17 @@ T('signCognitoRequest: deterministic SigV4 scoped to cognito-idp with sorted hea
   eq(a.url, 'https://cognito-idp.us-east-1.amazonaws.com/');
   eq(a.headers.Authorization!.includes('Credential=AKIDTEST/20260920/us-east-1/cognito-idp/aws4_request'), true);
   eq(a.headers['x-amz-date'], '20260920T120000Z');
-  eq(a.headers['x-amz-target'], 'CognitoIdentityProvider.SignUp');
+  eq(a.headers['x-amz-target'], 'AWSCognitoIdentityProviderService.SignUp');
   const signed = a.headers.Authorization!.split('SignedHeaders=')[1]!.split(',')[0]!.split(';');
   eq(signed, [...signed].sort());
   eq(signed.includes('x-amz-target'), true);
+  // Every x-amz-* header on the wire must be covered by the signature.
+  eq(signed.includes('x-amz-content-sha256'), true);
   // A session token must ride in the signature, not just the headers.
   const withTok = signCognitoRequest({
     cfg: CFG,
     creds: { ...CREDS, sessionToken: 'tok' },
-    target: 'CognitoIdentityProvider.SignUp',
+    target: 'AWSCognitoIdentityProviderService.SignUp',
     body,
     now: FIXED_NOW,
   });
@@ -137,7 +139,12 @@ T('cognitoSignUp sends the pool contract and returns the sub', async () => {
     attrs.some((a) => a.Name === 'given_name'),
     true,
   );
-  eq(calls[0]!.init.headers['x-amz-target'], 'CognitoIdentityProvider.SignUp');
+  // email_verified is admin-scope: the SignUp API refuses it on real pools.
+  eq(
+    attrs.some((a) => a.Name === 'email_verified'),
+    false,
+  );
+  eq(calls[0]!.init.headers['x-amz-target'], 'AWSCognitoIdentityProviderService.SignUp');
 });
 
 T('pool errors map to named codes, never raw bodies', async () => {
@@ -282,6 +289,16 @@ T('production lane: signup lands in the pool, login verifies there, pool-less ac
       mock.accounts.some((a) => a.email === 'ada@example.com'),
       true,
     );
+    // The durable grant, not just the API echo: meta row + audit event.
+    const creditRows = (await db.prepare("SELECT value FROM meta WHERE key LIKE 'credits:acme:%'").all()) as Array<{
+      value: string;
+    }>;
+    eq(creditRows.length, 1);
+    eq(JSON.parse(creditRows[0]!.value).balance, 100);
+    const grantEvents = (await db
+      .prepare("SELECT action FROM audit_log WHERE action = 'credits.granted'")
+      .all()) as Array<{ action: string }>;
+    eq(grantEvents.length >= 1, true);
 
     // 2. login verifies against the pool (fresh tenant → ada is also the local owner).
     const offer2 = (await (await fetch(`${url}/api/signup`)).json()) as { csrf: string };
@@ -354,6 +371,21 @@ T('pool outage is reported honestly and never fakes an account', async () => {
     const j = (await res.json()) as { ok: boolean; error: string };
     eq(j.ok, false);
     eq(j.error.includes('unreachable'), true);
+    // "Never fakes an account" means the DB agrees: no local mirror exists,
+    // so signing in with the same credentials must never mint a session.
+    const offer2 = (await (await fetch(`${url}/api/signup`)).json()) as { csrf: string };
+    const loginRes = await fetch(`${url}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-vital-csrf': offer2.csrf, cookie: `vital_csrf=${offer2.csrf}` },
+      redirect: 'manual',
+      body: JSON.stringify({ email: 'nobody@example.com', password: 'Secret-Password-12' }),
+    });
+    const setCookie = loginRes.headers.get('set-cookie') || '';
+    eq(setCookie.includes('vital_session='), false);
+    // An unclaimed tenant answers 303 to the claim page — that is not a
+    // session; anything else must be an explicit denial.
+    if (loginRes.status === 303) eq((loginRes.headers.get('location') || '').endsWith('/signup'), true);
+    else eq(loginRes.status === 401 || loginRes.status === 503, true);
   } finally {
     await server?.close();
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
