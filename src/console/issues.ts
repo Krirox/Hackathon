@@ -1122,11 +1122,13 @@ function issueCard(issue: IssueRow, comments: IssueCommentRow[]): string {
       : '';
 
   const imageMatch = issue.description.match(/(?:image|img):\s*(\S+)/i);
+  // A preview image is rendered only when the issue actually carries one
+  // (`image:` / `img:` in the description). There used to be a second branch
+  // here that drew an "Onboarding flow mockup" panel for any issue whose title
+  // contained "user onboarding" — invented artwork in a working screen.
   let previewHtml = '';
   if (imageMatch && imageMatch[1]) {
     previewHtml = `<div class="iss-card-preview-wrap"><img src="${esc(imageMatch[1])}" alt="" class="iss-card-preview-img" /></div>`;
-  } else if (issue.title.toLowerCase().includes('user onboarding')) {
-    previewHtml = `<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>`;
   }
 
   return `<article class="iss-card" draggable="true" data-id="${esc(issue.id)}" data-updated-at="${esc(issue.updatedAt)}" data-assignee="${esc(issue.assigneeEmail ?? '')}" tabindex="0" aria-label="${esc(issue.title)}">
@@ -1910,10 +1912,10 @@ export function renderIssuesBoard(data: IssueSnapshot, opts: IssuesBoardOptions)
 
     var previewHtml = '';
     var imgMatch = new RegExp('(?:image|img):\\\\s*(\\\\S+)', 'i').exec(issue.description || '');
+    // No title-keyed fallback: a card shows a preview only when the issue
+    // description carries a real image reference.
     if (imgMatch) {
       previewHtml = '<div class="iss-card-preview-wrap"><img src="' + escHtml(imgMatch[1]) + '" alt="" class="iss-card-preview-img" /></div>';
-    } else if (issue.title && issue.title.toLowerCase().indexOf('user onboarding') !== -1) {
-      previewHtml = '<div class="iss-card-preview-wrap" style="background:linear-gradient(135deg,var(--v-accent-dim) 0%,var(--v-bg-2) 55%,var(--v-bg-3) 100%);height:80px;border-radius:var(--radius-md);margin-bottom:10px;display:flex;align-items:center;justify-content:center;"><span style="font-size:11px;font-weight:600;color:var(--v-ink-2);background:var(--v-bg-1);padding:4px 10px;border-radius:var(--radius-sm);">Onboarding flow mockup</span></div>';
     }
 
     return '<article class="iss-card" draggable="true" data-id="' + escHtml(issue.id) + '" data-updated-at="' + escHtml(issue.updatedAt) + '" data-assignee="' + escHtml(issue.assigneeEmail || '') + '" tabindex="0" aria-label="' + escHtml(issue.title) + '">' +

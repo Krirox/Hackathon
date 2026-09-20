@@ -206,7 +206,10 @@ export async function buildTenantJourney(
       id: 'deliverable',
       label: 'Deliverable',
       at: firstDeliverable,
-      href: '/console/deliverables',
+      // A deliverable is drafted from an admitted request, and there is no
+      // deliverable index — /console/deliverables never existed, so this
+      // milestone used to link into a 404.
+      href: '/console/requests',
       detail:
         firstDeliverable !== null
           ? `First versioned deliverable ${fmtWhen(firstDeliverable)} (${deliverableCount} version(s))`
@@ -216,7 +219,9 @@ export async function buildTenantJourney(
       id: 'outcome',
       label: 'Measured outcome',
       at: outcomeAt,
-      href: '/console/report',
+      // Pre-registration and outcome capture both live on the release
+      // workspace. /console/report was the legacy CLI report and has no route.
+      href: '/console/workflows',
       detail: outcome
         ? `${outcome.metric}: predicted ${outcome.predicted ?? DASH} → actual ${outcome.actual ?? DASH} (${outcome.basis})`
         : 'Capture a measured outcome against the pre-registered basis',
