@@ -235,9 +235,9 @@ variable "lambda_memory_mb" {
 }
 
 variable "lambda_reserved_concurrency" {
-  description = "Cap on parallel executor microVMs — the budget-death backstop at the infra layer (0 = unreserved)"
+  description = "Cap on parallel executor microVMs — the budget-death backstop at the infra layer (0 = unreserved). Kept well under a fresh account's default 20-executor total Lambda quota: reserving more than quota-10 is rejected outright (PutFunctionConcurrency needs 10 unreserved executors for everything else)."
   type        = number
-  default     = 20
+  default     = 5
 }
 
 variable "acm_certificate_arn" {
