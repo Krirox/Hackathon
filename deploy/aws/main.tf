@@ -886,7 +886,7 @@ resource "aws_ecs_task_definition" "core" {
 resource "aws_secretsmanager_secret" "db_url" { name = "${local.name}/database-url" }
 resource "aws_secretsmanager_secret_version" "db_url" {
   secret_id     = aws_secretsmanager_secret.db_url.id
-  secret_string = "postgres://${var.db_username}:${random_password.db.result}@${aws_db_instance.ledger.address}:5432/${var.db_name}"
+  secret_string = "postgres://${var.db_username}:${random_password.db.result}@${aws_db_instance.ledger.address}:5432/${var.db_name}?sslmode=require"
 }
 
 resource "aws_ecs_service" "core" {

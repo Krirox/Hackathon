@@ -146,7 +146,7 @@ resource "aws_secretsmanager_secret" "buzz_db_url" {
 resource "aws_secretsmanager_secret_version" "buzz_db_url" {
   count         = var.enable_buzz ? 1 : 0
   secret_id     = aws_secretsmanager_secret.buzz_db_url[0].id
-  secret_string = "postgres://${var.buzz_db_username}:${random_password.buzz_db[0].result}@${aws_db_instance.buzz[0].address}:5432/${var.buzz_db_name}"
+  secret_string = "postgres://${var.buzz_db_username}:${random_password.buzz_db[0].result}@${aws_db_instance.buzz[0].address}:5432/${var.buzz_db_name}?sslmode=require"
 }
 
 resource "aws_secretsmanager_secret" "buzz_redis_url" {
