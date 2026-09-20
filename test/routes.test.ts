@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { T, eq, throws, fresh, TEN, NOW, base } from './helpers.ts';
-import { installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
+import { acceptInvitation, createInvitation, installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import {
   capabilityAllows,
@@ -732,6 +732,13 @@ interface PageBudget {
   dispatch: 'table' | 'legacy';
   /** Rendered with no session (the login form answers a session with a redirect). */
   anonymous?: true;
+  /**
+   * Who fetches the page. Defaults to the seeded owner. `engineer` exists
+   * because a page can be gated on *department* rather than role: fetched as the
+   * owner it answers a refusal, which costs almost nothing and would let the
+   * page's real cost drift unmeasured for as long as nobody looked.
+   */
+  as?: 'engineer';
   /** Total statements for one render: measured with ~10% headroom. */
   total: number;
   /**
@@ -897,7 +904,13 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
       'talk/health': 53,
       'console/shell-metrics': 16,
       'talk/rooms': 14,
-      'core/auth': 8,
+      // 12, not 8: the fixture now carries two members, and this page runs
+      // `disableConfirmation` once per member an admin could disable — 4
+      // statements each. With one member that loop never ran, so the old 8 did
+      // not cover this page's most expensive per-member work. Flagged, not
+      // hidden: /team costs *more* per member, and the number below is
+      // calibrated to this fixture.
+      'core/auth': 12,
       'gov/trust': 1,
     },
   },
@@ -1049,6 +1062,26 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
       'gov/trust': 1,
     },
   },
+  {
+    // Measured as an engineering member, not as the owner: this page answers the
+    // owner with a 403, and a refusal is not what its budget is about. Unlike
+    // `/console/rooms`, the board does *not* evaluate every row it shows — it
+    // reads the issues once and draws them, which is why this stays flat as the
+    // board fills up.
+    url: '/console/issues',
+    pattern: '/console/issues',
+    dispatch: 'table',
+    as: 'engineer',
+    total: 102,
+    modules: {
+      'talk/health': 53,
+      'console/shell-metrics': 16,
+      'talk/rooms': 14,
+      'core/auth': 5,
+      'console/issues': 4,
+      'gov/trust': 1,
+    },
+  },
 ];
 
 T('every budgeted page is attributed to the mechanism that really serves it', () => {
@@ -1072,7 +1105,7 @@ T('every budgeted page is attributed to the mechanism that really serves it', ()
 T('every page stays inside its statement budget', async () => {
   const { db, ledger, coord, comp } = await fresh();
   await installAuthSchema(db, NOW);
-  await signupTenant(
+  const { owner } = await signupTenant(
     db,
     {
       slug: TEN,
@@ -1088,11 +1121,31 @@ T('every page stays inside its statement budget', async () => {
   const base = `http://127.0.0.1:${server.port}`;
   try {
     const cookie = await login(base);
+    // One engineering member, for the pages the owner is refused. Without them
+    // the board's budget would be a measurement of its 403.
+    //
+    // Invited and accepted rather than `inviteUser`d: that helper flags the
+    // account `mustChangePassword`, so the session it produces is redirected to
+    // /change-password and the "page" measured would be that redirect.
+    const engineerEmail = 'eng@acme.test';
+    const { token } = await createInvitation(
+      db,
+      TEN,
+      { email: engineerEmail, name: 'Eng One', role: 'member', team: 'engineering' },
+      { userId: owner.id, role: 'owner' },
+      NOW,
+    );
+    await acceptInvitation(db, token, 'the-console-password', NOW);
+    const engineerCookie = await login(base, engineerEmail);
+    const headersFor = (page: PageBudget): Record<string, string> => {
+      if (page.anonymous) return {};
+      return { cookie: page.as === 'engineer' ? engineerCookie : cookie };
+    };
     const measured: { page: PageBudget; status: number; total: number; modules: Record<string, number> }[] = [];
     for (const page of PAGE_SQL_BUDGETS) {
       counted.reset();
       const res = await fetch(`${base}${page.url}`, {
-        headers: page.anonymous ? {} : { cookie },
+        headers: headersFor(page),
         redirect: 'manual',
       });
       await res.text();
