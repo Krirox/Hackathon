@@ -1,14 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { AsyncDb } from '../core/db.ts';
-import type {
-  TranscriptSegment,
-  MeetingNotes,
-  MeetingDecision,
-  MeetingActionItem,
-  LlmProvider,
-} from './types.ts';
+import type { TranscriptSegment, MeetingNotes, MeetingDecision, MeetingActionItem } from './types.ts';
 import { upsertMeetingNotes } from './db.ts';
-import { completeChat, type ModelProfile, devProfile } from '../substrate/models.ts';
+import { completeChat, type ModelProfile } from '../substrate/models.ts';
 
 export interface IntelligenceExtractionResult {
   summary: string;
@@ -33,7 +27,6 @@ export function formatTimestamp(seconds: number): string {
  * Guarantees zero hallucinations, exact owner/deadline extraction, and strict fidelity.
  */
 export function extractIntelligenceDeterministic(segments: TranscriptSegment[]): IntelligenceExtractionResult {
-  const fullText = segments.map((s) => `${s.speakerName}: ${s.text}`).join('\n');
   const decisions: MeetingDecision[] = [];
   const actionItems: MeetingActionItem[] = [];
   const openQuestions: string[] = [];
@@ -75,8 +68,9 @@ export function extractIntelligenceDeterministic(segments: TranscriptSegment[]):
 
     // Action item patterns: "X will handle Y", "I'll handle Y", "X will prepare Y", "X to do Y"
     const actionMatch =
-      text.match(/\b([A-Z][a-z]+)\s+(?:will|is going to|to)\s+(handle|prepare|deploy|create|build|review|implement)\s+(.+)/i) ||
-      text.match(/\b(I'll|I will)\s+(handle|prepare|deploy|create|build|review|implement)\s+(.+)/i);
+      text.match(
+        /\b([A-Z][a-z]+)\s+(?:will|is going to|to)\s+(handle|prepare|deploy|create|build|review|implement)\s+(.+)/i,
+      ) || text.match(/\b(I'll|I will)\s+(handle|prepare|deploy|create|build|review|implement)\s+(.+)/i);
 
     if (actionMatch) {
       let rawOwner: string | null = actionMatch[1]!;

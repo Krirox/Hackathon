@@ -42,7 +42,11 @@ export class FsSnapshotStore implements SnapshotStore {
     }
     const ref = `${kind}-${hash.slice(0, 16)}`;
     try { this.fs.put(ref, body); } catch (e) {
-      if ((e as Error).message.includes('TOO_LARGE')) throw new Error(`[snapshot:TOO_LARGE] ${kind} blob ${bytes}B over store cap`);
+      // The cap is the store's, the message is ours. The original is kept as the
+      // cause: "over cap" without the store's own reason is a dead end in a log.
+      if ((e as Error).message.includes('TOO_LARGE')) {
+        throw new Error(`[snapshot:TOO_LARGE] ${kind} blob ${bytes}B over store cap`, { cause: e });
+      }
       throw e;
     }
     if (this.db && this.tenant) {

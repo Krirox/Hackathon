@@ -30,7 +30,9 @@ import {
   taskFor,
   taskTotals,
   type AgentTask,
+  type ReviewLink,
 } from '../agent-tasks.ts';
+import { listReviews } from '../../coding/review.ts';
 
 export interface AgentTasksEnv {
   db: AsyncDb;
@@ -60,6 +62,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 /** The return target a detail link carries, so its Back button keeps filters. */
 function hereOf(ctx: { path: string; url: URL }): string {
   return ctx.path + (ctx.url.search || '');
+}
+
+/**
+ * A task's review, if one is open under its id — keyed by mission id, which is
+ * the review store's key and the id these rows offer when they link into it.
+ *
+ * Read once per page, not once per row: this is one query for a list that can
+ * be a hundred rows, and `listReviews` is already the same read the review index
+ * does. A missing store (a tenant that has never opened a review) is an empty
+ * map rather than an error — the row then offers to open one.
+ */
+async function reviewsByMission(db: AsyncDb, tenant: string): Promise<Map<string, ReviewLink>> {
+  const reviews = await listReviews(db, tenant).catch(() => []);
+  return new Map(reviews.map((r) => [r.missionId, { status: r.status, updatedAt: r.updatedAt }]));
 }
 
 /**
@@ -156,9 +172,16 @@ export function agentTasksRoutes(): RouteDef<AgentTasksEnv>[] {
           if (!page.length && q) {
             empty = `<p class="v-meta">No matching tasks. <a href="${esc(clearFilterUrl('/console/agent-tasks'))}">Clear search</a></p>`;
           }
-          const body = `${renderAgentTaskList(page, totals, now, here)}${empty}` + listScript();
-          const prev = offset > 0 ? `/console/agent-tasks?offset=${Math.max(0, offset - limit)}${q ? `&q=${encodeURIComponent(state.q ?? '')}` : ''}` : null;
-          const next = offset + page.length < total ? `/console/agent-tasks?offset=${offset + page.length}${q ? `&q=${encodeURIComponent(state.q ?? '')}` : ''}` : null;
+          const reviews = await reviewsByMission(ctx.env.db, tenant);
+          const body = `${renderAgentTaskList(page, totals, now, here, reviews)}${empty}` + listScript();
+          const prev =
+            offset > 0
+              ? `/console/agent-tasks?offset=${Math.max(0, offset - limit)}${q ? `&q=${encodeURIComponent(state.q ?? '')}` : ''}`
+              : null;
+          const next =
+            offset + page.length < total
+              ? `/console/agent-tasks?offset=${offset + page.length}${q ? `&q=${encodeURIComponent(state.q ?? '')}` : ''}`
+              : null;
           sendHtml(
             ctx.res,
             await ctx.env.shellPage(auth, {
@@ -221,8 +244,9 @@ export function agentTasksRoutes(): RouteDef<AgentTasksEnv>[] {
         const feedRows = await readFeed(db, tenant, requestId);
         const here = hereOf(ctx);
         const startLive = task.status.runtime === 'processing';
+        const review = (await reviewsByMission(db, tenant)).get(requestId);
         const body =
-          renderAgentTaskDetail(task, renderFeedItems(feedRows), now, here) +
+          renderAgentTaskDetail(task, renderFeedItems(feedRows), now, here, review) +
           `<script>(()=>{
   const feed=document.getElementById('v-agent-feed');if(!feed)return;
   const id=feed.getAttribute('data-request');const live=document.getElementById('v-agent-live');
@@ -291,10 +315,7 @@ export function agentTasksRoutes(): RouteDef<AgentTasksEnv>[] {
 }
 
 /** Capability + surface of each route, for the manifest test and reviewers. */
-export const AGENT_TASKS_CAPABILITIES: Record<
-  string,
-  { capability: Capability; surface: 'api' | 'html' }
-> = {
+export const AGENT_TASKS_CAPABILITIES: Record<string, { capability: Capability; surface: 'api' | 'html' }> = {
   'GET /console/agent-tasks': { capability: 'session', surface: 'html' },
   'GET /console/agent-tasks/:id': { capability: 'session', surface: 'html' },
   'GET /console/agent-tasks/:id/feed': { capability: 'session', surface: 'api' },

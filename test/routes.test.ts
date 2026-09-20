@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { T, eq, throws, fresh, TEN, NOW } from './helpers.ts';
+import { T, eq, throws, fresh, TEN, NOW, base } from './helpers.ts';
 import { installAuthSchema, inviteUser, signupTenant } from '../src/core/auth.ts';
 import { startConsoleServer } from '../src/console/serve.ts';
 import {
@@ -852,12 +852,25 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
     url: '/team',
     pattern: '/team',
     dispatch: 'legacy',
-    total: 104,
+    total: 100,
     modules: {
       'talk/health': 53,
       'console/shell-metrics': 16,
       'talk/rooms': 14,
       'core/auth': 8,
+      'gov/trust': 1,
+    },
+  },
+  {
+    url: '/team/operations',
+    pattern: '/team/operations',
+    dispatch: 'legacy',
+    total: 99,
+    modules: {
+      'talk/health': 53,
+      'console/shell-metrics': 16,
+      'talk/rooms': 14,
+      'core/auth': 5,
       'gov/trust': 2,
       'console/serve': 1,
     },
@@ -973,6 +986,26 @@ const PAGE_SQL_BUDGETS: readonly PageBudget[] = [
       'talk/rooms': 14,
       'core/auth': 4,
       'coding/review': 1,
+      'gov/trust': 1,
+    },
+  },
+  // The per-mission review page for a mission the tenant never reviewed: the
+  // shell, one `coding/review` read that returns nothing, and the mission lookup
+  // the empty state uses to name what it is asking about. Budgeted at the miss
+  // because that is the shape a fresh install renders; a review *with* files
+  // also reads the repository, which is disk rather than SQL.
+  {
+    url: '/console/review/M-NONE',
+    pattern: '/console/review/:missionId',
+    dispatch: 'table',
+    total: 99,
+    modules: {
+      'talk/health': 53,
+      'console/shell-metrics': 16,
+      'talk/rooms': 14,
+      'core/auth': 4,
+      'coding/review': 1,
+      'coding/mission': 1,
       'gov/trust': 1,
     },
   },
@@ -1253,6 +1286,69 @@ T('the code-review index lists what was opened, and refuses what cannot be read'
   }
 });
 
+T('a code review opens inside the console shell, and a task links to it', async () => {
+  // Two claims, both about reachability. First: the diff gate used to return a
+  // whole HTML document, so arriving at it from the console index swapped the
+  // rail out from under the reader. Second: an Agent Task could not point at the
+  // change set it produced, because nothing linked the two stores — the row now
+  // offers the task's own id as the review key and says whether one is open.
+  const { db, ledger, coord, comp } = await fresh();
+  await installAuthSchema(db, NOW);
+  await signupTenant(
+    db,
+    { slug: TEN, name: 'Acme', email: 'owner@acme.test', password: 'the-console-password', ownerName: 'Ada' },
+    NOW,
+  );
+  await coord.submit(base({ id: 'TASK-1', goal: 'ship the copy change' }));
+  const repo = mkdtempSync(join(tmpdir(), 'vital-review-shell-'));
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  try {
+    const cookie = await login(baseUrl);
+
+    // 1. The per-mission page is a page inside the console shell, not a document
+    //    of its own. Asserted on the miss path so no repository is involved.
+    const miss = await fetch(`${baseUrl}/console/review/M-NONE`, { headers: { cookie } });
+    eq(miss.status, 200);
+    const missBody = await miss.text();
+    eq(missBody.includes('id="console-rail"'), true, 'the review page carries the console rail:');
+    eq(missBody.includes('Open code review'), true, 'and the form that opens one:');
+    // Exactly one document: the shell's. The old page returned its own complete
+    // `<html>` too, which is how it could render without the rail.
+    eq((missBody.match(/<html/g) ?? []).length, 1, 'one document, not a nested second one:');
+
+    // 2. Before a review exists, the task row offers one under the task's id.
+    const before = await fetch(`${baseUrl}/console/agent-tasks`, { headers: { cookie } });
+    const beforeBody = await before.text();
+    eq(beforeBody.includes('href="/console/review/TASK-1"'), true, 'the task links into its review:');
+    eq(beforeBody.includes('Review change set'), true, 'and says what the link does:');
+
+    // Open one under that id — the link's whole premise, exercised.
+    const csrf = await freshToken(baseUrl, cookie);
+    const opened = await fetch(`${baseUrl}/console/review`, {
+      method: 'POST',
+      headers: { cookie },
+      body: `csrf=${csrf}&action=open&missionId=TASK-1&baseline=HEAD&workdir=${encodeURIComponent(repo)}`,
+      redirect: 'manual',
+    });
+    eq(opened.status, 303);
+
+    // 3. With a review open, both the row and the task's own page say so and link
+    //    to it, with the review's real status rather than a hopeful label.
+    const after = await fetch(`${baseUrl}/console/agent-tasks`, { headers: { cookie } });
+    const afterBody = await after.text();
+    eq(afterBody.includes('review · READY_FOR_REVIEW'), true, 'the row shows the review state:');
+    eq(afterBody.includes('href="/console/review/TASK-1"'), true, 'the row still links to it:');
+    const detail = await fetch(`${baseUrl}/console/agent-tasks/TASK-1`, { headers: { cookie } });
+    const detailBody = await detail.text();
+    eq(detailBody.includes('Code review'), true, 'the task page names the review:');
+    eq(detailBody.includes('Open review →'), true, 'and links into it:');
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('the migration boundary is explicit, not implied', () => {
   // Everything not in these tables is still served by the legacy chain, so it
   // has no declared capability yet. This assertion is the burn-down list: as
@@ -1286,13 +1382,14 @@ T('the migration boundary is explicit, not implied', () => {
   eq(migrated.has('GET /console/learning/compile'), true, 'compile form migrated:');
   eq(migrated.has('POST /console/learning/compile'), true, 'compilation migrated:');
   eq(migrated.has('POST /console/learning/cards/:id/transfer-test'), true, 'transfer dispatch migrated:');
-  // The code-review index — the two verbs that list reviews and open one. The
-  // per-mission review page itself is still legacy and is named below, so
-  // "code review is on the table" cannot be read as "the whole review surface is".
+  // The whole code-review surface: the index, the open form, and the
+  // per-mission diff gate with every action it posts. Four routes, and the
+  // capability is now read from a table instead of a regex branch.
   eq(migrated.has('GET /console/review'), true, 'review index migrated:');
   eq(migrated.has('POST /console/review'), true, 'review open migrated:');
-  eq(migrated.size, 18, 'migrated route count (update deliberately):');
-  eq(migrated.has('GET /console/review/:missionId'), false, 'the per-mission review page is still legacy:');
+  eq(migrated.has('GET /console/review/:missionId'), true, 'the per-mission review page migrated:');
+  eq(migrated.has('POST /console/review/:missionId'), true, 'review actions migrated:');
+  eq(migrated.size, 20, 'migrated route count (update deliberately):');
   eq(migrated.has('GET /console/learning'), false, 'the learning read page is still legacy:');
   eq(migrated.has('GET /console/learning/:id'), false, 'the card page is still legacy:');
   eq(migrated.has('POST /console/learning/label'), false, 'the label write is still legacy:');

@@ -15,19 +15,21 @@
 
 import type { RoomHealthEvaluation } from '../talk/health.ts';
 
-const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 export type DashboardDepartment = 'all' | 'legal' | 'marketing' | 'finance' | 'engineering';
 
 export interface DepartmentalSummaryOptions {
   activeScope: DashboardDepartment;
-  home: string;
   userRole: string;
   evaluations: RoomHealthEvaluation[];
 }
 
-export function renderDepartmentTabs(activeScope: DashboardDepartment, home: string): string {
+// No `home` parameter: every tab points at `/console/dashboard`, which the
+// server serves with the same handler as the console root (see the dashboard
+// branch in serve.ts). A second address argument that no branch reads is a
+// promise the signature cannot keep.
+export function renderDepartmentTabs(activeScope: DashboardDepartment): string {
   const tabs: Array<{ id: DashboardDepartment; label: string }> = [
     { id: 'all', label: 'All Departments' },
     { id: 'legal', label: 'Legal & Compliance' },
@@ -57,7 +59,8 @@ export function renderDepartmentTabs(activeScope: DashboardDepartment, home: str
 
 /** Real status cell: never a fabricated healthy default for missing rooms. */
 function statusOf(room: RoomHealthEvaluation | undefined): string {
-  if (!room) return '<span class="v-badge"><span class="dot" style="background:var(--v-faint);"></span>no room data</span>';
+  if (!room)
+    return '<span class="v-badge"><span class="dot" style="background:var(--v-faint);"></span>no room data</span>';
   let tone = 'v-badge-warn';
   if (room.status === 'healthy' || room.badge.includes('🟢')) tone = 'v-badge-good';
   else if (room.status === 'halted' || room.badge.includes('🔴')) tone = 'v-badge-risk';
@@ -107,7 +110,7 @@ function actionBtn(href: string, label: string, primary: boolean): string {
 }
 
 export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string {
-  const { activeScope, home, evaluations } = opts;
+  const { activeScope, evaluations } = opts;
   if (activeScope === 'all') return '';
 
   const getScope = (s: string) => evaluations.find((e) => e.scope === s);
@@ -168,7 +171,9 @@ export function renderDepartmentBanner(opts: DepartmentalSummaryOptions): string
       tile(
         label,
         statusOf(room),
-        room ? `${room.driftingCards} drifting card(s) · ${room.pendingApprovals} pending` : 'no evaluation for this scope',
+        room
+          ? `${room.driftingCards} drifting card(s) · ${room.pendingApprovals} pending`
+          : 'no evaluation for this scope',
       );
     return bannerShell({
       tintBg: 'var(--v-tint-info-bg)',

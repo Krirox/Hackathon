@@ -192,7 +192,14 @@ non-billable executor dry-run invocation).
 First-time bootstrap:
 
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
-2. Set repository secrets for OIDC role and sensitive variables (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`, `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`, `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`, `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`).
+2. Set repository secrets for the OIDC role and sensitive variables
+   (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`,
+   `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`,
+   `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`,
+   `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`, `TF_VAR_BUZZ_AGENT_MASTER_KEY`,
+   `TF_VAR_VITAL_REVIEW_SECRET`, `TF_VAR_BOOTSTRAP_EMAIL`,
+   `TF_VAR_BOOTSTRAP_PASSWORD`, `TF_VAR_SETUP_SECRET` — the full table with
+   what each one is lives under *Deploy — GitHub Actions* below).
 3. Run the `deploy-aws` workflow (see *Deploy — GitHub Actions* below). A local
    `terraform apply` works too, but the images must exist first: `core_image` and
    `executor_image` are validated as non-empty ECR URIs and the busybox fallback
@@ -542,6 +549,25 @@ database access, execution, and measurement are operational.
   class: rate limits back off, unknown results reconcile before retry, and
   sensitive actions (approvals, spends, external effects) are
   explicit-resubmission-only — never blindly replayed.
+
+## Topology verification
+
+`scripts/verify-topology.mjs` validates the documented ALB-to-task path, not
+just a loopback probe: Host routing, `X-Forwarded-Proto` handling with
+`TRUST_PROXY=1`, the reachability-only public pill (`/api/health` carries no
+readiness), and — with `--email`/`--password` — authenticated readiness from
+`/api/metrics`.
+
+```sh
+node scripts/verify-topology.mjs --base-url <console_url> --email … --password … --expect-ready true
+```
+
+Dependency-loss drill against `deploy/compose.yml`: boot the stack and run
+once expecting ready, `docker compose stop postgres`, run again with
+`--expect-ready false` — readiness fails while `/healthz` still answers alive
+(liveness ≠ readiness, per the rule above) — then start postgres again.
+`--expect-ready` needs the authenticated credentials; without them the
+readiness check cannot see the report.
 
 ## Support contact and diagnostics
 

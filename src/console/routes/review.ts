@@ -24,12 +24,17 @@ import type { ServerResponse } from 'node:http';
 import { requireAuth, type AuthContext, type RouteDef } from './registry.ts';
 import type { AsyncDb } from '../../core/db.ts';
 import { listReviews, openReview } from '../../coding/review.ts';
+import { renderReviewPage } from '../code-review.ts';
 
 export interface ReviewEnv {
   db: AsyncDb;
   tenant: string;
   /** Console base path. */
   home: string;
+  /** Human-readable actor for the audit trail. */
+  actorOf(auth: AuthContext): string;
+  /** Audit row for one act: the actor, what happened, the target, and when. */
+  audit(actor: string, action: string, target: string, at: string, detail?: string): Promise<void> | void;
   /**
    * The shelled console page. Supplied by the server so this module owns no
    * chrome: it cannot drift from the rail, the top bar or the account cluster.
@@ -147,6 +152,8 @@ ${rows}
 export const REVIEW_CAPABILITIES: Record<string, { capability: string; surface: string }> = {
   'GET /console/review': { capability: 'session', surface: 'html' },
   'POST /console/review': { capability: 'session', surface: 'html' },
+  'GET /console/review/:missionId': { capability: 'session', surface: 'html' },
+  'POST /console/review/:missionId': { capability: 'session', surface: 'html' },
 };
 
 export function reviewRoutes(): RouteDef<ReviewEnv>[] {
@@ -218,6 +225,72 @@ export function reviewRoutes(): RouteDef<ReviewEnv>[] {
           return redirect(ctx.res, `/console/review/${encodeURIComponent(missionId)}`);
         } catch (e) {
           return redirect(ctx.res, errorPath('/console/review', (e as Error).message));
+        }
+      },
+    },
+    {
+      method: 'GET',
+      pattern: '/console/review/:missionId',
+      capability: 'session',
+      surface: 'html',
+      activation: 'required',
+      note: 'The per-mission diff gate: baseline vs working tree, hunk decisions, secret scan, comments, verification, snapshot. Rendered inside the console shell — the review is reached from the index and from a mission, and a page you cannot navigate out of is a page you will not use.',
+      async handler(ctx) {
+        const auth = requireAuth(ctx);
+        const missionId = ctx.params.missionId ?? '';
+        const body = await renderReviewPage(
+          ctx.env.db,
+          ctx.env.tenant,
+          missionId,
+          {
+            q: ctx.url.searchParams.get('q') ?? undefined,
+            file: ctx.url.searchParams.get('file') ?? undefined,
+            mode: ctx.url.searchParams.get('mode') ?? undefined,
+            notice: ctx.url.searchParams.get('notice') ?? undefined,
+          },
+          auth.session.csrfToken,
+          ctx.env.actorOf(auth),
+        );
+        ctx.res.writeHead(200, { 'content-type': HTML, ...NO_STORE });
+        ctx.res.end(
+          await ctx.env.shellPage(auth, {
+            title: `Review ${missionId}`,
+            navKey: 'review',
+            hideHeader: true,
+            body,
+          }),
+        );
+      },
+    },
+    {
+      method: 'POST',
+      pattern: '/console/review/:missionId',
+      capability: 'session',
+      surface: 'html',
+      activation: 'required',
+      body: 'csrf',
+      note: 'Every review action: hunk/file and bulk accept-reject, human edit of the working tree, comments, send-to-agent, test runs, and the VERIFIED snapshot. Success and refusal are both audited under the actor.',
+      async handler(ctx) {
+        const auth = requireAuth(ctx);
+        const missionId = ctx.params.missionId ?? '';
+        const actor = ctx.env.actorOf(auth);
+        const fields = ctx.call?.fields ?? {};
+        try {
+          const { handleReviewAction } = await import('../code-review.ts');
+          const result = await handleReviewAction(ctx.env.db, ctx.env.tenant, missionId, fields, actor);
+          await ctx.env.audit(actor, 'review.action', `mission:${missionId}`, ctx.at, String(fields.action ?? ''));
+          return redirect(ctx.res, result.redirect);
+        } catch (e) {
+          // The refusal is the useful half of a review action, so it goes to the
+          // trail as well as back to the page the reviewer was reading.
+          await ctx.env.audit(
+            actor,
+            'review.action_failed',
+            `mission:${missionId}`,
+            ctx.at,
+            String((e as Error).message).slice(0, 200),
+          );
+          return redirect(ctx.res, errorPath(`/console/review/${encodeURIComponent(missionId)}`, (e as Error).message));
         }
       },
     },

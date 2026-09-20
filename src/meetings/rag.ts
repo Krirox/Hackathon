@@ -5,8 +5,6 @@ import type {
   MeetingEmbedding,
   MeetingQuestion,
   MeetingQuestionSource,
-  TranscriptSegment,
-  MeetingNotes,
   EmbeddingProvider,
 } from './types.ts';
 import {
@@ -14,7 +12,6 @@ import {
   insertMeetingEmbeddings,
   getMeetingEmbeddings,
   insertMeetingQuestion,
-  listMeetingQuestions,
   getMeetingById,
   getMeetingNotes,
   listTranscriptSegments,
@@ -124,9 +121,7 @@ export async function chunkAndIndexMeeting(
     const speakers = Array.from(new Set(window.map((s) => s.speakerName)));
     const speakerIds = Array.from(new Set(window.map((s) => s.speakerId)));
 
-    const text = window
-      .map((s) => `[${formatTimestamp(s.startTime)}] ${s.speakerName}: ${s.text}`)
-      .join('\n');
+    const text = window.map((s) => `[${formatTimestamp(s.startTime)}] ${s.speakerName}: ${s.text}`).join('\n');
 
     sequence += 1;
     chunks.push({
@@ -217,7 +212,11 @@ export async function retrieveMeetingChunks(
   }
 
   // Tokenize query for hybrid lexical scoring
-  const rawTokens = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 2);
+  const rawTokens = query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
   const queryStems = new Set<string>();
   for (const t of rawTokens) {
     queryStems.add(t);
@@ -226,7 +225,22 @@ export async function retrieveMeetingChunks(
     if (t.endsWith('ed') && t.length > 4) queryStems.add(t.slice(0, -2));
     if (t.endsWith('s') && t.length > 3) queryStems.add(t.slice(0, -1));
   }
-  const stopwords = new Set(['the', 'what', 'when', 'where', 'which', 'who', 'how', 'are', 'did', 'for', 'about', 'and', 'this', 'that']);
+  const stopwords = new Set([
+    'the',
+    'what',
+    'when',
+    'where',
+    'which',
+    'who',
+    'how',
+    'are',
+    'did',
+    'for',
+    'about',
+    'and',
+    'this',
+    'that',
+  ]);
   for (const sw of stopwords) {
     queryStems.delete(sw);
   }
@@ -358,8 +372,9 @@ CRITICAL RULES:
     );
 
     const answer = res.text.trim();
-    const isNotFound = answer.toLowerCase().includes("couldn't find that information") ||
-      answer.toLowerCase().includes("not found in this meeting");
+    const isNotFound =
+      answer.toLowerCase().includes("couldn't find that information") ||
+      answer.toLowerCase().includes('not found in this meeting');
 
     const qRecord: MeetingQuestion = {
       id: `que_${randomUUID().slice(0, 8)}`,
@@ -466,7 +481,9 @@ async function answerDeterministic(
 
   // Unrelated topic (e.g. "What database did we choose?" or "pricing")
   // Check if topic is actually mentioned in the top hits
-  const relevantKeywords = q.split(/\s+/).filter((w) => w.length > 3 && !['what', 'when', 'where', 'which', 'about'].includes(w));
+  const relevantKeywords = q
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !['what', 'when', 'where', 'which', 'about'].includes(w));
   const hasKeywordInHit = relevantKeywords.some((kw) => hits.some((h) => h.text.toLowerCase().includes(kw)));
 
   if (!hasKeywordInHit) {

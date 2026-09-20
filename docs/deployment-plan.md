@@ -34,9 +34,10 @@ agents and people talk; both ride the same deployment and database.
 
 ## 0. Ship gates (do not start Phase 1 until all are true)
 
-- [ ] `ci.yml` green on main: typecheck, `npm test`, `test:postgres` lane,
-      lint, `format:check`, `docs:check`, provenance, `npm audit`,
-      `verify-instance.mjs`, browser test
+- [ ] `ci.yml` green on main: typecheck, `npm test`, `docs:check`,
+      `test:postgres` lane, lint, `format:check`, `verify:provenance`,
+      `npm audit`, `verify-instance.mjs` — plus `npm run test:browser` green
+      (a separate lane; `ci.yml` installs Chromium but does not run it)
 - [ ] Local Docker E2E green on a clean tree (`deploy/compose.yml` +
       signup → setup → ingest → release → approve → receipt journey)
 - [ ] All P0 `flow_TODO.md` items closed with evidence; remaining gaps
@@ -305,11 +306,16 @@ terraform output        # console_url, alb_dns, alb_zone_id, cluster_name, …
 
    ```sh
    BUZZ_RELAY_URL=<relay> BUZZ_AGENT_MASTER_KEY=<from Secrets Manager> \
+     VITAL_DB=var/vital.db \
      node --import tsx scripts/seed-buzz-rooms.ts --tenant acme
    ```
 
-   Asserts 12 persisted channel UUIDs, exits non-zero otherwise. Then check
-   `/console/buzz`: roster, health badges, relay status green.
+   `VITAL_DB` is mandatory — the script refuses to run without it so
+   provisioning persists instead of evaporating. It provisions the 12
+   canonical rooms with real signed events, verifies each channel binding by
+   reading relay metadata back, and exits non-zero if any room is
+   unverified. Then check `/console/buzz`: roster, health badges, relay
+   status green.
 5. **Ingestion**: `ingest-files` against an operator-approved source
    (bounded, explicit — see `docs/deployment.md` F04a).
 6. **First release**: replay the Docker E2E journey against the real

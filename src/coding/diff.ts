@@ -82,7 +82,6 @@ export function diffLines(orig: string[], cur: string[], context = 3): { hunks: 
   for (let k = bO + 1; k < orig.length; k++) full.push({ t: '=', o: orig[k]! });
   // Group into hunks: change runs with `context` lines of padding.
   const hunks: { origStart: number; origLength: number; newStart: number; newLength: number; lines: DiffLine[]; changeType: 'add' | 'del' | 'mod' }[] = [];
-  let idx = 0, origNo = 1, newNo = 1;
   const changedIdx = full.map((f, k) => (f.t === '=' ? -1 : k)).filter((k) => k >= 0);
   if (changedIdx.length === 0) return { hunks: [] };
   // Cluster change positions separated by > 2*context equals.
@@ -93,7 +92,6 @@ export function diffLines(orig: string[], cur: string[], context = 3): { hunks: 
     else cur2.push(changedIdx[k]!);
   }
   clusters.push(cur2);
-  void idx;
   for (const cl of clusters) {
     const start = Math.max(0, cl[0]! - context), end = Math.min(full.length - 1, cl[cl.length - 1]! + context);
     // Compute line numbers at start by replay.
@@ -109,14 +107,28 @@ export function diffLines(orig: string[], cur: string[], context = 3): { hunks: 
     }
     hunks.push({
       origStart: o - oL, origLength: oL, newStart: nn - nL, newLength: nL, lines,
-      changeType: adds > 0 && dels > 0 ? 'mod' : adds > 0 ? 'add' : 'del',
+      changeType: changeTypeOf(adds, dels),
     });
-    void origNo; void newNo;
   }
   return { hunks };
 }
+/** What a run of added and deleted lines amounts to. Reads as a sentence, so a
+ * reader does not have to parse a nest of ternaries to learn that "both" is a
+ * modification. */
+function changeTypeOf(adds: number, dels: number): 'add' | 'del' | 'mod' {
+  if (adds > 0 && dels > 0) return 'mod';
+  return adds > 0 ? 'add' : 'del';
+}
+
+/** A D has a baseline and no working copy; an A is the reverse. */
+function fileStatus(original: string | null, current: string | null): FileStatus {
+  if (original === null) return 'A';
+  if (current === null) return 'D';
+  return 'M';
+}
+
 export function diffFile(path: string, original: string | null, current: string | null, provenance?: Map<string, { agentId: string; planStepId: string; eventId: string; timestamp: string }>): ChangedFile {
-  const status: FileStatus = original === null ? 'A' : current === null ? 'D' : 'M';
+  const status: FileStatus = fileStatus(original, current);
   const oLines = original === null ? [] : original.split('\n');
   const cLines = current === null ? [] : current.split('\n');
   const { hunks } = diffLines(oLines, cLines);

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { EmbeddingProvider, MeetingChunk, MeetingEmbedding } from './types.ts';
+import type { EmbeddingProvider } from './types.ts';
 
 /**
  * Cosine similarity between two float vectors.
@@ -54,7 +54,7 @@ export class DeterministicEmbeddingProvider implements EmbeddingProvider {
     for (let i = 0; i < this.dimensions; i++) {
       const byte1 = h1[i % h1.length]!;
       const byte2 = h2[i % h2.length]!;
-      const sign = (byte1 & 0x80) ? 1 : -1;
+      const sign = byte1 & 0x80 ? 1 : -1;
       const mag = (byte2 / 255.0) * weight;
       vec[i] = sign * mag;
     }
@@ -62,7 +62,11 @@ export class DeterministicEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embedText(text: string): Promise<number[]> {
-    const clean = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const clean = text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!clean) {
       return new Array(this.dimensions).fill(0);
     }

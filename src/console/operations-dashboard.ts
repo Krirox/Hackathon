@@ -47,7 +47,6 @@ export function resolvePrimaryTab(
 
 export interface OperationsDashboardOptions {
   tenant: string;
-  home: string;
   userEmail: string;
   userRole: string;
   userTeam?: string;
@@ -78,7 +77,6 @@ export interface OperationsDashboardOptions {
 export function renderOperationsDashboard(opts: OperationsDashboardOptions): string {
   const {
     tenant,
-    home,
     userEmail,
     userRole,
     userTeam,
@@ -431,10 +429,9 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
     };
   });
 
-  const deptTabs = renderDepartmentTabs(activeDepartment, home);
+  const deptTabs = renderDepartmentTabs(activeDepartment);
   const deptBanner = renderDepartmentBanner({
     activeScope: activeDepartment,
-    home,
     userRole,
     evaluations,
   });

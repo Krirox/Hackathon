@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict';
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { T, eq, fresh, TEN, NOW } from './helpers.ts';
 import { MeetingService } from '../src/meetings/service.ts';
 import { MeetingSignalingHub, type SignalingPeer, type SignalingMessage } from '../src/meetings/signaling.ts';
 import { MockSttProvider } from '../src/meetings/stt.ts';
-import { DeterministicEmbeddingProvider, cosineSimilarity } from '../src/meetings/embeddings.ts';
 import { extractIntelligenceDeterministic } from '../src/meetings/intelligence.ts';
-import { chunkAndIndexMeeting, askMeetingQuestion } from '../src/meetings/rag.ts';
 import {
   getMeetingById,
   insertRecording,
-  listMeetings,
   listParticipants,
   listTranscriptSegments,
   getMeetingNotes,
@@ -791,7 +788,7 @@ T('signaling upgrade refuses unauthenticated sockets and reaps idle peers', asyn
     });
 
   // 1. No identity: the upgrade is refused with 401, not silently accepted.
-  let res1 = await tryUpgrade();
+  const res1 = await tryUpgrade();
   eq(res1.status, '401', 'unauthenticated upgrade is refused:');
   res1.socket.destroy();
 

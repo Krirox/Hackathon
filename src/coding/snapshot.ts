@@ -95,7 +95,12 @@ export async function pinSnapshot(db: AsyncDb, tenant: string, id: string, pinne
 }
 export async function selectBestSnapshot(db: AsyncDb, tenant: string, req: { repo: string; runtime: Record<string, string> }): Promise<SnapshotManifest | null> {
   const snaps = await listSnapshots(db, tenant);
-  const rank = (s: SnapshotManifest) => (s.status === 'VERIFIED' ? 0 : s.status === 'EXPERIMENTAL' ? 1 : 2);
+  // VERIFIED first, then EXPERIMENTAL, then everything else (drafts, rejected).
+  const rank = (s: SnapshotManifest): number => {
+    if (s.status === 'VERIFIED') return 0;
+    if (s.status === 'EXPERIMENTAL') return 1;
+    return 2;
+  };
   const compat = snaps.filter((s) => checkCompatibility(s, req).ok).sort((a, b) => rank(a) - rank(b) || (a.createdAt < b.createdAt ? 1 : -1));
   return compat[0] ?? null;
 }

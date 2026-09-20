@@ -66,7 +66,7 @@ export class MockSttProvider implements SttProvider {
     });
   }
 
-  async transcribeAudio(audioBytes: Buffer | Uint8Array, mimeType = 'audio/webm'): Promise<SttTranscriptionResult> {
+  async transcribeAudio(audioBytes: Buffer | Uint8Array, _mimeType = 'audio/webm'): Promise<SttTranscriptionResult> {
     // If a script queue is provided, return that
     if (this.scriptQueue.length > 0) {
       const fullText = this.scriptQueue.map((s) => `${s.speakerName}: ${s.text}`).join('\n');
@@ -121,9 +121,12 @@ export class MockSttProvider implements SttProvider {
     };
   }
 
+  // A scripted mock reads the queue, not the bytes: the arguments exist because
+  // the SttProvider interface is what the live path calls, and a mock that
+  // changed the interface would stop proving the caller's contract.
   async transcribeLiveChunk(
-    chunk: Buffer | Uint8Array,
-    context?: { speakerId: string; speakerName: string; offsetSec: number },
+    _chunk: Buffer | Uint8Array,
+    _context?: { speakerId: string; speakerName: string; offsetSec: number },
   ): Promise<TranscriptSegment | null> {
     if (this.scriptQueue.length > 0) {
       const next = this.scriptQueue.shift()!;
@@ -196,14 +199,19 @@ export class WhisperSttProvider implements SttProvider {
     }));
 
     return {
-      segments: segments.length > 0 ? segments : [{
-        speakerId: 'spk_1',
-        speakerName: 'Speaker',
-        startTime: 0,
-        endTime: 5,
-        text: data.text.trim(),
-        confidence: 0.9,
-      }],
+      segments:
+        segments.length > 0
+          ? segments
+          : [
+              {
+                speakerId: 'spk_1',
+                speakerName: 'Speaker',
+                startTime: 0,
+                endTime: 5,
+                text: data.text.trim(),
+                confidence: 0.9,
+              },
+            ],
       fullText: data.text.trim(),
     };
   }

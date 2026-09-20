@@ -233,7 +233,6 @@ import {
 } from '../gov/trust.ts';
 import { recordReviewOutcome } from '../gov/review.ts';
 import { renderRoomsSetupPage, handleRoomsSetupPost } from './rooms-setup.ts';
-import { renderReviewPage } from './code-review.ts';
 import { reviewSecretFromEnv, verifyReviewToken } from '../talk/review-card.ts';
 import { buildBuzzRoster, renderBuzzRoster, renderBuzzRoom } from './buzz.ts';
 import { buzzDocument, renderWorkspaceShell } from './workspace-shell.ts';
@@ -595,13 +594,12 @@ async function wrapInWorkspaceShell(
   // only place the two families differ. This split is deliberate — restyling
   // the Console must never re-skin the chat.
   const isChat = navKey === 'buzz';
-  const innerHtml = isChat
-    ? // Buzz keeps upstream's exact body slice: the shell owns a #main landmark
-      // and the chat document already supplies one, so nothing is stripped.
-      html.includes('<body>')
-      ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
-      : html
-    : workspaceInnerHtml(html);
+  // Buzz keeps upstream's exact body slice: the shell owns a #main landmark and
+  // the chat document already supplies one, so nothing is stripped.
+  const chatInnerHtml = html.includes('<body>')
+    ? html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'))
+    : html;
+  const innerHtml = isChat ? chatInnerHtml : workspaceInnerHtml(html);
   if (isDrawer) {
     return innerHtml;
   }
@@ -1257,6 +1255,23 @@ interface Call {
   json?: Record<string, unknown>;
 }
 
+/**
+ * The `question` field of a RAG request, from whichever shape arrived.
+ *
+ * Two content types reach this endpoint — a JSON body from the room's fetch
+ * calls and a urlencoded form from the no-JS path. `JSON.parse` on a form body
+ * throws, and swallowing that with an empty string would answer "question
+ * required" to a caller who did send one. The form is the fallback, not the
+ * default.
+ */
+function readQuestion(raw: string): string {
+  try {
+    return (JSON.parse(raw) as { question?: string }).question ?? '';
+  } catch {
+    return new URLSearchParams(raw).get('question') ?? '';
+  }
+}
+
 async function parseCall(req: IncomingMessage): Promise<Call> {
   const raw = await readBody(req);
   const type = req.headers['content-type'] ?? '';
@@ -1504,17 +1519,6 @@ function teamPage(
     home?: string;
     now?: string;
     confirmations?: Map<string, DisableConfirmation>;
-    stops?: StopDisplay[];
-    selfHalts?: {
-      action: string;
-      actor: string;
-      target: string;
-      detail: string | null;
-      at: string;
-      outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
-    }[];
-    policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
-    compilerGaps?: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[];
     filter?: {
       q?: string;
       role?: string;
@@ -1659,6 +1663,7 @@ function teamPage(
     'Vital Console — team',
     `<p class="sub"><a href="${esc(extra?.home ?? '/')}">← console</a></p>
 <h1>Team</h1>
+${teamTabs('members')}
 ${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
 <h2>${membersHeading}</h2>
 ${filterForm}
@@ -1698,12 +1703,115 @@ ${
 </form>`
     : '<p class="sub">Ask an admin or the owner to create accounts.</p>'
 }
- ${stopsSection(csrf, canManage, extra?.stops, extra?.selfHalts)}
- ${governanceSection(extra?.policy)}
- ${compilerGapsSection(extra?.compilerGaps)}
- ${billingScopeSection()}
  `,
   );
+}
+
+/**
+ * The Team surface is split across two pages so neither reads as a wall of
+ * information: "Members" manages people, "Operations" holds the safety and
+ * governance read-outs (emergency stops, effective policy, compiler trust gaps,
+ * billing scope). This segmented control is the bridge rendered on both halves,
+ * built from the shared `.v-tabs` design-system control with the current page
+ * marked via `aria-current` (the design system's active-tab hook).
+ */
+function teamTabs(active: 'members' | 'operations'): string {
+  const tab = (key: 'members' | 'operations', label: string, href: string): string =>
+    `<a class="v-tab${active === key ? ' v-tab-active' : ''}" href="${href}"${active === key ? ' aria-current="page"' : ''}>${label}</a>`;
+  return `<nav class="v-tabs" aria-label="Team sections" style="margin:0 0 20px;">${tab('members', 'Members', '/team')}${tab('operations', 'Operations', '/team/operations')}</nav>`;
+}
+
+/** The read-only safety/governance data the Operations half of Team renders. */
+type TeamOpsData = {
+  stops?: StopDisplay[];
+  selfHalts?: {
+    action: string;
+    actor: string;
+    target: string;
+    detail: string | null;
+    at: string;
+    outboxStatus?: { status: string; attempts: number; nextAt: string } | null;
+  }[];
+  policy?: { approverRole: string; operatorMode: 'signature' | 'secret' | 'session' };
+  compilerGaps?: { cardId: string; intent: string; state: string; gaps: string[]; evalRef: string | null }[];
+};
+
+/**
+ * The operations half of Team. These governance surfaces were crowding the
+ * roster, so they live on their own page reached from the Team tab bar. The
+ * expensive reads (stop evidence, per-card trust gaps for up to 100 cards)
+ * happen only here, which keeps the Members page light.
+ */
+function teamOperationsPage(csrf: string, viewer: User, home: string, ops: TeamOpsData, notice?: string): string {
+  const canManage = atLeast(viewer.role, 'admin') && !viewer.mustChangePassword;
+  return page(
+    'Vital Console — team operations',
+    `<p class="sub"><a href="${esc(home)}">← console</a></p>
+<h1>Team</h1>
+${teamTabs('operations')}
+${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
+${stopsSection(csrf, canManage, ops.stops, ops.selfHalts)}
+${governanceSection(ops.policy)}
+${compilerGapsSection(ops.compilerGaps)}
+${billingScopeSection()}
+`,
+  );
+}
+
+/**
+ * Wrap a Team page (either half) in the Console workspace shell. Both /team and
+ * /team/operations share this so they get the identical rail, topbar, room list,
+ * and metrics — and so the rail highlights the Team item (navKey 'team').
+ */
+async function teamShelledDocument(
+  html: string,
+  db: import('../core/db.ts').AsyncDb,
+  tenant: string,
+  home: string,
+  auth: { user: User; session: { csrfToken: string } },
+): Promise<string> {
+  const isAdmin = atLeast(auth.user.role, 'admin');
+  const nav = renderConsoleNav(
+    buildConsoleNav(home, {
+      requests: true,
+      claims: true,
+      rooms: true,
+      humanWork: true,
+      settings: isAdmin,
+      learning: isAdmin,
+      audit: isAdmin,
+      data: isAdmin,
+      buzz: isAdmin,
+    }),
+    'team',
+  );
+  const cluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
+  const rooms = (await roomHealth(db, tenant)).map((h) => ({
+    scope: h.scope,
+    roomName: h.roomName,
+    badge: h.badge,
+    pending: h.pendingApprovals,
+    category: h.category,
+  }));
+  const shelled = renderConsoleShell({
+    rooms,
+    home,
+    consoleNav: nav,
+    accountCluster: cluster,
+    innerHtml: workspaceInnerHtml(html),
+    userEmail: auth.user.email,
+    userRole: auth.user.role,
+    userTeam: auth.user.team,
+    tenant,
+    metrics: await shellMetricsFor(db, tenant),
+    roomRecency: await roomRecency(
+      db,
+      tenant,
+      rooms.map((r) => r.scope),
+    ),
+    navKey: 'team',
+  });
+  return html.slice(0, html.indexOf('<body>') + 6) + shelled + html.slice(html.indexOf('</body>'));
 }
 
 function stopsSection(
@@ -2693,6 +2801,7 @@ export function startConsoleServer(
               '/forgot-password',
               '/reset-password',
               '/team',
+              '/team/operations',
               '/team/invite',
               '/team/disable',
               '/team/reactivate',
@@ -4052,71 +4161,11 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'buzz.reply', `msg:${newId}`, at, content.slice(0, 120));
             return redirect(res, `/console/buzz/${encodeURIComponent(scope)}#msg-${encodeURIComponent(targetReplyId)}`);
           }
-          // ------------------------------------------------------------ Code review (per-mission human gate)
-          // GET  /console/review/:missionId — diff review page
-          // POST /console/review/:missionId — review actions (accept/reject/edit/comment/verify/snapshot)
-          const reviewMatch = path.match(/^\/console\/review\/([^/]+)$/);
-          if (reviewMatch && (method === 'GET' || method === 'POST')) {
-            const auth = await sessionOf();
-            if (!auth)
-              return method === 'GET' ? redirectLogin() : json(res, 401, { ok: false, error: 'session required' });
-            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
-            const missionId = decodeURIComponent(reviewMatch[1]!);
-            if (method === 'GET') {
-              const html = await renderReviewPage(
-                db,
-                tenant,
-                missionId,
-                {
-                  q: url.searchParams.get('q') ?? undefined,
-                  file: url.searchParams.get('file') ?? undefined,
-                  mode: url.searchParams.get('mode') ?? undefined,
-                  notice: url.searchParams.get('notice') ?? undefined,
-                },
-                auth.session.csrfToken,
-                by(auth.user),
-              );
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(html);
-              return;
-            }
-            // POST: parse, CSRF-gate, dispatch, redirect back to the page.
-            let call: Call;
-            try {
-              call = await parseCall(req);
-            } catch (e) {
-              return json(res, 400, { ok: false, error: (e as Error).message });
-            }
-            if (!csrfOk(auth.session, call.csrf)) return json(res, 403, { ok: false, error: 'bad CSRF token' });
-            try {
-              const { handleReviewAction } = await import('./code-review.ts');
-              const result = await handleReviewAction(db, tenant, missionId, call.fields, by(auth.user));
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'review.action',
-                `mission:${missionId}`,
-                at,
-                String(call.fields.action ?? ''),
-              );
-              return redirect(res, result.redirect);
-            } catch (e) {
-              await auditConsole(
-                db,
-                tenant,
-                by(auth.user),
-                'review.action_failed',
-                `mission:${missionId}`,
-                at,
-                String((e as Error).message).slice(0, 200),
-              );
-              return redirect(
-                res,
-                `/console/review/${encodeURIComponent(missionId)}?notice=${encodeURIComponent((e as Error).message.slice(0, 200))}`,
-              );
-            }
-          }
+          // The per-mission code review moved onto the route table (both verbs,
+          // with their CSRF policy declared) and into the console shell. It used
+          // to answer a signed-out POST with JSON 401 while every other review
+          // form is a browser submission; `surface: 'html'` is the honest half of
+          // that pair — a reviewer whose session expired gets the login form.
 
           // ------------------------------------------------------------ Issues (engineers team only)
           // The engineering Issues board: kanban over the `issues` table with
@@ -4411,12 +4460,15 @@ export function startConsoleServer(
                 const syncRes = await syncGitHubProject(db, tenant, { fetchFn: opts.fetchFn ?? fetch });
                 return json(res, 200, { ok: syncRes.ok, syncedCount: syncRes.syncedCount, error: syncRes.error });
               }
-              let call: Call | null = null;
-              try {
-                call = await parseCall(req);
-              } catch (e) {
-                return json(res, 400, { ok: false, error: (e as Error).message });
+              // Parsed, or the parser's own refusal. The union keeps the parser's
+              // message visible (a malformed body and a rejected one are
+              // different answers) without a `let` whose initial value no reader
+              // ever sees.
+              const parsed = await parseCall(req).catch((e: unknown) => e as Error);
+              if (parsed instanceof Error) {
+                return json(res, 400, { ok: false, error: parsed.message });
               }
+              const call: Call = parsed;
               if (!auth || !csrfOk(auth.session, call.csrf))
                 return json(res, 403, { ok: false, error: 'bad CSRF token' });
               const serverFetchFn = opts.fetchFn ?? fetch;
@@ -4627,7 +4679,9 @@ export function startConsoleServer(
                 title = body.title || title;
                 scope = body.scope || scope;
                 if (typeof body.recordingEnabled === 'boolean') recordingEnabled = body.recordingEnabled;
-              } catch {}
+              } catch {
+                /* not JSON — the form fields above already carried the values */
+              }
             } else {
               const params = new URLSearchParams(raw);
               const formCsrf = params.get('csrf');
@@ -4827,12 +4881,7 @@ export function startConsoleServer(
 
             if ((subAction === 'rag' || subAction === 'ask') && method === 'POST') {
               const raw = await readBody(req);
-              let question = '';
-              try {
-                question = JSON.parse(raw).question ?? '';
-              } catch {
-                question = new URLSearchParams(raw).get('question') ?? '';
-              }
+              const question = readQuestion(raw);
               if (!question.trim()) {
                 return json(res, 400, { ok: false, error: 'question required' });
               }
@@ -4903,11 +4952,14 @@ export function startConsoleServer(
             // render at all — a GET carries it for a POST that the route table then
             // verifies. `queued` / `compiled` are the one-line receipts the actions
             // redirect back with; `error` is the refusal, which is the useful half.
-            const queueNotice = url.searchParams.get('queued')
-              ? `Transfer test queued (job ${url.searchParams.get('queued')}). A worker runs it and banks the result.`
-              : url.searchParams.get('compiled')
-                ? 'Card compiled into CANDIDATE — promotion still requires transfer evidence.'
-                : undefined;
+            const queuedJob = url.searchParams.get('queued');
+            const compiledCard = url.searchParams.get('compiled');
+            let queueNotice: string | undefined;
+            if (queuedJob) {
+              queueNotice = `Transfer test queued (job ${queuedJob}). A worker runs it and banks the result.`;
+            } else if (compiledCard) {
+              queueNotice = 'Card compiled into CANDIDATE — promotion still requires transfer evidence.';
+            }
             const body = await renderLearningCardPage(db, comp, tenant, cardId, {
               csrf: auth.session.csrfToken,
               notice: queueNotice,
@@ -5389,7 +5441,6 @@ export function startConsoleServer(
 
             const fullDashboard = renderOperationsDashboard({
               tenant,
-              home,
               userEmail: auth.user.email,
               userRole: auth.user.role,
               userTeam: auth.user.team,
@@ -5701,6 +5752,27 @@ export function startConsoleServer(
                 continue;
               }
             }
+            const q = url.searchParams.get('q') ?? undefined;
+            const role = url.searchParams.get('role') ?? undefined;
+            const status = url.searchParams.get('status') ?? undefined;
+            const teamParam = url.searchParams.get('team') ?? undefined;
+            const rawPage = Number(url.searchParams.get('page') ?? '1');
+            const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
+              home,
+              now: at,
+              confirmations,
+              filter: { q, role, status, team: teamParam, page: pageNum },
+            });
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(await teamShelledDocument(html, db, tenant, home, auth));
+            return;
+          }
+          if (method === 'GET' && path === '/team/operations') {
+            const auth = await sessionOf();
+            if (!auth) return redirectLogin();
+            if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
+            if (auth.user.mustChangePassword) return redirect(res, '/change-password');
             const stops = await describeStops(db, tenant);
             const haltEvidence = await listHaltEvidence(db, tenant);
             // Query outbox for automation-self-halt rows and pair with audit entries.
@@ -5761,73 +5833,14 @@ export function startConsoleServer(
             } catch {
               // No cards or compiler unavailable — the section renders empty.
             }
-            const q = url.searchParams.get('q') ?? undefined;
-            const role = url.searchParams.get('role') ?? undefined;
-            const status = url.searchParams.get('status') ?? undefined;
-            const teamParam = url.searchParams.get('team') ?? undefined;
-            const rawPage = Number(url.searchParams.get('page') ?? '1');
-            const pageNum = Number.isSafeInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
-            const html = teamPage(auth.session.csrfToken, auth.user, data.users, data.invitations, undefined, {
-              home,
-              now: at,
-              confirmations,
+            const html = teamOperationsPage(auth.session.csrfToken, auth.user, home, {
               stops,
               selfHalts,
               policy: { approverRole: approverMin, operatorMode },
               compilerGaps,
-              filter: { q, role, status, team: teamParam, page: pageNum },
             });
-            // Chat-centric: Team lives inside Workspace shell
-            const isAdmin = atLeast(auth.user.role, 'admin');
-            const teamNav = renderConsoleNav(
-              buildConsoleNav(home, {
-                requests: true,
-                claims: true,
-                rooms: true,
-                humanWork: true,
-                settings: isAdmin,
-                learning: isAdmin,
-                audit: isAdmin,
-                data: isAdmin,
-                buzz: isAdmin,
-              }),
-              'team',
-            );
-            const teamCluster = renderAccountCluster(auth.user.email, auth.user.role, auth.session.csrfToken);
-            const teamRooms = (await roomHealth(db, tenant)).map((h) => ({
-              scope: h.scope,
-              roomName: h.roomName,
-              badge: h.badge,
-              pending: h.pendingApprovals,
-              category: h.category,
-            }));
-            // Same inner-body extraction as every other shelled page: the shell
-            // owns the skip link and the #main landmark, so a page must not ship
-            // a second copy of either.
-            const teamInner = workspaceInnerHtml(html);
-            const teamMetrics = await shellMetricsFor(db, tenant);
-            const teamRecency = await roomRecency(
-              db,
-              tenant,
-              teamRooms.map((r) => r.scope),
-            );
-            const teamShelled = renderConsoleShell({
-              rooms: teamRooms,
-              home,
-              consoleNav: teamNav,
-              accountCluster: teamCluster,
-              innerHtml: teamInner,
-              userEmail: auth.user.email,
-              userRole: auth.user.role,
-              userTeam: auth.user.team,
-              tenant,
-              metrics: teamMetrics,
-              roomRecency: teamRecency,
-            });
-            const teamWithShell =
-              html.slice(0, html.indexOf('<body>') + 6) + teamShelled + html.slice(html.indexOf('</body>'));
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(teamWithShell);
+            res.end(await teamShelledDocument(html, db, tenant, home, auth));
             return;
           }
           if (path === '/team/invite' && method === 'POST') {
@@ -6346,14 +6359,12 @@ export function startConsoleServer(
             if (!scope || !actionClass)
               return json(res, 400, { ok: false, error: 'scope and action class are required' });
             if (!reason) {
-              const data = await teamData();
-              const html = teamPage(
+              const html = teamOperationsPage(
                 auth.session.csrfToken,
                 auth.user,
-                data.users,
-                data.invitations,
+                home,
+                {},
                 'recover failed: a recorded reason is required',
-                { home },
               );
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
               res.end(html);
@@ -6373,16 +6384,14 @@ export function startConsoleServer(
                 at,
                 reason,
               );
-              return redirect(res, '/team');
+              return redirect(res, '/team/operations');
             } catch (e) {
-              const data = await teamData();
-              const html = teamPage(
+              const html = teamOperationsPage(
                 auth.session.csrfToken,
                 auth.user,
-                data.users,
-                data.invitations,
+                home,
+                {},
                 `recover failed: ${(e as Error).message.replace(/^\[trust:[^\]]+\]\s*/, '')}`,
-                { home },
               );
               res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
               res.end(html);
