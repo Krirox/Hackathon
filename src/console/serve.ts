@@ -864,7 +864,7 @@ ${
   <button type="submit">Sign in</button>
 </form>
 <p class="sub"><a href="/forgot-password${opts.next ? `?next=${encodeURIComponent(opts.next)}` : ''}">Forgot password?</a></p>
-<p class="sub">Deploying a new instance? <a href="mailto:hello@vital.company">Contact us</a> for a pilot walkthrough. This console does not create additional tenants.</p>`,
+<p class="sub">Deploying a new instance? <a href="mailto:support@elitefolks.com">Contact us</a> for a pilot walkthrough. This console does not create additional tenants.</p>`,
   );
 }
 
@@ -2026,7 +2026,7 @@ function billingScopeSection(): string {
   <div class="v-card-head" style="margin-bottom:12px;">
     <div>
       <h2 class="v-card-title">Engagement and billing scope</h2>
-      <p class="sub" style="margin:4px 0 0;font-size:13px;max-width:78ch;line-height:1.55;">Engagement is a direct pilot scoped to the Ship-to-Result wedge with pre-registered metrics and kill criteria agreed before the pilot starts. <a href="mailto:hello@vital.company">Contact us</a> for a pilot walkthrough. There is no hosted subscription, invoice, or billing flow in this release. Do not present the pilot as one. Subscription or invoice flows will only appear if a hosted commercial model is selected.</p>
+      <p class="sub" style="margin:4px 0 0;font-size:13px;max-width:78ch;line-height:1.55;">Engagement is a direct pilot scoped to the Ship-to-Result wedge with pre-registered metrics and kill criteria agreed before the pilot starts. <a href="mailto:support@elitefolks.com">Contact us</a> for a pilot walkthrough. There is no hosted subscription, invoice, or billing flow in this release. Do not present the pilot as one. Subscription or invoice flows will only appear if a hosted commercial model is selected.</p>
     </div>
   </div>
 </div>`;

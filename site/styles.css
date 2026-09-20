@@ -432,12 +432,13 @@ a {
   z-index: 1;
   pointer-events: none;
   color: rgba(255, 255, 255, 0.38);
-  overflow: hidden;
+  overflow: visible;
 }
 
 .orbit-field svg {
   width: 100%;
   height: 115%;
+  overflow: visible;
   transform: perspective(1100px) rotateX(64deg);
   transform-origin: 50% 18%;
 }
