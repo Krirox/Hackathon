@@ -1976,6 +1976,18 @@ const by = (u: User): string => `${u.id} (${u.email})`;
 const actorLabel = (u: User): string => u.email;
 
 /**
+ * Two-segment paths under /console/meetings that are words, not meeting ids.
+ *
+ * They used to be the query-param aliases (`/console/meetings/detail?id=…`,
+ * `/console/meetings/room?id=…`) for the detail and live-room pages. Those
+ * routes are deleted: a meeting is addressed by id, at `/console/meetings/:id`
+ * and `/console/meetings/:id/room`. Named once because two places must agree on
+ * it — the dispatcher must not read the segment as a meeting id, and the
+ * request log must not bucket the resulting 404 as a meeting view.
+ */
+const RETIRED_MEETING_ALIASES = new Set(['/console/meetings/room', '/console/meetings/detail']);
+
+/**
  * Dashboard search (FLOW-020) over the existing home path: permissioned
  * searchable request/claim indexes with stable pagination, true totals with
  * explicit truncation, meaningful no-results with a clear-filter action, and
@@ -2746,11 +2758,7 @@ export function startConsoleServer(
             logPath = `/api/meetings/:id/${path.split('/').pop()}`;
           else if (/^\/api\/meetings\/[^/]+$/.test(path)) logPath = '/api/meetings/:id';
           else if (/^\/console\/meetings\/[^/]+\/room$/.test(path)) logPath = '/console/meetings/:id/room';
-          else if (
-            /^\/console\/meetings\/[^/]+$/.test(path) &&
-            path !== '/console/meetings/room' &&
-            path !== '/console/meetings/detail'
-          )
+          else if (/^\/console\/meetings\/[^/]+$/.test(path) && !RETIRED_MEETING_ALIASES.has(path))
             logPath = '/console/meetings/:id';
           // Chat room names are tenant data too, and this is the busiest page in
           // the product — logged as `unmatched` it made the render-cost metric
@@ -2760,13 +2768,12 @@ export function startConsoleServer(
             [
               home,
               '/console',
+              '/console/',
               '/console/rooms',
               '/console/requests',
               '/console/human-work',
               '/console/claims',
               '/console/meetings',
-              '/console/meetings/room',
-              '/console/meetings/detail',
               '/api/meetings',
               '/api/meetings/create',
               '/api/meetings/list',
@@ -2781,6 +2788,10 @@ export function startConsoleServer(
               '/login/mfa',
               '/console/dashboard',
               '/console/compiler',
+              '/console/buzz',
+              '/console/digest',
+              '/console/learning',
+              '/console/workflows',
               '/console/audit',
               '/console/data',
               '/console/data/export',
@@ -2817,6 +2828,7 @@ export function startConsoleServer(
               '/setup/test-source',
               '/setup/sample',
               '/setup/start-release',
+              '/setup/rooms',
               '/api/ingest/health',
               '/healthz',
               '/api/health',
@@ -4559,18 +4571,14 @@ export function startConsoleServer(
           }
 
           const roomMatch = path.match(/^\/console\/meetings\/([^/]+)\/room$/);
-          if ((path === '/console/meetings/room' || roomMatch) && method === 'GET') {
+          if (roomMatch && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (activationDenied(res, auth, false)) return;
 
-            const meetingId = roomMatch ? decodeURIComponent(roomMatch[1]!) : url.searchParams.get('id');
-            if (!meetingId) {
-              res.writeHead(302, { location: `${home}console/meetings` });
-              res.end();
-              return;
-            }
+            // The id is a path segment, so it is always present and never empty.
+            const meetingId = decodeURIComponent(roomMatch[1]!);
             const meeting = await meetingService.getMeeting(tenant, meetingId);
             if (!meeting) {
               res.writeHead(302, { location: `${home}console/meetings` });
@@ -4617,25 +4625,13 @@ export function startConsoleServer(
           }
 
           const detailMatch = path.match(/^\/console\/meetings\/([^/]+)$/);
-          if (
-            (path === '/console/meetings/detail' ||
-              (detailMatch && detailMatch[1] !== 'room' && detailMatch[1] !== 'detail')) &&
-            method === 'GET'
-          ) {
+          if (detailMatch && !RETIRED_MEETING_ALIASES.has(path) && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
             if (activationDenied(res, auth, false)) return;
 
-            const meetingId =
-              detailMatch && detailMatch[1] !== 'detail'
-                ? decodeURIComponent(detailMatch[1]!)
-                : url.searchParams.get('id');
-            if (!meetingId) {
-              res.writeHead(302, { location: `${home}console/meetings` });
-              res.end();
-              return;
-            }
+            const meetingId = decodeURIComponent(detailMatch[1]!);
             const details = await meetingService.getMeetingDetails(tenant, meetingId);
             if (!details) {
               res.writeHead(302, { location: `${home}console/meetings` });
@@ -4706,7 +4702,7 @@ export function startConsoleServer(
             await auditConsole(db, tenant, by(auth.user), 'meeting.create', `meeting:${meeting.id}`, at, meeting.title);
 
             if (ctype.includes('application/x-www-form-urlencoded')) {
-              res.writeHead(303, { location: `${home}console/meetings/room?id=${encodeURIComponent(meeting.id)}` });
+              res.writeHead(303, { location: `${home}console/meetings/${encodeURIComponent(meeting.id)}/room` });
               res.end();
               return;
             }
@@ -5663,10 +5659,7 @@ export function startConsoleServer(
             return;
           }
 
-          if (
-            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-            method === 'GET'
-          ) {
+          if (path === '/setup/rooms' && method === 'GET') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });
@@ -5678,10 +5671,7 @@ export function startConsoleServer(
             res.end(html);
             return;
           }
-          if (
-            (path === '/setup/rooms' || path === '/settings/rooms' || path === '/console/settings/rooms') &&
-            method === 'POST'
-          ) {
+          if (path === '/setup/rooms' && method === 'POST') {
             const auth = await sessionOf();
             if (!auth) return redirectLogin();
             if (auth.user.tenant !== tenant) return json(res, 403, { ok: false, error: 'wrong tenant' });

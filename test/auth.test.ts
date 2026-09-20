@@ -1245,7 +1245,7 @@ T('FINAL-001: authenticated back links resolve to the console home in both serve
         true,
         `team back link is ${home} (siteDir=${siteDir}):`,
       );
-      const rooms = await call(s.port, '/console/settings/rooms', { cookie });
+      const rooms = await call(s.port, '/setup/rooms', { cookie });
       eq(rooms.status, 200);
       // Presentation of the link is the design system's business; the
       // contract is that it points home and says so.

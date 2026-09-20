@@ -2222,6 +2222,27 @@ T('FINAL-002: Settings nav entry is admin-gated and the setup page stays reachab
   }
 });
 
+T('the room provisioning page has one address: /setup/rooms', async () => {
+  const { db, ledger, coord, comp } = await seeded();
+  const server = await startConsoleServer(db, ledger, coord, comp, { tenant: TEN, now: () => NOW });
+  try {
+    const base_ = `http://127.0.0.1:${server.port}`;
+    const owner = await ownerSession(server.port);
+    const canonical = await fetch(`${base_}/setup/rooms`, { headers: owner.headers });
+    eq(canonical.status, 200, 'the canonical page resolves:');
+    // /settings/rooms and /console/settings/rooms were duplicate dispatcher
+    // aliases for it. A page with three addresses has three places to get its
+    // auth wrong, and only one of them was ever linked.
+    for (const retired of ['/settings/rooms', '/console/settings/rooms']) {
+      const res = await fetch(`${base_}${retired}`, { headers: owner.headers });
+      eq(res.status, 404, `${retired} no longer resolves:`);
+    }
+  } finally {
+    await server.close();
+    await db.close();
+  }
+});
+
 T('FINAL-004: learning review page renders and labels decisions without JSON links', async () => {
   const { db, ledger, coord, comp } = await seeded();
   await db

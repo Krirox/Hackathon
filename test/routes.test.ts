@@ -548,13 +548,16 @@ T('every request logs its render cost', async () => {
   const base = `http://127.0.0.1:${server.port}`;
   const original = console.log;
   const lines: string[] = [];
+  // The pages whose cost matters most, including ones that were missing from
+  // the log's name list and so logged as the useless bucket `unmatched`.
+  const pages = ['/console/rooms', '/console/digest', '/console/workflows', '/setup/rooms'];
   try {
     const cookie = await login(base);
     console.log = (...args: unknown[]) => {
       lines.push(args.map(String).join(' '));
     };
     try {
-      await (await fetch(`${base}/console/rooms`, { headers: { cookie } })).text();
+      for (const path of pages) await (await fetch(`${base}${path}`, { headers: { cookie } })).text();
       // The line is written on `finish`, a tick after the body is read.
       await new Promise((r) => setTimeout(r, 50));
     } finally {
@@ -575,8 +578,14 @@ T('every request logs its render cost', async () => {
       .filter((r): r is { path: string; sql: number; memo: number } => Boolean(r?.path));
     // The line must name the page: a metric bucketed as `unmatched` cannot show
     // which page regressed, and the busiest pages used to log exactly that.
+    for (const path of pages) {
+      eq(
+        logged.some((r) => r.path === path),
+        true,
+        `${path} logged its own name (got ${logged.map((l) => l.path).join(', ')}):`,
+      );
+    }
     const page = logged.find((r) => r.path === '/console/rooms');
-    eq(Boolean(page), true, `the page logged its own name (got ${logged.map((l) => l.path).join(', ')}):`);
     // A shelled page is not one query: this asserts a real count, so a meter that
     // silently stopped counting (or stopped being wired) fails here.
     eq((page?.sql ?? 0) > 20, true, `sql counted (${page?.sql}):`);
