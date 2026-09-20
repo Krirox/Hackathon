@@ -21,14 +21,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
-# Agent mascot SVGs. The console serves /assets/agents/* from
-# <cwd>/site/assets/agents regardless of --site (serve.ts), and buzz.ts points
-# agent avatars at those paths — so they must ship even though the marketing
-# site itself is deliberately not in this image (it is deployed separately).
-COPY site/assets/agents ./site/assets/agents
+# Marketing site + agent mascots. With `serve --site site`, `/` is public
+# index.html and the session-gated console lives under `/console` (see serve.ts).
+COPY site ./site
 # jcode sidecar reaches core over localhost; the socket path is shared via volume in ECS.
 ENV HOST=0.0.0.0 PORT=3100 VITAL_TENANT=acme
 EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||'3100')+'/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-CMD ["node", "dist/cli.js", "serve"]
+CMD ["node", "dist/cli.js", "serve", "--site", "site"]
