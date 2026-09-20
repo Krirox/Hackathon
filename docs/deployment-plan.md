@@ -76,8 +76,9 @@ agents and people talk; both ride the same deployment and database.
    §5 covers both ways to connect it.
 3. **GitHub repo** with `main` protected by `ci.yml`, plus Docker and the
    AWS CLI available locally if you take the from-your-machine path (§6b).
-4. **Model/provider API keys**: Novita (production model plane), Gemini
-   (development plane), Serper (search).
+4. **Bedrock model access**: enable the foundation models named in
+   `bedrock_prod_model_id` / `bedrock_dev_model_id` (defaults in
+   `deploy/aws/variables.tf`) in the target region before the first apply.
 5. **Quotas**: Fargate vCPU, RDS, ElastiCache in the target region —
    request increases before the pilot if the account is new.
 
@@ -207,7 +208,8 @@ as **repository secrets** (Settings → Secrets and variables → Actions):
 | `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface — required, no placeholder passes |
 | `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens — required |
 | `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake — required |
-| `TF_VAR_SERPER_API_KEY` / `TF_VAR_GEMINI_API_KEY` / `TF_VAR_NOVITA_API_KEY` | search + model planes — required |
+| `TF_VAR_SERPER_API_KEY` | search plane — required |
+| *(models)* | ECS + Lambda use **Amazon Bedrock** (Converse API) via task role IAM — no `TF_VAR_*` keys. Enable `bedrock_prod_model_id` / `bedrock_dev_model_id` in the account (see `deploy/aws/variables.tf`) before apply. |
 | `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
 | `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | relay identity (64 hex) |
 | `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex; empty = no publishing identity |

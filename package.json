@@ -28,6 +28,7 @@
     "node": "22.x"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1136.0",
     "@noble/curves": "^2.4.0",
     "pg": "^8.23.0",
     "zod": "^4.5.4"

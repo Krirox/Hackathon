@@ -80,8 +80,6 @@ jobs:
           TF_VAR_vital_core_secret: ${{ secrets.TF_VAR_VITAL_CORE_SECRET }}
           TF_VAR_webhook_secret: ${{ secrets.TF_VAR_WEBHOOK_SECRET }}
           TF_VAR_serper_api_key: ${{ secrets.TF_VAR_SERPER_API_KEY }}
-          TF_VAR_gemini_api_key: ${{ secrets.TF_VAR_GEMINI_API_KEY }}
-          TF_VAR_novita_api_key: ${{ secrets.TF_VAR_NOVITA_API_KEY }}
           TF_VAR_operator_secret: ${{ secrets.TF_VAR_OPERATOR_SECRET }}
           TF_VAR_buzz_relay_private_key: ${{ secrets.TF_VAR_BUZZ_RELAY_PRIVATE_KEY }}
           TF_VAR_buzz_agent_master_key: ${{ secrets.TF_VAR_BUZZ_AGENT_MASTER_KEY }}
@@ -100,10 +98,16 @@ jobs:
           else
             terraform init -input=false
           fi
+          # terraform.tfvars is git-ignored (it can carry secrets), so CI reads
+          # the non-secret domain wiring from repo *variables* instead. Unset
+          # = empty = the variables.tf default (HTTP-only, no DNS) — a stack
+          # without a domain still deploys exactly as before.
           terraform apply -input=false -auto-approve \
             -var "region=$AWS_REGION" \
             -var "core_image=$CORE_IMAGE" \
-            -var "executor_image=$EXECUTOR_IMAGE"
+            -var "executor_image=$EXECUTOR_IMAGE" \
+            -var "domain_name=${{ vars.DOMAIN_NAME }}" \
+            -var "hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}"
       - name: Smoke check
         run: |
           CLUSTER=$(terraform -chdir=deploy/aws output -raw cluster_name)

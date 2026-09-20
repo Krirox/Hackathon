@@ -9,6 +9,11 @@ var/
 data/artifacts/
 data/snapshots/
 .terraform/
+# Terraform working files: tfvars carries zone IDs, tfstate carries DB
+# passwords. Only terraform.tfvars.example is tracked.
+deploy/aws/terraform.tfvars
+*.tfstate
+*.tfstate.*
 tmp/
 # Transient run output (server logs, test logs) — a tracked log is a conflict on
 # every run, and one of them lived in the tree root.

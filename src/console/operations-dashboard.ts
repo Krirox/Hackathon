@@ -524,6 +524,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       flex: 1;
       max-width: 480px;
       margin: 0 20px;
+      min-width: 0;
     }
     .search-box {
       width: 100%;
@@ -554,6 +555,7 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       display: flex;
       align-items: center;
       gap: 20px;
+      min-width: 0;
     }
     .stat-chip {
       display: flex;
@@ -588,6 +590,24 @@ export function renderOperationsDashboard(opts: OperationsDashboardOptions): str
       font-weight: 700;
       display: grid;
       place-items: center;
+    }
+    /* Responsive top bar: the fixed 60px row cannot wrap, so before it can
+       overflow and clip its right-hand cluster at tablet widths we shed the
+       redundant live-readout chips — the same spend / escalations / human-min
+       numbers already render as KPI cards in the body. Every *action* (theme,
+       search, Go to Chat, account) stays reachable; only duplicate
+       informational chips collapse, then the (non-interactive) tenant label. */
+    @media (max-width: 1200px) {
+      .top-bar { gap: 10px; padding: 0 14px; }
+      .top-right { gap: 12px; }
+      .top-center { margin: 0 10px; }
+      .stat-chip { display: none; }
+    }
+    @media (max-width: 640px) {
+      .top-bar { padding: 0 12px; }
+      .top-right { gap: 10px; }
+      .tenant-select { display: none; }
+      .top-center { margin: 0 8px; }
     }
 
     /* Layout Columns */

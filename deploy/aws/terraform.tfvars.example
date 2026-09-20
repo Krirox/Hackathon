@@ -31,8 +31,9 @@ db_max_allocated_storage = 100
 # vital_core_secret  = ""
 # webhook_secret     = ""
 # serper_api_key     = ""
-# gemini_api_key     = ""
-# novita_api_key     = ""
+# Bedrock model IDs (Converse API). Enable each model in the account/region first.
+# bedrock_prod_model_id = "zai.glm-4.7-flash"
+# bedrock_dev_model_id  = "zai.glm-4.7-flash"
 # Console mutation gate (empty = ungated dev only). Pilot: set via TF_VAR_operator_secret.
 # operator_secret = "CHANGEME"
 # Buzz agent identities + review tokens (empty = fail closed: no publishing identity, dead webhook approve path).
@@ -63,7 +64,7 @@ db_max_allocated_storage = 100
 # lock table once, then uncomment there and init with -backend-config flags
 # (bucket, key, region, dynamodb_table). Until then, one machine, local state.
 
-allowed_egress_hosts         = "api.novita.ai,generativelanguage.googleapis.com,api.serper.dev"
+allowed_egress_hosts         = "api.serper.dev"
 lambda_memory_mb             = 2048
 lambda_reserved_concurrency  = 20
 

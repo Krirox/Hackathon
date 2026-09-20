@@ -1,26 +1,19 @@
 /**
- * Model providers (ops decision 2026-09-09): Gemini for dev, Novita AI
- * serving DeepSeek V4 for production.
+ * Model lanes: local dev defaults to Gemini; production defaults to Amazon
+ * Bedrock (IAM auth on AWS). Novita + Gemini remain available via
+ * DEV_MODEL_PROVIDER / PROD_MODEL_PROVIDER for compose and experiments.
  *
  * Wire formats verified against vendor docs, not memory:
- *   Novita  POST https://api.novita.ai/openai/v1/chat/completions,
- *           OpenAI-compatible, `Authorization: Bearer KEY`
- *           (docs: novita.ai/docs, model list at /openai/v1/models)
- *   Gemini  POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent,
- *           `x-goog-api-key` header, {contents:[{role, parts:[{text}]}]}
- *           (docs: ai.google.dev; system prompt goes in systemInstruction,
- *           assistant turns use role "model")
+ *   Bedrock  Converse API (@aws-sdk/client-bedrock-runtime), task/Lambda IAM
+ *   Novita   POST …/openai/v1/chat/completions, Bearer auth (optional local)
+ *   Gemini   POST …/generateContent, x-goog-api-key (optional local)
  *
- * Keys travel in headers only — read at the runtime boundary via
- * `readApiKey`, never stored, never logged, never ledgered. `fetchFn` is
- * injected so tests stub the network and CI never spends a token.
- *
- * Two uncertainties, stated not hidden: (1) Novita model IDs move — the
- * default below names the V4 family, confirm via GET /openai/v1/models
- * (display names seen: "Deepseek V4 Flash", "Deepseek V4 Pro"); override
- * with NOVITA_MODEL. (2) Gemini model generations move — override with
- * GEMINI_MODEL. An unapproved model never runs: see the registry below.
+ * Third-party keys are read at the boundary via `readApiKey` (never logged).
+ * Bedrock uses the default credential chain (ECS/Lambda task role). `fetchFn`
+ * is injected for HTTP providers so tests stub the network and CI spends nothing.
  */
+
+import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export class ModelError extends Error {
   constructor(
@@ -31,14 +24,14 @@ export class ModelError extends Error {
   }
 }
 
-export type ModelProvider = 'gemini' | 'novita';
+export type ModelProvider = 'gemini' | 'novita' | 'bedrock';
 
 export interface ModelProfile {
   /** 'dev' | 'production' | custom lane name. */
   name: string;
   provider: ModelProvider;
   model: string;
-  /** Env var holding the key — the name travels, the value never does. */
+  /** Env var holding the key for HTTP providers — empty for Bedrock (IAM). */
   apiKeyEnv: string;
   baseUrl: string;
   maxOutputTokens: number;
@@ -47,22 +40,39 @@ export interface ModelProfile {
 
 export const NOVITA_BASE_URL = 'https://api.novita.ai/openai';
 export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+export const DEFAULT_BEDROCK_PROD_MODEL = 'zai.glm-4.7-flash';
+export const DEFAULT_BEDROCK_DEV_MODEL = 'zai.glm-4.7-flash';
 
-export function devProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile {
+function parseProvider(
+  env: NodeJS.ProcessEnv,
+  laneVar: 'DEV_MODEL_PROVIDER' | 'PROD_MODEL_PROVIDER',
+  fallback: ModelProvider,
+): ModelProvider {
+  const v = env[laneVar] ?? env.MODEL_PROVIDER;
+  if (v === 'gemini' || v === 'novita' || v === 'bedrock') return v;
+  return fallback;
+}
+
+function bedrockBaseUrl(env: NodeJS.ProcessEnv): string {
+  const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? 'us-east-1';
+  return `https://bedrock-runtime.${region}.amazonaws.com`;
+}
+
+function geminiProfile(name: string, env: NodeJS.ProcessEnv): ModelProfile {
   return {
-    name: 'dev',
+    name,
     provider: 'gemini',
     model: env.GEMINI_MODEL ?? 'gemini-3.8-flash',
     apiKeyEnv: 'GEMINI_API_KEY',
     baseUrl: GEMINI_BASE_URL,
-    maxOutputTokens: 1024,
+    maxOutputTokens: name === 'production' ? 2048 : 1024,
     temperature: 0.2,
   };
 }
 
-export function prodProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile {
+function novitaProfile(name: string, env: NodeJS.ProcessEnv): ModelProfile {
   return {
-    name: 'production',
+    name,
     provider: 'novita',
     model: env.NOVITA_MODEL ?? 'deepseek/deepseek-v4',
     apiKeyEnv: 'NOVITA_API_KEY',
@@ -72,10 +82,41 @@ export function prodProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile 
   };
 }
 
-/** Read the key at the boundary. Missing means misconfigured, loudly. */
+function bedrockProfile(name: string, env: NodeJS.ProcessEnv): ModelProfile {
+  const model =
+    name === 'dev'
+      ? (env.BEDROCK_DEV_MODEL ?? env.BEDROCK_MODEL ?? DEFAULT_BEDROCK_DEV_MODEL)
+      : (env.BEDROCK_MODEL ?? DEFAULT_BEDROCK_PROD_MODEL);
+  return {
+    name,
+    provider: 'bedrock',
+    model,
+    apiKeyEnv: '',
+    baseUrl: bedrockBaseUrl(env),
+    maxOutputTokens: name === 'production' ? 2048 : 1024,
+    temperature: 0.2,
+  };
+}
+
+export function devProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile {
+  const provider = parseProvider(env, 'DEV_MODEL_PROVIDER', 'gemini');
+  if (provider === 'bedrock') return bedrockProfile('dev', env);
+  if (provider === 'novita') return novitaProfile('dev', env);
+  return geminiProfile('dev', env);
+}
+
+export function prodProfile(env: NodeJS.ProcessEnv = process.env): ModelProfile {
+  const provider = parseProvider(env, 'PROD_MODEL_PROVIDER', 'bedrock');
+  if (provider === 'bedrock') return bedrockProfile('production', env);
+  if (provider === 'gemini') return geminiProfile('production', env);
+  return novitaProfile('production', env);
+}
+
+/** Read the key at the boundary. Bedrock uses IAM — no API key env. */
 export function readApiKey(env: NodeJS.ProcessEnv, profile: ModelProfile): string {
-  // Google's own precedence: GOOGLE_API_KEY wins when both are set.
-  const resolved = env[profile.apiKeyEnv] ?? (profile.apiKeyEnv === 'GEMINI_API_KEY' ? env.GOOGLE_API_KEY : undefined);
+  if (profile.provider === 'bedrock') return '';
+  const resolved =
+    env[profile.apiKeyEnv] ?? (profile.apiKeyEnv === 'GEMINI_API_KEY' ? env.GOOGLE_API_KEY : undefined);
   if (!resolved) {
     throw new ModelError(
       'MISSING_API_KEY',
@@ -104,6 +145,19 @@ type FetchFn = (
   json(): Promise<unknown>;
 }>;
 
+export type BedrockConverseFn = (input: {
+  modelId: string;
+  messages: ChatMessage[];
+  maxOutputTokens: number;
+  temperature: number;
+  region: string;
+}) => Promise<{ text: string; inputTokens: number; outputTokens: number }>;
+
+export interface CompleteChatOptions {
+  env?: NodeJS.ProcessEnv;
+  bedrockConverse?: BedrockConverseFn;
+}
+
 interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
@@ -119,12 +173,15 @@ export async function completeChat(
   apiKey: string,
   messages: ChatMessage[],
   fetchFn: FetchFn,
+  opts: CompleteChatOptions = {},
 ): Promise<ChatResult> {
-  if (!apiKey) throw new ModelError('MISSING_API_KEY', 'refusing an unauthenticated model call');
+  if (profile.provider !== 'bedrock' && !apiKey) {
+    throw new ModelError('MISSING_API_KEY', 'refusing an unauthenticated model call');
+  }
   if (messages.length === 0) throw new ModelError('EMPTY_PROMPT', 'a model call with no messages predicts nothing');
-  return profile.provider === 'gemini'
-    ? completeGemini(profile, apiKey, messages, fetchFn)
-    : completeNovita(profile, apiKey, messages, fetchFn);
+  if (profile.provider === 'gemini') return completeGemini(profile, apiKey, messages, fetchFn);
+  if (profile.provider === 'novita') return completeNovita(profile, apiKey, messages, fetchFn);
+  return completeBedrock(profile, messages, opts);
 }
 
 async function completeGemini(
@@ -180,7 +237,65 @@ async function completeNovita(
   };
 }
 
+async function completeBedrock(
+  profile: ModelProfile,
+  messages: ChatMessage[],
+  opts: CompleteChatOptions,
+): Promise<ChatResult> {
+  const env = opts.env ?? process.env;
+  const region = env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? 'us-east-1';
+  if (opts.bedrockConverse) {
+    const r = await opts.bedrockConverse({
+      modelId: profile.model,
+      messages,
+      maxOutputTokens: profile.maxOutputTokens,
+      temperature: profile.temperature,
+      region,
+    });
+    return { text: r.text, usage: { input: r.inputTokens, output: r.outputTokens } };
+  }
+  const system = messages.filter((m) => m.role === 'system').map((m) => m.text);
+  const converseMessages = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({
+      role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+      content: [{ text: m.text }],
+    }));
+  const client = new BedrockRuntimeClient({ region });
+  try {
+    const out = await client.send(
+      new ConverseCommand({
+        modelId: profile.model,
+        system: system.length > 0 ? [{ text: system.join('\n') }] : undefined,
+        messages: converseMessages,
+        inferenceConfig: { maxTokens: profile.maxOutputTokens, temperature: profile.temperature },
+      }),
+    );
+    const text = (out.output?.message?.content ?? []).map((p) => p.text ?? '').join('');
+    return {
+      text,
+      usage: { input: out.usage?.inputTokens ?? 0, output: out.usage?.outputTokens ?? 0 },
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new ModelError('MODEL_FETCH', `bedrock ${profile.model} → ${msg}`);
+  }
+}
+
 // ------------------------------------------------- approved-model registry ----
+
+function defaultApprovedModel(lane: string, env: NodeJS.ProcessEnv): string {
+  if (lane === 'dev') {
+    const provider = parseProvider(env, 'DEV_MODEL_PROVIDER', 'gemini');
+    if (provider === 'bedrock') return env.BEDROCK_DEV_MODEL ?? env.BEDROCK_MODEL ?? DEFAULT_BEDROCK_DEV_MODEL;
+    if (provider === 'novita') return env.NOVITA_MODEL ?? 'deepseek/deepseek-v4';
+    return env.GEMINI_MODEL ?? 'gemini-3.8-flash';
+  }
+  const provider = parseProvider(env, 'PROD_MODEL_PROVIDER', 'bedrock');
+  if (provider === 'bedrock') return env.BEDROCK_MODEL ?? DEFAULT_BEDROCK_PROD_MODEL;
+  if (provider === 'gemini') return env.GEMINI_MODEL ?? 'gemini-3.8-flash';
+  return env.NOVITA_MODEL ?? 'deepseek/deepseek-v4';
+}
 
 /**
  * QM-shaped, smaller: approved models per lane. Anything unlisted never
@@ -189,13 +304,9 @@ async function completeNovita(
  * defaults, fail closed.
  */
 export function approvedModels(lane: string, env: NodeJS.ProcessEnv = process.env): string[] {
-  if (lane === 'dev') {
-    return (env.APPROVED_DEV_MODELS ?? 'gemini-3.8-flash')
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  }
-  return (env.APPROVED_PROD_MODELS ?? 'deepseek/deepseek-v4')
+  const raw = lane === 'dev' ? env.APPROVED_DEV_MODELS : env.APPROVED_PROD_MODELS;
+  const fallback = defaultApprovedModel(lane, env);
+  return (raw ?? fallback)
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
@@ -223,9 +334,10 @@ export async function approvedCompleteChat(
   messages: ChatMessage[],
   fetchFn: FetchFn,
   env: NodeJS.ProcessEnv = process.env,
+  opts: Omit<CompleteChatOptions, 'env'> = {},
 ): Promise<ChatResult> {
   assertApproved(profile, lane, env);
-  return completeChat(profile, apiKey, messages, fetchFn);
+  return completeChat(profile, apiKey, messages, fetchFn, { ...opts, env });
 }
 
 // ------------------------------------------------------- model-judge backend ----
@@ -242,7 +354,7 @@ const JUDGE_PROMPT =
  * like every other dead classifier in this repo.
  */
 export async function judgeText(
-  opts: { profile: ModelProfile; apiKey: string; fetchFn: FetchFn },
+  opts: { profile: ModelProfile; apiKey: string; fetchFn: FetchFn; bedrockConverse?: BedrockConverseFn },
   text: string,
 ): Promise<{ score: number; flags: string[] }> {
   let out: string;
@@ -255,15 +367,12 @@ export async function judgeText(
         { role: 'user', text },
       ],
       opts.fetchFn,
+      { bedrockConverse: opts.bedrockConverse },
     );
     out = r.text.trim();
   } catch {
     return { score: 1, flags: ['judge_error'] };
   }
-  // Strict whole-string match: the judge must reply with ONLY a number in
-  // [0,1]. A substring match (e.g. "10 out of 10" → 1, or "0.7 is my
-  // score" → 0) gives a confidently wrong answer. Anything that is not
-  // purely a number in range fails closed to score=1 / judge_unparseable.
   const m = out.match(/^(0(?:\.\d+)?|1(?:\.0+)?)$/);
   if (!m) return { score: 1, flags: ['judge_unparseable'] };
   const score = Math.max(0, Math.min(1, Number(m[0])));

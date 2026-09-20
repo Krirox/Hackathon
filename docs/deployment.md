@@ -175,7 +175,7 @@ Why this shape, per Vital's own rules:
 - **Egress decided once, in code.** `decideEgress` (core + Lambda) is the
   policy; SGs/NAT/WAF are the backstop. Metadata hosts + 169.254/16 + EC2
   IPv6 metadata are never destinations; `ALLOWED_EGRESS_HOSTS` allowlists
-  only Novita/Gemini/Serper by default.
+  only Serper by default on AWS (models use Bedrock via IAM, not egress).
 - **Kill switches stay drills, now alarmed.** Tenant/scope/action-class
   kills (`killDrill`) plus CloudWatch alarms (ALB 5xx, Lambda errors, SQS
   oldest-message age) → SNS ops topic.
@@ -194,8 +194,7 @@ First-time bootstrap:
 1. Initialize remote state: configure an S3 bucket and DynamoDB lock table for Terraform state (`TF_BACKEND_BUCKET`).
 2. Set repository secrets for the OIDC role and sensitive variables
    (`TF_VAR_TENANT_HMAC_SECRET`, `TF_VAR_VITAL_CORE_SECRET`,
-   `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_GEMINI_API_KEY`,
-   `TF_VAR_NOVITA_API_KEY`, `TF_VAR_OPERATOR_SECRET`,
+   `TF_VAR_WEBHOOK_SECRET`, `TF_VAR_SERPER_API_KEY`, `TF_VAR_OPERATOR_SECRET`,
    `TF_VAR_BUZZ_RELAY_PRIVATE_KEY`, `TF_VAR_BUZZ_AGENT_MASTER_KEY`,
    `TF_VAR_VITAL_REVIEW_SECRET`, `TF_VAR_BOOTSTRAP_EMAIL`,
    `TF_VAR_BOOTSTRAP_PASSWORD`, `TF_VAR_SETUP_SECRET` — the full table with
@@ -393,9 +392,7 @@ GitHub → repo → **Settings → Secrets and variables → Actions**.
 | `TF_VAR_TENANT_HMAC_SECRET` | signs the talk surface. Required; no placeholder passes |
 | `TF_VAR_VITAL_CORE_SECRET` | mints scope tokens. Required |
 | `TF_VAR_WEBHOOK_SECRET` | authenticates webhook intake. Required |
-| `TF_VAR_SERPER_API_KEY` | search. Required |
-| `TF_VAR_GEMINI_API_KEY` | development-model plane. Required |
-| `TF_VAR_NOVITA_API_KEY` | production-model plane. Required |
+| `TF_VAR_SERPER_API_KEY` | search plane — required |
 | `TF_VAR_OPERATOR_SECRET` | gates console mutations; empty = ungated (dev only) |
 | `TF_VAR_BUZZ_RELAY_PRIVATE_KEY` | secp256k1 relay key, 64 hex chars |
 | `TF_VAR_BUZZ_AGENT_MASTER_KEY` | 32+ hex chars; empty = no publishing identity |
