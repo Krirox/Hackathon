@@ -1087,14 +1087,12 @@ export type StripeFetch = (
  * Key travels in Authorization header only (never written to ledger or artifacts).
  * Ingests live invoice status, subscription revenue, and billing discrepancies.
  */
-export function stripeInvoicesCollector(
-  opts: {
-    apiKey: string;
-    fetchFn?: StripeFetch;
-    limit?: number;
-    sourceTier?: SourceTier;
-  },
-): Collector {
+export function stripeInvoicesCollector(opts: {
+  apiKey: string;
+  fetchFn?: StripeFetch;
+  limit?: number;
+  sourceTier?: SourceTier;
+}): Collector {
   const name = 'stripe:invoices';
   return {
     name,
@@ -1105,7 +1103,8 @@ export function stripeInvoicesCollector(
       if (!opts.apiKey) {
         throw new Error('[ingest:STRIPE_KEY] Stripe API key missing — set STRIPE_SECRET_KEY, never hardcode it');
       }
-      const fetchFn = opts.fetchFn ?? ((url: string, init: { method: string; headers: Record<string, string> }) => fetch(url, init));
+      const fetchFn =
+        opts.fetchFn ?? ((url: string, init: { method: string; headers: Record<string, string> }) => fetch(url, init));
       const limit = opts.limit ?? 100;
       const url = `https://api.stripe.com/v1/invoices?limit=${limit}`;
       const res = await fetchFn(url, {
@@ -1153,4 +1152,3 @@ export function stripeInvoicesCollector(
     },
   };
 }
-

@@ -743,7 +743,10 @@ T('learning: a card can be compiled from mined evidence, and the evidence overri
   );
   await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, predicates: [] }), 'without predicates');
   await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, tests: [] }), 'no spec');
-  await rejects(() => compileCandidate(db, comp, TEN, { ...baseInput, intent: 'never-seen' }), 'no compilable candidate');
+  await rejects(
+    () => compileCandidate(db, comp, TEN, { ...baseInput, intent: 'never-seen' }),
+    'no compilable candidate',
+  );
 
   const card = await compileCandidate(db, comp, TEN, baseInput);
   eq(card.state, 'CANDIDATE', 'a compiled card starts in CANDIDATE, never promoted:');
@@ -763,7 +766,21 @@ T('learning: traces with no executor provenance are refused, not compiled with a
       .prepare(
         'INSERT INTO traces (id,tenant,request_id,scope,task_type,intent,steps,tier,outcome,cost_json,skill_card,router_confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
       )
-      .run(`tr_orphan_${i}`, TEN, null, 'marketing', 'launch.copy.draft', 'orphan-intent', '[]', 'MODEL', 'SUCCESS', '{}', null, 0.9, NOW);
+      .run(
+        `tr_orphan_${i}`,
+        TEN,
+        null,
+        'marketing',
+        'launch.copy.draft',
+        'orphan-intent',
+        '[]',
+        'MODEL',
+        'SUCCESS',
+        '{}',
+        null,
+        0.9,
+        NOW,
+      );
   }
   const candidates = await listCompileCandidates(db, TEN);
   const orphan = candidates.find((c) => c.intent === 'orphan-intent');
@@ -814,8 +831,7 @@ T('learning: a transfer test is queued durably, and a bad request is refused bef
     now: NOW,
   });
   const row = (await db.prepare('SELECT kind, payload_json, status FROM outbox WHERE id = ?').get(id)) as
-    | { kind: string; payload_json: string; status: string }
-    | undefined;
+    { kind: string; payload_json: string; status: string } | undefined;
   eq(row?.kind, TRANSFER_TEST_KIND);
   eq(row?.status, 'PENDING');
   eq(JSON.parse(String(row!.payload_json)).cardId, card.id);
@@ -962,7 +978,11 @@ T('learning: a transfer test with only baseline harnesses says so instead of imp
   });
   await worker.tick(NOW);
   const tests = await comp.transferResults(TEN, card.id);
-  eq(tests.every((t) => t.kind === 'harness_smoke'), true, 'no cross_model evidence is claimed:');
+  eq(
+    tests.every((t) => t.kind === 'harness_smoke'),
+    true,
+    'no cross_model evidence is claimed:',
+  );
   const lastError = String(worker.status().lastError ?? '');
   eq(lastError.includes('TRANSFER_SMOKE_ONLY'), true, `the worker says the gate is still open: ${lastError}`);
   await db.close();

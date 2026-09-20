@@ -1019,10 +1019,7 @@ T('FLOW-023: worker heartbeat separates unconfigured, live, and silent workers',
 });
 
 T('executor health names the echo harness, so a live worker cannot pass as execution', async () => {
-  const echo = describeExecutorHealth(
-    { workerId: 'w-echo', at: NOW, adapter: 'local-echo', baseline: true },
-    NOW,
-  );
+  const echo = describeExecutorHealth({ workerId: 'w-echo', at: NOW, adapter: 'local-echo', baseline: true }, NOW);
   eq(echo.state, 'live');
   eq(echo.baseline, true);
   eq(echo.detail.includes('test-baseline'), true, 'the adapter is reported by role, not just by name:');

@@ -147,17 +147,10 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
           await ctx.env.eraseTenant(ctx.env.tenant, ctx.env.actorOf(auth), ctx.at);
           // The session belonged to data that no longer exists: clear it and
           // land on the receipt rather than on a console with no user.
-          ctx.env.redirect(
-            ctx.res,
-            `/receipts/erasure/${encodeURIComponent(ctx.env.tenant)}`,
-            { clearSession: true },
-          );
+          ctx.env.redirect(ctx.res, `/receipts/erasure/${encodeURIComponent(ctx.env.tenant)}`, { clearSession: true });
           return;
         } catch (e) {
-          ctx.env.redirect(
-            ctx.res,
-            `${ctx.env.home}/data?error=${encodeURIComponent((e as Error).message)}`,
-          );
+          ctx.env.redirect(ctx.res, `${ctx.env.home}/data?error=${encodeURIComponent((e as Error).message)}`);
         }
       },
     },
@@ -187,10 +180,9 @@ export function complianceRoutes(): RouteDef<ComplianceEnv>[] {
 }
 
 /** Capability + surface of each route, for the manifest test and reviewers. */
-export const COMPLIANCE_CAPABILITIES: Record<string, { capability: Capability; surface: 'api' | 'html' }> =
-  {
-    'GET /console/audit': { capability: 'owner', surface: 'html' },
-    'GET /console/data': { capability: 'owner', surface: 'html' },
-    'GET /console/data/export': { capability: 'owner', surface: 'html' },
-    'POST /console/data/erase': { capability: 'owner', surface: 'html' },
-  };
+export const COMPLIANCE_CAPABILITIES: Record<string, { capability: Capability; surface: 'api' | 'html' }> = {
+  'GET /console/audit': { capability: 'owner', surface: 'html' },
+  'GET /console/data': { capability: 'owner', surface: 'html' },
+  'GET /console/data/export': { capability: 'owner', surface: 'html' },
+  'POST /console/data/erase': { capability: 'owner', surface: 'html' },
+};

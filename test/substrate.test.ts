@@ -126,27 +126,55 @@ T('egress normalizes IP literal bypasses before range checks', async () => {
 
 T('egress denies loopback, private and unspecified ranges unless explicitly allowlisted', async () => {
   const closed = { allowedHosts: [] as string[], deniedHosts: [] as string[] };
-  for (const host of ['127.0.0.1', '10.0.0.5', '172.16.0.1', '172.31.255.255', '192.168.1.1', '0.0.0.0', '::1', '::ffff:10.0.0.1', 'fc00::1', 'fe80::1']) {
+  for (const host of [
+    '127.0.0.1',
+    '10.0.0.5',
+    '172.16.0.1',
+    '172.31.255.255',
+    '192.168.1.1',
+    '0.0.0.0',
+    '::1',
+    '::ffff:10.0.0.1',
+    'fc00::1',
+    'fe80::1',
+  ]) {
     eq(decideEgress(host, closed).verdict, 'deny', `${host} denied by default:`);
   }
   // An EXACT allowlist entry re-opens loopback/private for local doubles…
-  eq(decideEgress('127.0.0.1', { allowedHosts: ['127.0.0.1'], deniedHosts: [] }).verdict, 'allow', 'exact entry re-opens loopback:');
+  eq(
+    decideEgress('127.0.0.1', { allowedHosts: ['127.0.0.1'], deniedHosts: [] }).verdict,
+    'allow',
+    'exact entry re-opens loopback:',
+  );
   // …but wildcards never do, denied entries still win, and link-local never opens.
-  eq(decideEgress('127.0.0.1', { allowedHosts: ['*.example'], deniedHosts: [] }).verdict, 'deny', 'wildcards do not open loopback:');
+  eq(
+    decideEgress('127.0.0.1', { allowedHosts: ['*.example'], deniedHosts: [] }).verdict,
+    'deny',
+    'wildcards do not open loopback:',
+  );
   eq(
     decideEgress('127.0.0.1', { allowedHosts: ['127.0.0.1'], deniedHosts: ['127.0.0.1'] }).verdict,
     'deny',
     'denied wins over the override:',
   );
-  eq(decideEgress('2852039166', { allowedHosts: ['2852039166'], deniedHosts: [] }).verdict, 'deny', 'link-local never opens:');
+  eq(
+    decideEgress('2852039166', { allowedHosts: ['2852039166'], deniedHosts: [] }).verdict,
+    'deny',
+    'link-local never opens:',
+  );
 });
 
 T('egress resolves hostnames and refuses rebinding to internal addresses', async () => {
   const policy = { allowedHosts: ['api.example.com'], deniedHosts: [] as string[] };
   const publicOnly = async () => [{ address: '93.184.216.34', family: 4 }];
-  const rebound = async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.9', family: 4 }];
+  const rebound = async () => [
+    { address: '93.184.216.34', family: 4 },
+    { address: '10.0.0.9', family: 4 },
+  ];
   const toMetadata = async () => [{ address: '169.254.169.254', family: 4 }];
-  const failing = async () => { throw new Error('no such host'); };
+  const failing = async () => {
+    throw new Error('no such host');
+  };
   const localExact = async () => [{ address: '127.0.0.1', family: 4 }];
 
   const ok = await resolveAndDecideEgress('api.example.com', policy, publicOnly);
@@ -226,7 +254,11 @@ T('scope tokens bind scope + grants + expiry, and nothing else crosses', async (
   await rejects(async () => verifyScopeToken(secret, tok, '2026-09-11T12:00:00.000Z'), 'EXPIRED_TOKEN');
   await rejects(async () => mintScopeToken('', { scope: 'x', grants: [], issuedAt: NOW, expiresAt: NOW }), 'NO_SECRET');
   const empty = mintScopeToken(secret, { scope: 'x', grants: [], issuedAt: NOW, expiresAt: NOW });
-  await rejects(async () => verifyScopeToken(secret, empty, NOW), 'MALFORMED_TOKEN', 'a token authorizing nothing verifies to nothing:');
+  await rejects(
+    async () => verifyScopeToken(secret, empty, NOW),
+    'MALFORMED_TOKEN',
+    'a token authorizing nothing verifies to nothing:',
+  );
 });
 
 T('scope tokens bind their audience: cross-request replay is refused', async () => {

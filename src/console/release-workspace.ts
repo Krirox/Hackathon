@@ -309,11 +309,7 @@ function deriveBlockerAndNext(
  * failure: a workflow page must still render when the lease columns are
  * unreadable, and it must not claim a stall it could not verify.
  */
-async function loadLegLeases(
-  db: AsyncDb,
-  tenant: string,
-  requestIds: string[],
-): Promise<Map<string, LegLease>> {
+async function loadLegLeases(db: AsyncDb, tenant: string, requestIds: string[]): Promise<Map<string, LegLease>> {
   const out = new Map<string, LegLease>();
   if (requestIds.length === 0) return out;
   const placeholders = requestIds.map(() => '?').join(',');
@@ -452,9 +448,7 @@ export async function buildWorkspaceView(
   const nowMs = Date.now();
   const legRequestIds = (run?.legs ?? []).map((l) => l.requestId).filter((r): r is string => Boolean(r));
   const leases = await loadLegLeases(db, tenant, legRequestIds);
-  const legs = run
-    ? await Promise.all(run.legs.map((l) => hydrateLeg(coord, ledger, tenant, l, leases, nowMs)))
-    : [];
+  const legs = run ? await Promise.all(run.legs.map((l) => hydrateLeg(coord, ledger, tenant, l, leases, nowMs))) : [];
   const decisionIds = [
     ...(run?.decisionId ? [run.decisionId] : []),
     ...legs.map((l) => l.decisionId).filter((d): d is string => Boolean(d)),
@@ -700,10 +694,7 @@ export async function stalledLegRequestIds(
   for (const leg of run.legs) {
     if (!leg.requestId) continue;
     const lease = leases.get(leg.requestId) ?? null;
-    const stall =
-      leg.status === 'EXECUTING'
-        ? describeLegStall(lease?.state ?? null, lease, nowMs)
-        : null;
+    const stall = leg.status === 'EXECUTING' ? describeLegStall(lease?.state ?? null, lease, nowMs) : null;
     if (stall) out.push(leg.requestId);
   }
   return out;
@@ -729,7 +720,8 @@ export async function retryWorkflow(
   if (overlay?.cancelledAt) throw new Error('cannot retry a cancelled workflow');
   const nowIso = opts.now ?? new Date().toISOString();
   const stalled = await stalledLegRequestIds(db, tenant, workflowId, { now: nowIso });
-  const reclaimed = stalled.length > 0 ? await coord.reclaimStale(tenant, Date.parse(nowIso), stalled.length, stalled) : [];
+  const reclaimed =
+    stalled.length > 0 ? await coord.reclaimStale(tenant, Date.parse(nowIso), stalled.length, stalled) : [];
   const run = await resumeFanOutWorkflow(db, coord, tenant, workflowId, opts);
   return { run, reclaimed };
 }

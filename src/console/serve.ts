@@ -552,10 +552,7 @@ function workspaceInnerHtml(html: string): string {
  * its utility styling is preserved.
  */
 function stripUtilityPageStyles(head: string): string {
-  return head.replace(
-    /<style>\s*\/\*\s*Compact utility surface:[\s\S]*?<\/style>/i,
-    '',
-  );
+  return head.replace(/<style>\s*\/\*\s*Compact utility surface:[\s\S]*?<\/style>/i, '');
 }
 
 async function wrapInWorkspaceShell(
@@ -1011,7 +1008,9 @@ function accountPage(
 ): string {
   const result = passwordChangeResult('voluntary');
   const initials = user.email.slice(0, 2).toUpperCase();
-  const displayName = (user.email.split('@')[0] ?? user.email).replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const displayName = (user.email.split('@')[0] ?? user.email)
+    .replace(/[._]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
   const nav = accountNav('account')
     .map((item) => {
       if (item.active) {

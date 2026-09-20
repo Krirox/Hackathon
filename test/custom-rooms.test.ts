@@ -65,7 +65,10 @@ T('custom rooms: create validates scope, agent, and collisions', async () => {
     eq(created.scope, 'design');
     eq(created.channel, 'chan-design');
     const listed = await listCustomRooms(db, TEN);
-    eq(listed.some((c) => c.scope === 'design'), true);
+    eq(
+      listed.some((c) => c.scope === 'design'),
+      true,
+    );
     eq(isCanonicalScope('design'), false);
     eq(isCanonicalScope('general'), true);
 
@@ -113,7 +116,14 @@ T('custom rooms: create validates scope, agent, and collisions', async () => {
       await createCustomRoom(
         db,
         TEN,
-        { id: 'y', name: 'y', scope: 'uniq-scope-2', agentName: 'other-agent', mission: '', category: 'department-xyz' },
+        {
+          id: 'y',
+          name: 'y',
+          scope: 'uniq-scope-2',
+          agentName: 'other-agent',
+          mission: '',
+          category: 'department-xyz',
+        },
         'human:owner',
       );
     } catch (e) {
@@ -168,7 +178,7 @@ T('custom rooms: def resolution, config, and health rollups', async () => {
 
 T('room policy mutation requires admin: members refused, ceilings capped', async () => {
   const { db, ledger, coord, comp } = await setupTestApp();
-  const ownerRec = (await db.prepare("SELECT id FROM users WHERE tenant = ? AND email = ?").get(TEN, OWNER.email)) as {
+  const ownerRec = (await db.prepare('SELECT id FROM users WHERE tenant = ? AND email = ?').get(TEN, OWNER.email)) as {
     id: string;
   };
   const { token: inviteToken } = await createInvitation(

@@ -1065,12 +1065,7 @@ export function createCoordinator(db: AsyncDb, limits: SchedulerLimits = DEFAULT
    * release is a CAS on (state, claimed_at) so a freshly re-claimed lease is
    * never stolen. Bounded per call, one audit row per release.
    */
-  async function reclaimStale(
-    tenant: string,
-    nowMs: number,
-    limit = 100,
-    ids?: readonly string[],
-  ): Promise<string[]> {
+  async function reclaimStale(tenant: string, nowMs: number, limit = 100, ids?: readonly string[]): Promise<string[]> {
     if (ids && ids.length === 0) return [];
     const names = ids ? ` AND id IN (${ids.map(() => '?').join(',')})` : '';
     const rows = (await db
