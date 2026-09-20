@@ -379,7 +379,7 @@ export function renderConsoleShell(opts: {
    * unshelled detail pages — would otherwise clamp the whole shell to a
    * half-screen column. This block ships after any carried-over head style,
    * so equal-specificity body rules here win the cascade. */
-  html, body { height: 100%; margin: 0; padding: 0; max-width: none; font-size: 13.5px; overflow: hidden; }
+  html, body { height: 100%; margin: 0; padding: 0; max-width: none; font-size: 13.5px; color: var(--v-ink); background: var(--v-bg-0); overflow: hidden; }
   a { color: inherit; text-decoration: none; }
   a:hover { text-decoration: none; }
 
@@ -485,7 +485,21 @@ export function renderConsoleShell(opts: {
   }
   /* Scrollable reading surface for non-chat pages. Chat manages its own
      scroll container, so it keeps overflow hidden on the surface. */
-  .vc-surface > .vc-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 26px 28px; }
+  .vc-surface > .vc-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 32px 36px; scrollbar-gutter: stable; }
+  @media (max-width: 1440px) { .vc-surface > .vc-scroll { padding: 22px 26px 28px; } }
+  /* detailDocument renders "Back to console" as a direct child anchor of
+     body and styles it via a first-of-type sibling selector; once the shell
+     strips the skip link and wraps the page, that selector can no longer
+     reach it. Re-apply the pill here so the escape hatch looks intentional. */
+  .ws-scroll > a:first-of-type,
+  .vc-scroll > a:first-of-type {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; margin-bottom: 16px;
+    background: var(--v-bg-1); border: 1px solid var(--v-line); border-radius: var(--radius-md);
+    font-size: 13px; font-weight: 500; color: var(--v-accent); box-shadow: var(--v-card-shadow);
+    transition: background .15s var(--ease-out), border-color .15s var(--ease-out);
+  }
+  .ws-scroll > a:first-of-type:hover,
+  .vc-scroll > a:first-of-type:hover { background: var(--v-bg-2); border-color: var(--v-line-strong); text-decoration: none; }
   @media (max-width: 900px) {
     .vc-surface > .vc-scroll { padding: 16px; }
     /* Icon-only rather than a label on narrow screens. */

@@ -760,6 +760,10 @@ export function renderMeetingLibraryView(opts: { meetings: Meeting[]; home: stri
   <!-- Top Header with Actions -->
   <div class="library-top-bar">
     <div class="library-header-info">
+      <a href="/console/dashboard" class="btn-back-console" title="Return to the Vital Console dashboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+        <span>Back to console</span>
+      </a>
       <div class="library-title-row">
         <h1 class="library-heading">Meeting Intelligence</h1>
         <div class="header-badges">
@@ -1047,6 +1051,35 @@ export function renderMeetingLibraryView(opts: { meetings: Meeting[]; home: stri
    shipped a fixed light palette (--v-stage-white / ink-strong backgrounds with
    dark stage text), which painted a bright island inside the dark Console
    shell. Every rule below now speaks in theme-adaptive console tokens. */
+
+/* Back to Console — small pill above the library title. Uses shell tokens so
+   it flips with light/dark and matches the topbar/rail. */
+.btn-back-console {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px 5px 8px;
+  margin: 0 0 10px;
+  border-radius: var(--radius-pill);
+  background: var(--v-bg-2);
+  color: var(--v-ink-2);
+  border: 1px solid var(--v-line);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .005em;
+  text-decoration: none;
+  width: fit-content;
+  transition: background .15s var(--ease-out), color .15s var(--ease-out), border-color .15s var(--ease-out);
+}
+.btn-back-console:hover {
+  background: var(--v-accent-dim);
+  color: var(--v-accent);
+  border-color: transparent;
+  text-decoration: none;
+}
+.btn-back-console:focus-visible { outline: 2px solid var(--v-focus); outline-offset: 2px; }
+.btn-back-console svg { flex-shrink: 0; }
+
 .meeting-library-view {
   padding: 22px 26px;
   background: transparent;

@@ -525,6 +525,12 @@ const esc = (s: string): string =>
  * page's own <main> is unwrapped (the shell renders the single
  * `<main id="main">` landmark) and its skip link is dropped for the same
  * reason. Scripts are preserved — they are page behaviour, not layout.
+ *
+ * A `page()`-built utility document also carries chrome the shell already
+ * provides: the `.utility-wrap` container, the `.utility-bar` theme-toggle
+ * pill, and its own theme-toggle script (the shell ships one too, and the
+ * script is re-entrancy-guarded, but two copies is still two copies).
+ * All three are stripped here so the shell owns the chrome.
  */
 function workspaceInnerHtml(html: string): string {
   const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html;
@@ -549,6 +555,24 @@ function workspaceInnerHtml(html: string): string {
       // the console root that the shell-agnostic tests pin, and a shelled page is
       // still reachable with the rail hidden.
       .trim()
+  );
+}
+
+/**
+ * The utility `<style>` block `page()` writes into its `<head>` uses bare
+ * element selectors (`form`, `input`, `button`, `label`). When a `page()`
+ * document is merged into the Console shell, those rules reach the shell's
+ * own `.ws-search` / `.ws-topbar-search` forms and repaint them as cards —
+ * the sidebar placeholder drops below the icon, the topbar field grows to
+ * 24px padding, and the theme pill appears twice. The block is identified
+ * by its marker comment and stripped from the merged head. Standalone
+ * `page()` output (login, signup, error) never goes through this path, so
+ * its utility styling is preserved.
+ */
+function stripUtilityPageStyles(head: string): string {
+  return head.replace(
+    /<style>\s*\/\*\s*Compact utility surface:[\s\S]*?<\/style>/i,
+    '',
   );
 }
 
@@ -660,7 +684,7 @@ async function wrapInWorkspaceShell(
   // stray content out of `<head>` and rendered the page a second time above
   // the shell (unscrollable, theme-less). An empty capture means "no head to
   // carry" and the fragment now appears exactly once, inside the shell.
-  const head = /<head[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? '';
+  const head = stripUtilityPageStyles(/<head[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? '');
   const openBody = /<body[^>]*>/i.exec(html)?.[0] ?? '<body>';
   return themeDocument(
     `<!doctype html><html lang="en" data-theme="${DEFAULT_THEME}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}</head>${openBody}${shell}</body></html>`,
@@ -1005,55 +1029,153 @@ function accountPage(
   } = {},
 ): string {
   const result = passwordChangeResult('voluntary');
+  const initials = user.email.slice(0, 2).toUpperCase();
+  const displayName = (user.email.split('@')[0] ?? user.email).replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   const nav = accountNav('account')
     .map((item) => {
       if (item.active) {
-        return `<span aria-current="page">${esc(item.label)}</span>`;
+        return `<span class="v-badge v-badge-good" aria-current="page">${esc(item.label)}</span>`;
       }
-      return `<a href="${esc(item.href)}">${esc(item.label)}</a>`;
+      return `<a href="${esc(item.href)}" class="v-btn v-btn-ghost v-btn-sm">${esc(item.label)}</a>`;
     })
-    .join(' · ');
-  const emailBlock = ((): string => {
+    .join('');
+
+  // --- Email verification status badge + action ---
+  const emailStatus = ((): string => {
     if (extra.emailVerified === undefined) return '';
-    if (extra.emailVerified) return '<p class="sub">Email verified — this address may be used for recovery.</p>';
-    return `<p class="sub">Email not yet verified — automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code>vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day). <form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary" style="min-height:auto;">Request operator verification</button></form></p>`;
+    if (extra.emailVerified) {
+      return `<div style="display:flex;align-items:center;gap:10px;margin-top:6px;"><span class="v-badge v-badge-good"><span class="dot"></span>Email verified</span><span class="v-meta">This address may be used for recovery.</span></div>`;
+    }
+    const badge = `<span class="v-badge v-badge-warn"><span class="dot"></span>Email not yet verified</span>`;
+    const action = `<form method="post" action="/account/email/request" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary" style="min-height:auto;">Request operator verification</button></form>`;
+    const hint = `Automatic email delivery is not configured on this host. Ask your system operator to generate your verification link with <code class="v-mono" style="font-size:12px;background:var(--v-bg-2);padding:2px 6px;border-radius:4px;">vital verify-link --tenant ${esc(user.tenant)} --email ${esc(user.email)}</code> (turnaround: typically same-day).`;
+    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;">${badge}${action}</div>
+<p class="v-meta" style="margin-top:6px;">${hint}</p>`;
   })();
-  const mfaBlock = extra.mfaHint ? `<p class="sub">${esc(extra.mfaHint)}</p>` : '';
-  // FINAL-005: authenticator enrollment, factor list, and recovery codes.
+
+  // --- Two-factor authentication section ---
   const mfaSection = ((): string => {
+    if (extra.mfaHint) return `<p class="v-sub" style="margin:0 0 16px;">${esc(extra.mfaHint)}</p>`;
     if (!extra.mfa) return '';
     if (extra.mfa.enabled) {
-      const factors = extra.mfa.factors
+      const factorList = extra.mfa.factors
         .map(
           (f) =>
-            `<form method="post" action="/account/mfa/remove" style="display:inline;margin-left:8px"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="factorId" value="${esc(f.id)}"><button type="submit" class="v-btn v-btn-sm v-btn-ghost">Remove ${esc(f.kind)} factor</button></form>`,
+            `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--v-line)">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="v-badge v-badge-good" style="font-size:11px;"><span class="dot"></span>${esc(f.kind.toUpperCase())}</span>
+    <span class="v-meta">Added ${esc(new Date(f.verifiedAt).toLocaleDateString())}${f.lastUsedAt ? ` · Last used ${esc(new Date(f.lastUsedAt).toLocaleDateString())}` : ''}</span>
+  </div>
+  <form method="post" action="/account/mfa/remove"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="factorId" value="${esc(f.id)}"><button type="submit" class="v-btn v-btn-sm v-btn-ghost" style="color:var(--v-risk);">Remove</button></form>
+</div>`,
         )
         .join('');
-      return `<h2>Two-factor authentication</h2>
-<p class="sub">Enabled — ${extra.mfa.factors.length} authenticator factor(s); ${extra.mfa.recoveryCount} unused recovery code(s).</p>
-<form method="post" action="/account/mfa/recovery" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit">Regenerate recovery codes</button></form>${factors}`;
+      return `<div class="v-stack-sm">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+    <span class="v-badge v-badge-good"><span class="dot"></span>Enabled</span>
+    <span class="v-meta">${extra.mfa.factors.length} factor(s) · ${extra.mfa.recoveryCount} unused recovery code(s)</span>
+  </div>
+  ${factorList}
+  <form method="post" action="/account/mfa/recovery" style="margin-top:12px;"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary">Regenerate recovery codes</button></form>
+</div>`;
     }
-    return `<h2>Two-factor authentication</h2>
-<p class="sub">Not enabled. Add an authenticator app so a stolen password alone cannot sign in.</p>
-<p><a href="/account/mfa/setup">Set up two-factor authentication</a></p>`;
+    return `<div style="display:flex;align-items:flex-start;gap:14px;">
+  <div style="width:40px;height:40px;border-radius:var(--radius-md);background:var(--v-bg-2);display:grid;place-items:center;flex-shrink:0;">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--v-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  </div>
+  <div>
+    <p class="v-sub" style="margin:0 0 10px;">Not enabled. Add an authenticator app so a stolen password alone cannot sign in.</p>
+    <a href="/account/mfa/setup" class="v-btn v-btn-primary v-btn-sm">Set up two-factor authentication</a>
+  </div>
+</div>`;
   })();
+
+  // --- Change password form ---
+  const passwordForm = `<form method="post" action="/account/password" style="display:grid;gap:14px;max-width:420px;">
+  <input type="hidden" name="csrf" value="${esc(csrf)}">
+  <div style="display:grid;gap:5px;">
+    <label for="password" style="font-size:13px;font-weight:600;color:var(--v-ink-2);">New password</label>
+    <input id="password" name="password" type="password" class="v-input" autocomplete="new-password" required minlength="12" placeholder="Minimum 12 characters">
+    <span class="v-meta">${esc(result.sessionNote)} — ${esc(result.nextStep)}</span>
+  </div>
+  <button type="submit" class="v-btn v-btn-primary" style="justify-self:start;">Save new password</button>
+</form>`;
+
+  // --- Sessions / sign-out ---
+  const sessionsSection = `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+  <p class="v-sub" style="margin:0;">Signing out ends this session. Other devices remain signed in until their session expires.</p>
+  <form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(csrf)}"><button type="submit" class="v-btn v-btn-sm v-btn-secondary" style="color:var(--v-risk);border-color:var(--v-tint-risk-bg);">Sign out</button></form>
+</div>`;
+
   return page(
     'Vital Console — account and security',
-    `<h1>Account and security</h1>
-<p class="sub">Signed in as ${esc(user.email)} · ${esc(user.role)}</p>
-${notice ? `<p class="sub">${esc(notice)}</p>` : ''}
-${error ? `<p class="err">${esc(error)}</p>` : ''}
-${emailBlock}${mfaBlock}
-${mfaSection}
-<h2>Change password</h2>
-<p class="sub">${esc(result.sessionNote)} — ${esc(result.nextStep)}</p>
-<form method="post" action="/account/password">
-  <input type="hidden" name="csrf" value="${esc(csrf)}">
-  <label class="sub" for="password">new password (min 12 chars)</label>
-  <input id="password" name="password" type="password" autocomplete="new-password" required minlength="12">
-  <button type="submit">Save new password</button>
-</form>
-<p class="sub"><a href="${esc(homeRef)}">Back to console</a> · ${nav}</p>`,
+    `<div class="v-stack" style="max-width:720px;">
+
+  <!-- Page header -->
+  <div>
+    <h1 style="font-size:24px;font-weight:700;letter-spacing:-0.025em;margin:0 0 4px;color:var(--v-ink);">Account and security</h1>
+    <p class="v-sub" style="margin:0;">Manage your identity, credentials, and session settings.</p>
+  </div>
+
+  ${notice ? `<div class="success" style="margin:0;">${esc(notice)}</div>` : ''}
+  ${error ? `<div class="error-summary" style="margin:0;">${esc(error)}</div>` : ''}
+
+  <!-- Identity card -->
+  <div class="v-card">
+    <div class="v-card-head">
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div style="width:44px;height:44px;border-radius:50%;background:var(--v-accent);color:var(--v-accent-ink);display:grid;place-items:center;font-size:15px;font-weight:700;flex-shrink:0;">${esc(initials)}</div>
+        <div>
+          <div style="font-size:15px;font-weight:650;color:var(--v-ink);">${esc(displayName)}</div>
+          <div class="v-meta">${esc(user.email)}</div>
+        </div>
+      </div>
+      <span class="v-badge">${esc(user.role)}</span>
+    </div>
+    ${emailStatus}
+  </div>
+
+  <!-- Two-factor authentication -->
+  <div class="v-card">
+    <div class="v-card-head">
+      <div>
+        <h2 class="v-card-title">Two-factor authentication</h2>
+        <p class="v-meta" style="margin:2px 0 0;">Protect your account with a second verification step.</p>
+      </div>
+    </div>
+    ${mfaSection}
+  </div>
+
+  <!-- Change password -->
+  <div class="v-card">
+    <div class="v-card-head">
+      <div>
+        <h2 class="v-card-title">Change password</h2>
+        <p class="v-meta" style="margin:2px 0 0;">Updating your password signs out all other active sessions.</p>
+      </div>
+    </div>
+    ${passwordForm}
+  </div>
+
+  <!-- Sessions -->
+  <div class="v-card">
+    <div class="v-card-head">
+      <div>
+        <h2 class="v-card-title">Sessions</h2>
+        <p class="v-meta" style="margin:2px 0 0;">Active sign-in on this device.</p>
+      </div>
+    </div>
+    ${sessionsSection}
+  </div>
+
+  <!-- Footer nav -->
+  <div style="display:flex;align-items:center;gap:8px;padding-top:8px;flex-wrap:wrap;">
+    <a href="${esc(homeRef)}" class="v-btn v-btn-ghost v-btn-sm">&larr; Back to console</a>
+    <span style="color:var(--v-faint);">/</span>
+    ${nav}
+  </div>
+
+</div>`,
   );
 }
 

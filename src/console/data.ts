@@ -27,73 +27,72 @@ export function renderDataPage(tenant: string, opts: DataPageOptions): string {
 
   // No page-level back link: detailDocument already renders one above this
   // body, and repeating it produced "Back to console ← Back to console".
-  return `<h1>Data &amp; retention</h1>
-<p class="sub">Manage organization data portability, cryptographic audit exports, and GDPR Article 17 erasure.</p>
+  return `<div class="v-page-head">
+  <div>
+    <p class="v-eyebrow">System</p>
+    <h1 class="v-page-title">Data &amp; retention</h1>
+    <p class="v-sub" style="margin-top:6px;">Manage organization data portability, cryptographic audit exports, and GDPR Article 17 erasure.</p>
+  </div>
+</div>
 ${noticeHtml}
 ${errorHtml}
 
-<div class="card">
-  <h2>Export Reality Ledger</h2>
-  <p class="sub">
+<div class="v-card" style="margin-bottom:16px;">
+  <h2 class="v-card-title">Export Reality Ledger</h2>
+  <p class="v-sub" style="margin:8px 0 16px;max-width:78ch;line-height:1.55;">
     Download the complete portable snapshot of this organization's history: typed claims, claim links, decisions, Context Bundles, measured outcomes, and the append-only audit trail (JSON format).
   </p>
-  <div style="margin-top:16px;">
-    <a href="/console/data/export" download="${esc(tenant)}-ledger-export.json" style="display:inline-flex;align-items:center;gap:6px;background:var(--v-accent);color:var(--v-accent-ink);font-weight:600;padding:10px 18px;border-radius:10px;text-decoration:none;font-size:13px;">
-      ⬇ Download Ledger Export (JSON)
-    </a>
-  </div>
+  <a class="v-btn v-btn-primary" href="/console/data/export" download="${esc(tenant)}-ledger-export.json">⬇ Download Ledger Export (JSON)</a>
 </div>
 
-<div class="card">
-  <h2>Backup &amp; restore</h2>
-  <p class="sub">
+<div class="v-card" style="margin-bottom:16px;">
+  <h2 class="v-card-title">Backup &amp; restore</h2>
+  <p class="v-sub" style="margin:8px 0 0;max-width:78ch;line-height:1.55;">
     Backups are <strong>operator-managed infrastructure</strong>, not a console feature in this build.
     The supported disaster-recovery path is a point-in-time copy of the database file (with artifact
     store) taken by your platform operator — restoring is a file restore, verified by the
     backup/restore drill, <em>not</em> an in-app import. The export below is a portable evidence
     record and is explicitly <strong>not a backup</strong> and cannot be restored by import.
   </p>
-  <p class="sub">
+  <p class="v-sub" style="margin:10px 0 0;max-width:78ch;line-height:1.55;">
     To confirm current operational health, run <code>vital status --readiness</code> (or see the
     System readiness strip on the console home) and check your operator's backup job for the
     database file <code>${esc(tenant)}</code>.
   </p>
 </div>
 
-<div class="card">
-  <h2>Verify Erasure Receipt</h2>
-  <p class="sub">
+<div class="v-card" style="margin-bottom:16px;">
+  <h2 class="v-card-title">Verify Erasure Receipt</h2>
+  <p class="v-sub" style="margin:8px 0 14px;max-width:78ch;line-height:1.55;">
     Check the cryptographic audit trail of a previously erased tenant to verify deletion completeness and retained proof rows.
   </p>
-  <form method="get" action="/receipts/erasure" style="margin-top:12px;display:flex;gap:8px;max-width:480px;">
-    <input name="slug" placeholder="Organization slug (e.g. acme)" required style="flex:1;">
-    <button type="submit" style="background:var(--v-ink-2);">Verify Receipt</button>
+  <form method="get" action="/receipts/erasure" style="display:flex;gap:10px;max-width:480px;">
+    <input name="slug" class="v-input" placeholder="Organization slug (e.g. acme)" required style="flex:1;">
+    <button type="submit" class="v-btn v-btn-secondary">Verify Receipt</button>
   </form>
 </div>
 
-<div class="card" style="border-color:var(--v-risk);background:var(--v-tint-risk-bg);">
-  <h2 style="color:var(--v-tint-risk-ink);">Danger Zone — Permanent Tenant Erasure</h2>
-  <p class="sub">
+<div class="v-card" style="border-color:var(--v-risk);background:var(--v-tint-risk-bg);margin-bottom:16px;">
+  <h2 class="v-card-title" style="color:var(--v-tint-risk-ink);">Danger Zone — Permanent Tenant Erasure</h2>
+  <p class="v-sub" style="margin:8px 0 0;max-width:78ch;line-height:1.55;">
     Permanently delete all claims, decisions, outcomes, credentials, and member sessions for <strong>${esc(tenant)}</strong>.
     An in-memory export is verified before deletion commits, and an immutable proof receipt is recorded under <code>erased:${esc(tenant)}</code>.
   </p>
-  <p class="sub" style="color:var(--v-tint-risk-ink);font-weight:500;">
+  <p class="v-sub" style="color:var(--v-tint-risk-ink);font-weight:500;margin:10px 0 0;">
     ⚠️ This action cannot be undone. To proceed, type the organization slug <code>${esc(tenant)}</code> below and confirm.
   </p>
   <form method="post" action="/console/data/erase" style="margin-top:16px;max-width:480px;display:grid;gap:12px;">
     <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
-    <label style="font-size:13px;font-weight:500;color:var(--v-ink-2);">
-      Confirm organization slug
-      <input name="confirmSlug" required placeholder="${esc(tenant)}" style="margin-top:4px;">
+    <label class="v-field">
+      <span class="v-field-label">Confirm organization slug</span>
+      <input name="confirmSlug" class="v-input" required placeholder="${esc(tenant)}">
     </label>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--v-ink-2);">
       <input type="checkbox" name="confirmed" required>
       I understand that this will permanently erase all data for ${esc(tenant)}.
     </label>
     <div>
-      <button type="submit" style="background:var(--v-risk);color:var(--v-bg-1);border:none;padding:10px 18px;border-radius:10px;font-weight:600;cursor:pointer;">
-        Permanently Erase Organization
-      </button>
+      <button type="submit" class="v-btn" style="background:var(--v-risk);color:var(--v-bg-1);">Permanently Erase Organization</button>
     </div>
   </form>
 </div>`;

@@ -30,7 +30,7 @@ export interface LearningPageOptions {
 
 function labeledNotice(notice?: string): string {
   if (!notice) return '';
-  return `<p class="sub" role="status">${esc(notice)}</p>`;
+  return `<div class="v-success" role="status">${esc(notice)}</div>`;
 }
 
 export async function renderLearningPage(
@@ -45,50 +45,62 @@ export async function renderLearningPage(
 
   const queueRows =
     queue.length === 0
-      ? '<p class="sub">No unlabeled routing decisions. The queue fills as the router makes shadow decisions.</p>'
-      : `<table class="stacked"><thead><tr class="sub"><th align="left">decision</th><th align="left">task</th><th align="left">proposed → executed</th><th align="left">evidence</th><th align="left">label</th></tr></thead><tbody>${queue
+      ? '<div class="v-empty" style="margin-top:12px;"><h3>No unlabeled routing decisions</h3><p>The queue fills as the router makes shadow decisions.</p></div>'
+      : `<div class="v-table-wrap"><table class="v-table"><thead><tr><th>decision</th><th>task</th><th>proposed → executed</th><th>evidence</th><th>label</th></tr></thead><tbody>${queue
           .map((d) => {
             const rate = d.evidence.successRate === null ? '—' : `${(d.evidence.successRate * 100).toFixed(0)}%`;
             return `<tr>
-<td>${esc(String(d.id))}</td>
-<td>${esc(d.taskType)} <span class="sub">· ${esc(d.scope)}</span></td>
-<td>${esc(d.proposed)} → ${esc(d.executed)}</td>
-<td class="sub">${d.evidence.traces} traces · ${rate}</td>
-<td><form method="post" action="/console/learning/label" style="display:inline">
+<td><span class="v-code-pill">${esc(String(d.id))}</span></td>
+<td><strong>${esc(d.taskType)}</strong> <span class="v-meta">· ${esc(d.scope)}</span></td>
+<td>${esc(d.proposed)} <span class="v-meta">→</span> ${esc(d.executed)}</td>
+<td class="v-meta">${d.evidence.traces} traces · ${rate}</td>
+<td><form method="post" action="/console/learning/label" style="display:flex;align-items:center;gap:8px;">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <input type="hidden" name="decisionId" value="${esc(String(d.id))}">
-<select name="correctTier">${ROUTING_TIERS.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
-<button type="submit">Label</button>
+<select name="correctTier" class="v-input" style="width:auto;min-height:34px;padding:5px 10px;font-size:12.5px;">${ROUTING_TIERS.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
+<button type="submit" class="v-btn v-btn-primary v-btn-sm">Label</button>
 </form></td></tr>`;
           })
-          .join('')}</tbody></table>`;
+          .join('')}</tbody></table></div>`;
 
   const cardRowList = await Promise.all(
     cards.slice(0, 100).map(async (card) => {
       const gaps = await describeCardReadOnly(db, comp, tenant, card.id)
         .then((d) => d.trustGaps)
         .catch((): string[] => []);
-      const gapText = gaps.length === 0 ? '—' : `${gaps.length} open`;
+      const gapCell =
+        gaps.length === 0
+          ? '<span class="v-badge v-badge-good">none</span>'
+          : `<span class="v-badge v-badge-warn">${gaps.length} open</span>`;
       return `<tr>
-<td><a href="/console/learning/${esc(encodeURIComponent(card.id))}">${esc(card.id)}</a></td>
-<td>${esc(card.intent)}</td>
-<td>${esc(card.state)} <span class="sub">v${card.version}</span></td>
-<td class="sub">${esc(gapText)}</td></tr>`;
+<td><a href="/console/learning/${esc(encodeURIComponent(card.id))}"><code>${esc(card.id)}</code></a></td>
+<td><strong>${esc(card.intent)}</strong></td>
+<td><span class="v-badge">${esc(card.state)}</span> <span class="v-meta">v${card.version}</span></td>
+<td>${gapCell}</td></tr>`;
     }),
   );
   const cardRows =
     cards.length === 0
-      ? '<p class="sub">No skill cards yet. Mining surfaces intents worth compiling; <a href="/console/learning/compile">compile one</a> to create the first card.</p>'
-      : `<table class="stacked"><thead><tr class="sub"><th align="left">card</th><th align="left">intent</th><th align="left">state</th><th align="left">trust gaps</th></tr></thead><tbody>${cardRowList.join('')}</tbody></table>`;
+      ? '<div class="v-empty" style="margin-top:12px;"><h3>No skill cards yet</h3><p>Cards appear after repeated successful procedures are mined; <a href="/console/learning/compile">compile one</a> to create the first card.</p></div>'
+      : `<div class="v-table-wrap"><table class="v-table"><thead><tr><th>card</th><th>intent</th><th>state</th><th>trust gaps</th></tr></thead><tbody>${cardRowList.join('')}</tbody></table></div>`;
 
-  return `<p class="sub"><a href="/console/workflows">← Workflows</a></p>
-<h1>Learning review</h1>
-<p class="sub">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card — <a href="/console/learning/compile">compile a mined candidate</a>, and queue transfer evidence from a card's page.</p>
+  return `<div class="v-page-head">
+  <div>
+    <p class="v-eyebrow">System</p>
+    <h1 class="v-page-title">Learning review</h1>
+    <p class="v-sub" style="margin-top:6px;">Label routing decisions and inspect why each skill card is not trusted yet. Linking evidence never promotes a card — <a href="/console/learning/compile">compile a mined candidate</a>, and queue transfer evidence from a card's page.</p>
+  </div>
+  <a class="v-btn v-btn-secondary v-btn-sm" href="/console/workflows">← Workflows</a>
+</div>
 ${labeledNotice(opts.notice)}
-<h2>Labeling queue (${queue.length})</h2>
-${queueRows}
-<h2>Skill cards (${cards.length})</h2>
-${cardRows}`;
+<div class="v-list-group">
+  <h2>Labeling queue (${queue.length})</h2>
+  ${queueRows}
+</div>
+<div class="v-list-group">
+  <h2>Skill cards (${cards.length})</h2>
+  ${cardRows}
+</div>`;
 }
 
 export interface CompilePageOptions {
@@ -198,11 +210,16 @@ export async function renderLearningCardPage(
     : '';
   const notice = opts.notice ? `<p class="sub" role="status">${esc(opts.notice)}</p>` : '';
   const error = opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : '';
-  return `<p class="sub"><a href="/console/learning">← Learning review</a></p>
-<h1>${esc(card.intent)}</h1>
-<p><code>${esc(card.id)}</code> · ${esc(card.state)} · v${card.version} · ${esc(card.trustTier)}</p>
+  return `<div class="v-page-head">
+  <div>
+    <p class="v-eyebrow">Learning review</p>
+    <h1 class="v-page-title">${esc(card.intent)}</h1>
+    <p class="v-sub" style="margin-top:6px;"><code>${esc(card.id)}</code> · ${esc(card.state)} · v${card.version} · ${esc(card.trustTier)}</p>
+  </div>
+  <a class="v-btn v-btn-secondary v-btn-sm" href="/console/learning">← Learning review</a>
+</div>
 ${notice}${error}
-<p class="sub">${esc(evidence.evidenceOnly)}</p>
+<p class="v-meta">${esc(evidence.evidenceOnly)}</p>
 <h2>Why not trusted yet</h2>
 ${gaps}
 <h2>Transfer tests</h2>

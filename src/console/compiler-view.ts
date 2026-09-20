@@ -9,6 +9,11 @@
 //   - board metrics are computed from the cards actually listed
 //   - trust gaps come from describeCardReadOnly (the same evaluator the
 //     detail page uses) — never invented percentages
+//
+// Presentation follows the Console design system (theme.ts): the page owns a
+// v-page-head frame, the board is a kanban of lifecycle columns, metrics are
+// KPI cards, and the right rail explains the trust ladder. No inline palette —
+// every colour is a --v-* token so light/dark themes both render correctly.
 
 import type { AsyncDb } from '../core/db.ts';
 import type { OrganizationalCompiler } from '../compiler/compiler.ts';
@@ -52,12 +57,36 @@ interface CardRow {
 
 function driftNote(row: CardRow): string {
   if (row.driftSamples !== null && row.driftSamples < 10) {
-    return `<div style="font-size:10px;color:var(--v-faint);margin-top:4px;">insufficient samples for drift (${esc(String(row.driftSamples))})</div>`;
+    return `<div class="v-meta" style="margin-top:5px;">insufficient samples for drift (${esc(String(row.driftSamples))})</div>`;
   }
   if (row.driftEwma !== null) {
-    return `<div style="font-size:10px;color:var(--v-muted);margin-top:4px;">drift EWMA ${esc(row.driftEwma.toFixed(2))}</div>`;
+    return `<div class="v-meta" style="margin-top:5px;">drift EWMA ${esc(row.driftEwma.toFixed(2))}</div>`;
   }
   return '';
+}
+
+/** The lifecycle ladder, rendered as the explainer rail on an empty board. */
+function lifecycleRailHtml(): string {
+  const steps = [
+    { name: 'Quarantine', note: 'new cards land here first' },
+    { name: 'Shadow → Pilot', note: 'measured against live traffic' },
+    { name: 'Promoted', note: 'transfer-tested, drift-watched' },
+  ];
+  return `
+  <div class="v-card">
+    <h2 class="v-card-title">Lifecycle ladder</h2>
+    <p class="v-sub" style="margin:6px 0 14px;">Every card moves through these states. The board below shows where each one actually is.</p>
+    <div style="display:grid;gap:8px;">
+      ${steps
+        .map(
+          (s, i) => `<div class="v-attention-item" style="border-left:3px solid var(--v-accent);">
+        <span class="v-badge"><span class="dot"></span>${esc(String(i + 1))}</span>
+        <span><strong>${esc(s.name)}</strong><span class="v-meta" style="display:block;">${esc(s.note)}</span></span>
+      </div>`,
+        )
+        .join('')}
+    </div>
+  </div>`;
 }
 
 export async function renderCompilerParts(
@@ -69,23 +98,22 @@ export async function renderCompilerParts(
   const cards = await comp.list(tenant, {}).catch(() => [] as SkillCard[]);
 
   if (cards.length === 0) {
-    const empty = `<div style="border:1px dashed var(--v-line-strong);border-radius:8px;padding:28px;text-align:center;color:var(--v-muted);font-size:13px;">
-No skill cards compiled yet. Cards appear here as traces are compiled — nothing is demo-seeded.</div>`;
+    const empty = `<div class="v-empty">
+  <h3>No skill cards compiled yet</h3>
+  <p>Cards appear here as traces are compiled — nothing is demo-seeded. The board fills column by column as the compiler mines repeated successful procedures.</p>
+</div>`;
     return {
       boardHtml: empty,
-      metricsHtml: `<div style="border:1px dashed var(--v-line-strong);border-radius:8px;padding:14px;text-align:center;color:var(--v-muted);font-size:12px;">No board metrics yet — metrics are computed from real cards and traces.</div>`,
+      metricsHtml: `<div class="v-empty" style="padding:18px 20px;text-align:left;">
+  <p style="margin:0;">No board metrics yet — metrics are computed from real cards and traces.</p>
+</div>`,
       rightPanelHtml: `
-  <div>
-    <h2 style="font-size:14px;font-weight:700;margin:0 0 6px 0;color:var(--v-ink);font-style:normal;">Why not trusted yet</h2>
-    <p style="font-size:12px;color:var(--v-muted);margin:0 0 12px;line-height:1.5;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded. Compilation is an explicit, gated act: <a href="/console/learning/compile">compile a mined candidate</a> to create the first card. Mining alone will not fill this board.</p>
-    <div style="display:grid;gap:8px;font-size:12px;">
-      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Quarantine</strong><div style="color:var(--v-muted);font-size:11px;">new cards land here first</div></div>
-      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Shadow → Pilot</strong><div style="color:var(--v-muted);font-size:11px;">measured against live traffic</div></div>
-      <div style="background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:8px;padding:8px 10px;"><strong style="color:var(--v-ink);">Promoted</strong><div style="color:var(--v-muted);font-size:11px;">transfer-tested, drift-watched</div></div>
-    </div>
-  </div>`,
+  <div class="v-card">
+    <h2 class="v-card-title">Why not trusted yet</h2>
+    <p class="v-sub" style="margin:8px 0 0;line-height:1.55;">No skill cards exist, so there are no transfer tests or drift readings to show. Cards are mined from real execution traces — nothing here is demo-seeded. Compilation is an explicit, gated act: <a href="/console/learning/compile">compile a mined candidate</a> to create the first card. Mining alone will not fill this board.</p>
+  </div>
+  ${lifecycleRailHtml()}`,
     };
-
   }
 
   // Real per-card reads: trust gaps and drift from the read-only registry
@@ -114,23 +142,27 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
   const renderCardItem = (row: CardRow) => {
     const { card } = row;
     const gapCount = row.trustGaps.length;
-    const badge = gapCount === 0
-      ? '<span style="color:var(--v-fact);font-size:12px;font-weight:bold;" title="No open trust gaps">✔</span>'
-      : `<span style="color:var(--v-hypo);font-size:11px;font-weight:bold;" title="${esc(row.trustGaps.join('; '))}">${esc(String(gapCount))} gap${gapCount === 1 ? '' : 's'}</span>`;
+    const badge =
+      gapCount === 0
+        ? '<span class="v-badge v-badge-good" title="No open trust gaps">✔ trusted</span>'
+        : `<span class="v-badge v-badge-warn" title="${esc(row.trustGaps.join('; '))}">${esc(String(gapCount))} gap${gapCount === 1 ? '' : 's'}</span>`;
     const drift = driftNote(row);
     const gaps =
       gapCount > 0
-        ? `<div style="font-size:10px;color:var(--v-hypo);margin-top:4px;">${row.trustGaps.map((g) => esc(g)).join(' · ')}</div>`
+        ? `<div class="v-meta" style="color:var(--v-tint-warn-ink);margin-top:6px;">${row.trustGaps.map((g) => esc(g)).join(' · ')}</div>`
         : '';
     return `
-    <div style="background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:8px;padding:10px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;">
-        <div style="font-weight:600;font-size:12px;color:var(--v-ink);">${esc(card.intent)}</div>
+    <div class="v-card v-card-hover" style="padding:12px 13px;margin-bottom:8px;border-radius:var(--radius-md);">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;">
+        <div style="font-weight:600;font-size:12.5px;color:var(--v-ink);min-width:0;">${esc(card.intent)}</div>
         ${badge}
       </div>
-      <div style="font-size:10px;color:var(--v-muted);margin-top:1px;">v${esc(String(card.version))} · ${esc(card.trustTier)} · ${esc(card.validatedAtTier)}</div>
-      <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;">
-        ${card.predicates.slice(0, 4).map((t) => `<span style="font-size:9px;background:var(--v-bg-2);color:var(--v-ink-2);padding:1px 5px;border-radius:4px;">${esc(t)}</span>`).join('')}
+      <div class="v-meta" style="margin-top:2px;">v${esc(String(card.version))} · ${esc(card.trustTier)} · ${esc(card.validatedAtTier)}</div>
+      <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;">
+        ${card.predicates
+          .slice(0, 4)
+          .map((t) => `<span class="v-tag">${esc(t)}</span>`)
+          .join('')}
       </div>
       ${drift}
       ${gaps}
@@ -139,18 +171,18 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
 
   const renderCol = (colName: string) => {
     const items = rows.filter((r) => r.col === colName);
-    const subNote = colName === 'QUARANTINE' ? '<div style="font-size:8.5px;color:var(--v-faint);font-weight:normal;margin-top:1px;">imported packs enter here</div>' : '';
-    const colBg = colName === 'QUARANTINE'
-      ? 'background: repeating-linear-gradient(45deg, var(--v-bg-2), var(--v-bg-2) 6px, var(--v-bg-2) 6px, var(--v-bg-2) 12px);'
-      : 'background: var(--v-bg-2);';
+    const subNote =
+      colName === 'QUARANTINE'
+        ? '<div class="v-meta" style="font-weight:normal;margin-top:1px;">imported packs enter here</div>'
+        : '';
     return `
-    <div style="flex:1;min-width:130px;${colBg}border:1px solid var(--v-line);border-radius:8px;padding:8px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--v-line);">
+    <div class="v-board-col">
+      <div class="v-board-col-head">
         <div>
-          <span style="font-weight:700;font-size:11px;letter-spacing:0.04em;color:var(--v-ink-2);">${colName}</span>
+          <span class="v-eyebrow">${colName}</span>
           ${subNote}
         </div>
-        <span style="font-size:10px;color:var(--v-muted);background:var(--v-line);padding:1px 5px;border-radius:10px;font-weight:600;">${items.length}</span>
+        <span class="v-badge" style="padding:1px 8px;font-size:11px;">${items.length}</span>
       </div>
       <div>
         ${items.map(renderCardItem).join('\n')}
@@ -160,7 +192,7 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
 
   const boardHtml = `
   <div>
-    <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:8px;">
+    <div class="v-board">
       ${BOARD_COLUMNS.map(renderCol).join('\n')}
     </div>
   </div>`;
@@ -171,40 +203,44 @@ No skill cards compiled yet. Cards appear here as traces are compiled — nothin
   const share = total > 0 ? (promoted / total) * 100 : null;
   const drifting = rows.filter((r) => r.driftEwma !== null && r.driftSamples !== null && r.driftSamples >= 10).length;
   const metricsHtml = `
-  <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;padding:14px;background:var(--v-bg-1);border:1px solid var(--v-line);border-radius:10px;">
-    <div>
-      <div style="font-size:11px;color:var(--v-muted);">cards</div>
-      <div style="font-size:18px;font-weight:700;color:var(--v-ink);margin-top:2px;">${esc(String(total))}</div>
+  <div class="v-grid-3">
+    <div class="v-card v-kpi-card">
+      <span class="v-kpi-label">cards</span>
+      <span class="v-kpi">${esc(String(total))}</span>
+      <span class="v-meta">compiled from real traces</span>
     </div>
-    <div>
-      <div style="font-size:11px;color:var(--v-muted);">promoted</div>
-      <div style="font-size:18px;font-weight:700;color:var(--v-accent);margin-top:2px;">${esc(String(promoted))} <span style="font-size:12px;color:var(--v-muted);font-weight:normal;">of ${esc(String(total))}${share !== null ? ` · ${share.toFixed(1)}% of board` : ''}</span></div>
+    <div class="v-card v-kpi-card">
+      <span class="v-kpi-label">promoted</span>
+      <span class="v-kpi" style="color:var(--v-accent);">${esc(String(promoted))}</span>
+      <span class="v-meta">of ${esc(String(total))}${share !== null ? ` · ${share.toFixed(1)}% of board` : ''}</span>
     </div>
-    <div>
-      <div style="font-size:11px;color:var(--v-muted);">drift-monitored</div>
-      <div style="font-size:18px;font-weight:700;color:var(--v-ink);margin-top:2px;">${esc(String(drifting))} <span style="font-size:12px;color:var(--v-muted);font-weight:normal;">promoted cards with enough samples</span></div>
+    <div class="v-card v-kpi-card">
+      <span class="v-kpi-label">drift-monitored</span>
+      <span class="v-kpi">${esc(String(drifting))}</span>
+      <span class="v-meta">promoted cards with enough samples</span>
     </div>
   </div>`;
 
   // Right panel: real open trust gaps across the board, per card.
   const withGaps = rows.filter((r) => r.trustGaps.length > 0).slice(0, 6);
   const rightPanelHtml = `
-  <div>
-    <h2 style="font-size:14px;font-weight:700;margin:0 0 14px 0;color:var(--v-ink);">Why not trusted yet</h2>
+  <div class="v-card">
+    <h2 class="v-card-title">Why not trusted yet</h2>
     ${
       withGaps.length === 0
-        ? '<div style="font-size:12px;color:var(--v-muted);">No open trust gaps on listed cards.</div>'
+        ? '<p class="v-sub" style="margin:8px 0 0;">No open trust gaps on listed cards.</p>'
         : withGaps
             .map(
-              (r) => `<div style="margin-bottom:12px;">
-      <div style="font-size:12px;font-weight:600;color:var(--v-ink);">${esc(r.card.intent)}</div>
-      <ul style="margin:4px 0 0 16px;padding:0;font-size:11px;color:var(--v-hypo);">${r.trustGaps.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>
+              (r) => `<div style="margin-top:12px;">
+      <div style="font-size:13px;font-weight:600;color:var(--v-ink);">${esc(r.card.intent)}</div>
+      <ul class="v-list" style="margin-top:4px;">${r.trustGaps.map((g) => `<li class="v-row" style="font-size:12px;color:var(--v-tint-warn-ink);">${esc(g)}</li>`).join('')}</ul>
     </div>`,
             )
             .join('\n')
     }
-    <div style="font-size:11px;color:var(--v-faint);margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board. That path is now reachable: <a href="/console/learning/compile">compile a mined candidate</a>, then queue a transfer test from the card's page. Promotion still requires cross-model evidence, so a smoke run against a test-baseline harness will not move a card.</div>
-  </div>`;
+    <p class="v-meta" style="margin-top:14px;">Trust gates run through the governed transfer-test path — promotion is never granted from this board. That path is now reachable: <a href="/console/learning/compile">compile a mined candidate</a>, then queue a transfer test from the card's page. Promotion still requires cross-model evidence, so a smoke run against a test-baseline harness will not move a card.</p>
+  </div>
+  ${lifecycleRailHtml()}`;
 
   return { boardHtml, metricsHtml, rightPanelHtml };
 }
@@ -218,22 +254,28 @@ export async function renderCompilerView(
   const parts = await renderCompilerParts(db, comp, tenant, opts);
 
   return `
-<section class="compiler-view" style="font-family:'Inter',sans-serif;color:var(--v-ink);">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+<style>
+  /* Board chrome lives with the board: kanban columns sized to the surface,
+     horizontally scrollable on narrow viewports instead of collapsing. */
+  .v-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px;}
+  .v-board-col{flex:1 1 0;min-width:190px;background:var(--v-bg-2);border:1px solid var(--v-line);border-radius:var(--radius-lg);padding:10px 10px 6px;}
+  .v-board-col-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--v-line);}
+</style>
+<section class="compiler-view">
+  <div class="v-page-head">
     <div>
-      <h1 style="font-size:22px;font-weight:700;margin:0;color:var(--v-ink);">Compiler</h1>
-      <p style="font-size:12px;color:var(--v-muted);margin:2px 0 0 0;">Skill card autonomous progression, shadow evaluations, and trust verification.</p>
+      <p class="v-eyebrow">System</p>
+      <h1 class="v-page-title">Compiler</h1>
+      <p class="v-sub" style="margin-top:6px;">Skill card autonomous progression, shadow evaluations, and trust verification.</p>
     </div>
   </div>
 
-  <div style="display:grid;grid-template-columns:1fr 260px;gap:16px;align-items:start;">
-    <div>
+  <div class="v-grid-wide" style="align-items:start;">
+    <div class="v-stack">
       ${parts.boardHtml}
-      <div style="margin-top:16px;">
-        ${parts.metricsHtml}
-      </div>
+      ${parts.metricsHtml}
     </div>
-    <div>
+    <div class="v-stack-sm">
       ${parts.rightPanelHtml}
     </div>
   </div>
